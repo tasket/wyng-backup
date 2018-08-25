@@ -154,7 +154,7 @@ def get_lvm_deltas():
                     + " /dev/mapper/"+vgname+"-"+poolname+"_tmeta" \
                     + " | grep -v '<same .*\/>$'" ]
                 #print(cmd[0])
-                subprocess.check_call(aaa, shell=True, stdout=f)
+                subprocess.check_call(cmd, shell=True, stdout=f)
         except:
             td_err = True
     subprocess.check_call(["dmsetup","message", vgname+"-"+poolname+"-tpool", \
