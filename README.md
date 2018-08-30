@@ -1,6 +1,6 @@
 ## sparsebak
 
-Efficient, disk image-centric backups for Qubes OS.
+Efficient, disk image-based backups for Qubes OS.
 
 ### Status
 
@@ -29,12 +29,12 @@ Command options:
 Currently this has to be done manually but is quite manageable with regular Linux
 commands. The general process is:
 
-1. Get the backup set onto a local volume, then cd to the 'vm*' subdir.
+1. Get the backup set onto a local volume, then cd to the '/baktest/set01/qubes_dom0*' subdir.
 
-2. Create a 'zero' file of `bkchunksize` using `dd` and create a new dir called 'full':
+2. Create a 'zero' file of `bkchunksize` using `dd` and create new dirs called 'full' and 'z':
 ```
 dd if=/dev/zero of=zero bs=1024 count=256 # caution, size may change in future!
-mkdir full
+mkdir full z
 ```
 
 3. Hardlink the most recent session into 'full' with `ln S_00001122-334455/* full`.
@@ -42,10 +42,30 @@ Repeat for other session dirs, working backwards in time until the oldest is lin
 Note: `ln` will say it can't link some files because destination already exists --
 this is intended.
 
-4. Convert all the zero-length files in 'full' to point to 'zero' from step 2
-with `find full -size 0 -type f -exec ln -f ./zero '{}' \;`
+4. Move the zero-length files to 'z':
+```
+find full -size 0 -type f -exec ln -f ./zero '{}' \;
+```
 
-5. Combine files into a volume:
+5. Convert all the files in 'z' to point to 'zero':
+```
+find z -type f -exec ln -f ./zero '{}' \;
+```
+
+6. Change file extensions to .xz then decompress:
+```
+cd full
+for i in !(*.*); do mv -- "$i" "$i.xz"; done
+unxz *
+```
+
+7. Add zero files back to 'full':
+```
+cd ..
+mv z/* full
+```
+
+7. Combine files into a volume:
 ```
 cat full/* | sudo dd of=/dev/mapper/vm-test123-volume bs=4096 conv=sparse
 ```
