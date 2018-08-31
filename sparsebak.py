@@ -41,6 +41,10 @@ parser.add_option("-u", "--unattended", action="store_true", dest="unattended", 
                 help="Non-interactive, supress prompts")
 (options, args) = parser.parse_args()
 
+if options.full and not options.send:
+    print("ERROR: --full option requires --send.")
+    exit(1)
+
 monitor_only = not options.send # gather metadata without backing up if True
 
 
@@ -77,17 +81,15 @@ def prepare_snapshots():
             print("ERROR:", datavol, "does not exist!")
             exit(1) #fix
 
-        # Check for stale snap2vol
+        # Remove stale snap2vol
         if lv_exists(vgname, snap2vol):
             p = subprocess.check_output(["lvremove", "-f",vgname+"/"+snap2vol],
                                         stderr=subprocess.STDOUT)
-            print("Stale snapshot removed.")
-            # also cleanup other data from aborted backup...
 
         # Make initial snapshot if necessary:
         if not os.path.exists(bkdir+"/"+datavol+".deltamap") \
             and not os.path.exists(bkdir+"/"+datavol+".deltamap-tmp"):
-            if options.full:
+            if options.full and not lv_exists(vgname, snap1vol):
                 p = subprocess.check_output(["lvcreate", "-pr", "-kn", "-ay", "-s",
                     vgname+"/"+datavol, "-n", snap1vol], stderr=subprocess.STDOUT)
                 print("Initial snapshot created:", snap1vol)
@@ -99,11 +101,6 @@ def prepare_snapshots():
         elif not lv_exists(vgname, snap1vol):
             raise Exception("ERROR: Map and snapshots in inconsistent state, "
                 +snap1vol+" is missing!")
-
-        # Make current snapshot
-        p = subprocess.check_output( ["lvcreate", "-pr", "-kn", "-ay", \
-            "-s", vgname+"/"+datavol, "-n",snap2vol], stderr=subprocess.STDOUT)
-        print("Current snapshot created:", snap2vol)
 
 
 def lv_exists(vgname, lvname):
@@ -167,18 +164,22 @@ def find_changed_vols():
         snap2vol = datavol + ".tock"
         reason = ""
         if datavol in newvols and options.full:
-            continue
+            pass
         elif datavol in newvols:
             reason = "- needs initial full backup"
-        elif int(allvols[datavol][1]) <= int(allvols[snap1vol][1]):
+        elif int(allvols[datavol][1]) <= int(allvols[snap1vol][1]) \
+        and monitor_only:
             reason = "- no new transactions"
         else:
             dvs.append(datavol)
 
         if reason > "":
             print("  Skipping", datavol, reason)
-            p = subprocess.check_output(["lvremove", "-f",vgname+"/"+snap2vol],
-                                        stderr=subprocess.STDOUT)
+        else:
+            # Make current snapshot
+            p = subprocess.check_output( ["lvcreate", "-pr", "-kn", "-ay", \
+                "-s", vgname+"/"+datavol, "-n",snap2vol], stderr=subprocess.STDOUT)
+            print("  Current snapshot created:", snap2vol)
 
     return dvs
 
@@ -188,12 +189,14 @@ def get_lvm_deltas():
     print("\nAcquiring LVM delta info...")
     subprocess.run(["dmsetup","message", vgname+"-"+poolname+"-tpool", \
         "0", "release_metadata_snap"], check=False, stderr=subprocess.DEVNULL)
-    subprocess.check_call( ["dmsetup", "message", vgname+"-"+poolname+"-tpool", \
-        "0", "reserve_metadata_snap"] )
+    subprocess.check_call(["dmsetup", "message", vgname+"-"+poolname+"-tpool", \
+        "0", "reserve_metadata_snap"])
     td_err = False
     for datavol in datavols:
         snap1vol = datavol + ".tick"
         snap2vol = datavol + ".tock"
+        if int(allvols[datavol][1]) <= int(allvols[snap1vol][1]):
+            continue
         try:
             with open(deltafile+datavol, "w") as f:
                 cmd = ["thin_delta -m" \
@@ -217,6 +220,10 @@ def update_delta_digest():
     if not os.path.exists(mapstate):
         print("Skipping map update.")
         return False, False
+    os.rename(mapstate, mapstate+"-tmp")
+
+    if int(allvols[datavol][1]) <= int(allvols[snap1vol][1]):
+        return True, False
 
     print("Updating block change map...")
     dtree = xml.etree.ElementTree.parse(deltafile+datavol).getroot()
@@ -226,7 +233,6 @@ def update_delta_digest():
     dnewblocks = 0
     dfreedblocks = 0
 
-    os.rename(mapstate, mapstate+"-tmp")
     with open(mapstate+"-tmp", "r+b") as bmapf:
         os.ftruncate(bmapf.fileno(), bmap_size)
         bmap_mm = mmap.mmap(bmapf.fileno(), 0)
@@ -255,8 +261,8 @@ def update_delta_digest():
 #        print("WRITE:")
         bmap_mm[lastindex] |= bmap_byte
     #os.rename(mapstate+"-tmp", mapstate)
-    print("Data changed :", dnewblocks * bs, "bytes")
-    print("   Discarded :", dfreedblocks * bs, "bytes")
+    print("  New changes  :", dnewblocks * bs, "bytes")
+    print("  New Discards :", dfreedblocks * bs, "bytes")
     return True, dnewblocks+dfreedblocks > 0
 
 
@@ -296,7 +302,7 @@ def record_to_bkdir(send_all = False):
                 print("     ", end="\x0d")
     os.rename(destdir+"-tmp", destdir)
     print("Bytes sent:", bcount)
-    return True
+    return bcount
 
 
 def init_deltamap(bmfile):
@@ -321,8 +327,9 @@ def finalize_monitor_session():
     os.rename(mapstate+"-tmp", mapstate)
 
 
-def finalize_bk_session():
-    rotate_snapshots()
+def finalize_bk_session(bcount):
+    if bcount > 0:
+        rotate_snapshots()
     init_deltamap(mapstate)
 
 
@@ -352,11 +359,15 @@ datavols = find_changed_vols()
 
 if not options.full:
     newvols = []
-if len(datavols) > 0:
-    get_lvm_deltas()
-elif len(newvols) == 0:
+if len(datavols)+len(newvols) == 0:
     print("No new data.")
     exit(0)
+    
+# get metadata again after find_changed_vols:
+get_lvm_metadata()
+
+if len(datavols) > 0:
+    get_lvm_deltas()
 
 for datavol in datavols+newvols:
     print("\n** Starting", datavol)
@@ -370,8 +381,8 @@ for datavol in datavols+newvols:
     map_exists, map_updated = update_delta_digest()
 
     if not monitor_only:
-        if record_to_bkdir(send_all = datavol in newvols):
-            finalize_bk_session()
+        bcount = record_to_bkdir(send_all = datavol in newvols)
+        finalize_bk_session(bcount)
     else:
         finalize_monitor_session()
 
