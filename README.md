@@ -4,8 +4,8 @@ Efficient, disk image-based backups for Qubes OS.
 
 ### Status
 
-Alpha stage, still in testing and development. Can only do full or incremental
-backups to local dom0 location. Do NOT rely on this program as your primary backup system!
+Alpha stage, still in testing and development. Can do full or incremental
+backups to local dom0 or VM filesystems. Do NOT rely on this program as your primary backup system!
 
 ### Operation
 
@@ -52,11 +52,11 @@ find full -size 0 -type f -exec ln -f ./zero '{}' \;
 find z -type f -exec ln -f ./zero '{}' \;
 ```
 
-6. Change file extensions to .xz then decompress:
+6. Change file extensions to .gz then decompress:
 ```
 cd full
-for i in !(*.*); do mv -- "$i" "$i.xz"; done
-unxz *
+for i in !(*.*); do mv -- "$i" "$i.gz"; done
+gunzip *
 ```
 
 7. Add zero files back to 'full':
