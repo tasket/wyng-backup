@@ -58,11 +58,18 @@ def get_configs():
     return datavols
 
 
-# Determine previous session, and if it completed.
+# Check run environment and determine previous session, and if it completed.
 # Example: if .deltamap-tmp exists, then perform checks on
 # which snapshots exist.
 def detect_state():
-    pass
+    if not monitor_only and destvm != None:
+        try:
+            t = subprocess.check_output(["qvm-run", "-p", destvm, "mountpoint " \
+                +destmountpoint+" && mkdir -p "+destmountpoint+"/"+destdir \
+                +" && touch "+destmountpoint+"/"+destdir+" && sync"])
+        except:
+            print("Destination VM not ready to receive backup; Exiting.")
+            exit(1)
 
 
 ## TICK - process metadata and compile delta info
@@ -282,7 +289,7 @@ def record_to_vm(send_all = False):
 
     # Use tar to stream files to destination
     untar = subprocess.Popen(["qvm-run", "-p", destvm, "cd "+destmountpoint \
-            +"/"+destdir+" && tar -xf - && sync"], stdin=subprocess.PIPE, \
+            +"/"+destdir+" && tar -xf -"], stdin=subprocess.PIPE, \
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     with tarfile.open(mode="w|", fileobj=untar.stdin) as tar:
         with open("/dev/mapper/"+vgname+"-"+snap2vol.replace("-","--"),"rb") as vf:
@@ -293,7 +300,7 @@ def record_to_vm(send_all = False):
                     b = int((addr / bkchunksize) % 8)
                     if send_all or bmap_mm[bmap_pos] & (2** b):
                         ## REVIEW int math vs large vol sizes . . .
-                        print(int((addr/snap2size)*100),"%  ",bmap_pos, hex(addr), end=" ")
+                        print(int((bmap_pos/bmap_size)*100),"%  ",bmap_pos, hex(addr), end=" ")
                         vf.seek(addr)
                         buf = vf.read(bkchunksize)
                         destfile = format(addr,"016x")
@@ -312,7 +319,8 @@ def record_to_vm(send_all = False):
                         tar_info.size = len(buf)
                         tar.addfile(tarinfo=tar_info, fileobj=io.BytesIO(buf))
 
-                print("100%")
+                if bcount+zcount > 0:
+                    print("100%")
                 info_file = sdir+"-tmp/info"
                 with open(info_file, "w") as f:
                     print("volsize =", snap2size, file=f)
@@ -322,13 +330,14 @@ def record_to_vm(send_all = False):
                           else "none", file=f)
                 tar.add(info_file)
     print("Ending tar process ", end="")
-    for i in range(10):
+    for i in range(20):
         time.sleep(1)
         if untar.poll() != None:
             break
         print(".", end="")
     if untar.poll() == None:
         print("close stdin")
+        #untar.stdin.flush()
         untar.stdin.close()
         time.sleep(5)
         if untar.poll() == None:
@@ -337,7 +346,9 @@ def record_to_vm(send_all = False):
 
     print("")
     p = subprocess.check_output(["qvm-run", "-p", destvm, \
-        "cd "+destmountpoint+"/"+destdir+" && mv ."+sdir+"-tmp ."+sdir])
+        "cd "+destmountpoint+"/"+destdir \
+        +" && mv ."+sdir+"-tmp ."+sdir \
+        +" && sync"])
     os.rename(sdir+"-tmp", sdir)
 
     print("Bytes sent:", bcount)
@@ -416,13 +427,14 @@ def finalize_monitor_session():
     if map_updated:
         rotate_snapshots()
     os.rename(mapstate+"-tmp", mapstate)
+    os.sync()
 
 
 def finalize_bk_session(bcount):
     if bcount > 0:
         rotate_snapshots()
     init_deltamap(mapstate)
-
+    os.sync()
 
 
 ## Main ###########################################################
@@ -460,14 +472,6 @@ get_lvm_metadata()
 if len(datavols) > 0:
     get_lvm_deltas()
 
-if not monitor_only and destvm != None:
-    try:
-        t = subprocess.check_output(["qvm-run", "-p", destvm, "mountpoint " \
-            +destmountpoint+" && mkdir -p "+destmountpoint+"/"+destdir])
-    except:
-        print("Destination VM not ready to receive backup; Exiting.")
-        exit(1)
-
 for datavol in datavols+newvols:
     print("\n** Starting", datavol)
     snap1vol = datavol + ".tick"
@@ -488,4 +492,3 @@ for datavol in datavols+newvols:
 
 
 print("\nDone.\n")
-
