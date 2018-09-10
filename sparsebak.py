@@ -13,10 +13,10 @@ from optparse import OptionParser
 #import qubesadmin.tools
 
 bkset = "set01"
-localdir = "/sparsebak"
+localdir = "/sparsebak" # must be absolute path
 vgname = "qubes_dom0"
 poolname = "pool00"
-destvm = "backup"
+destvm = "temp2"
 destmountpoint = "/home"
 destdir = "user"
 
@@ -271,21 +271,20 @@ def update_delta_digest():
 ## TOCK - Run backup session
 
 def record_to_vm(send_all = False):
-
     sdir=bkdir+"/"+datavol+"/"+bksession
     os.makedirs(sdir+"-tmp")
     sessions = sorted([e for e in os.listdir(sdir+"-tmp/..") if e[:2]=="S_" \
                       and e[-3:]!="tmp"])
     zeros = bytes(bkchunksize)
-    bcount = 0
+    bcount = zcount = 0
 
     print("Backing up to VM", destvm)
 
     # Use tar to stream files to destination
     untar = subprocess.Popen(["qvm-run", "-p", destvm, "cd "+destmountpoint \
-        +"/"+destdir+" && tar -xf -"], stdin=subprocess.PIPE)
-    with tarfile.open(mode="w|", fileobj=untar.stdin, bufsize=128*512) as tar:
-
+            +"/"+destdir+" && tar -xf - && sync"], stdin=subprocess.PIPE, \
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    with tarfile.open(mode="w|", fileobj=untar.stdin) as tar:
         with open("/dev/mapper/"+vgname+"-"+snap2vol.replace("-","--"),"rb") as vf:
             with open("/dev/zero" if send_all else mapstate+"-tmp","r+b") as bmapf:
                 bmap_mm = bytes(1) if send_all else mmap.mmap(bmapf.fileno(), 0)
@@ -305,6 +304,7 @@ def record_to_vm(send_all = False):
                             print(" DATA ", end="\x0d")
                         else:
                             buf = bytes(0)
+                            zcount += 1
                             print("______", end="\x0d")
 
                         tar_info = tarfile.TarInfo(sdir+"-tmp/"+destfile[:-7] \
@@ -312,13 +312,32 @@ def record_to_vm(send_all = False):
                         tar_info.size = len(buf)
                         tar.addfile(tarinfo=tar_info, fileobj=io.BytesIO(buf))
 
+                print("100%")
                 info_file = sdir+"-tmp/info"
                 with open(info_file, "w") as f:
-                    f.write("size = "+str(snap2size)+"\n")
-                    f.write("previous = ")
-                    f.write(sessions[-1] if len(sessions)>0 else "none")
+                    print("volsize =", snap2size, file=f)
+                    print("sent =", bcount, file=f)
+                    print("zeros =", zcount, file=f)
+                    print("previous =", sessions[-1] if len(sessions)>0 \
+                          else "none", file=f)
                 tar.add(info_file)
-    untar.wait()
+    print("Ending tar process ", end="")
+    for i in range(10):
+        time.sleep(1)
+        if untar.poll() != None:
+            break
+        print(".", end="")
+    if untar.poll() == None:
+        print("close stdin")
+        untar.stdin.close()
+        time.sleep(5)
+        if untar.poll() == None:
+            untar.terminate()
+            print("terminated untar process!")
+
+    print("")
+    p = subprocess.check_output(["qvm-run", "-p", destvm, \
+        "cd "+destmountpoint+"/"+destdir+" && mv ."+sdir+"-tmp ."+sdir])
     os.rename(sdir+"-tmp", sdir)
 
     print("Bytes sent:", bcount)
@@ -326,13 +345,10 @@ def record_to_vm(send_all = False):
 
 
 def record_to_bkdir(send_all = False):
-    # Refactor for realistic 'send' use cases
-    # Add a stat file for each vol/session showing vol size and previous session
-
     sdir=bkdir+"/"+datavol+"/"+bksession
     sessions = sorted([e for e in os.listdir(sdir+"/..") if e[:2]=="S_"])
     zeros = bytes(bkchunksize)
-    bcount = 0
+    bcount = zcount = 0
 
     print("Backing up to", sdir)
     os.makedirs(sdir+"-tmp")
@@ -359,11 +375,16 @@ def record_to_bkdir(send_all = False):
                         print("DATA", end="")
                     else:
                         Path(destfile).touch()
+                        zcount += 1
                 print("     ", end="\x0d")
+    info_file = sdir+"-tmp/info"
     with open(sdir+"-tmp/info","w") as f:
-        f.write("size =", snap2size)
-        f.write("previous =", sessions[-1])
-            
+        print("volsize =", snap2size, file=f)
+        print("sent =", bcount, file=f)
+        print("zeros =", zcount, file=f)
+        print("previous =", sessions[-1] if len(sessions)>0 \
+              else "none", file=f)
+
 #    send_to_vm(sdir+"-tmp") ####
     os.rename(sdir+"-tmp", sdir)
     print("Bytes sent:", bcount)
@@ -467,3 +488,4 @@ for datavol in datavols+newvols:
 
 
 print("\nDone.\n")
+
