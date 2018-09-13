@@ -12,15 +12,13 @@ import xml.etree.ElementTree
 from optparse import OptionParser
 #import qubesadmin.tools
 
-bkset = "set02"
+bkset = "set01"
 localdir = "/sparsebak" # must be absolute path
 vgname = "qubes_dom0"
 poolname = "pool00"
 destvm = "temp2"
-destmountpoint = "/home/user/vol"
-destdir = "_backups"
-#destmountpoint = "/home"
-#destdir = "user"
+destmountpoint = "/home"
+destdir = "user"
 
 tmpdir = "/tmp/sparsebak"
 volfile = tmpdir+"/volumes.txt"
