@@ -1,6 +1,6 @@
 ## sparsebak
 
-Efficient, disk image-based backups for Qubes OS.
+Efficient, disk image-based backups for Qubes OS and Linux LVM.
 
 ### Status
 
@@ -9,70 +9,32 @@ backups to local dom0 or VM filesystems. Do NOT rely on this program as your pri
 
 ### Operation
 
-sparsebak looks in '/baktest/set01/sparsebak.conf' for a list of volume names to
+sparsebak looks in '/sparsebak/set01/sparsebak.conf' for a list of volume names to
 be monitored and backed up. The volumes should all be from qubes_dom0/pool00,
-unless you have changed the `vgname` and `poolname` variables.
+unless you have changed the `vgname` and `poolname` variables. Other variables to
+set are `destvm`, `destmountpoint` and `destdir`.
 
-The resulting backup data is also saved to '/baktest/set01/' for now. Backup to
-remote is still not implemented.
+The resulting backup metadata is also saved to '/sparsebak/set01/' for now. Backup to
+VM filesystem is implemented, for example a trusted Qubes VM with access to an
+encryped removable volume, for example, or an encrypted remote filesystem.
 
 Currently the default mode (with no command options) is a monitor-only session
 that collects volume change metadata. This only takes a few seconds and is good
 to do on a frequent, regular basis - i.e. several times an hour.
 
 Command options:
-  -s, --send    Perform a backup. By default, only incremental backups will be attempted.
-  -f, --full    Do initial, full backups when no prior backup session exists for a volume.
+  -s, --send    Perform a backup after scanning volume changes.
+  -f, --full    No longer used; -f is now implied by -s.
 
 ### Restoring
 
-Currently this has to be done manually but is quite manageable with regular Linux
-commands. The general process is:
-
-1. Get the backup set onto a local volume, then cd to the '/baktest/set01/qubes_dom0*' subdir.
-
-2. Create a 'zero' file of `bkchunksize` using `dd` and create new dirs called 'full' and 'z':
-```
-dd if=/dev/zero of=zero bs=1024 count=256 # caution, size may change in future!
-mkdir full z
-```
-
-3. Hardlink the most recent session into 'full' with `ln S_00001122-334455/* full`.
-Repeat for other session dirs, working backwards in time until the oldest is linked.
-Note: `ln` will say it can't link some files because destination already exists --
-this is intended.
-
-4. Move the zero-length files to 'z':
-```
-find full -size 0 -type f -exec ln -f ./zero '{}' \;
-```
-
-5. Convert all the files in 'z' to point to 'zero':
-```
-find z -type f -exec ln -f ./zero '{}' \;
-```
-
-6. Change file extensions to .gz then decompress:
-```
-cd full
-for i in !(*.*); do mv -- "$i" "$i.gz"; done
-gunzip *
-```
-
-7. Add zero files back to 'full':
-```
-cd ..
-mv z/* full
-```
-
-7. Combine files into a volume:
-```
-cat full/* | sudo dd of=/dev/mapper/vm-test123-volume bs=4096 conv=sparse
-```
+The `spbk-assemble` tool can be used to create a regular disk image from a
+sparsebak archive. It should be run on a system/VM that has filesystem access
+to the archive, using the syntax `spbk-assemble <path-to-set/vggroup/volumename`.
 
 ### Todo
 
-* Basic functions: Volume selection, Send, Restore, Delete
+* Basic functions: Volume selection, Restore, Delete
 
 * Encryption
 
