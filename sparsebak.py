@@ -5,20 +5,22 @@
 
 
 
-import os, shutil, subprocess, time
+import sys, os, shutil, subprocess, time
 from pathlib import Path
-import re, mmap, gzip, tarfile, io
+import re, mmap, gzip, tarfile, io, fcntl
 import xml.etree.ElementTree
 from optparse import OptionParser
 #import qubesadmin.tools
 
-bkset = "set01"
+bkset = "set02"
 localdir = "/sparsebak" # must be absolute path
 vgname = "qubes_dom0"
 poolname = "pool00"
 destvm = "temp2"
-destmountpoint = "/home"
-destdir = "user"
+destmountpoint = "/home/user/vol"
+destdir = "_backups"
+#destmountpoint = "/home"
+#destdir = "user"
 
 tmpdir = "/tmp/sparsebak"
 volfile = tmpdir+"/volumes.txt"
@@ -30,6 +32,17 @@ bs = 512
 #bkchunksize = 1024 * 256 # 256k
 bkchunksize = 256 * bs # 128k same as thin_delta chunk
 
+if os.getuid() > 0:
+    print("sparsebak must be run as root/sudo user.")
+    exit(1)
+lockpath = "/var/lock/sparsebak"
+lockf = open(lockpath, "w")
+try:
+    fcntl.lockf(lockf, fcntl.LOCK_EX|fcntl.LOCK_NB)
+except IOError:
+    print("ERROR: sparsebak is already running.")
+    exit(1)
+
 
 usage = "usage: %prog [options] path-to-backup-set"
 parser = OptionParser(usage)
@@ -39,7 +52,9 @@ parser.add_option("-u", "--unattended", action="store_true", dest="unattended", 
                 help="Non-interactive, supress prompts")
 (options, args) = parser.parse_args()
 
+
 monitor_only = not options.send # gather metadata without backing up if True
+
 
 
 def get_configs():
@@ -52,14 +67,24 @@ def get_configs():
 # Example: if .deltamap-tmp exists, then perform checks on
 # which snapshots exist.
 def detect_state():
+    vm_run_args = {"none":[],
+                   "qubes":["qvm-run", "-p", destvm]
+                  }
+    if os.path.exists("/etc/qubes-release") and destvm != None:
+        vmtype = "qubes"
+    else:
+        vmtype = "none" # no virtual machine
+
     if not monitor_only and destvm != None:
         try:
-            t = subprocess.check_output(["qvm-run", "-p", destvm, "mountpoint " \
+            t = subprocess.check_output(vm_run_args[vmtype]+["mountpoint " \
                 +destmountpoint+" && mkdir -p "+destmountpoint+"/"+destdir \
                 +" && touch "+destmountpoint+"/"+destdir+" && sync"])
         except:
             print("Destination VM not ready to receive backup; Exiting.")
             exit(1)
+
+    return vmtype, vm_run_args
 
 
 ## TICK - process metadata and compile delta info
@@ -191,8 +216,6 @@ def get_lvm_deltas():
     for datavol in datavols:
         snap1vol = datavol + ".tick"
         snap2vol = datavol + ".tock"
-        #if int(allvols[datavol][1]) <= int(allvols[snap1vol][1]):
-        #    continue
         try:
             with open(deltafile+datavol, "w") as f:
                 cmd = ["thin_delta -m" \
@@ -214,12 +237,8 @@ def get_lvm_deltas():
 def update_delta_digest():
 
     if datavol in newvols:
-        print("Skipping map update.")
         return False, False
     os.rename(mapstate, mapstate+"-tmp")
-
-    #if int(allvols[datavol][1]) <= int(allvols[snap1vol][1]):
-    #    return True, False
 
     print("Updating block change map...")
     dtree = xml.etree.ElementTree.parse(deltafile+datavol).getroot()
@@ -276,7 +295,7 @@ def record_to_vm(send_all = False):
     print("Backing up to VM", destvm)
 
     # Use tar to stream files to destination
-    untar = subprocess.Popen(["qvm-run", "-p", destvm, "cd "+destmountpoint \
+    untar = subprocess.Popen(vm_run_args[vmtype]+["cd "+destmountpoint \
             +"/"+destdir+" && tar -xf -"], stdin=subprocess.PIPE, \
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     with tarfile.open(mode="w|", fileobj=untar.stdin) as tar:
@@ -309,21 +328,21 @@ def record_to_vm(send_all = False):
 
                 if bcount+zcount > 0:
                     print("100%")
-                info_file = sdir+"-tmp/info"
-                with open(info_file,"w") as f:
-                    print("volsize =", snap2size, file=f)
-                    print("chunksize =", bkchunksize, file=f)
-                    print("sent =", bcount, file=f)
-                    print("zeros =", zcount, file=f)
-                    print("previous =", sessions[-1] if len(sessions)>0 \
-                        else "none", file=f)
-                tar.add(info_file)
+
+        info_file = sdir+"-tmp/info"
+        with open(info_file,"w") as f:
+            print("volsize =", snap2size, file=f)
+            print("chunksize =", bkchunksize, file=f)
+            print("sent =", bcount, file=f)
+            print("zeros =", zcount, file=f)
+            print("previous =", sessions[-1] if len(sessions)>0 \
+                else "none", file=f)
+        tar.add(info_file)
     #print("Ending tar process ", end="")
     for i in range(20):
         time.sleep(1)
         if untar.poll() != None:
             break
-        print(".", end="")
     if untar.poll() == None:
         print("close untar stdin")
         #untar.stdin.flush()
@@ -333,9 +352,8 @@ def record_to_vm(send_all = False):
             untar.terminate()
             print("terminated untar process!")
 
-    print("")
-    p = subprocess.check_output(["qvm-run", "-p", destvm, \
-        "cd "+destmountpoint+"/"+destdir \
+    p = subprocess.check_output(vm_run_args[vmtype]+ \
+        ["cd "+destmountpoint+"/"+destdir \
         +" && mv ."+sdir+"-tmp ."+sdir \
         +" && sync"])
     os.rename(sdir+"-tmp", sdir)
@@ -346,7 +364,8 @@ def record_to_vm(send_all = False):
 
 def record_to_bkdir(send_all = False):
     sdir=bkdir+"/"+datavol+"/"+bksession
-    sessions = sorted([e for e in os.listdir(sdir+"/..") if e[:2]=="S_"])
+    sessions = sorted([e for e in os.listdir(sdir+"/..") if e[:2]=="S_" \
+                      and e[-3:]!="tmp"])
     zeros = bytes(bkchunksize)
     bcount = zcount = 0
 
@@ -405,23 +424,24 @@ def init_deltamap(bmfile):
         os.ftruncate(bmapf.fileno(), bmap_size)
 
 
-def rotate_snapshots():
-    print("Rotating snapshots for", datavol)
-    # Review: this should be atomic
-    p = subprocess.check_output( ["lvremove", "--force", vgname+"/"+snap1vol ])
-    p = subprocess.check_output( ["lvrename", vgname+"/"+snap2vol, snap1vol ])
+def rotate_snapshots(rotate=True):
+    if rotate:
+        print("Rotating snapshots for", datavol)
+        # Review: this should be atomic
+        p = subprocess.check_output( ["lvremove", "--force", vgname+"/"+snap1vol ])
+        p = subprocess.check_output( ["lvrename", vgname+"/"+snap2vol, snap1vol ])
+    else:
+        p = subprocess.check_output( ["lvremove", "--force", vgname+"/"+snap2vol ])
 
 
 def finalize_monitor_session():
-    if map_updated:
-        rotate_snapshots()
+    rotate_snapshots(map_updated)
     os.rename(mapstate+"-tmp", mapstate)
     os.sync()
 
 
 def finalize_bk_session(bcount):
-    if bcount > 0:
-        rotate_snapshots()
+    rotate_snapshots(bcount > 0)
     init_deltamap(mapstate)
     os.sync()
 
@@ -447,8 +467,8 @@ if not os.path.exists(bkdir):
     os.makedirs(bkdir)
 
 datavols = get_configs()
-detect_state()
-datavols, newvols = prepare_snapshots()
+vmtype, vm_run_args = detect_state()
+datavols, newvols   = prepare_snapshots()
 get_lvm_metadata()
 #datavols = find_changed_vols()
 
