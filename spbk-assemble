@@ -14,57 +14,40 @@ else
   exit 1
 fi
 
-
 ( cd "$voldir"
   curdir=`pwd`
-  rm -rf full z || true
-  mkdir full z
+  rm -rf full || true
+  mkdir full
 
   echo
   echo "Getting metadata for sparsebak volume $volname."
+
   sessions=`find . -name 'S_*' -type d -exec basename '{}' \; |sort --reverse`
   read last therest <<<$sessions
   read one two volsize <<<`grep '^volsize =' $last/info`
   read one two chunksize <<<`grep '^chunksize =' $last/info`
 
-  echo -n "Creating and shifting links for sessions:"
+  echo -n "Creating links for sessions:"
   for s in $sessions; do
     echo -n " $s"
     cp -rln $s/* full
   done
-  echo -n "..."
-
-  dd if=/dev/zero of=z/zero bs=$chunksize count=1  2>/dev/null
-  find full -size 0 -type f -exec mv {} z \;
-  find z -size 0 -type f -exec ln -srf z/zero '{}' \;
-
-  chunks=`find full -name '?????????' -type d -exec basename '{}' \;`
-  for c in $chunks; do
-    if [ -n "`find full/$c -name 'x*' -type f`" ]; then
-      mv full/$c/x* full
-    fi
-  done
+  dd if=/dev/zero of=full/zero bs=$chunksize count=1  2>/dev/null
+  find full -size 0 -type f -exec ln -srf full/zero '{}' \;
   echo
-
-  echo -n "Renaming chunks to .gz."
-  find full -name 'x*' -type f -exec mv '{}' '{}.gz' \;
-  echo
-  echo -n "Decompressing."
-  gunzip -f full/*.gz
-  echo
-
-  mv z/* full
-  rm -rf z
 
   echo
   echo -n "Calculating SHA256 hash..."
-  sha=`cat full/x* | sha256sum`
+  sha=`find full -name 'x*' | sort | xargs zcat -f | sha256sum`
   echo
   echo $sha
 
   echo
-  echo "Decompressed copy located in $voldir/full dir."
-  echo "Use 'cat $voldir/full/x* | dd of=file.img' to make disk image."
+  echo "Volume instance located in $voldir/full dir."
+  echo "To make disk image, use:"
+  echo "\$ cd $voldir"
+  echo "\$ find full -name 'x*' | sort | xargs zcat -f | dd of=file.img"
 )
 
+echo
 echo "Done."

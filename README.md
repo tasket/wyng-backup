@@ -4,8 +4,10 @@ Efficient, disk image-based backups for Qubes OS and Linux LVM.
 
 ### Status
 
-Alpha stage, still in testing and development. Can do full or incremental
-backups to local dom0 or VM filesystems. Do NOT rely on this program as your primary backup system!
+Can do full or incremental backups to local dom0 or VM filesystems, as well as
+simple volume retreival for restoring.
+
+This is still in alpha/testing stage. Do NOT rely on this program as your primary backup system!
 
 ### Operation
 
@@ -14,8 +16,8 @@ be monitored and backed up. The volumes should all be from qubes_dom0/pool00,
 unless you have changed the `vgname` and `poolname` variables. Other variables to
 set are `destvm`, `destmountpoint` and `destdir`.
 
-The resulting backup metadata is also saved to '/sparsebak/set01/' for now. Backup to
-VM filesystem is implemented, for example a trusted Qubes VM with access to an
+The resulting backup metadata is also saved to '/sparsebak/set01/' for now. Backups
+can be sent to a trusted Qubes VM with access to an
 encryped removable volume, for example, or an encrypted remote filesystem.
 
 Currently the default mode (with no command options) is a monitor-only session
