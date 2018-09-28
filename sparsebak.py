@@ -48,6 +48,33 @@ monitor_only = not options.send # gather metadata without backing up if True
 
 
 
+class BkSet:
+    class Volume:
+        class Ses:
+            def  __init__(self, name):
+                self.time = 0 # parse name here
+                self.vsize = 0
+                self.chunksize = 0
+                self.Bsent = 0
+                self.Zsent = 0
+                self.prev = ""
+                self.finalized = False
+                # get info file
+        def __init__(self, name):
+            self.sessions = []
+            self.vsize = self.sessions[-1].vsize
+            self.name = ""
+
+    def __init__(self, name):
+        self.name = name
+        self.vgname = None
+        self.poolname = None
+        self.destvm = None
+        self.destmountpoint = None
+        self.destdir = None
+        self.vols = []
+    
+
 def get_configs():
     config = configparser.ConfigParser()
     config.read(topdir+"/sparsebak.ini")
@@ -303,8 +330,29 @@ def record_to_vm(send_all = False):
     zeros = bytes(bkchunksize)
     bcount = zcount = 0
     thetime = time.time()
+    if send_all:
+        # sends all from this address forward
+        sendall_addr = 0
+    else:
+        sendall_addr = snap2size + 1
 
     print("Backing up to VM", destvm)
+
+    # Check volume size vs prior backup session
+    if len(sessions) > 0 and not send_all:
+        with open(bkdir+"/"+datavol+"/"+sessions[-1]+"/info", "r") as sf:
+            lines = sf.readlines()
+        for l in lines:
+            if l.strip()[:7] == "volsize":
+                prior_size = int(l.split()[2])
+                break
+        next_chunk_addr = (prior_size-1) - ((prior_size-1) % bkchunksize) \
+                        + bkchunksize
+        if prior_size > snap2size:
+            print("  Warning, volume size has shrunk.")
+        elif snap2size-1 >= next_chunk_addr:
+            print("  Volume size has increased.")
+            sendall_addr = next_chunk_addr
 
     # Use tar to stream files to destination
     untar = subprocess.Popen(vm_run_args[vmtype]+["cd "+destmountpoint \
@@ -315,11 +363,12 @@ def record_to_vm(send_all = False):
             tar.add(mapstate+"-tmp")
         with open("/dev/mapper/"+vgname+"-"+snap2vol.replace("-","--"),"rb") as vf:
             with open("/dev/zero" if send_all else mapstate+"-tmp","r+b") as bmapf:
+
                 bmap_mm = bytes(1) if send_all else mmap.mmap(bmapf.fileno(), 0)
                 for addr in range(0, snap2size, bkchunksize):
                     bmap_pos = int(addr / bkchunksize / 8)
                     b = int((addr / bkchunksize) % 8)
-                    if send_all or bmap_mm[bmap_pos] & (2** b):
+                    if addr >= sendall_addr or bmap_mm[bmap_pos] & (2** b):
                         ## REVIEW int math vs large vol sizes . . .
                         vf.seek(addr)
                         buf = vf.read(bkchunksize)
@@ -381,13 +430,35 @@ def record_to_vm(send_all = False):
 
 def record_to_bkdir(send_all = False):
     sdir=bkdir+"/"+datavol+"/"+bksession
+    os.makedirs(sdir+"-tmp")
     sessions = sorted([e for e in os.listdir(sdir+"/..") if e[:2]=="S_" \
                       and e[-3:]!="tmp"])
     zeros = bytes(bkchunksize)
     bcount = zcount = 0
+    if send_all:
+        # sends all from this address forward
+        sendall_addr = 0
+    else:
+        sendall_addr = snap2size + 1
 
-    print("Backing up to", sdir)
-    os.makedirs(sdir+"-tmp")
+    print("Backing up to local folder", bkdir)
+
+    # Check volume size vs prior backup session
+    if len(sessions) > 0 and not send_all:
+        with open(bkdir+"/"+datavol+"/"+sessions[-1]+"/info", "r") as sf:
+            lines = sf.readlines()
+        for l in lines:
+            if l.strip()[:7] == "volsize":
+                prior_size = int(l.split()[2])
+                break
+        next_chunk_addr = (prior_size-1) - ((prior_size-1) % bkchunksize) \
+                        + bkchunksize
+        if prior_size > snap2size:
+            print("  Warning, volume size has shrunk.")
+        elif snap2size-1 >= next_chunk_addr:
+            print("  Volume size has increased.")
+            sendall_addr = next_chunk_addr
+
     with open("/dev/mapper/"+vgname+"-"+snap2vol.replace("-","--"),"rb") as vf:
         with open("/dev/zero" if send_all else mapstate+"-tmp","r+b") as bmapf:
             bmap_mm = bytes(1) if send_all else mmap.mmap(bmapf.fileno(), 0)
@@ -395,7 +466,7 @@ def record_to_bkdir(send_all = False):
                 bmap_pos = int(addr / bkchunksize / 8)
                 b = int((addr / bkchunksize) % 8)
                 print(bmap_pos, b, hex(addr), end=" ")
-                if send_all or bmap_mm[bmap_pos] & (2** b):
+                if addr >= sendall_addr or bmap_mm[bmap_pos] & (2** b):
                     ## REVIEW int math vs large vol sizes . . .
                     vf.seek(addr)
                     buf = vf.read(bkchunksize)
@@ -421,15 +492,9 @@ def record_to_bkdir(send_all = False):
         print("zeros =", zcount, file=f)
         print("previous =", sessions[-1] if len(sessions)>0 \
               else "none", file=f)
-#    send_to_vm(sdir+"-tmp") ####
     os.rename(sdir+"-tmp", sdir)
     print("Bytes sent:", bcount)
     return bcount+zcount > 0
-
-
-#def send_to_vm(src):
-#    subprocess.run(["tar -cf - "+src+" | qvm-run -p "+destvm+" 'mkdir -p sparsebak"
-#                    +" && cd sparsebak && tar -xf -'"], shell=True)
 
 
 def init_deltamap(bmfile):
