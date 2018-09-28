@@ -11,12 +11,13 @@ This is still in alpha/testing stage. Do NOT rely on this program as your primar
 
 ### Operation
 
-sparsebak looks in '/sparsebak/set01/sparsebak.conf' for a list of volume names to
-be monitored and backed up. The volumes should all be from qubes_dom0/pool00,
-unless you have changed the `vgname` and `poolname` variables. Other variables to
-set are `destvm`, `destmountpoint` and `destdir`.
+sparsebak looks in '/sparsebak/sparsebak.ini' for a list of volume names to
+be monitored and backed up. Some settings you can change are `vgname` and `poolname`
+for the volume group and pool, in addition to `destvm`, `destmountpoint` and `destdir`
+which combine to a vm:dir/path specification for the backup destination. The
+`destmountpoint` is checked to make sure its mounted when sparsebak is run in `--send` mode.
 
-The resulting backup metadata is also saved to '/sparsebak/set01/' for now. Backups
+The resulting backup metadata is also saved to '/sparsebak' for now. Backups
 can be sent to a trusted Qubes VM with access to an
 encryped removable volume, for example, or an encrypted remote filesystem.
 
@@ -26,13 +27,13 @@ to do on a frequent, regular basis - i.e. several times an hour.
 
 Command options:
   -s, --send    Perform a backup after scanning volume changes.
-  -f, --full    No longer used; -f is now implied by -s.
+  -u, --unattended
 
 ### Restoring
 
 The `spbk-assemble` tool can be used to create a regular disk image from a
 sparsebak archive. It should be run on a system/VM that has filesystem access
-to the archive, using the syntax `spbk-assemble <path-to-set/vggroup/volumename`.
+to the archive, using the syntax `spbk-assemble path-to-volume-name`.
 
 ### Todo
 
