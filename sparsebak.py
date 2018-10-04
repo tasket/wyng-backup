@@ -40,12 +40,13 @@ usage = "usage: %prog [options] path-to-backup-set"
 parser = OptionParser(usage)
 parser.add_option("-s", "--send", action="store_true", dest="send", default=False,
                 help="Perform backup and send to destination")
+parser.add_option("--tarfile", action="store_true", dest="tarfile", default=False,
+                help="Store current backup session as a tarfile")
 parser.add_option("-u", "--unattended", action="store_true", dest="unattended", default=False,
                 help="Non-interactive, supress prompts")
 (options, args) = parser.parse_args()
 
 monitor_only = not options.send # gather metadata without backing up if True
-
 
 
 class BkSet:
@@ -73,7 +74,7 @@ class BkSet:
         self.destmountpoint = None
         self.destdir = None
         self.vols = []
-    
+
 
 def get_configs():
     config = configparser.ConfigParser()
@@ -313,7 +314,7 @@ def update_delta_digest():
 #        print("WRITE:")
         bmap_mm[lastindex] |= bmap_byte
     if dnewblocks+dfreedblocks > 0:
-        print(",  added", dnewblocks * bs, "changes,",
+        print(", added", dnewblocks * bs, "changes,",
               dfreedblocks * bs, "discards.")
     else:
         print()
@@ -323,10 +324,9 @@ def update_delta_digest():
 ## TOCK - Run backup session
 
 def record_to_vm(send_all = False):
+    sessions = sorted([e for e in os.listdir(bkdir+"/"+datavol) \
+                        if e[:2]=="S_" and e[-3:]!="tmp"])
     sdir=bkdir+"/"+datavol+"/"+bksession
-    os.makedirs(sdir+"-tmp")
-    sessions = sorted([e for e in os.listdir(sdir+"-tmp/..") if e[:2]=="S_" \
-                      and e[-3:]!="tmp"])
     zeros = bytes(bkchunksize)
     bcount = zcount = 0
     thetime = time.time()
@@ -355,145 +355,88 @@ def record_to_vm(send_all = False):
             sendall_addr = next_chunk_addr
 
     # Use tar to stream files to destination
-    untar = subprocess.Popen(vm_run_args[vmtype]+["cd "+destmountpoint \
-            +"/"+destdir+" && tar -xf -"], stdin=subprocess.PIPE, \
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    with tarfile.open(mode="w|", fileobj=untar.stdin) as tar:
-        if map_exists:
-            tar.add(mapstate+"-tmp")
-        with open("/dev/mapper/"+vgname+"-"+snap2vol.replace("-","--"),"rb") as vf:
-            with open("/dev/zero" if send_all else mapstate+"-tmp","r+b") as bmapf:
-
-                bmap_mm = bytes(1) if send_all else mmap.mmap(bmapf.fileno(), 0)
-                for addr in range(0, snap2size, bkchunksize):
-                    bmap_pos = int(addr / bkchunksize / 8)
-                    b = int((addr / bkchunksize) % 8)
-                    if addr >= sendall_addr or bmap_mm[bmap_pos] & (2** b):
-                        ## REVIEW int math vs large vol sizes . . .
-                        vf.seek(addr)
-                        buf = vf.read(bkchunksize)
-                        destfile = format(addr,"016x")
-                        print(" ",int((bmap_pos/bmap_size)*100),"%  ",bmap_pos, \
-                              destfile, end=" ")
-                        if buf != zeros: # write only non-empty
-                            # Performance fix: move compression into separate processes
-                            bcount += len(buf)
-                            buf = gzip.compress(buf, compresslevel=4)
-                            print(" DATA ", end="\x0d")
-                        else:
-                            buf = bytes(0)
-                            zcount += 1
-                            print("______", end="\x0d")
-
-                        tar_info = tarfile.TarInfo(sdir+"-tmp/"+destfile[:-7] \
-                                   +"/x"+destfile)
-                        tar_info.size = len(buf)
-                        tar_info.mtime = thetime
-                        tar.addfile(tarinfo=tar_info, fileobj=io.BytesIO(buf))
-
-                if bcount+zcount > 0:
-                    print("  100%")
-
-        info_file = sdir+"-tmp/info"
-        with open(info_file, "w") as f:
-            print("volsize =", snap2size, file=f)
-            print("chunksize =", bkchunksize, file=f)
-            print("sent =", bcount, file=f)
-            print("zeros =", zcount, file=f)
-            print("previous =", "none" if send_all else sessions[-1], file=f)
-        tar.add(info_file)
-    #print("Ending tar process ", end="")
-    for i in range(20):
-        time.sleep(1)
-        if untar.poll() != None:
-            break
-    if untar.poll() == None:
-        print("close untar stdin")
-        untar.stdin.flush()
-        untar.stdin.close()
-        time.sleep(5)
-        if untar.poll() == None:
-            untar.terminate()
-            print("terminated untar process!")
-            # fix: verify archive dir contents here
-
-    p = subprocess.check_output(vm_run_args[vmtype]+ \
-        ["cd "+destmountpoint+"/"+destdir \
-        +[""," && mv ."+mapstate+"-tmp ."+mapstate][map_exists] \
-        +" && mv ."+sdir+"-tmp ."+sdir \
-        +" && sync"])
-    os.rename(sdir+"-tmp", sdir)
-
-    print(" ", bcount, "bytes sent.")
-    return bcount
-
-
-def record_to_bkdir(send_all = False):
-    sdir=bkdir+"/"+datavol+"/"+bksession
-    os.makedirs(sdir+"-tmp")
-    sessions = sorted([e for e in os.listdir(sdir+"/..") if e[:2]=="S_" \
-                      and e[-3:]!="tmp"])
-    zeros = bytes(bkchunksize)
-    bcount = zcount = 0
-    if send_all:
-        # sends all from this address forward
-        sendall_addr = 0
+    stream_started = False
+    if options.tarfile:
+        # don't untar at destination
+        untar_cmd = ["cd "+destmountpoint+"/"+destdir+" && mkdir -p ."+sdir \
+                    +" && cat >."+sdir+"/"+bksession+".tar"]
     else:
-        sendall_addr = snap2size + 1
-
-    print("Backing up to local folder", bkdir)
-
-    # Check volume size vs prior backup session
-    if len(sessions) > 0 and not send_all:
-        with open(bkdir+"/"+datavol+"/"+sessions[-1]+"/info", "r") as sf:
-            lines = sf.readlines()
-        for l in lines:
-            if l.strip()[:7] == "volsize":
-                prior_size = int(l.split()[2])
-                break
-        next_chunk_addr = (prior_size-1) - ((prior_size-1) % bkchunksize) \
-                        + bkchunksize
-        if prior_size > snap2size:
-            print("  Warning, volume size has shrunk.")
-        elif snap2size-1 >= next_chunk_addr:
-            print("  Volume size has increased.")
-            sendall_addr = next_chunk_addr
+        untar_cmd = ["cd "+destmountpoint+"/"+destdir+" && tar -xf -"]
 
     with open("/dev/mapper/"+vgname+"-"+snap2vol.replace("-","--"),"rb") as vf:
         with open("/dev/zero" if send_all else mapstate+"-tmp","r+b") as bmapf:
             bmap_mm = bytes(1) if send_all else mmap.mmap(bmapf.fileno(), 0)
+
             for addr in range(0, snap2size, bkchunksize):
                 bmap_pos = int(addr / bkchunksize / 8)
                 b = int((addr / bkchunksize) % 8)
-                print(bmap_pos, b, hex(addr), end=" ")
                 if addr >= sendall_addr or bmap_mm[bmap_pos] & (2** b):
                     ## REVIEW int math vs large vol sizes . . .
                     vf.seek(addr)
                     buf = vf.read(bkchunksize)
                     destfile = format(addr,"016x")
-                    if not os.path.exists(sdir+"-tmp/"+destfile[:-7]):
-                        os.makedir(sdir+"-tmp/"+destfile[:-7])
+                    print(" ",int((bmap_pos/bmap_size)*100),"%  ",bmap_pos, \
+                            destfile, end=" ")
+
                     if buf != zeros: # write only non-empty
                         # Performance fix: move compression into separate processes
-                        with gzip.open(sdir+"-tmp/"+destfile[:-7]+"/x"+destfile, \
-                            "wb", compresslevel=4) as segf:
-                            segf.write(buf)
                         bcount += len(buf)
-                        print("DATA", end="")
+                        buf = gzip.compress(buf, compresslevel=4)
+                        print(" DATA ", end="\x0d")
                     else:
-                        Path(destfile).touch()
+                        buf = bytes(0)
                         zcount += 1
-                print("     ", end="\x0d")
-    info_file = sdir+"-tmp/info"
-    with open(info_file,"w") as f:
-        print("volsize =", snap2size, file=f)
-        print("chunksize =", bkchunksize, file=f)
-        print("sent =", bcount, file=f)
-        print("zeros =", zcount, file=f)
-        print("previous =", sessions[-1] if len(sessions)>0 \
-              else "none", file=f)
-    os.rename(sdir+"-tmp", sdir)
-    print("Bytes sent:", bcount)
+                        print("______", end="\x0d")
+
+                    if not stream_started:
+                        untar = subprocess.Popen(vm_run_args[vmtype] + untar_cmd, \
+                                stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, \
+                                stderr=subprocess.DEVNULL)
+                        tarf = tarfile.open(mode="w|", fileobj=untar.stdin)
+                        stream_started = True
+
+                    tar_info = tarfile.TarInfo(sdir+"-tmp/"+destfile[:-7] \
+                                +"/x"+destfile)
+                    tar_info.size = len(buf)
+                    tar_info.mtime = thetime
+                    tarf.addfile(tarinfo=tar_info, fileobj=io.BytesIO(buf))
+
+    if stream_started:
+        print("  100%")
+
+        os.makedirs(sdir)
+        with open(sdir+"/info", "w") as f:
+            print("volsize =", snap2size, file=f)
+            print("chunksize =", bkchunksize, file=f)
+            print("sent =", bcount, file=f)
+            print("zeros =", zcount, file=f)
+            print("previous =", "none" if send_all else sessions[-1], file=f)
+        tarf.add(sdir+"/info")
+        if map_exists:
+            tarf.add(mapstate+"-tmp")
+
+        #print("Ending tar process ", end="")
+        tarf.close()
+        untar.stdin.close()
+        for i in range(10):
+            time.sleep(1)
+            if untar.poll() != None:
+                break
+        if untar.poll() == None:
+            time.sleep(5)
+            if untar.poll() == None:
+                untar.terminate()
+                print("terminated untar process!")
+                # fix: verify archive dir contents here
+
+        p = subprocess.check_output(vm_run_args[vmtype]+ \
+            ["cd "+destmountpoint+"/"+destdir \
+            +(" && mv ."+mapstate+"-tmp ."+mapstate if map_exists \
+                                                and not options.tarfile else "") \
+            +(" && mv ."+sdir+"-tmp ."+sdir if not options.tarfile else "") \
+            +" && sync"])
+
+    print(" ", bcount, "bytes sent.")
     return bcount+zcount > 0
 
 
@@ -592,7 +535,6 @@ for datavol in datavols+newvols:
     = update_delta_digest()
 
     if not monitor_only:
-        ### sent = record_to_bkdir(send_all = datavol in newvols)
         sent \
         = record_to_vm(send_all = datavol in newvols)
         finalize_bk_session(sent)
