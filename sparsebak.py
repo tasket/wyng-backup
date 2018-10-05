@@ -36,12 +36,12 @@ except IOError:
     exit(1)
 
 
-usage = "usage: %prog [options] path-to-backup-set"
+usage = "usage: %prog [options]"
 parser = OptionParser(usage)
 parser.add_option("-s", "--send", action="store_true", dest="send", default=False,
                 help="Perform backup and send to destination")
 parser.add_option("--tarfile", action="store_true", dest="tarfile", default=False,
-                help="Store current backup session as a tarfile")
+                help="Store backup session as a tarfile")
 parser.add_option("-u", "--unattended", action="store_true", dest="unattended", default=False,
                 help="Non-interactive, supress prompts")
 (options, args) = parser.parse_args()
@@ -113,9 +113,7 @@ def detect_state():
             exit(1)
 
     for cmd in ["vgcfgbackup","thin_delta","lvdisplay","lvcreate"]:
-        try:
-            p = subprocess.check_output(["which", cmd])
-        except:
+        if not shutil.which(cmd):
             print("ERROR: Command not found,", cmd)
             exit(1)
 
@@ -404,16 +402,17 @@ def record_to_vm(send_all = False):
     if stream_started:
         print("  100%")
 
-        os.makedirs(sdir)
-        with open(sdir+"/info", "w") as f:
+        os.makedirs(sdir+"-tmp")
+        with open(sdir+"-tmp/info", "w") as f:
             print("volsize =", snap2size, file=f)
             print("chunksize =", bkchunksize, file=f)
             print("sent =", bcount, file=f)
             print("zeros =", zcount, file=f)
+            print("format =", "tar" if options.tarfile else "folders", file=f)
             print("previous =", "none" if send_all else sessions[-1], file=f)
-        tarf.add(sdir+"/info")
-        if map_exists:
-            tarf.add(mapstate+"-tmp")
+        tarf.add(sdir+"-tmp/info")
+        #if map_exists:
+        #    tarf.add(mapstate+"-tmp")
 
         #print("Ending tar process ", end="")
         tarf.close()
@@ -431,8 +430,8 @@ def record_to_vm(send_all = False):
 
         p = subprocess.check_output(vm_run_args[vmtype]+ \
             ["cd "+destmountpoint+"/"+destdir \
-            +(" && mv ."+mapstate+"-tmp ."+mapstate if map_exists \
-                                                and not options.tarfile else "") \
+            #+(" && mv ."+mapstate+"-tmp ."+mapstate if map_exists \
+            #                                and not options.tarfile else "") \
             +(" && mv ."+sdir+"-tmp ."+sdir if not options.tarfile else "") \
             +" && sync"])
 
@@ -453,10 +452,10 @@ def rotate_snapshots(rotate=True):
     if rotate:
         print("Rotating snapshots for", datavol)
         # Review: this should be atomic
-        p = subprocess.check_output( ["lvremove", "--force", vgname+"/"+snap1vol ])
-        p = subprocess.check_output( ["lvrename", vgname+"/"+snap2vol, snap1vol ])
+        p = subprocess.check_output(["lvremove","--force", vgname+"/"+snap1vol])
+        p = subprocess.check_output(["lvrename",vgname+"/"+snap2vol, snap1vol])
     else:
-        p = subprocess.check_output( ["lvremove", "--force", vgname+"/"+snap2vol ])
+        p = subprocess.check_output(["lvremove","--force",vgname+"/"+snap2vol])
 
 
 def finalize_monitor_session():
