@@ -6,7 +6,7 @@
 
 
 import sys, os, shutil, subprocess, time
-from pathlib import Path
+#from pathlib import Path
 import re, mmap, gzip, tarfile, io, fcntl
 import xml.etree.ElementTree
 from optparse import OptionParser
@@ -242,8 +242,8 @@ def get_lvm_size(vol):
 # Get delta between snapshots
 def get_lvm_deltas():
     print("Acquiring LVM delta info.")
-    subprocess.run(["dmsetup","message", vgname+"-"+poolname+"-tpool", \
-        "0", "release_metadata_snap"], check=False, stderr=subprocess.DEVNULL)
+    subprocess.call(["dmsetup","message", vgname+"-"+poolname+"-tpool", \
+        "0", "release_metadata_snap"], stderr=subprocess.DEVNULL)
     subprocess.check_call(["dmsetup", "message", vgname+"-"+poolname+"-tpool", \
         "0", "reserve_metadata_snap"])
     td_err = False
@@ -347,7 +347,7 @@ def record_to_vm(send_all = False):
         next_chunk_addr = (prior_size-1) - ((prior_size-1) % bkchunksize) \
                         + bkchunksize
         if prior_size > snap2size:
-            print("  Warning, volume size has shrunk.")
+            print("  Volume size has shrunk.")
         elif snap2size-1 >= next_chunk_addr:
             print("  Volume size has increased.")
             sendall_addr = next_chunk_addr
@@ -369,22 +369,22 @@ def record_to_vm(send_all = False):
                 bmap_pos = int(addr / bkchunksize / 8)
                 b = int((addr / bkchunksize) % 8)
                 if addr >= sendall_addr or bmap_mm[bmap_pos] & (2** b):
-                    ## REVIEW int math vs large vol sizes . . .
                     vf.seek(addr)
                     buf = vf.read(bkchunksize)
                     destfile = format(addr,"016x")
                     print(" ",int((bmap_pos/bmap_size)*100),"%  ",bmap_pos, \
                             destfile, end=" ")
 
-                    if buf != zeros: # write only non-empty
+                    # write only non-empty and last chunks
+                    if buf != zeros or addr >= snap2size-bkchunksize:
                         # Performance fix: move compression into separate processes
                         bcount += len(buf)
                         buf = gzip.compress(buf, compresslevel=4)
                         print(" DATA ", end="\x0d")
                     else:
+                        print("______", end="\x0d")
                         buf = bytes(0)
                         zcount += 1
-                        print("______", end="\x0d")
 
                     if not stream_started:
                         untar = subprocess.Popen(vm_run_args[vmtype] + untar_cmd, \
@@ -411,8 +411,6 @@ def record_to_vm(send_all = False):
             print("format =", "tar" if options.tarfile else "folders", file=f)
             print("previous =", "none" if send_all else sessions[-1], file=f)
         tarf.add(sdir+"-tmp/info")
-        #if map_exists:
-        #    tarf.add(mapstate+"-tmp")
 
         #print("Ending tar process ", end="")
         tarf.close()
@@ -430,8 +428,6 @@ def record_to_vm(send_all = False):
 
         p = subprocess.check_output(vm_run_args[vmtype]+ \
             ["cd "+destmountpoint+"/"+destdir \
-            #+(" && mv ."+mapstate+"-tmp ."+mapstate if map_exists \
-            #                                and not options.tarfile else "") \
             +(" && mv ."+sdir+"-tmp ."+sdir if not options.tarfile else "") \
             +" && sync"])
 
@@ -494,8 +490,8 @@ vgname, poolname, destvm, destmountpoint, destdir, datavols \
 bkdir = topdir+"/"+vgname+"%"+poolname
 bksession = time.strftime("S_%Y%m%d-%H%M%S")
 
-print("\nStarting", ["backup","monitor-only"][int(monitor_only)], \
-      "session", [bksession,""][int(monitor_only)])
+print("\nStarting", ["backup","monitor-only"][monitor_only], \
+      "session", [bksession,""][monitor_only])
 
 shutil.rmtree(tmpdir+"-old", ignore_errors=True)
 if os.path.exists(tmpdir):

@@ -26,8 +26,9 @@ that collects volume change metadata. This only takes a few seconds and is good
 to do on a frequent, regular basis - i.e. several times an hour.
 
 Command options:
-  -s, --send    Perform a backup after scanning volume changes.
+  -s, --send	Perform a backup after scanning volume changes.
   -u, --unattended
+  --tarfile	Store backups in tar files instead of chunks (cannot be pruned).
 
 ### Restoring
 
