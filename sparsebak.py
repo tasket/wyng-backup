@@ -296,20 +296,15 @@ def update_delta_digest():
             else: # superfluous tag
                 continue
 
-#            seg = 0
             for blockpos in range(blockbegin, blockbegin + blocklen):
                 volsegment = int(blockpos / (bkchunksize / bs))
                 bmap_pos = int(volsegment / 8)
-                if bmap_pos != lastindex: ##REVIEW
-#                    print("WRITE:")
+                if bmap_pos != lastindex:
                     bmap_mm[lastindex] |= bmap_byte
                     bmap_byte = 0
                 bmap_byte |= 2** (volsegment % 8)
                 lastindex = bmap_pos
-#                print(delta.tag, hex(blockpos*bs), volsegment, bmap_pos, bmap_byte, \
-#                    "JUMP" if seg > 0 and seg != volsegment else "")
-#                seg = volsegment
-#        print("WRITE:")
+
         bmap_mm[lastindex] |= bmap_byte
     if dnewblocks+dfreedblocks > 0:
         print(", added", dnewblocks * bs, "changes,",
@@ -322,6 +317,8 @@ def update_delta_digest():
 ## TOCK - Run backup session
 
 def record_to_vm(send_all = False):
+    if not os.path.exists(bkdir+"/"+datavol):
+        os.makedirs(bkdir+"/"+datavol)
     sessions = sorted([e for e in os.listdir(bkdir+"/"+datavol) \
                         if e[:2]=="S_" and e[-3:]!="tmp"])
     sdir=bkdir+"/"+datavol+"/"+bksession
@@ -416,9 +413,9 @@ def record_to_vm(send_all = False):
         tarf.close()
         untar.stdin.close()
         for i in range(10):
-            time.sleep(1)
             if untar.poll() != None:
                 break
+            time.sleep(1)
         if untar.poll() == None:
             time.sleep(5)
             if untar.poll() == None:
