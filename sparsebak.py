@@ -434,7 +434,7 @@ def record_to_vm(send_all = False):
             print("format =", "tar" if options.tarfile else "folders", file=f)
             print("previous =", "none" if send_all else sessions[-1], file=f)
         tarf.add(sdir+"-tmp/info")
-        tarf.add(sdir+"-tmp/hashes")
+        tarf.add(sdir+"-tmp/manifest")
 
         #print("Ending tar process ", end="")
         tarf.close()
