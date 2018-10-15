@@ -6,11 +6,9 @@
 
 
 import sys, os, shutil, subprocess, time
-#from pathlib import Path
 import re, mmap, gzip, tarfile, io, fcntl
 import xml.etree.ElementTree
-from optparse import OptionParser
-import configparser, hashlib
+import argparse, configparser, hashlib
 #import qubesadmin.tools
 
 
@@ -21,7 +19,6 @@ volfile = tmpdir+"/volumes.txt"
 deltafile = tmpdir+"/delta."
 allvols = {}
 bs = 512
-#bkchunksize = 1024 * 256 # 256k
 bkchunksize = 256 * bs # 128k same as thin_delta chunk
 
 if os.getuid() > 0:
@@ -36,17 +33,20 @@ except IOError:
     exit(1)
 
 
-usage = "usage: %prog [options]"
-parser = OptionParser(usage)
-parser.add_option("-s", "--send", action="store_true", dest="send", default=False,
-                help="Perform backup and send to destination")
-parser.add_option("--tarfile", action="store_true", dest="tarfile", default=False,
-                help="Store backup session as a tarfile")
-parser.add_option("-u", "--unattended", action="store_true", dest="unattended", default=False,
-                help="Non-interactive, supress prompts")
-(options, args) = parser.parse_args()
+par = argparse.ArgumentParser(description="")
+# fix: add subparsers
+par.add_argument("action", choices=["send","monitor","clean"], default="monitor",
+                 help="Scan volume metadata (no backup)")
+#                help="Perform backup and send to destination")
+par.add_argument("-u", "--unattended", action="store_true", default=False,
+                 help="Non-interactive, supress prompts")
+par.add_argument("-a", "--all", action="store_true", default=False,
+                 help="Apply action to all volumes")
+par.add_argument("--tarfile", action="store_true", dest="tarfile", default=False,
+                 help="Store backup session as a tarfile")
+options = par.parse_args()
 
-monitor_only = not options.send # gather metadata without backing up if True
+monitor_only = options.action == "monitor" # gather metadata without backing up if True
 
 
 class BkSet:
@@ -172,10 +172,12 @@ def prepare_snapshots():
                 print("  Initial snapshot created for", datavol)
             nvs.append(datavol)
         elif os.path.exists(bkdir+"/"+datavol+".deltamap-tmp"):
-            raise Exception("ERROR: Previous delta map not finalized for " \
-                            +datavol+" (needs recovery)")
-            # Fix: ask to recover/use the tmp file
-        elif not lv_exists(vgname, snap1vol):
+            print("  Delta map not finalized for",
+                  datavol, "...recovering.")
+            os.rename(bkdir+"/"+datavol+".deltamap-tmp",
+                      bkdir+"/"+datavol+".deltamap")
+
+        if not lv_exists(vgname, snap1vol):
             raise Exception("ERROR: Map and snapshots in inconsistent state, "
                             +snap1vol+" is missing!")
 
