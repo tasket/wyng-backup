@@ -36,7 +36,7 @@ except IOError:
 par = argparse.ArgumentParser(description="")
 # fix: add subparsers
 par.add_argument("action", choices=["send","monitor","clean"], default="monitor",
-                 help="Scan volume metadata (no backup)")
+                 help="Action to take")
 #                help="Perform backup and send to destination")
 par.add_argument("-u", "--unattended", action="store_true", default=False,
                  help="Non-interactive, supress prompts")
@@ -46,7 +46,7 @@ par.add_argument("--tarfile", action="store_true", dest="tarfile", default=False
                  help="Store backup session as a tarfile")
 options = par.parse_args()
 
-monitor_only = options.action == "monitor" # gather metadata without backing up if True
+monitor_only = options.action == "monitor" # gather metadata without backing up
 
 
 class BkSet:
@@ -78,6 +78,7 @@ class BkSet:
 
 def get_configs():
     config = configparser.ConfigParser()
+    config.optionxform = lambda option: option
     config.read(topdir+"/sparsebak.ini")
     c = config["var"]
     dvs = []
@@ -133,11 +134,7 @@ def prepare_snapshots():
     it to the older snap1vol. Then, depending on monitor or backup mode, we'll
     accumulate delta info and possibly use snap2vol as source for a
     backup session.
-    '''
 
-    ''' Todo: Check snap1 creation time to make sure it isn't newer
-    than snap2 from previous session. Move info file creation to
-    the update_delta_digest function.
     Associated rule: Latest session cannot
     be simply pruned; an earlier target must first be restored to system
     then snap1 and info file synced (possibly by adding an empty session on
@@ -279,9 +276,9 @@ def update_delta_digest():
 
     if datavol in newvols:
         return False, False
-    os.rename(mapstate, mapstate+"-tmp")
 
     print("Updating block change map", end="")
+    os.rename(mapstate, mapstate+"-tmp")
     dtree = xml.etree.ElementTree.parse(deltafile+datavol).getroot()
     dblocksize = int(dtree.get("data_block_size"))
     bmap_byte = 0
@@ -313,11 +310,13 @@ def update_delta_digest():
                 lastindex = bmap_pos
 
         bmap_mm[lastindex] |= bmap_byte
+
     if dnewblocks+dfreedblocks > 0:
         print(", added", dnewblocks * bs, "changes,",
               dfreedblocks * bs, "discards.")
     else:
         print()
+
     return True, dnewblocks+dfreedblocks > 0
 
 
@@ -387,7 +386,7 @@ def record_to_vm(send_all = False):
                         count += 1
                         vf.seek(addr)
                         buf = vf.read(bkchunksize)
-                        destfile = format(addr,"016x")
+                        destfile = "x"+format(addr,"016x")
                         print(" ",int((bmap_pos/bmap_size)*100),"%  ",bmap_pos, \
                                 destfile, end=" ")
 
@@ -396,7 +395,7 @@ def record_to_vm(send_all = False):
                             # Performance fix: move compression into separate processes
                             buf = gzip.compress(buf, compresslevel=4)
                             bcount += len(buf)
-                            print(destfile, hashlib.sha256(buf).hexdigest(),
+                            print(hashlib.sha256(buf).hexdigest(), destfile,
                                   file=hashf)
                             print(" DATA ", end="\x0d")
                         else: # record zero-length file
@@ -417,7 +416,7 @@ def record_to_vm(send_all = False):
 
                         # Add buffer to stream
                         tar_info = tarfile.TarInfo(sdir+"-tmp/"+destfile[:-7] \
-                                                       +"/x"+destfile)
+                                                       +destfile)
                         tar_info.size = len(buf)
                         tar_info.mtime = thetime
                         tarf.addfile(tarinfo=tar_info, fileobj=io.BytesIO(buf))
