@@ -415,8 +415,8 @@ def record_to_vm(send_all = False):
                             stream_started = True
 
                         # Add buffer to stream
-                        tar_info = tarfile.TarInfo(sdir+"-tmp/"+destfile[:-7] \
-                                                       +destfile)
+                        tar_info = tarfile.TarInfo(sdir+"-tmp/"+destfile[1:-7] \
+                                                       +"/"+destfile)
                         tar_info.size = len(buf)
                         tar_info.mtime = thetime
                         tarf.addfile(tarinfo=tar_info, fileobj=io.BytesIO(buf))
