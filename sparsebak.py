@@ -401,7 +401,7 @@ def record_to_vm(send_all = False):
                         else: # record zero-length file
                             print("______", end="\x0d")
                             buf = bytes(0)
-                            print(destfile, 0, file=hashf)
+                            print(0, destfile, file=hashf)
                             zcount += 1
 
                         # Start tar stream
