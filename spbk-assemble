@@ -6,17 +6,26 @@
 
 set -e
 
+if [ "$1" == "-c" ]; then
+  do_check=1
+  shift
+else
+  do_check=0
+fi
+
 if [ -n "$1" ] & [ -d "$1" ]; then
   voldir="$1"
   volname=`basename $voldir`
 else
-  echo "Usage: spbk-assemble <path-to-volume-dir>"
+  echo "Usage: spbk-assemble [-c] <path-to-volume-dir>"
   exit 1
 fi
 
 ( cd "$voldir"
   curdir=`pwd`
-  rm -rf full || true
+  if [ -e full ]; then
+    rm -r full
+  fi
   mkdir full
 
   echo
@@ -26,26 +35,61 @@ fi
   read last therest <<<$sessions
   read one two volsize <<<`grep '^volsize =' $last/info`
   read one two chunksize <<<`grep '^chunksize =' $last/info`
+  # Find last chunk, in case volume shrank
+  lastchunk=`python3 -c "print(format(($volsize-1) - (($volsize -1) % $chunksize), '016x'))"`
 
   echo -n "Creating links for sessions:"
+  rm -f manifest.tmp
   for s in $sessions; do
     echo -n " $s"
-    cp -rln $s/* full
+    cp -rlnT $s full
+    cat $s/manifest >>manifest.tmp
   done
+  rm -f full/manifest full/deltamap.gz
   echo -n "..."
-  dd if=/dev/zero of=full/zero bs=$chunksize count=1  2>/dev/null
-  find full -size 0 -type f -exec ln -srf full/zero '{}' \;
+
+  # Remove any extra chunks at the end
+  find full -name 'x*' | sort | sed "1,/x$lastchunk/d" | xargs -r rm -v
+
+  # Merge composite manifest
+  sort -u -k 2,2 manifest.tmp | sed "/ x$lastchunk/q" >full/manifest
+  rm manifest.tmp
   echo
 
-  echo
-  echo -n "Calculating SHA256 hash..."
-  sha=`find full -name 'x*' | sort | xargs zcat -f | sha256sum`
-  echo
-  echo $sha
+  # Test data against manifest
+  if [ $do_check == 1 ]; then
+    echo
+    echo -n "Checking SHA-256 sums from manifest..."
+    grep -v '^0 ' full/manifest |sed -E 's| x(.{9})(.{7})| full/\1/x\1\2|' \
+    | sha256sum -c --status
+    echo OK
+
+    echo
+    echo -n "Checking zeros..."
+    grep '^0 ' full/manifest |sed -E 's|^.+ x(.{9})(.{7})| full/\1/x\1\2|' \
+    | ( while read ff; do
+          if [ ! -f $ff ]; then
+            echo " $ff does not exist!"
+            exit 1
+          fi
+          if [ -s $ff ]; then
+            echo " $ff is non-zero!"
+            exit 1
+          fi
+      done )
+    echo OK
+  fi
+
+  # Add links to zero
+  dd if=/dev/zero of=full/zero bs=$chunksize count=1  2>/dev/null
+  find full -size 0 -type f -name 'x*' -exec ln -srf full/zero '{}' \;
+
+  #echo "Calculating SHA256 hash..."
+  #find full -name 'x*' | sort | xargs zcat -f | sha256sum
 
   echo
   echo "Volume instance located in $voldir/full dir."
-  echo "To make disk image, use:"
+  echo "To make the disk image, use:"
   echo "\$ cd $voldir"
   echo "\$ find full -name 'x*' | sort | xargs zcat -f | dd of=file.img conv=sparse"
 )
