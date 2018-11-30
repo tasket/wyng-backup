@@ -60,13 +60,13 @@ fi
   if [ $do_check == 1 ]; then
     echo
     echo -n "Checking SHA-256 sums from manifest..."
-    grep -v '^0 ' full/manifest |sed -E 's| x(.{9})(.{7})| full/\1/x\1\2|' \
+    grep -v '^0 ' full/manifest | sed -E 's| x(.{9})(.{7})| full/\1/x\1\2|' \
     | sha256sum -c --status
     echo OK
 
     echo
     echo -n "Checking zeros..."
-    grep '^0 ' full/manifest |sed -E 's|^.+ x(.{9})(.{7})| full/\1/x\1\2|' \
+    grep '^0 ' full/manifest | sed -E 's|^.+ x(.{9})(.{7})| full/\1/x\1\2|' \
     | ( while read ff; do
           if [ ! -f $ff ]; then
             echo " $ff does not exist!"
@@ -81,8 +81,11 @@ fi
   fi
 
   # Add links to zero
+  echo
+  echo -n "Re-linking zeros..."
   dd if=/dev/zero of=full/zero bs=$chunksize count=1  2>/dev/null
   find full -size 0 -type f -name 'x*' -exec ln -srf full/zero '{}' \;
+  echo OK
 
   #echo "Calculating SHA256 hash..."
   #find full -name 'x*' | sort | xargs zcat -f | sha256sum
@@ -91,7 +94,7 @@ fi
   echo "Volume instance located in $voldir/full dir."
   echo "To make the disk image, use:"
   echo "\$ cd $voldir"
-  echo "\$ find full -name 'x*' | sort | xargs zcat -f | dd of=file.img conv=sparse"
+  echo "\$ find full -name 'x*' | sort -d | xargs zcat -f | dd of=file.img conv=sparse"
 )
 
 echo
