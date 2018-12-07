@@ -5,7 +5,7 @@
 
 
 
-import sys, os, shutil, subprocess, time, datetime
+import sys, os, stat, shutil, subprocess, time, datetime
 from os.path import join as pjoin
 import re, mmap, gzip, tarfile, io, fcntl
 import xml.etree.ElementTree
@@ -13,14 +13,19 @@ import argparse, configparser, hashlib
 #import qubesadmin.tools
 
 
-config = None
+conf = None
 topdir = "/sparsebak" # must be absolute path
 tmpdir = "/tmp/sparsebak"
 volfile = tmpdir+"/volumes.txt"
 deltafile = tmpdir+"/delta."
 allvols = {}
 bs = 512
+bigbs = 4096
 bkchunksize = 256 * bs # 128k same as thin_delta chunk
+assert bkchunksize % bigbs == 0 and bkchunksize % bs == 0
+max_address = 0xffffffffffffffff # 64bits
+
+
 
 if os.getuid() > 0:
     print("sparsebak must be run as root/sudo user.")
@@ -36,16 +41,20 @@ except IOError:
 
 parser = argparse.ArgumentParser(description="")
 parser.add_argument("action", choices=["send","monitor","clean","prune",
-                                       "receive","verify","resync"], \
-                 default="monitor", help="Action to take")
-#                help="Perform backup and send to destination")
-parser.add_argument("params", nargs="*")
+                                       "receive","verify","resync","list"], \
+                    default="monitor", help="Action to take")
+#                   help="Perform backup and send to destination")
 parser.add_argument("-u", "--unattended", action="store_true", default=False,
-                 help="Non-interactive, supress prompts")
+                    help="Non-interactive, supress prompts")
 parser.add_argument("-a", "--all", action="store_true", default=False,
-                 help="Apply action to all volumes")
+                    help="Apply action to all volumes")
 parser.add_argument("--tarfile", action="store_true", dest="tarfile", default=False,
-                 help="Store backup session as a tarfile")
+                    help="Store backup session as a tarfile")
+parser.add_argument("--session",
+                    help="YYYYMMDD-HHMMSS[,YYYYMMDD-HHMMSS] select session date(s), singular or range.")
+parser.add_argument("--save-to", dest="saveto", default="",
+                    help="Path to store volume for receive")
+parser.add_argument("volumes", nargs="*")
 
 #subparser = parser.add_subparsers(help="sub-command help")
 #prs_prune = subparser.add_parser("prune",help="prune help")
@@ -55,53 +64,75 @@ options = parser.parse_args()
 monitor_only = options.action == "monitor" # gather metadata without backing up
 
 
-class BkSet:
-    class Volume:
-        class Ses:
-            def  __init__(self, name):
-                self.time = 0 # parse name here
-                self.vsize = 0
-                self.chunksize = 0
-                self.Bsent = 0
-                self.Zsent = 0
-                self.prev = ""
-                self.manifest = ""
-                self.finalized = False
-                # get info file
-        def __init__(self, name):
-            self.sessions = []
-            self.vsize = self.sessions[-1].vsize
-            self.name = ""
+class ArchiveSet:
+    def __init__(self, name, top, conf):
+        cp = configparser.ConfigParser()
+        cp.optionxform = lambda option: option
+        cp.read(pjoin(top,conf))
+        c = cp["var"]
 
-    def __init__(self, name):
         self.name = name
-        self.vgname = None
-        self.poolname = None
-        self.destvm = None
-        self.destmountpoint = None
-        self.destdir = None
-        self.vols = []
+        self.vgname = c['vgname']
+        self.poolname = c['poolname']
+        self.path = pjoin(top,self.vgname+"%"+self.poolname)
+        self.destvm = None if c['destvm'].lower() == "none" else c['destvm']
+        self.destmountpoint = c['destmountpoint']
+        self.destdir = c['destdir']
+
+        self.vols = {}
+        for key in cp["volumes"]:
+            if cp["volumes"][key] != "disable":
+                self.vols[key] = self.Volume(key, self.path)
+
+        #self.vols = {e.name: self.Volume(e.name, self.path) for e \
+        #    in os.scandir(self.path) if e.is_dir()}
+
+    class Volume:
+        def __init__(self, name, path):
+            self.sessions ={e.name: self.Ses(e.name,pjoin(path,name)) for e \
+                in os.scandir(pjoin(path,name)) if e.name[:2]=="S_" \
+                    and e.name[-3:]!="tmp"}
+            #print(name,"\n",self.sessions)
+            # use latest volsize
+            self.volsize = self.sessions[sorted(self.sessions)[-1]].volsize
+            self.name = name
+            self.enabled = None
+            self.present = os.path.exists(pjoin(path,name))
+
+        class Ses:
+            def  __init__(self, name, path):
+                self.name = name
+                self.volsize = None
+                self.chunksize = None
+                self.chunks = None
+                self.bytes = None
+                self.zeros = None
+                self.format = None
+                self.previous = None
+                self.manifest = None
+                a_ints = ["volsize","chunksize","chunks","bytes","zeros"]
+
+                with open(pjoin(path,name,"info"), "r") as sf:
+                    lines = sf.readlines()
+                for ln in lines:
+                    vname, value = ln.strip().split(" = ")
+                    setattr(self, vname, 
+                            int(value) if vname in a_ints else value)
+
 
 
 def get_configs():
-    config = configparser.ConfigParser()
-    config.optionxform = lambda option: option
-    config.read(topdir+"/sparsebak.ini")
-    c = config["var"]
-    dvs = []
-    print("Volume selections:")
-    for key in config["volumes"]:
-        if config["volumes"][key] != "disable":
-            dvs.append(key)
-            print(" ", key)
+    global aset
 
-    if c['destvm'].lower() == "none":
-        destvm = None
-    else:
-        destvm = c['destvm']
+    aset = ArchiveSet("", topdir, "sparsebak.ini")
 
-    return c['vgname'], c['poolname'], destvm, c['destmountpoint'], \
-           c['destdir'], dvs
+    print("\nConfigured Volumes:")
+    for vn,v in aset.vols.items():
+        print(" ",v.name)
+
+    # temporary kludge:
+    return aset.vgname, aset.poolname, aset.destvm, aset.destmountpoint, \
+        aset.destdir, sorted(aset.vols)
 
 
 def detect_vm_state():
@@ -117,9 +148,9 @@ def detect_vm_state():
         try:
             t = subprocess.check_output(vm_run_args[vmtype]+["mountpoint '" \
                 +destmountpoint+"' && mkdir -p '"+destmountpoint+"/"+destdir \
-                +"' && touch '"+destmountpoint+"/"+destdir+"' && sync"])
+                +"' && cd '"+destmountpoint+"/"+destdir+"' && sync"])
         except:
-            print("Destination VM not ready to receive backup; Exiting.")
+            print("Destination not ready to receive commands; Exiting.")
             exit(1)
 
     for cmd in ["vgcfgbackup","thin_delta","lvdisplay","lvcreate"]:
@@ -178,7 +209,7 @@ def prepare_snapshots():
                       bkdir+"/"+datavol+".deltamap")
 
         if not lv_exists(vgname, snap1vol):
-            raise Exception("ERROR: Map and snapshots in inconsistent state, "
+            raise RuntimeError("ERROR: Map and snapshots in inconsistent state, "
                             +snap1vol+" is missing!")
 
         # Make current snapshot
@@ -243,7 +274,19 @@ def get_lvm_size(vol):
     line = subprocess.check_output( ["lvdisplay --units=b " \
         + " /dev/mapper/"+vgname+"-"+vol.replace("-","--") \
         +  "| grep 'LV Size'"], shell=True).decode("UTF-8").strip()
-    return int(re.sub("^.+ ([0-9]+) B", r'\1', line))
+    
+    size = int(re.sub("^.+ ([0-9]+) B", r'\1', line))
+    if size > max_address + 1:
+        raise ValueError("Volume size is larger than", max_address+1)
+    return size
+
+
+def get_info_vol_size(datavol, ses=""):
+    if ses == "":
+        # Select last session if none specified
+        ses = get_sessions(datavol)[-1]
+
+    return aset.vols[datavol].sessions[ses].volsize
 
 
 # Get delta between snapshots
@@ -263,8 +306,8 @@ def get_lvm_deltas():
                     + " --thin1 " + allvols[snap1vol][0] \
                     + " --thin2 " + allvols[snap2vol][0] \
                     + " /dev/mapper/"+vgname+"-"+poolname+"_tmeta" \
-                    + " | grep -v '<same .*\/>$'" ]
-                #print(cmd[0])
+                    + " | grep -v '<same .*\/>$'"
+                    ]
                 subprocess.check_call(cmd, shell=True, stdout=f)
         except:
             td_err = True
@@ -280,16 +323,17 @@ def update_delta_digest():
     if datavol in newvols:
         return False, False
 
-    print("Updating block change map", end="")
-    os.rename(mapstate, mapstate+"-tmp")
+    print("Updating block change map: ", end="")
+    os.rename(mapfile, mapfile+"-tmp")
     dtree = xml.etree.ElementTree.parse(deltafile+datavol).getroot()
     dblocksize = int(dtree.get("data_block_size"))
+    assert bkchunksize >= (bs*dblocksize) and bkchunksize % (bs*dblocksize) == 0
     bmap_byte = 0
     lastindex = 0
     dnewblocks = 0
     dfreedblocks = 0
-    
-    with open(mapstate+"-tmp", "r+b") as bmapf:
+
+    with open(mapfile+"-tmp", "r+b") as bmapf:
         os.ftruncate(bmapf.fileno(), bmap_size)
         bmap_mm = mmap.mmap(bmapf.fileno(), 0)
 
@@ -304,8 +348,8 @@ def update_delta_digest():
                 continue
 
             for blockpos in range(blockbegin, blockbegin + blocklen):
-                volsegment = int(blockpos / (bkchunksize / bs))
-                bmap_pos = int(volsegment / 8)
+                volsegment = blockpos // (bkchunksize // bs)
+                bmap_pos = volsegment // 8
                 if bmap_pos != lastindex:
                     bmap_mm[lastindex] |= bmap_byte
                     bmap_byte = 0
@@ -315,10 +359,10 @@ def update_delta_digest():
         bmap_mm[lastindex] |= bmap_byte
 
     if dnewblocks+dfreedblocks > 0:
-        print(",", dnewblocks * bs, "changed,",
+        print(dnewblocks * bs, "changed,",
               dfreedblocks * bs, "discarded.")
     else:
-        print()
+        print("no changes.")
 
     return True, dnewblocks+dfreedblocks > 0
 
@@ -327,7 +371,14 @@ def last_chunk_addr(volsize, chunksize):
     return (volsize-1) - ((volsize-1) % chunksize)
 
 
-def send_to_dest(send_all = False):
+def get_sessions(datavol):
+    a = sorted(list(aset.vols[datavol].sessions.keys()))
+    return a
+    #return sorted([e for e in os.listdir(bkdir+"/"+datavol) \
+    #                if e[:2]=="S_" and e[-3:]!="tmp"])
+
+
+def send_volume(send_all = False):
     if not os.path.exists(bkdir+"/"+datavol):
         os.makedirs(bkdir+"/"+datavol)
     # Read existing sessions
@@ -350,12 +401,7 @@ def send_to_dest(send_all = False):
 
     # Check volume size vs prior backup session
     if len(sessions) > 0 and not send_all:
-        with open(bkdir+"/"+datavol+"/"+sessions[-1]+"/info", "r") as sf:
-            lines = sf.readlines()
-        for l in lines:
-            if l.strip()[:7] == "volsize":
-                prior_size = int(l.split()[2])
-                break
+        prior_size = get_info_vol_size(datavol)
         next_chunk_addr = last_chunk_addr(prior_size, bkchunksize) + bkchunksize
         if prior_size > snap2size:
             print("  Volume size has shrunk.")
@@ -367,14 +413,15 @@ def send_to_dest(send_all = False):
     stream_started = False
     if options.tarfile:
         # don't untar at destination
-        untar_cmd = ["cd "+destmountpoint+"/"+destdir+" && mkdir -p ."+sdir \
-                    +" && cat >."+sdir+"/"+bksession+".tar"]
+        untar_cmd = ["cd '"+pjoin(destmountpoint,destdir)+ \
+                    +"' && mkdir -p ."+sdir+"-tmp" \
+                    +" && cat >."+pjoin(sdir+"-tmp",bksession+".tar")]
     else:
-        untar_cmd = ["cd "+destmountpoint+"/"+destdir+" && tar -xf -"]
+        untar_cmd = ["cd '"+pjoin(destmountpoint,destdir)+"' && tar -xf -"]
 
     # Open source volume and its delta bitmap as r, session manifest as w.
     with open("/dev/mapper/"+vgname+"-"+snap2vol.replace("-","--"),"rb") as vf:
-        with open("/dev/zero" if send_all else mapstate+"-tmp","r+b") as bmapf:
+        with open("/dev/zero" if send_all else mapfile+"-tmp","r+b") as bmapf:
             bmap_mm = bytes(1) if send_all else mmap.mmap(bmapf.fileno(), 0)
             with open(sdir+"-tmp/manifest", "w") as hashf:
 
@@ -382,8 +429,8 @@ def send_to_dest(send_all = False):
                 for addr in range(0, snap2size, bkchunksize):
 
                     # Calculate corresponding position in bitmap.
-                    bmap_pos = int(addr / bkchunksize / 8)
-                    b = int((addr / bkchunksize) % 8)
+                    bmap_pos = addr // bkchunksize // 8
+                    b = (addr // bkchunksize) % 8
 
                     # Should this chunk be sent?
                     if addr >= sendall_addr or bmap_mm[bmap_pos] & (2** b):
@@ -391,7 +438,7 @@ def send_to_dest(send_all = False):
                         vf.seek(addr)
                         buf = vf.read(bkchunksize)
                         destfile = "x"+format(addr,"016x")
-                        print(" ",int((bmap_pos/bmap_size)*100),"%  ",bmap_pos, \
+                        print(" ",int(bmap_pos/bmap_size*100),"%  ",bmap_pos, \
                                 destfile, end=" ")
 
                         # Compress & write only non-empty and last chunks
@@ -440,7 +487,7 @@ def send_to_dest(send_all = False):
             print("previous =", "none" if send_all else sessions[-1], file=f)
         tarf.add(sdir+"-tmp/info")
         tarf.add(sdir+"-tmp/manifest")
-        with open(mapstate+"-tmp", "rb") as f_in:
+        with open(mapfile+"-tmp", "rb") as f_in:
             with gzip.open(sdir+"-tmp/deltamap.gz", "wb") as f_out:
                 shutil.copyfileobj(f_in, f_out)
         tarf.add(sdir+"-tmp/deltamap.gz")
@@ -461,8 +508,8 @@ def send_to_dest(send_all = False):
 
         # Cleanup on VM/remote
         p = subprocess.check_output(vm_run_args[vmtype]+ \
-            ["cd '"+destmountpoint+"/"+destdir+"'" \
-            +(" && mv '."+sdir+"-tmp' '."+sdir+"'") if not options.tarfile else "" \
+            ["cd '"+pjoin(destmountpoint,destdir)+"'" \
+            +" && mv '."+sdir+"-tmp' '."+sdir+"'" \
             +" && sync"])
         os.rename(sdir+"-tmp", sdir)
     else:
@@ -472,9 +519,9 @@ def send_to_dest(send_all = False):
     return count > 0
 
 
-def monitor_send():
+def monitor_send(volumes=[], monitor_only=True):
     global datavol, datavols, newvols, bmap_size, snap1size, snap2size
-    global snap1vol, snap2vol, map_exists, map_updated, mapstate, bksession
+    global snap1vol, snap2vol, map_exists, map_updated, mapfile, bksession
 
     bksession = time.strftime("S_%Y%m%d-%H%M%S")
     print("\nStarting", ["backup","monitor-only"][monitor_only], \
@@ -491,6 +538,13 @@ def monitor_send():
         print("No new data.")
         exit(0)
 
+    dvs = []
+    for v in volumes:
+        if v in datavols+newvols:
+            dvs.append(v)
+    if len(dvs) > 0:
+        datavols = dvs
+
     if len(datavols) > 0:
         get_lvm_deltas()
 
@@ -500,15 +554,15 @@ def monitor_send():
         snap2vol = datavol + ".tock"
         snap1size = get_lvm_size(snap1vol)
         snap2size = get_lvm_size(snap2vol)
-        bmap_size = int(snap2size / bkchunksize / 8) + 1
+        bmap_size = (snap2size // bkchunksize // 8) + 1
 
-        mapstate = bkdir+"/"+datavol+".deltamap"
+        mapfile = bkdir+"/"+datavol+".deltamap"
         map_exists, map_updated \
         = update_delta_digest()
 
         if not monitor_only:
             sent \
-            = send_to_dest(send_all = datavol in newvols)
+            = send_volume(send_all = datavol in newvols)
             finalize_bk_session(sent)
         else:
             finalize_monitor_session()
@@ -535,16 +589,21 @@ def rotate_snapshots(rotate=True):
 
 def finalize_monitor_session():
     rotate_snapshots(map_updated)
-    os.rename(mapstate+"-tmp", mapstate)
+    os.rename(mapfile+"-tmp", mapfile)
     os.sync()
 
 
 def finalize_bk_session(sent):
     rotate_snapshots(sent)
-    init_deltamap(mapstate)
+    init_deltamap(mapfile)
     os.sync()
 
 
+# Prune backup sessions from an archive. Basis is a non-overwriting dir tree
+# merge starting with newest dirs and working backwards. Target of merge is
+# timewise the next session dir after the pruned dirs.
+# Specify data volume and one or two member list with start [end] date-time
+# in YYYYMMDD-HHMMSS format.
 def prune_sessions(datavol, times):
     global destmountpoint, destdir, bkdir
 
@@ -553,13 +612,15 @@ def prune_sessions(datavol, times):
     for dt in times:
         datetime.datetime.strptime(dt, "%Y%m%d-%H%M%S")
 
-    t1 = "S_"+times[0]
+    # t1 alone should be a specific session date-time,
+    # t1 and t2 together are a date-time range.
+    t1 = "S_"+times[0].strip()
     if len(times) > 1:
-        t2 = "S_"+times[1]
+        t2 = "S_"+times[1].strip()
     else:
         t2 = ""
-    sessions = sorted([e for e in os.listdir(bkdir+"/"+datavol) \
-                        if e[:2]=="S_" and e[-3:]!="tmp"])
+    sessions = get_sessions()
+
     if len(sessions) < 3:
         print("No extra sessions to prune.")
         return
@@ -572,12 +633,12 @@ def prune_sessions(datavol, times):
 
     # Find specific sessions to prune
     to_prune = []
-    for ses in sessions:
-        if ses >= t1:
-            if t2 == "":
-                to_prune.append(ses)
-                break
-            elif ses <= t2:
+    if t2 == "":
+        if t1 in sessions:
+            to_prune.append(t1)
+    else:
+        for ses in sessions:
+            if t1 <= ses <= t2:
                 to_prune.append(ses)
 
     if len(to_prune) == 0:
@@ -586,34 +647,58 @@ def prune_sessions(datavol, times):
 
     # Determine target session where data will be merged.
     target_s = sessions[sessions.index(to_prune[-1]) + 1]
-    #print("\nPruning sessions", ", ".join(to_prune))
+
+    merge_sessions(datavol, to_prune, target_s, clear_target=False,
+                   clear_sources=True)
+
+
+# Merge sessions together. Starting from first session results in a target
+# that contains an updated, complete volume. Other starting points can
+# form the basis for a pruning operation.
+# Specify the data volume (datavol), source sessions (sources), and
+# target dir (can be empty or session dir). Caution: clear_target and
+# clear_sources are destructive.
+def merge_sessions(datavol, sources, target, clear_target=False,
+                   clear_sources=False):
+    global destmountpoint, destdir, bkdir
+
+    for ses in sources + [target]:
+        if aset.vols[datavol].sessions(ses).format == "tar":
+            print("Cannot merge range containing tarfile session.")
+            exit(1)
 
     # Get volume size
-    with open(pjoin(bkdir,datavol,target_s,"info"), "r") as sf:
-        lines = sf.readlines()
-    for ln in lines:
-        if ln.strip()[:7] == "volsize":
-            volsize = int(ln.split()[2])
-            break
+    volsize = get_info_vol_size(datavol, target if not clear_target \
+                                         else sources[-1])
     last_chunk = "x"+format(last_chunk_addr(volsize,bkchunksize), "016x")
     #print("Last =", last_chunk)
 
     # Prepare merging of manifests (starting with target session).
     cmd = ["cd '"+pjoin(bkdir,datavol) \
-        +"' && cp "+pjoin(target_s,"manifest")+" manifest.tmp"
+        +("' && cp "+pjoin(target,"manifest")+" manifest.tmp") \
+         if not clear_target else "' && truncate -s 0 manifest.tmp"
         ]
     p = subprocess.check_output(cmd, shell=True)
 
+    if clear_target:
+        cmd = vm_run_args[vmtype]+ \
+            ["cd '"+pjoin(destmountpoint,destdir,bkdir.strip("/"),datavol) \
+            +"' && if [ -e "+target+" ]; then" \
+            +"  rm -r "+target+" && mkdir -p "+target+"; fi"
+            ]
+        p = subprocess.check_output(cmd)
+
     # Merge each session to be pruned into the target.
-    for ses in reversed(sorted(to_prune)):
-        print("  Merging session", ses, "into", target_s)
+    for ses in reversed(sorted(sources)):
+        print("  Merging session", ses, "into", target)
         cmd = ["cd '"+pjoin(bkdir,datavol) \
             +"' && cat "+pjoin(ses,"manifest")+" >>manifest.tmp"
             ]
         p = subprocess.check_output(cmd, shell=True)
+
         cmd = vm_run_args[vmtype]+ \
             ["cd '"+pjoin(destmountpoint,destdir,bkdir.strip("/"),datavol) \
-            +"' && cp -rlnT "+ses+" "+target_s
+            +"' && cp -rlnT "+ses+" "+target
             ]
         p = subprocess.check_output(cmd)
 
@@ -621,12 +706,12 @@ def prune_sessions(datavol, times):
     # ordering in above merge will result in only the newest instance of each
     # filename being retained. Then filter entries beyond current last chunk
     # and send to the archive.
-    print("Merging manifests...")
+    print("  Merging manifests")
     cmd = ["cd '"+pjoin(bkdir,datavol) \
         +"' && sort -u -k 2,2 manifest.tmp" \
-        +"  |  sed '/ "+last_chunk+"/q' >"+pjoin(target_s,"manifest") \
+        +"  |  sed '/ "+last_chunk+"/q' >"+pjoin(target,"manifest") \
         +"  && rm manifest.tmp" \
-        +"  && tar -cf - "+pjoin(target_s,"manifest") \
+        +"  && tar -cf - "+pjoin(target,"manifest") \
         +"  | "+" ".join(vm_run_args[vmtype]) \
         +" 'cd "+'"'+pjoin(destmountpoint,destdir,bkdir.strip("/"),datavol) \
         +'" && tar -xmf -'+"'"
@@ -634,16 +719,17 @@ def prune_sessions(datavol, times):
     p = subprocess.check_output(cmd, shell=True)
 
     # Trim chunks to volume size and remove pruned sessions.
-    print("Trimming volume...")
+    print("  Trimming volume")
     cmd = vm_run_args[vmtype] + \
         ["cd '"+pjoin(destmountpoint,destdir,bkdir.strip("/"),datavol) \
-        +"' && find "+target_s+" -name 'x*' | sort -d" \
+        +"' && find "+target+" -name 'x*' | sort -d" \
         +"  |  sed '1,/"+last_chunk+"/d'" \
         +"  |  xargs -r rm -v"
         ]
     p = subprocess.check_call(cmd)
 
-    for ses in to_prune:
+    # Remove pruned sessions in local metadata
+    for ses in sources:
         cmd = ["cd '"+pjoin(bkdir,datavol) \
             +"' && rm -r "+ses \
             +"  && "+" ".join(vm_run_args[vmtype]) \
@@ -653,12 +739,18 @@ def prune_sessions(datavol, times):
         p = subprocess.check_call(cmd, shell=True)
 
 
+# For systems that experienced administrative issues leaving one or more of
+# the archive volumes out of sync with the volumes+metadata on the source
+# system. In future, sparsebak should automatically warn or run resync when
+# necessary, but this step currently requires user awareness/initiative.
+# If you also know which sessions were created
+# during an out-of-sync state (corrupted sessions) consider removing them
+# with 'prune'.
 def resync(datavol):
-    global destmountpoint, destdir, bkdir, datavols, bkchunksize, bs, vgname
+    global destmountpoint, destdir, bkdir, bkchunksize, vgname
 
     print("\nStarting resync scan for volume",datavol)
-    assert datavol in datavols
-    mapstate = bkdir+"/"+datavol+".deltamap"
+    mapfile = bkdir+"/"+datavol+".deltamap"
 
     cmd = vm_run_args[vmtype] \
             +["cd '"+pjoin(destmountpoint,destdir,bkdir.strip("/"),datavol) \
@@ -668,7 +760,7 @@ def resync(datavol):
     getvol = subprocess.Popen(cmd, stdout=subprocess.PIPE)
 
     with open("/dev/mapper/"+vgname+"-"+datavol.replace("-","--")+".tick","rb") as vf:
-        with open(mapstate, "r+b") as bmapf:
+        with open(mapfile, "r+b") as bmapf:
             bmap_mm = mmap.mmap(bmapf.fileno(), 0)
             addr = 0
             count = 0
@@ -685,8 +777,8 @@ def resync(datavol):
 
                 if buf1 != buf2:
                     print("* delta", format(addr, "016x"))
-                    volsegment = int(addr / bkchunksize )
-                    bmap_pos = int(volsegment / 8)
+                    volsegment = addr // bkchunksize 
+                    bmap_pos = volsegment // 8
                     bmap_mm[bmap_pos] |= 2** (volsegment % 8)
                     count += len(buf1)
 
@@ -694,36 +786,180 @@ def resync(datavol):
                 #getvol.poll()
 
     print("\nTotal bytes :",addr)
-    print("Delta bytes :", count)
+    print("Delta bytes re-mapped:", count)
     
     if count > 0:
         print("\nNext 'send' will bring this volume into sync.")
+
+
+# Receive volume from archive. If no same_path specified,
+# then verify only.
+def receive_volume(datavol, select_ses="", save_path=""):
+    global destmountpoint, destdir, bkdir, bkchunksize, vgname
+
+    if save_path and os.path.exists(save_path) and not options.unattended:
+        print("\n!! This will erase all existing data in",save_path)
+        ans = input("   Are you sure? (yes/no): ")
+        if ans.lower() != "yes":
+            exit(0)
+
+    sessions = get_sessions(datavol)
+    # Set the session to retrieve
+    if select_ses:
+        datetime.datetime.strptime(select_ses, "%Y%m%d-%H%M%S")
+        select_ses = "S_"+select_ses
+        if select_ses not in sessions:
+            raise ValueError("The specified session date-time does not exist.")
+    else:
+        select_ses = sessions[-1]
+
+    print("\nReading manifests")
+    volsize = get_info_vol_size(datavol, select_ses)
+    last_chunk = "x"+format(last_chunk_addr(volsize, bkchunksize), "016x")
+    zeros = bytes(bkchunksize)
+
+    # empty accumulator
+    cmd = ["truncate -s 0 "+tmpdir+"/manifests.cat"]
+    p = subprocess.check_output(cmd, shell=True)
+
+    # Collect session manifests
+    for ses in reversed(sorted(sessions)):
+        if ses > "S_"+select_ses:
+            continue
+        if aset.vols[datavol].sessions[ses].format == "tar":
+            raise NotImplementedError(
+                "Receive from tarfile not yet implemented: "+ses)
+        cmd = ["cd '"+pjoin(bkdir,datavol) \
+            +"' && sed -E 's|$| "+ses+"|' " \
+            +pjoin(ses,"manifest")+" >>"+tmpdir+"/manifests.cat"
+            ]
+        p = subprocess.check_output(cmd, shell=True)
+
+    # Merge manifests and send to archive system
+    cmd = ["cd '"+pjoin(bkdir,datavol) \
+        +"' && sort -u -k 2,2 "+tmpdir+"/manifests.cat" \
+        +"  |  tee "+tmpdir+"/manifest.verify " \
+        +"  |  sed -E 's|^.+ x(.{9})(.{7}) (S_.+)|\\3/\\1/x\\1\\2|;" \
+        +" /"+last_chunk+"/q'"
+        +"  | "+" ".join(vm_run_args[vmtype]) \
+        +" 'mkdir -p "+tmpdir \
+        +"  && cat >"+tmpdir+"/receive.lst'"
+        ]
+    p = subprocess.check_output(cmd, shell=True)
+
+    print("\nReceiving volume", datavol, select_ses)
+
+    # Create retriever process using py program
+    cmd = vm_run_args[vmtype] \
+            +["cd '"+pjoin(destmountpoint,destdir,bkdir.strip("/"),datavol) \
+            +"' && cat >"+tmpdir+"/receive_out.py" \
+            +"  && python3 "+tmpdir+"/receive_out.py"
+            ]
+    getvol = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                stdin=subprocess.PIPE)
+
+    ## START py program code ##
+    getvol.stdin.write(b'''import os.path, sys
+with open("/tmp/sparsebak/receive.lst","rb") as list:
+    for line in list:
+        fname = line.strip()
+        fsize = os.path.getsize(fname)
+        i = sys.stdout.buffer.write(fsize.to_bytes(4,"big"))
+        with open(fname,"rb") as dataf:
+            i = sys.stdout.buffer.write(dataf.read(fsize))
+    ''')
+    ## END py program code ##
+    getvol.stdin.close()
+
+
+    # Prepare save volume
+    if save_path:
+        # Discard all data in destination if this is a block device
+        # then open for writing
+        if os.path.exists(save_path) \
+        and stat.S_ISBLK(os.stat(save_path).st_mode):
+            p = subprocess.check_output(["blkdiscard", save_path])
+        else:
+            p = subprocess.check_output(
+                ["truncate", "-s", str(volsize), save_path])
+            p = subprocess.check_output(
+                ["truncate", "-s", str(volsize), save_path])
+        print("Saving to", save_path)
+        savevol = open(save_path, "w+b")
+
+    # Open manifest then receive, check and save data
+    with open(tmpdir+"/manifest.verify", "r") as mf:
+        for addr in range(0, volsize, bkchunksize):
+            faddr = "x"+format(addr,"016x")
+            print(faddr,end=" ")
+
+            cksum, fname, ses = mf.readline().strip().split()
+            size = int.from_bytes(getvol.stdout.read(4),"big")
+
+            if fname != faddr:
+                raise ValueError("Bad fname "+fname)
+            if cksum.strip() == "0":
+                if size != 0:
+                    raise ValueError("Expected zero length, got "+size)
+                print("OK",end="\x0d")
+                if save_path:
+                    savevol.seek(bkchunksize, 1)
+                continue
+            if size > bkchunksize + (bkchunksize // 128):
+                raise BufferError("Bad chunk size: "+size)
+
+            buf = getvol.stdout.read(size)
+            rc  = getvol.poll()
+            if rc is not None and len(buf) == 0:
+                break
+
+            if len(buf) != size:
+                raise BufferError("Got "+len(buf)+" bytes, expected "+size)
+            if cksum != hashlib.sha256(buf).hexdigest():
+                #with open(tmpdir+"/bufdump", "wb") as dump:
+                #    dump.write(buf)
+                raise ValueError("Bad hash "+fname \
+                    +" :: "+hashlib.sha256(buf).hexdigest())
+
+            buf = gzip.decompress(buf)
+            if len(buf) > bkchunksize:
+                raise BufferError("Decompressed to "+len(buf)+" bytes")
+            print("OK",end="\x0d")
+            if save_path:
+                savevol.write(buf)
+
+        if rc is not None and rc > 0:
+            raise RuntimeError("Error code from getvol process: "+rc)
+        if save_path:
+            savevol.close()
 
 
 
 ##  Main  #####################################################################
 
 ''' ToDo:
-Config management
-Encryption and manifests
-Restore and verify
-Separate threads for encoding tasks
-Option for live Qubes volumes (*-private-snap)
-Gracefully abort send during interruption
-Auto-resume aborted backup session
-Auto-pruning/rotation
-Determine previous session, and if it completed
-  Example: if .deltamap-tmp exists, then perform checks on
-  which snapshots exist.
-Check dir/file presence, volume sizes, deltabmap size
-Check for modulus bkchunksize/(bs * dblocksize) == 0 and mod 4096
-Make separate /var (local) and dest (remote) directories
+    Test with local destination (dom0 drive)
+    Resync uses retrieve
+
+    Config management, add/recognize disabled volumes
+    Encryption
+    Add support for special source metadat (qubes.xml etc)
+    Add other destination exec types (e.g. ssh to vm)
+    Separate threads for encoding tasks
+    Option for live Qubes volumes (*-private-snap)
+    Verify entire archive
+    Deleting volumes
+    Multiple storage pool configs
+    Auto-pruning/rotation
+    Auto-resume aborted backup session:
+        Check dir/file presence, volume sizes, deltabmap size
+        Example: if .deltamap-tmp exists, then perform checks on
+        which snapshots exist.
 '''
 
 
 vgname, poolname, destvm, destmountpoint, destdir, datavols \
 = get_configs()
-#print(vgname, poolname, destvm, destmountpoint, destdir, datavols)
 
 bkdir = topdir+"/"+vgname+"%"+poolname
 
@@ -737,21 +973,61 @@ if not os.path.exists(bkdir):
 vmtype, vm_run_args \
 = detect_vm_state()
 
-if options.action == "send":
-    monitor_send()
-elif options.action == "monitor":
-    monitor_send()
+# Check volume args against config
+for vol in options.volumes:
+    if vol not in datavols:
+        raise ValueError("Volume "+vol+" not configured")
+
+
+# Process commands
+
+if options.action == "monitor":
+    monitor_send(monitor_only=True)
+
+elif options.action   == "send":
+    monitor_send(options.volumes, monitor_only=False)
+
 elif options.action == "prune":
+    if not options.session:
+        raise ValueError("Must specify --session for prune")
     for dv in datavols:
-        prune_sessions(dv, options.params)
+        prune_sessions(dv, options.session.split(","))
+
 elif options.action == "receive":
-    print("Not implemented.")
-    exit(1)
+    if not options.saveto:
+        raise ValueError("Must specify --save-to for receive")
+    if len(options.volumes) != 1:
+        raise ValueError("Specify one volume for receive")
+    if options.session and len(options.session.split(",")) > 1:
+        raise ValueError("Specify one session for receive")
+    receive_volume(options.volumes[0],
+                   select_ses="" if not options.session \
+                   else options.session.split(",")[0],
+                   save_path=options.saveto)
+
 elif options.action == "verify":
-    print("Not implemented.")
-    exit(1)
+    receive_volume(options.volumes[0], save_path="")
+
 elif options.action == "resync":
-    resync(options.params[0])
+    resync(options.volumes[0])
+
+elif options.action == "list":
+    for dv in options.volumes:
+        print("\nSessions for volume",dv,":")
+        sessions = get_sessions(dv)
+        for ses in sessions:
+            print(" ",ses[2:]+(" (tar)"
+                    if aset.vols[dv].sessions[ses].format == "tar"
+                  else ""))
+
+elif options.action == "clean":
+    raise NotImplementedError()
+
+elif options.action == "delete":
+    raise NotImplementedError()
+
+elif options.action == "untar":
+    raise NotImplementedError()
 
 
 print("\nDone.\n")
