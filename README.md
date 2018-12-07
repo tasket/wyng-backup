@@ -1,6 +1,6 @@
 <h1 align="center">Sparsebak</h1>
 <p align="center">
-Fast /Time Machine/-like disk image backups for Qubes OS and Linux LVM.
+Fast <i>Time Machine</i>-like disk image backups for Qubes OS and Linux LVM.
 </p>
 
 Introduction
