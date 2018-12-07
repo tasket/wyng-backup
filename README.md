@@ -9,7 +9,7 @@ Introduction
 Sparsebak is aimed at incremental archive management at the logical volume level
 where a snapshot management interface is available. Examples of such interfaces
 are LVM commands, Btrfs / XFS / ZFS tools, etc. This lv focus is combined with
-a /sparsebundle/-like storage format that enables flexible and quick maintainance
+a *sparsebundle* type storage format that enables flexible and quick maintainance
 operations.
 
 The upshot of this combination is that sparsebak has nearly instantaneous access to
@@ -17,9 +17,9 @@ volume changes, remains fairly space-efficient regardless of updated-file sizes,
 avoids snapshot space consumption pitfalls, and can make an indefinite* number of
 frequent backups to an archive with relatively little CPU / disk IO overhead.
 
-Sparsebak is optimized to process data as /streams/ whenever possible, which
+Sparsebak is optimized to process data as *streams* whenever possible, which
 avoids writing temporary caches of data to disk. It also doesn't require the
-source admin system to ever /mount/ processed volumes, meaning untrusted data
+source admin system to ever mount processed volumes, meaning untrusted data
 and filesystems can be handled safely.
 
 (* See `prune` command for freeing space on the destination.)
@@ -194,17 +194,17 @@ suffice you may need to `lvremove` the volume's .tick and .tock snapshots.
 Sparsebak will likely support encryption in the future. In the meantime here is a
 brief description for ad-hoc locally-encrypted remote storage from Qubes OS:
 
-1. Qube /remotefs/ runs `sshfs` to access a remote filesystem and then `losetup` on a
+1. Qube *remotefs* runs `sshfs` to access a remote filesystem and then `losetup` on a
 remote file (to size the file correctly during inital setup,
 use `truncate -s <size> myfile.img` before using `losetup`).
 
-2. /dom0/ then runs `qvm-block attach backup remotefs:loop0`.
+2. *Domain0* then runs `qvm-block attach backup remotefs:loop0`.
 
-3. Qube /backup/ (no net access) runs `cryptsetup` on /dev/xvdi to create/access
+3. Qube *backup* (no net access) runs `cryptsetup` on /dev/xvdi to create/access
 the volume in its encrypted form.
 
-A local USB storage option similar to the above can be achived by substituting /sys-usb/
-for /remotefs/.
+A local USB storage option similar to the above can be achived by substituting *sys-usb*
+for *remotefs*.
 
 
 Todo
