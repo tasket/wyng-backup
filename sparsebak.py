@@ -690,7 +690,7 @@ def merge_sessions(datavol, sources, target, clear_target=False,
     # and send to the archive.
     print("  Merging manifests")
     cmd = ["cd '"+pjoin(bkdir,datavol)
-        +"' && sort -u -k 2,2 "+tmpdir+"/manifest.tmp"
+        +"' && sort -u -d -k 2,2 "+tmpdir+"/manifest.tmp"
         +"  |  sed '/ "+last_chunk+"/q' >"+pjoin(target,"manifest")
         +"  && tar -cf - "+pjoin(target,"manifest")
         +"  | "+" ".join(vm_run_args[vmtype])
@@ -769,7 +769,7 @@ def receive_volume(datavol, select_ses="", save_path="", compare=False):
     # any entries beyond the current last chunk, then piped
     # to cat on destination.
     cmd = ["cd '"+pjoin(bkdir,datavol)
-        +"' && sort -u -k 2,2 "+tmpdir+"/manifests.cat"
+        +"' && sort -u -d -k 2,2 "+tmpdir+"/manifests.cat"
         +"  |  tee "+tmpdir+"/manifest.verify"
         +"  |  sed -E 's|^.+ x(.{9})(.{7}) (S_.+)|\\3/\\1/x\\1\\2|;"
         +" /"+last_chunk+"/q'"
