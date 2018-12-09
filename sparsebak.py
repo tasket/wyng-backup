@@ -97,28 +97,36 @@ def get_configs():
 
 # Detect features of internal and destination environments:
 def detect_vm_state():
+    global destvm
+
+    if os.path.exists("/etc/qubes-release") and destvm[:8] == "qubes://":
+        vmtype = "qubes" # Qubes OS guest VM
+        destvm = destvm[8:]
+    elif destvm[:6] == "ssh://":
+        vmtype = "ssh"
+        destvm = destvm[6:]
+    elif destvm[:11] == "internal:":
+        vmtype = "internal" # local shell environment
+    else:
+        raise ValueError("'destvm' not an accepted type.")
+
     vm_run_args = {"internal":["sh","-c"],
+                   "ssh":["ssh",destvm],
                    "qubes":["qvm-run", "-p", destvm]
                   }
-    if os.path.exists("/etc/qubes-release") and destvm != None:
-        vmtype = "qubes" # Qubes OS guest
-    else:
-        vmtype = "internal" # local shell environment
 
-    if options.action not in ["monitor","list"] and destvm != None:
+    if options.action not in ["monitor","list","version"] and destvm != None:
         try:
             t = subprocess.check_output(vm_run_args[vmtype]+["mountpoint '"
                 +destmountpoint+"' && mkdir -p '"+destmountpoint+"/"+destdir
                 +"' && cd '"+destmountpoint+"/"+destdir+"' && sync"])
         except:
-            print("Destination not ready to receive commands; Exiting.")
-            exit(1)
+            raise RuntimeError("Destination not ready to receive commands.")
 
     for cmd in ["vgcfgbackup","thin_delta","lvdisplay","lvcreate",
                 "blkdiscard","truncate"]:
         if not shutil.which(cmd):
-            print("ERROR: Required command not found:", cmd)
-            exit(1)
+            raise RuntimeError("Required command not found: "+cmd)
 
     return vmtype, vm_run_args
 
@@ -894,6 +902,7 @@ with open("/tmp/sparsebak/receive.lst","rb") as list:
     Resync uses retrieve
 
     Config management, add/recognize disabled volumes
+    Check free space on destination
     Encryption
     Add support for special source metadat (qubes.xml etc)
     Add other destination exec types (e.g. ssh to vm)
@@ -911,6 +920,7 @@ with open("/tmp/sparsebak/receive.lst","rb") as list:
 
 
 # Constants
+progversion = "0.2alpha1"
 topdir = "/sparsebak" # must be absolute path
 tmpdir = "/tmp/sparsebak"
 volfile = tmpdir+"/volumes.txt"
@@ -988,7 +998,10 @@ for vol in options.volumes:
 
 # Process commands
 
-if options.action == "monitor":
+if options.action == "version":
+    print("Sparsebak version", progversion)
+
+elif options.action == "monitor":
     monitor_send(monitor_only=True)
 
 elif options.action   == "send":

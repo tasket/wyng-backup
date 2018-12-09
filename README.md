@@ -6,31 +6,32 @@ Fast <i>Time Machine</i>-like disk image backups for Qubes OS and Linux LVM.
 Introduction
 ---
 
-Sparsebak is aimed at incremental archive management at the logical volume level
-where a snapshot management interface is available. Examples of such interfaces
-are LVM commands, Btrfs / XFS / ZFS tools, etc. This lv focus is combined with
-a *sparsebundle* type storage format that enables flexible and quick maintainance
-operations.
+Sparsebak is aimed at incremental backup management for logical volumes. The
+focus on condensing logical volume *metadata* is combined with a sparsebundle-style
+(similar to OS X Time Machine) storage format that enables flexible and quick
+archive operations.
 
 The upshot of this combination is that sparsebak has nearly instantaneous access to
-volume changes, remains fairly space-efficient regardless of updated-file sizes,
+volume changes (no repeated scanning of volume data!), remains
+space-efficient regardless of file sizes within a volume,
 avoids snapshot space consumption pitfalls, and can make an indefinite* number of
 frequent backups to an archive with relatively little CPU / disk IO overhead.
 
 Sparsebak is optimized to process data as *streams* whenever possible, which
 avoids writing temporary caches of data to disk. It also doesn't require the
 source admin system to ever mount processed volumes, meaning untrusted data
-and filesystems can be handled safely.
+and guest filesystems can be handled safely on Qubes OS and other security-oriented
+hypervisors.
 
-(* See `prune` command for freeing space on the destination.)
+_(* See `prune` command for freeing space in the destination archive.)_
 
 
 Status
 ---
 
-Can do full or incremental backups of Linux thin LVM to local dom0 or VM filesystems, as well as
-simple volume retreival for restore and verify. Fast pruning of past backup
-sessions is now possible.
+Can do full or incremental backups of Linux thin-provisioned LVM to local dom0
+or VM filesystems, as well as simple volume retreival for restore and verify.
+Fast pruning of past backup sessions is now possible.
 
 Data verification currently relies on SHA-256 manifests being safely stored on the
 source/admin system to maintain integrity. Encryption and key-based verification
@@ -54,13 +55,13 @@ which combine to a vm:dir/path specification for the backup destination. The
 `destmountpoint` is checked to make sure its mounted for several sparsebak commands
 including `send`, `receive`, `verify` and `prune`, but not `monitor`.
 
-#### Example config .ini
+#### Example config sparsebak.ini
 
 ```
 [var]
 vgname = qubes_dom0
 poolname = pool00
-destvm = backup
+destvm = qubes://backup
 destmountpoint = /mnt/volume
 destdir = backups
 
@@ -70,10 +71,25 @@ vm-personal-private = disable
 vm-banking-private = enable
 ```
 
+The `destvm` setting requires a prefix of `ssh://`, `qubes://` or `internal:` for
+local/admin access.
+
 The resulting backup metadata is also saved to '/sparsebak'. Backups
 can be sent to a trusted Qubes VM with access to an
 encryped removable volume, for example, or an encrypted remote filesystem layer
-over sshfs or samba.
+over sshfs or samba (see [Encryption options] below).
+
+Although not absolutely necessary, it is recommended that the `monitor`
+command be run at fairly frequent (10-20 min.)
+intervals to minimize the amount of disk space that sparsebak-managed snapshots
+may occupy. A rule in /etc/cron.d takes care of this:
+
+```
+*/20 * * * * root su -l -c '/usr/local/bin/sparsebak.py monitor'
+```
+
+This will harvest each snapshot's delta metadata and rotate to fresh snapshots every 20 minutes.
+
 
 
 Operation
@@ -95,7 +111,7 @@ in the form of `sparsebak.py [options] command [volume_name]`.
   * `-u, --unattended` : Don't prompt for interactive input.
   * `--tarfile` : Store backups on destination as tar files (see notes).
   * `--save-to=path` : Required for `receive`.
-  * `--session=date-time[,date-time\]` : Select sessions by date-time (receive, verify, prune).
+  * `--session=date-time[,date-time]` : Select sessions by date-time (receive, verify, prune).
 
 #### monitor
 
@@ -155,13 +171,13 @@ specific session, or two date-times as a range:
    $ sudo sparsebak.py prune --session=20180605-000000,20180701-140000
    
 ...removes any backup sessions between midnight on June 5 through 2pm on July 1.
-Specific volumes cannot yet be specified, so this operates across all enabled
-volumes in the main sparsebak.ini config file.
+If specific volumes aren't specified, `prune` will operate across all volumes
+enabled in the config file.
 
 
 ### Other restore options
 
-The `spbk-assemble` tool can be used to create a regular disk image from within
+The `spbk-assemble` tool can still be used to create a regular disk image from within
 a sparsebak archive. It should be run on a system/VM that has filesystem access
 to the archive, using the syntax `spbk-assemble [-c] path-to-volume-name`. Use
 `-c` option to do a local SHA-256 hash during assembly. This tool will
@@ -171,6 +187,8 @@ Since sparsebak's archival folder format is similar to Apple's sparsebundle,
 the possibility exists to adapt a FUSE sparsebundle handler to access archives
 as a read-only filesystem. One such FUSE handler is
 [sparsebundlefs](https://github.com/torarnv/sparsebundlefs).
+Another, [sparsebundle-loopback](https://github.com/jeffmahoney/sparsebundle-loopback)
+is written in Python.
 
 
 Testing
@@ -189,7 +207,16 @@ If you should need to start over again with a particular volume then deleting th
 volume's subfolders on both the source and destination should suffice. If it doesn't
 suffice you may need to `lvremove` the volume's .tick and .tock snapshots.
 
-### Encrytion options
+Troubleshooting notes
+---
+
+A recent change now requires a type prefix for the `destvm` setting. This was
+done to allow clear specification of the type of proceduced calls required and
+so protocols like `ssh` can be supported unambiguously. Existing users will
+have to change their .ini setting to add a `qubes://`, `ssh://` or `internal:`
+prefix.
+
+### Encryption options
 
 Sparsebak will likely support encryption in the future. In the meantime here is a
 brief description for ad-hoc locally-encrypted remote storage from Qubes OS:
@@ -218,7 +245,7 @@ Todo
 
 * Show configured vs present volumes in list output
 
-* Encryption
+* Encryption integration
 
 * File name and sequence obfuscation
 
