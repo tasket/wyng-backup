@@ -30,7 +30,7 @@ Status
 ---
 
 Can do full or incremental backups of Linux thin-provisioned LVM to local dom0
-or VM filesystems, as well as simple volume retreival for restore and verify.
+or VM filesystems or via ssh, as well as simple volume retrieval for restore and verify.
 Fast pruning of past backup sessions is now possible.
 
 Data verification currently relies on SHA-256 manifests being safely stored on the
