@@ -246,7 +246,7 @@ def get_lvm_size(vol):
     line = subprocess.check_output( ["lvdisplay --units=b "
         + " /dev/mapper/"+vgname+"-"+vol.replace("-","--")
         +  "| grep 'LV Size'"], shell=True).decode("UTF-8").strip()
-    
+
     size = int(re.sub("^.+ ([0-9]+) B", r'\1', line))
     if size > max_address + 1:
         raise ValueError("Volume size is larger than", max_address+1)
@@ -304,7 +304,15 @@ def update_delta_digest():
     os.rename(mapfile, mapfile+"-tmp")
     dtree = xml.etree.ElementTree.parse(deltafile+datavol).getroot()
     dblocksize = int(dtree.get("data_block_size"))
-    assert bkchunksize >= (bs*dblocksize) and bkchunksize % (bs*dblocksize) == 0
+    if bkchunksize >= (bs*dblocksize) and bkchunksize % (bs*dblocksize) == 0:
+        pass
+    else:
+        print("file         =",deltafile+datavol)
+        print("bkchunksize =", bkchunksize)
+        print("dblocksize  =", dblocksize)
+        print("bs          =", bs)
+        raise ValueError("Chunk size error")
+
     bmap_byte = 0
     lastindex = 0
     dnewblocks = 0
@@ -659,16 +667,14 @@ def merge_sessions(datavol, sources, target, clear_target=False,
     # Prepare merging of manifests (starting with target session).
     if clear_target:
         open(pjoin(tmpdir,"manifest.tmp"), "wb").close()
-    else:
-        shutil.copy(pjoin(bkdir,datavol,target,"manifest"),
-                    tmpdir+"/manifest.tmp")
-
-    if clear_target:
         cmd = vm_run_args[vmtype]+ \
             ["cd '"+pjoin(destmountpoint,destdir,bkdir.strip("/"),datavol)
              +"' rm -rf "+target+" && mkdir -p "+target
             ]
         p = subprocess.check_output(cmd)
+    else:
+        shutil.copy(pjoin(bkdir,datavol,target,"manifest"),
+                    tmpdir+"/manifest.tmp")
 
     # Merge each session to be pruned into the target.
     for ses in reversed(sorted(sources)):
@@ -700,17 +706,18 @@ def merge_sessions(datavol, sources, target, clear_target=False,
     p = subprocess.check_output(cmd, shell=True)
 
     # Trim chunks to volume size and remove pruned sessions.
-    print("  Trimming volume")
+    print("  Trimming volume...", end="")
     cmd = vm_run_args[vmtype] + \
         ["cd '"+pjoin(destmountpoint,destdir,bkdir.strip("/"),datavol)
         +"' && find "+target+" -name 'x*' | sort -d"
         +"  |  sed '1,/"+last_chunk+"/d'"
-        +"  |  xargs -r rm -v"
+        +"  |  xargs -r rm"
         ]
     p = subprocess.check_call(cmd)
 
     # Remove pruned sessions
     for ses in sources:
+        print("..", end="")
         cmd = ["cd '"+pjoin(bkdir,datavol)
             +"' && rm -r "+ses
             +"  && "+" ".join(vm_run_args[vmtype])
@@ -718,6 +725,7 @@ def merge_sessions(datavol, sources, target, clear_target=False,
             +'" && rm -r '+ses+"'"
             ]
         p = subprocess.check_call(cmd, shell=True)
+    print()
 
 
 # Receive volume from archive. If no same_path specified, then verify only.
@@ -1001,7 +1009,7 @@ for vol in options.volumes:
 if options.action == "version":
     print("Sparsebak version", progversion)
 
-elif options.action == "monitor":
+elif options.action == "monitorXX":
     monitor_send(monitor_only=True)
 
 elif options.action   == "send":
@@ -1042,8 +1050,12 @@ elif options.action == "list":
                     if aset.vols[dv].sessions[ses].format == "tar"
                   else ""))
 
-elif options.action == "clean":
-    raise NotImplementedError()
+elif options.action == "cleanXX":
+    for v in datavols:
+        p = subprocess.check_output(["lvremove", "-f",vgname+"/"+datavol+".tick"],
+                                    stderr=subprocess.STDOUT)
+        p = subprocess.check_output(["lvremove", "-f",vgname+"/"+datavol+".tock"],
+                                    stderr=subprocess.STDOUT)
 
 elif options.action == "delete":
     raise NotImplementedError()
