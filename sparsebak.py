@@ -1009,7 +1009,7 @@ for vol in options.volumes:
 if options.action == "version":
     print("Sparsebak version", progversion)
 
-elif options.action == "monitorXX":
+elif options.action == "monitor":
     monitor_send(monitor_only=True)
 
 elif options.action   == "send":
