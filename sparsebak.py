@@ -25,7 +25,7 @@ class ArchiveSet:
         self.vgname = c['vgname']
         self.poolname = c['poolname']
         self.path = pjoin(top,self.vgname+"%"+self.poolname)
-        self.destvm = None if c['destvm'].lower() == "none" else c['destvm']
+        self.destvm = c['destvm']
         self.destmountpoint = c['destmountpoint']
         self.destdir = c['destdir']
 
@@ -385,8 +385,6 @@ def send_volume(send_all = False):
         # beyond range; send all is off
         sendall_addr = snap2size + 1
 
-    print("Backing up to", ("VM "+destvm) if destvm != None else "local")
-
     # Check volume size vs prior backup session
     if len(sessions) > 0 and not send_all:
         prior_size = get_info_vol_size(datavol)
@@ -445,6 +443,8 @@ def send_volume(send_all = False):
 
                         # Start tar stream
                         if not stream_started:
+                            print("Backing up to", (vmtype+"://"+destvm) if \
+                                destvm != None else destmountpoint)
                             untar = subprocess.Popen(vm_run_args[vmtype]
                                     + untar_cmd,
                                     stdin=subprocess.PIPE,
@@ -1041,7 +1041,14 @@ elif options.action == "receive":
                    save_path=options.saveto)
 
 elif options.action == "verify":
-    receive_volume(options.volumes[0], save_path="")
+    if len(options.volumes) != 1:
+        raise ValueError("Specify one volume for verify")
+    if options.session and len(options.session.split(",")) > 1:
+        raise ValueError("Specify one session for verify")
+    receive_volume(options.volumes[0],
+                   select_ses="" if not options.session \
+                   else options.session.split(",")[0],
+                   save_path="")
 
 elif options.action == "resync":
     receive_volume(options.volumes[0], save_path="", compare=True)
