@@ -6,9 +6,9 @@ Fast <i>Time Machine</i>-like disk image backups for Qubes OS and Linux LVM.
 Introduction
 ---
 
-Sparsebak is aimed at incremental backup management for logical volumes. The
+Sparsebak is aimed at incremental backup management for logical volumes. A
 focus on condensing logical volume *metadata* is combined with a sparsebundle-style
-(similar to OS X Time Machine) storage format that enables flexible and quick
+(similar to OS X Time Machine) storage format to achieve flexible and quick
 archive operations.
 
 The upshot of this combination is that sparsebak has nearly instantaneous access to
@@ -61,7 +61,7 @@ including `send`, `receive`, `verify` and `prune`, but not `monitor`.
 [var]
 vgname = qubes_dom0
 poolname = pool00
-destvm = qubes://backup
+destvm = qubes://backupvm
 destmountpoint = /mnt/volume
 destdir = backups
 
@@ -205,7 +205,15 @@ time, do a regular copy of the source metadata folder with `sudo cp /sparsebak /
 
 If you should need to start over again with a particular volume then deleting the
 volume's subfolders on both the source and destination should suffice. If it doesn't
-suffice you may need to `lvremove` the volume's .tick and .tock snapshots.
+suffice you may need to `lvremove` the volume's .tick and .tock snapshots. A new
+command `purge-metadata` was added to take care of these steps on the source system,
+but removal should still be done manually on the destination.
+
+Avoid switching/swapping the /sparsebak dir and ini file, even for testing purposes.
+If you somehow must have more than one, there must be no overlap of names in
+the volumes section. In the future sparsebak will support multiple archive ini
+configs.
+
 
 Troubleshooting notes
 ---

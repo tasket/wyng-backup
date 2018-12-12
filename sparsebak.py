@@ -115,7 +115,8 @@ def detect_vm_state():
                    "qubes":["qvm-run", "-p", destvm]
                   }
 
-    if options.action not in ["monitor","list","version"] and destvm != None:
+    if options.action not in ["purge-metadata","monitor","list","version"] \
+    and destvm != None:
         try:
             t = subprocess.check_output(vm_run_args[vmtype]+["mountpoint '"
                 +destmountpoint+"' && mkdir -p '"+destmountpoint+"/"+destdir
@@ -304,14 +305,12 @@ def update_delta_digest():
     os.rename(mapfile, mapfile+"-tmp")
     dtree = xml.etree.ElementTree.parse(deltafile+datavol).getroot()
     dblocksize = int(dtree.get("data_block_size"))
-    if bkchunksize >= (bs*dblocksize) and bkchunksize % (bs*dblocksize) == 0:
-        pass
-    else:
-        print("file         =",deltafile+datavol)
+    if dblocksize % lvm_block_factor != 0:
+        print("file        =",deltafile+datavol)
         print("bkchunksize =", bkchunksize)
         print("dblocksize  =", dblocksize)
         print("bs          =", bs)
-        raise ValueError("Chunk size error")
+        raise ValueError("dblocksize error")
 
     bmap_byte = 0
     lastindex = 0
@@ -332,6 +331,10 @@ def update_delta_digest():
             else: # superfluous tag
                 continue
 
+            # blockpos iterates over disk blocks, with
+            # thin LVM tools constant of 512 bytes/block.
+            # dblocksize (source) and and bkchunksize (dest) may be
+            # somewhat independant of each other.
             for blockpos in range(blockbegin, blockbegin + blocklen):
                 volsegment = blockpos // (bkchunksize // bs)
                 bmap_pos = volsegment // 8
@@ -935,9 +938,11 @@ volfile = tmpdir+"/volumes.txt"
 deltafile = tmpdir+"/delta."
 allvols = {}
 bs = 512
-bigbs = 4096
-bkchunksize = 256 * bs # 128k same as thin_delta chunk
-assert bkchunksize % bigbs == 0 and bkchunksize % bs == 0
+# LVM min blocks = 128 = 64kBytes
+lvm_block_factor = 128
+# Dest chunk size = 128kBytes
+bkchunksize = 2 * lvm_block_factor * bs
+assert bkchunksize % (lvm_block_factor * bs) == 0
 max_address = 0xffffffffffffffff # 64bits
 
 
@@ -964,8 +969,8 @@ os.makedirs(tmpdir)
 
 # Parse arguments
 parser = argparse.ArgumentParser(description="")
-parser.add_argument("action", choices=["send","monitor","clean","prune",
-                    "receive","verify","resync","list","version"],
+parser.add_argument("action", choices=["send","monitor","clean-metadata",
+                    "prune","receive","verify","resync","list","version"],
                     default="monitor", help="Action to take")
 parser.add_argument("-u", "--unattended", action="store_true", default=False,
                     help="Non-interactive, supress prompts")
@@ -1048,14 +1053,23 @@ elif options.action == "list":
         for ses in sessions:
             print(" ",ses[2:]+(" (tar)"
                     if aset.vols[dv].sessions[ses].format == "tar"
-                  else ""))
+                    else ""))
 
-elif options.action == "cleanXX":
-    for v in datavols:
-        p = subprocess.check_output(["lvremove", "-f",vgname+"/"+datavol+".tick"],
-                                    stderr=subprocess.STDOUT)
-        p = subprocess.check_output(["lvremove", "-f",vgname+"/"+datavol+".tock"],
-                                    stderr=subprocess.STDOUT)
+elif options.action == "purge-metadata":
+    print("Warning: This removes all sparsebak snapshots and metadata for",
+          options.volumes)
+    ans = input("Are you sure (y/N)? ")
+    if ans.lower() not in ["y","yes"]:
+        exit(0)
+    for dv in options.volumes:
+        shutil.rmtree(pjoin(bkdir,dv))
+        for i in [".tick",".tock"]:
+            if lv_exists(vgname, dv+i):
+                p = subprocess.check_output(["lvremove",
+                                             "-f",vgname+"/"+dv+i])
+                print("Removed", vgname+"/"+dv+i)
+    else:
+        print("No volumes specified.")
 
 elif options.action == "delete":
     raise NotImplementedError()
