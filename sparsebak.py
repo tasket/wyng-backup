@@ -931,7 +931,7 @@ with open("/tmp/sparsebak/receive.lst","rb") as list:
 
 
 # Constants
-progversion = "0.2alpha1"
+progversion = "0.2alpha2"
 topdir = "/sparsebak" # must be absolute path
 tmpdir = "/tmp/sparsebak"
 volfile = tmpdir+"/volumes.txt"
