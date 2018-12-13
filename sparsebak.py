@@ -244,9 +244,8 @@ def get_lvm_metadata():
 
 
 def get_lvm_size(vol):
-    line = subprocess.check_output( ["lvdisplay --units=b "
-        + " /dev/mapper/"+vgname+"-"+vol.replace("-","--")
-        +  "| grep 'LV Size'"], shell=True).decode("UTF-8").strip()
+    line = subprocess.check_output( ["lvdisplay --units=b " + vgname+"/"+vol
+        +  " | grep 'LV Size'"], shell=True).decode("UTF-8").strip()
 
     size = int(re.sub("^.+ ([0-9]+) B", r'\1', line))
     if size > max_address + 1:
@@ -305,12 +304,12 @@ def update_delta_digest():
     os.rename(mapfile, mapfile+"-tmp")
     dtree = xml.etree.ElementTree.parse(deltafile+datavol).getroot()
     dblocksize = int(dtree.get("data_block_size"))
-    if dblocksize % lvm_block_factor != 0:
-        print("file        =",deltafile+datavol)
-        print("bkchunksize =", bkchunksize)
-        print("dblocksize  =", dblocksize)
-        print("bs          =", bs)
-        raise ValueError("dblocksize error")
+    #if dblocksize % lvm_block_factor != 0:
+    #    print("file        =",deltafile+datavol)
+    #    print("bkchunksize =", bkchunksize)
+    #    print("dblocksize  =", dblocksize)
+    #    print("bs          =", bs)
+    #    raise ValueError("dblocksize error")
 
     bmap_byte = 0
     lastindex = 0
@@ -406,7 +405,7 @@ def send_volume(send_all = False):
         untar_cmd = ["cd '"+pjoin(destmountpoint,destdir)+"' && tar -xf -"]
 
     # Open source volume and its delta bitmap as r, session manifest as w.
-    with open("/dev/mapper/"+vgname+"-"+snap2vol.replace("-","--"),"rb") as vf:
+    with open(pjoin("/dev",vgname,snap2vol),"rb") as vf:
         with open("/dev/zero" if send_all else mapfile+"-tmp","r+b") as bmapf:
             bmap_mm = bytes(1) if send_all else mmap.mmap(bmapf.fileno(), 0)
             with open(sdir+"-tmp/manifest", "w") as hashf:
@@ -821,6 +820,9 @@ with open("/tmp/sparsebak/receive.lst","rb") as list:
         # then open for writing
         if os.path.exists(save_path) \
         and stat.S_ISBLK(os.stat(save_path).st_mode):
+            if volsize > get_lvm_size(os.path.basename(save_path)):
+                p = subprocess.check_output(["lvresize", "-L",str(volsize)+"b",
+                                             "-f", save_path])
             p = subprocess.check_output(["blkdiscard", save_path])
         else:
             p = subprocess.check_output(
@@ -830,8 +832,7 @@ with open("/tmp/sparsebak/receive.lst","rb") as list:
         print("Saving to", save_path)
         savef = open(save_path, "w+b")
     elif compare:
-        cmpf = open("/dev/mapper/"+vgname+"-"
-                    + datavol.replace("-","--")+".tick", "rb")
+        cmpf = open(pjoin("/dev",vgname,datavol+".tick"), "rb")
         mapfile = bkdir+"/"+datavol+".deltamap"
         bmap_size = (volsize // bkchunksize // 8) + 1
         if not os.path.exists(mapfile):
@@ -860,7 +861,7 @@ with open("/tmp/sparsebak/receive.lst","rb") as list:
                 elif compare:
                     cmpf.seek(bkchunksize, 1)
                 continue
-            if size > bkchunksize + (bkchunksize // 128):
+            if size > bkchunksize + (bkchunksize // 128) or size < 1:
                 raise BufferError("Bad chunk size: "+size)
 
             buf = getvol.stdout.read(size)
@@ -909,16 +910,14 @@ with open("/tmp/sparsebak/receive.lst","rb") as list:
 ##  Main  #####################################################################
 
 ''' ToDo:
-    Test with local destination (dom0 drive)
-    Resync uses retrieve
-
     Config management, add/recognize disabled volumes
     Check free space on destination
     Encryption
-    Add support for special source metadat (qubes.xml etc)
+    Add support for special source metadata (qubes.xml etc)
     Add other destination exec types (e.g. ssh to vm)
     Separate threads for encoding tasks
     Option for live Qubes volumes (*-private-snap)
+    Guard against vm snap rotation during receive-save
     Verify entire archive
     Deleting volumes
     Multiple storage pool configs
@@ -969,7 +968,7 @@ os.makedirs(tmpdir)
 
 # Parse arguments
 parser = argparse.ArgumentParser(description="")
-parser.add_argument("action", choices=["send","monitor","clean-metadata",
+parser.add_argument("action", choices=["send","monitor","purge-metadata",
                     "prune","receive","verify","resync","list","version"],
                     default="monitor", help="Action to take")
 parser.add_argument("-u", "--unattended", action="store_true", default=False,
@@ -1006,7 +1005,7 @@ vmtype, vm_run_args \
 # Check volume args against config
 for vol in options.volumes:
     if vol not in datavols:
-        raise ValueError("Volume "+vol+" not configured")
+        raise ValueError("Volume "+vol+" not configured.")
 
 
 # Process commands
@@ -1030,7 +1029,7 @@ elif options.action == "prune":
 
 elif options.action == "receive":
     if not options.saveto:
-        raise ValueError("Must specify --save-to for receive")
+        raise ValueError("Must specify --save-to for receive.")
     if len(options.volumes) != 1:
         raise ValueError("Specify one volume for receive")
     if options.session and len(options.session.split(",")) > 1:
@@ -1063,13 +1062,17 @@ elif options.action == "list":
                     else ""))
 
 elif options.action == "purge-metadata":
-    print("Warning: This removes all sparsebak snapshots and metadata for",
-          options.volumes)
+    if options.unattended:
+        raise RuntimeError("Purge cannot be used with --unattended.")
+    print("Warning: This removes all sparsebak-generated snapshots and metadata for:")
+    print(", ".join(options.volumes))
+    print()
+    
     ans = input("Are you sure (y/N)? ")
     if ans.lower() not in ["y","yes"]:
         exit(0)
+    print("Purging")
     for dv in options.volumes:
-        shutil.rmtree(pjoin(bkdir,dv))
         for i in [".tick",".tock"]:
             if lv_exists(vgname, dv+i):
                 p = subprocess.check_output(["lvremove",
@@ -1077,6 +1080,7 @@ elif options.action == "purge-metadata":
                 print("Removed", vgname+"/"+dv+i)
     else:
         print("No volumes specified.")
+    shutil.rmtree(pjoin(bkdir))
 
 elif options.action == "delete":
     raise NotImplementedError()

@@ -46,8 +46,9 @@ Setup & Requirements
 Required packages: thin-provisioning-tools, lvm2, python3. Configured volumes
 must reside in lvm thin-provisioned pools.
 
-Sparsebak is currently distributed as a single python script with no complex
-supporting modules or other program files. It looks in '/sparsebak/sparsebak.ini'
+`sparsebak.py` is currently distributed as a single python script with no complex
+supporting modules or other program files; it can be placed in '/usr/local/bin'
+or another place of your choosing. It looks in '/sparsebak/sparsebak.ini'
 for global settings and a list of volume names to be monitored
 and backed up. Some settings you can change are `vgname` and `poolname`
 for the volume group and pool, in addition to `destvm`, `destmountpoint` and `destdir`
@@ -113,17 +114,6 @@ in the form of `sparsebak.py [options] command [volume_name]`.
   * `--save-to=path` : Required for `receive`.
   * `--session=date-time[,date-time]` : Select sessions by date-time (receive, verify, prune).
 
-#### monitor
-
-   $ sudo sparsebak.py monitor
-
-The `monitor` command takes no options and starts a monitor-only session
-that collects volume change metadata. This only takes a few seconds and is good
-to do on a frequent, regular basis (several times an hour or more) via cron or a
-systemd timer. This command
-exists to make sparsebak snapshots short-lived and relatively carefree --
-sparsebak snapshots will not eat up disk space by accumulating large amounts of old data.
-
 #### send
 
    $ sudo sparsebak.py send
@@ -138,6 +128,17 @@ incremental backup.
 like `prune` and `receive` from working; this can be resolved by manually un-taring the archive
 on the destination and changing format 'tar' to 'folders' in the local session 'info' file.
 In future, tar archives will have limited `prune` and full `receive` support.)
+
+#### monitor
+
+   $ sudo sparsebak.py monitor
+
+The `monitor` command takes no options and starts a monitor-only session
+that collects snapshot change metadata. This only takes a few seconds and is good
+to do on a frequent, regular basis (several times an hour or more) via cron or a
+systemd timer. This command isn't strictly necessary but
+exists to make sparsebak snapshots short-lived and relatively carefree --
+sparsebak snapshots will not eat up disk space by accumulating large amounts of old data.
 
 #### receive
 
