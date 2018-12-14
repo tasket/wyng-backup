@@ -153,6 +153,7 @@ def prepare_snapshots():
     dvs = []
     nvs = []
     for datavol in datavols:
+        sessions = get_sessions(datavol)
         snap1vol = datavol + ".tick"
         snap2vol = datavol + ".tock"
         if datavol[0] == "#":
@@ -169,6 +170,8 @@ def prepare_snapshots():
         # Make initial snapshot if necessary:
         if not os.path.exists(bkdir+"/"+datavol+".deltamap") \
         and not os.path.exists(bkdir+"/"+datavol+".deltamap-tmp"):
+            if len(sessions) > 0:
+                raise RuntimeError("ERROR: Sessions exist but no map for "+datavol)
             if not monitor_only and not lv_exists(vgname, snap1vol):
                 p = subprocess.check_output(["lvcreate", "-pr", "-kn",
                     "-ay", "-s", vgname+"/"+datavol, "-n", snap1vol],
@@ -365,12 +368,12 @@ def get_sessions(datavol):
 
 # Send volume to destination:
 
-def send_volume(send_all = False):
+def send_volume(datavol):
     if not os.path.exists(bkdir+"/"+datavol):
         os.makedirs(bkdir+"/"+datavol)
-    # Read existing sessions
-    sessions = sorted([e for e in os.listdir(bkdir+"/"+datavol) \
-                        if e[:2]=="S_" and e[-3:]!="tmp"])
+    sessions = get_sessions(datavol)
+    send_all = len(sessions) == 0
+
     # Make new session folder
     sdir=bkdir+"/"+datavol+"/"+bksession
     os.makedirs(sdir+"-tmp")
@@ -554,7 +557,7 @@ def monitor_send(volumes=[], monitor_only=True):
 
         if not monitor_only:
             sent \
-            = send_volume(send_all = datavol in newvols)
+            = send_volume(datavol)
             finalize_bk_session(sent)
         else:
             finalize_monitor_session()
@@ -930,7 +933,7 @@ with open("/tmp/sparsebak/receive.lst","rb") as list:
 
 
 # Constants
-progversion = "0.2alpha3"
+progversion = "0.2alpha2"
 topdir = "/sparsebak" # must be absolute path
 tmpdir = "/tmp/sparsebak"
 volfile = tmpdir+"/volumes.txt"
