@@ -32,19 +32,20 @@ class ArchiveSet:
         self.vols = {}
         for key in cp["volumes"]:
             if cp["volumes"][key] != "disable":
-                self.vols[key] = self.Volume(key, self.path)
-                self.vols[key].enabled = True
                 os.makedirs(pjoin(self.path,key), exist_ok=True)
+                self.vols[key] = self.Volume(key, self.path, self.vgname)
+                self.vols[key].enabled = True
                 self.vols[key].present = True
 
-        fs_vols = [e.name for e in os.scandir(self.path) if e.is_dir()
-                   and e.name not in self.vols.keys()]
-        for key in fs_vols:
-            self.vols[key] = self.Volume(key, self.path)
+        #fs_vols = [e.name for e in os.scandir(self.path) if e.is_dir()
+        #           and e.name not in self.vols.keys()]
+        #for key in fs_vols:
+        #    self.vols[key] = self.Volume(key, self.path)
         
     class Volume:
-        def __init__(self, name, path):
-            self.present = os.path.exists(pjoin(path,name))
+        def __init__(self, name, path, vgname):
+            self.present = lv_exists(vgname, name)
+            #self.mapped = ###
             self.sessions ={e.name: self.Ses(e.name,pjoin(path,name)) for e \
                 in os.scandir(pjoin(path,name)) if e.name[:2]=="S_" \
                     and e.name[-3:]!="tmp"} if self.present else {}
@@ -75,6 +76,14 @@ class ArchiveSet:
                     setattr(self, vname, 
                             int(value) if vname in a_ints else value)
 
+
+class Lvm_Volume:
+    def __init__(self, name, vgname):
+        self.name = name
+        self.vg = vgname
+        self.pool = None
+        self.size = None
+        self.dev_id = None
 
 
 # Get global configuration settings:
@@ -118,9 +127,12 @@ def detect_vm_state():
     if options.action not in ["purge-metadata","monitor","list","version"] \
     and destvm != None:
         try:
-            t = subprocess.check_output(vm_run_args[vmtype]+["mountpoint '"
-                +destmountpoint+"' && mkdir -p '"+destmountpoint+"/"+destdir
-                +"' && cd '"+destmountpoint+"/"+destdir+"' && sync"])
+            t = subprocess.check_output(vm_run_args[vmtype]
+                +["mountpoint '"+destmountpoint
+                +"' && mkdir -p '"+destmountpoint+"/"+destdir+topdir
+                +"' && cd '"+destmountpoint+"/"+destdir+topdir
+                +"' && touch archive.dat"
+                +"  && ln -f archive.dat .hardlink"])
         except:
             raise RuntimeError("Destination not ready to receive commands.")
 
@@ -209,6 +221,16 @@ def lv_exists(vgname, lvname):
         return True
 
 
+def vg_exists(vgname):
+    try:
+        p = subprocess.check_output( ["vgdisplay", vgname],
+                                    stderr=subprocess.STDOUT )
+    except:
+        return False
+    else:
+        return True
+
+
 # Load lvm metadata
 def get_lvm_metadata():
     print("\nScanning volume metadata...")
@@ -246,8 +268,8 @@ def get_lvm_metadata():
             volume = devid = ""
 
 
-def get_lvm_size(vol):
-    line = subprocess.check_output( ["lvdisplay --units=b " + vgname+"/"+vol
+def get_lvm_size(volpath):
+    line = subprocess.check_output( ["lvdisplay --units=b " + volpath
         +  " | grep 'LV Size'"], shell=True).decode("UTF-8").strip()
 
     size = int(re.sub("^.+ ([0-9]+) B", r'\1', line))
@@ -352,7 +374,7 @@ def update_delta_digest():
         print(dnewblocks * bs, "changed,",
               dfreedblocks * bs, "discarded.")
     else:
-        print("no changes.")
+        print("No changes.")
 
     return True, dnewblocks+dfreedblocks > 0
 
@@ -401,11 +423,11 @@ def send_volume(datavol):
     stream_started = False
     if options.tarfile:
         # don't untar at destination
-        untar_cmd = ["cd '"+pjoin(destmountpoint,destdir)
-                    +"' && mkdir -p ."+sdir+"-tmp"
+        untar_cmd = [ destcd
+                    +" && mkdir -p ."+sdir+"-tmp"
                     +" && cat >."+pjoin(sdir+"-tmp",bksession+".tar")]
     else:
-        untar_cmd = ["cd '"+pjoin(destmountpoint,destdir)+"' && tar -xf -"]
+        untar_cmd = [ destcd + " && tar -xf -"]
 
     # Open source volume and its delta bitmap as r, session manifest as w.
     with open(pjoin("/dev",vgname,snap2vol),"rb") as vf:
@@ -498,8 +520,8 @@ def send_volume(datavol):
                 # fix: verify archive dir contents here
 
         # Cleanup on VM/remote
-        p = subprocess.check_output(vm_run_args[vmtype]+ \
-            ["cd '"+pjoin(destmountpoint,destdir)+"'"
+        p = subprocess.check_output(vm_run_args[vmtype]
+            +[ destcd
             +" && mv '."+sdir+"-tmp' '."+sdir+"'"
             +" && sync"])
         os.rename(sdir+"-tmp", sdir)
@@ -517,8 +539,6 @@ def monitor_send(volumes=[], monitor_only=True):
     global snap1vol, snap2vol, map_exists, map_updated, mapfile, bksession
 
     bksession = time.strftime("S_%Y%m%d-%H%M%S")
-    print("\nStarting", ["backup","monitor-only"][monitor_only],
-        "session", [bksession,""][monitor_only])
 
     datavols, newvols \
     = prepare_snapshots()
@@ -528,6 +548,10 @@ def monitor_send(volumes=[], monitor_only=True):
     if monitor_only:
         newvols = []
         volumes = []
+    else:
+        print("\nStarting backup session", bksession)
+        print("to destination", (vmtype+"://"+destvm) if \
+            destvm != None else destmountpoint)
 
     if len(datavols)+len(newvols) == 0:
         print("No new data.")
@@ -547,8 +571,8 @@ def monitor_send(volumes=[], monitor_only=True):
         print("\nProcessing Volume :", datavol)
         snap1vol = datavol + ".tick"
         snap2vol = datavol + ".tock"
-        snap1size = get_lvm_size(snap1vol)
-        snap2size = get_lvm_size(snap2vol)
+        snap1size = get_lvm_size(pjoin("/dev",vgname,snap1vol))
+        snap2size = get_lvm_size(pjoin("/dev",vgname,snap2vol))
         bmap_size = (snap2size // bkchunksize // 8) + 1
 
         mapfile = bkdir+"/"+datavol+".deltamap"
@@ -821,13 +845,20 @@ with open("/tmp/sparsebak/receive.lst","rb") as list:
     if save_path:
         # Discard all data in destination if this is a block device
         # then open for writing
-        if os.path.exists(save_path) \
-        and stat.S_ISBLK(os.stat(save_path).st_mode):
-            if volsize > get_lvm_size(os.path.basename(save_path)):
+        if vg_exists(os.path.dirname(save_path)):
+            lv = os.path.basename(save_path)
+            vg = os.path.basename(os.path.dirname(save_path))
+            if not lv_exists(vg,lv):
+                # not possible to tell from path which thinpool to use
+                print("Please create LV before receiving.")
+                raise NotImplementedError("Automatic LV creation")
+            if volsize > get_lvm_size(save_path):
                 p = subprocess.check_output(["lvresize", "-L",str(volsize)+"b",
                                              "-f", save_path])
+        if os.path.exists(save_path) \
+        and stat.S_ISBLK(os.stat(save_path).st_mode):
             p = subprocess.check_output(["blkdiscard", save_path])
-        else:
+        else: # file
             p = subprocess.check_output(
                 ["truncate", "-s", "0", save_path])
             p = subprocess.check_output(
@@ -835,6 +866,12 @@ with open("/tmp/sparsebak/receive.lst","rb") as list:
         print("Saving to", save_path)
         savef = open(save_path, "w+b")
     elif compare:
+        if not options.unattended:
+            print("\nFor resync compare, make sure the specified volume"
+                  " is unmounted first!")
+            ans = input("Continue? (yes/no): ")
+            if ans.lower() != "yes":
+                exit(0)
         cmpf = open(pjoin("/dev",vgname,datavol+".tick"), "rb")
         mapfile = bkdir+"/"+datavol+".deltamap"
         bmap_size = (volsize // bkchunksize // 8) + 1
@@ -848,7 +885,7 @@ with open("/tmp/sparsebak/receive.lst","rb") as list:
     with open(tmpdir+"/manifest.verify", "r") as mf:
         for addr in range(0, volsize, bkchunksize):
             faddr = "x"+format(addr,"016x")
-            print(faddr,end=" ")
+            print(int(addr/volsize*100),"%  ",faddr,end=" ")
 
             cksum, fname, ses = mf.readline().strip().split()
             size = int.from_bytes(getvol.stdout.read(4),"big")
@@ -933,9 +970,10 @@ with open("/tmp/sparsebak/receive.lst","rb") as list:
 
 
 # Constants
-progversion = "0.2alpha2"
-topdir = "/sparsebak" # must be absolute path
-tmpdir = "/tmp/sparsebak"
+progversion = "0.2alphaX"
+progname = "sparsebak"
+topdir = "/"+progname # must be absolute path
+tmpdir = "/tmp/"+progname
 volfile = tmpdir+"/volumes.txt"
 deltafile = tmpdir+"/delta."
 allvols = {}
@@ -954,7 +992,7 @@ if os.getuid() > 0:
     exit(1)
 
 # Allow only one instance at a time
-lockpath = "/var/lock/sparsebak"
+lockpath = "/var/lock/"+progname
 try:
     lockf = open(lockpath, "w")
     fcntl.lockf(lockf, fcntl.LOCK_EX|fcntl.LOCK_NB)
@@ -1004,6 +1042,7 @@ if not os.path.exists(bkdir):
 
 vmtype, vm_run_args \
 = detect_vm_state()
+destcd = " cd '"+destmountpoint+"/"+destdir+"'"
 
 # Check volume args against config
 for vol in options.volumes:
