@@ -49,7 +49,6 @@ class ArchiveSet:
             self.sessions ={e.name: self.Ses(e.name,pjoin(path,name)) for e \
                 in os.scandir(pjoin(path,name)) if e.name[:2]=="S_" \
                     and e.name[-3:]!="tmp"} if self.present else {}
-            #print(name,"\n",self.sessions)
             # use latest volsize
             self.volsize = self.sessions[sorted(self.sessions)[-1]].volsize \
                             if len(self.sessions)>0 else 0
@@ -59,6 +58,7 @@ class ArchiveSet:
         class Ses:
             def  __init__(self, name, path):
                 self.name = name
+                self.localtime = None
                 self.volsize = None
                 self.chunksize = None
                 self.chunks = None
@@ -77,13 +77,43 @@ class ArchiveSet:
                             int(value) if vname in a_ints else value)
 
 
-class Lvm_Volume:
-    def __init__(self, name, vgname):
+class Lvm_VolGroup:
+    def __init__(self, name):
         self.name = name
-        self.vg = vgname
-        self.pool = None
-        self.size = None
-        self.dev_id = None
+        self.lvs = {}
+
+class Lvm_Volume:
+    colnames = ["vg_name","lv_name","lv_attr","lv_size","lv_time",
+                "pool_lv","thin_id","lv_path"]
+    a_ints = ["lv_size"]
+
+    def __init__(self, members):
+        for attr in self.colnames:
+            val = members[self.colnames.index(attr)]
+            setattr(self, attr, int(re.sub("[^0-9]", "", val)) if attr \
+                in self.a_ints else val)
+
+
+def get_lvm_vgs():
+
+    p = subprocess.check_call(["lvs --units=b --noheadings --separator ::"
+        +" -o " + ",".join(Lvm_Volume.colnames)
+        +" >"+tmpdir+"/volumes.lst"], shell=True)
+
+    vgs = {}
+    with open(tmpdir+"/volumes.lst", "r") as vlistf:
+        for ln in vlistf:
+            members = ln.strip().split("::")
+            vgname = members[0]
+            lvname = members[1]
+            if vgname not in vgs.keys():
+                vgs[vgname] = Lvm_VolGroup(vgname)
+            vgs[vgname].lvs[lvname] = Lvm_Volume(members)
+            #print(vgs[vgname].lvs[lvname].lv_name,
+            #      vgs[vgname].lvs[lvname].thin_id,
+            #      vgs[vgname].lvs[lvname].lv_size)
+
+    return vgs
 
 
 # Get global configuration settings:
@@ -146,7 +176,7 @@ def detect_vm_state():
 
 # Prepare snapshots and check consistency with metadata:
 
-def prepare_snapshots():
+def prepare_snapshots(datavols):
 
     ''' Normal precondition will have a snap1vol already in existence in addition
     to the source datavol. Here we create a fresh snap2vol so we can compare
@@ -168,9 +198,9 @@ def prepare_snapshots():
         sessions = get_sessions(datavol)
         snap1vol = datavol + ".tick"
         snap2vol = datavol + ".tock"
-        if datavol[0] == "#":
-            continue
-        elif not lv_exists(vgname, datavol):
+        mapfile = pjoin(bkdir, datavol, "deltamap")
+
+        if not lv_exists(vgname, datavol):
             print("Warning:", datavol, "does not exist!")
             continue
 
@@ -179,9 +209,18 @@ def prepare_snapshots():
             p = subprocess.check_output(["lvremove", "-f",vgname+"/"+snap2vol],
                                         stderr=subprocess.STDOUT)
 
+        # Move map to new location
+        if os.path.exists(bkdir+"/"+datavol+".deltamap"):
+            os.rename(bkdir+"/"+datavol+".deltamap", mapfile)
+
+        # Future: Expand recovery to start send-resume
+        if os.path.exists(mapfile+"-tmp"):
+            print("  Delta map not finalized for",
+                  datavol, "...recovering.")
+            os.rename(mapfile+"-tmp", mapfile)
+
         # Make initial snapshot if necessary:
-        if not os.path.exists(bkdir+"/"+datavol+".deltamap") \
-        and not os.path.exists(bkdir+"/"+datavol+".deltamap-tmp"):
+        if not os.path.exists(mapfile):
             if len(sessions) > 0:
                 raise RuntimeError("ERROR: Sessions exist but no map for "+datavol)
             if not monitor_only and not lv_exists(vgname, snap1vol):
@@ -190,11 +229,6 @@ def prepare_snapshots():
                     stderr=subprocess.STDOUT)
                 print("  Initial snapshot created for", datavol)
             nvs.append(datavol)
-        elif os.path.exists(bkdir+"/"+datavol+".deltamap-tmp"):
-            print("  Delta map not finalized for",
-                  datavol, "...recovering.")
-            os.rename(bkdir+"/"+datavol+".deltamap-tmp",
-                      bkdir+"/"+datavol+".deltamap")
 
         if not lv_exists(vgname, snap1vol):
             raise RuntimeError("ERROR: Map and snapshots in inconsistent state, "
@@ -213,7 +247,7 @@ def prepare_snapshots():
 
 def lv_exists(vgname, lvname):
     try:
-        p = subprocess.check_output( ["lvs", vgname+"/"+lvname],
+        p = subprocess.check_output( ["lvdisplay", vgname+"/"+lvname],
                                     stderr=subprocess.STDOUT )
     except:
         return False
@@ -229,43 +263,6 @@ def vg_exists(vgname):
         return False
     else:
         return True
-
-
-# Load lvm metadata
-def get_lvm_metadata():
-    print("\nScanning volume metadata...")
-    p = subprocess.check_output( ["vgcfgbackup", "--reportformat", "json",
-        "-f", volfile ], stderr=subprocess.STDOUT )
-    with open(volfile) as f:
-        lines = f.readlines()
-    scope = 0
-    volume = devid = ""
-    version = False
-    for l in lines:
-        if l.strip() == "version = 1":
-            version = True
-            break
-    if not version:
-        raise ValueError("Incorrect format from 'vgcfgbackup'!")
-
-    # Parse all volumes and their thinlv ids
-    for l in lines:
-        refind = re.sub("\s([0-9A-Za-z\_\-\+\.]+) {\n", r'\1', l)
-        scope += l.count('{')
-        scope -= l.count('}')
-        if scope == 3 and not refind == l:
-            volume = refind.strip()
-            allvols[volume] = [None]
-        elif scope == 4 and volume > "" and None in allvols[volume]:
-            if "device_id =" in l:
-                devid = re.sub("device_id = ([0-9]+)", r'\1', l).strip()
-            #elif "transaction_id =" in l:
-            #    trans = re.sub("transaction_id = ([0-9]+)", r'\1', l).strip()
-        elif scope == 0 and '}' in l:
-            break
-        if devid > "":
-            allvols[volume] = [devid]
-            volume = devid = ""
 
 
 def get_lvm_size(volpath):
@@ -287,7 +284,7 @@ def get_info_vol_size(datavol, ses=""):
 
 
 # Get raw lvm deltas between snapshots
-def get_lvm_deltas():
+def get_lvm_deltas(datavols):
     print("Acquiring LVM delta info.")
     subprocess.call(["dmsetup","message", vgname+"-"+poolname+"-tpool",
         "0", "release_metadata_snap"], stderr=subprocess.DEVNULL)
@@ -300,8 +297,8 @@ def get_lvm_deltas():
         try:
             with open(deltafile+datavol, "w") as f:
                 cmd = ["thin_delta -m"
-                    + " --thin1 " + allvols[snap1vol][0]
-                    + " --thin2 " + allvols[snap2vol][0]
+                    + " --thin1 " + lv_vols[snap1vol].thin_id
+                    + " --thin2 " + lv_vols[snap2vol].thin_id
                     + " /dev/mapper/"+vgname+"-"+poolname+"_tmeta"
                     + " | grep -v '<same .*\/>$'"
                     ]
@@ -320,7 +317,7 @@ def get_lvm_deltas():
 # for volume block ranges until a send command is successfully performed and
 # the mapfile is reinitialzed with zeros.
 
-def update_delta_digest():
+def update_delta_digest(datavol):
 
     if datavol in newvols:
         return False, False
@@ -427,7 +424,7 @@ def send_volume(datavol):
                     +" && mkdir -p ."+sdir+"-tmp"
                     +" && cat >."+pjoin(sdir+"-tmp",bksession+".tar")]
     else:
-        untar_cmd = [ destcd + " && tar -xf -"]
+        untar_cmd = [ destcd + " && tar -xmf -"]
 
     # Open source volume and its delta bitmap as r, session manifest as w.
     with open(pjoin("/dev",vgname,snap2vol),"rb") as vf:
@@ -436,6 +433,8 @@ def send_volume(datavol):
             with open(sdir+"-tmp/manifest", "w") as hashf:
 
                 # Cycle over range of addresses in volume.
+                checkpt = checkpt_pct = 200 if options.unattended else 1
+                percent = 0; status = ""
                 for addr in range(0, snap2size, bkchunksize):
 
                     # Calculate corresponding position in bitmap.
@@ -448,8 +447,11 @@ def send_volume(datavol):
                         vf.seek(addr)
                         buf = vf.read(bkchunksize)
                         destfile = "x"+format(addr,"016x")
-                        print(" ",int(bmap_pos/bmap_size*100),"%  ",bmap_pos,
-                                destfile, end=" ")
+
+                        percent = int(bmap_pos/bmap_size*1000)
+                        status = "  %.1f%%  %dMB  %s " \
+                            % (percent/10, bcount//1000000, destfile) \
+                            if percent >= checkpt else ""
 
                         # Compress & write only non-empty and last chunks
                         if buf != zeros or addr >= snap2size-bkchunksize:
@@ -458,16 +460,18 @@ def send_volume(datavol):
                             bcount += len(buf)
                             print(hashlib.sha256(buf).hexdigest(), destfile,
                                   file=hashf)
-                            print(" DATA ", end="\x0d")
                         else: # record zero-length file
-                            print("______", end="\x0d")
                             buf = bytes(0)
                             print(0, destfile, file=hashf)
                             zcount += 1
 
+                        if status:
+                            print(status, end="\x0d")
+                            checkpt += checkpt_pct
+
                         # Start tar stream
                         if not stream_started:
-                            print("Backing up to", (vmtype+"://"+destvm) if \
+                            print("Sending to", (vmtype+"://"+destvm) if \
                                 destvm != None else destmountpoint)
                             untar = subprocess.Popen(vm_run_args[vmtype]
                                     + untar_cmd,
@@ -481,15 +485,16 @@ def send_volume(datavol):
                         tar_info = tarfile.TarInfo(sdir+"-tmp/"+destfile[1:-7]
                                                        +"/"+destfile)
                         tar_info.size = len(buf)
-                        tar_info.mtime = thetime
                         tarf.addfile(tarinfo=tar_info, fileobj=io.BytesIO(buf))
+
 
     # Send session info, end stream and cleanup
     if count > 0:
-        print("  100%")
+        print("  100%  ")
 
         # Make info file and send with hashes
         with open(sdir+"-tmp/info", "w") as f:
+            print("localtime =", localtime, file=f)
             print("volsize =", snap2size, file=f)
             print("chunksize =", bkchunksize, file=f)
             print("chunks =", count, file=f)
@@ -535,23 +540,26 @@ def send_volume(datavol):
 # Controls flow of monitor and send_volume procedures:
 
 def monitor_send(volumes=[], monitor_only=True):
-    global datavol, datavols, newvols, bmap_size, snap1size, snap2size
-    global snap1vol, snap2vol, map_exists, map_updated, mapfile, bksession
+    global datavols, newvols, volgroups, lv_vols
+    global bmap_size, snap1size, snap2size, snap1vol, snap2vol
+    global map_exists, map_updated, mapfile, bksession, localtime
 
-    bksession = time.strftime("S_%Y%m%d-%H%M%S")
+    localtime = time.strftime("%Y%m%d-%H%M%S")
+    bksession = "S_"+localtime
 
     datavols, newvols \
-    = prepare_snapshots()
+        = prepare_snapshots(volumes if len(volumes) >0 else datavols)
 
-    get_lvm_metadata()
+    volgroups = get_lvm_vgs()
+    if vgname not in volgroups.keys():
+        raise ValueError("Volume group "+vgname+" not present.")
+    lv_vols = volgroups[vgname].lvs
 
     if monitor_only:
         newvols = []
         volumes = []
     else:
         print("\nStarting backup session", bksession)
-        print("to destination", (vmtype+"://"+destvm) if \
-            destvm != None else destmountpoint)
 
     if len(datavols)+len(newvols) == 0:
         print("No new data.")
@@ -565,7 +573,7 @@ def monitor_send(volumes=[], monitor_only=True):
         datavols = dvs
 
     if len(datavols) > 0:
-        get_lvm_deltas()
+        get_lvm_deltas(datavols)
 
     for datavol in datavols+newvols:
         print("\nProcessing Volume :", datavol)
@@ -575,28 +583,28 @@ def monitor_send(volumes=[], monitor_only=True):
         snap2size = get_lvm_size(pjoin("/dev",vgname,snap2vol))
         bmap_size = (snap2size // bkchunksize // 8) + 1
 
-        mapfile = bkdir+"/"+datavol+".deltamap"
+        mapfile = pjoin(bkdir,datavol,"deltamap")
         map_exists, map_updated \
-        = update_delta_digest()
+        = update_delta_digest(datavol)
 
         if not monitor_only:
             sent \
             = send_volume(datavol)
-            finalize_bk_session(sent)
+            finalize_bk_session(datavol, sent)
         else:
-            finalize_monitor_session()
+            finalize_monitor_session(datavol, map_updated)
 
 
-def init_deltamap(bmfile):
+def init_deltamap(bmfile, bmsize):
     if os.path.exists(bmfile):
         os.remove(bmfile)
     if os.path.exists(bmfile+"-tmp"):
         os.remove(bmfile+"-tmp")
     with open(bmfile, "wb") as bmapf:
-        os.ftruncate(bmapf.fileno(), bmap_size)
+        os.ftruncate(bmapf.fileno(), bmsize)
 
 
-def rotate_snapshots(rotate=True):
+def rotate_snapshots(datavol, rotate=True):
     if rotate:
         print("Rotating snapshots for", datavol)
         # Review: this should be atomic
@@ -606,15 +614,15 @@ def rotate_snapshots(rotate=True):
         p = subprocess.check_output(["lvremove","--force",vgname+"/"+snap2vol])
 
 
-def finalize_monitor_session():
-    rotate_snapshots(map_updated)
+def finalize_monitor_session(datavol, map_updated):
+    rotate_snapshots(datavol, rotate=map_updated)
     os.rename(mapfile+"-tmp", mapfile)
     os.sync()
 
 
-def finalize_bk_session(sent):
-    rotate_snapshots(sent)
-    init_deltamap(mapfile)
+def finalize_bk_session(datavol, sent):
+    rotate_snapshots(datavol, rotate=sent)
+    init_deltamap(mapfile, bmap_size)
     os.sync()
 
 
@@ -777,11 +785,17 @@ def receive_volume(datavol, select_ses="", save_path="", compare=False):
         datetime.datetime.strptime(select_ses, "%Y%m%d-%H%M%S")
         select_ses = "S_"+select_ses
         if select_ses not in sessions:
-            raise ValueError("The specified session date-time does not exist.")
-    else:
+            print("The specified session date-time does not exist.")
+            exit(1)
+    elif len(sessions) > 0:
         select_ses = sessions[-1]
+    else:
+        print("No sessions available.")
+        exit(1)
+
 
     print("\nReading manifests")
+    attended = not options.unattended
     volsize = get_info_vol_size(datavol, select_ses)
     last_chunk = "x"+format(last_chunk_addr(volsize, bkchunksize), "016x")
     zeros = bytes(bkchunksize)
@@ -866,18 +880,26 @@ with open("/tmp/sparsebak/receive.lst","rb") as list:
         print("Saving to", save_path)
         savef = open(save_path, "w+b")
     elif compare:
+        # Fix: check info vs lvm volume size
         if not options.unattended:
             print("\nFor resync compare, make sure the specified volume"
                   " is unmounted first!")
             ans = input("Continue? (yes/no): ")
             if ans.lower() != "yes":
                 exit(0)
-        cmpf = open(pjoin("/dev",vgname,datavol+".tick"), "rb")
-        mapfile = bkdir+"/"+datavol+".deltamap"
+        mapfile = pjoin(bkdir, datavol, "deltamap")
         bmap_size = (volsize // bkchunksize // 8) + 1
+        if not lv_exists(vgname, datavol+".tick"):
+            p = subprocess.check_output(["lvcreate", "-pr", "-kn",
+                "-ay", "-s", vgname+"/"+datavol, "-n", snap1vol],
+                stderr=subprocess.STDOUT)
+            print("  Initial snapshot created for", datavol)
         if not os.path.exists(mapfile):
             init_deltamap(mapfile)
+
+        cmpf  = open(pjoin("/dev",vgname,datavol+".tick"), "rb")
         bmapf = open(mapfile, "r+b")
+        os.ftruncate(bmapf.fileno(), bmap_size)
         bmap_mm = mmap.mmap(bmapf.fileno(), 0)
         cmp_count = 0
 
@@ -885,7 +907,8 @@ with open("/tmp/sparsebak/receive.lst","rb") as list:
     with open(tmpdir+"/manifest.verify", "r") as mf:
         for addr in range(0, volsize, bkchunksize):
             faddr = "x"+format(addr,"016x")
-            print(int(addr/volsize*100),"%  ",faddr,end=" ")
+            if attended:
+                print(int(addr/volsize*100),"%  ",faddr,end="  ")
 
             cksum, fname, ses = mf.readline().strip().split()
             size = int.from_bytes(getvol.stdout.read(4),"big")
@@ -920,13 +943,14 @@ with open("/tmp/sparsebak/receive.lst","rb") as list:
             buf = gzip.decompress(buf)
             if len(buf) > bkchunksize:
                 raise BufferError("Decompressed to "+len(buf)+" bytes")
-            print("OK",end="\x0d")
+            if attended:
+                print("OK",end="\x0d")
             if save_path:
                 savef.write(buf)
             elif compare:
                 buf2 = cmpf.read(bkchunksize)
                 if buf != buf2:
-                    print("* delta", format(addr, "016x"))
+                    print("* delta", faddr, "    ")
                     volsegment = addr // bkchunksize 
                     bmap_pos = volsegment // 8
                     bmap_mm[bmap_pos] |= 2** (volsegment % 8)
@@ -964,7 +988,7 @@ with open("/tmp/sparsebak/receive.lst","rb") as list:
     Auto-pruning/rotation
     Auto-resume aborted backup session:
         Check dir/file presence, volume sizes, deltabmap size
-        Example: if .deltamap-tmp exists, then perform checks on
+        Example: if deltamap-tmp exists, then perform checks on
         which snapshots exist.
 '''
 
@@ -976,7 +1000,8 @@ topdir = "/"+progname # must be absolute path
 tmpdir = "/tmp/"+progname
 volfile = tmpdir+"/volumes.txt"
 deltafile = tmpdir+"/delta."
-allvols = {}
+volgroups = {}
+lv_vols = {}
 bs = 512
 # LVM min blocks = 128 = 64kBytes
 lvm_block_factor = 128
@@ -984,7 +1009,8 @@ lvm_block_factor = 128
 bkchunksize = 2 * lvm_block_factor * bs
 assert bkchunksize % (lvm_block_factor * bs) == 0
 max_address = 0xffffffffffffffff # 64bits
-
+# for 64bits, a subdir split of 9+7 allows 2048 files per dir
+addrsplit = [len(hex(max_address))-2-7, 7]
 
 # Root user required
 if os.getuid() > 0:
@@ -1051,15 +1077,23 @@ for vol in options.volumes:
 
 
 # Process commands
-
-if options.action == "version":
-    print("Sparsebak version", progversion)
-
-elif options.action == "monitor":
-    monitor_send(monitor_only=True)
+print()
+if options.action == "monitorXX":
+    monitor_send(datavols, monitor_only=True)
 
 elif options.action   == "send":
     monitor_send(options.volumes, monitor_only=False)
+
+else:
+    # get lvs for funcs that don't create snapshots...
+    volgroups = get_lvm_vgs()
+    if vgname not in volgroups.keys():
+        raise ValueError("Volume group "+vgname+" not present.")
+    lv_vols = volgroups[vgname].lvs
+
+
+if options.action == "version":
+    print(progname, "version", progversion)
 
 elif options.action == "prune":
     if not options.session:
@@ -1115,14 +1149,12 @@ elif options.action == "purge-metadata":
         exit(0)
     print("Purging")
     for dv in options.volumes:
-        for i in [".tick",".tock"]:
-            if lv_exists(vgname, dv+i):
+        for ext in [".tick",".tock"]:
+            if lv_exists(vgname, dv+ext):
                 p = subprocess.check_output(["lvremove",
-                                             "-f",vgname+"/"+dv+i])
-                print("Removed", vgname+"/"+dv+i)
-    else:
-        print("No volumes specified.")
-    shutil.rmtree(pjoin(bkdir))
+                                             "-f",vgname+"/"+dv+ext])
+                print("Removed", vgname+"/"+dv+ext)
+        shutil.rmtree(pjoin(bkdir,dv))
 
 elif options.action == "delete":
     raise NotImplementedError()
