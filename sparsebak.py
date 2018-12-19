@@ -45,7 +45,13 @@ class ArchiveSet:
     class Volume:
         def __init__(self, name, path, vgname):
             self.present = lv_exists(vgname, name)
-            #self.mapped = ###
+
+            # Move map to new location
+            mapfile = pjoin(path, name, "deltamap")
+            if os.path.exists(path+"/"+name+".deltamap"):
+                os.rename(path+"/"+name+".deltamap", mapfile)
+
+            self.mapped = os.path.exists(mapfile)
             self.sessions ={e.name: self.Ses(e.name,pjoin(path,name)) for e \
                 in os.scandir(pjoin(path,name)) if e.name[:2]=="S_" \
                     and e.name[-3:]!="tmp"} if self.present else {}
@@ -94,6 +100,7 @@ class Lvm_Volume:
                 in self.a_ints else val)
 
 
+# Retrieves survey of all LVs as vgs[].lvs[] dicts
 def get_lvm_vgs():
 
     p = subprocess.check_call(["lvs --units=b --noheadings --separator ::"
@@ -109,9 +116,6 @@ def get_lvm_vgs():
             if vgname not in vgs.keys():
                 vgs[vgname] = Lvm_VolGroup(vgname)
             vgs[vgname].lvs[lvname] = Lvm_Volume(members)
-            #print(vgs[vgname].lvs[lvname].lv_name,
-            #      vgs[vgname].lvs[lvname].thin_id,
-            #      vgs[vgname].lvs[lvname].lv_size)
 
     return vgs
 
@@ -154,20 +158,21 @@ def detect_vm_state():
                    "qubes":["qvm-run", "-p", destvm]
                   }
 
-    if options.action not in ["purge-metadata","monitor","list","version"] \
+    if options.action in ["send","receive","verify","diff","prune"] \
     and destvm != None:
         try:
             t = subprocess.check_output(vm_run_args[vmtype]
                 +["mountpoint '"+destmountpoint
                 +"' && mkdir -p '"+destmountpoint+"/"+destdir+topdir
+                +"' && mkdir -p '"+tmpdir+"-dest"
                 +"' && cd '"+destmountpoint+"/"+destdir+topdir
                 +"' && touch archive.dat"
                 +"  && ln -f archive.dat .hardlink"])
         except:
             raise RuntimeError("Destination not ready to receive commands.")
 
-    for cmd in ["vgcfgbackup","thin_delta","lvdisplay","lvcreate",
-                "blkdiscard","truncate"]:
+    for cmd in ["thin_delta","lvs","lvdisplay","lvcreate","blkdiscard",
+                "truncate","ssh" if vmtype=="ssh" else "sh"]:
         if not shutil.which(cmd):
             raise RuntimeError("Required command not found: "+cmd)
 
@@ -208,10 +213,6 @@ def prepare_snapshots(datavols):
         if lv_exists(vgname, snap2vol):
             p = subprocess.check_output(["lvremove", "-f",vgname+"/"+snap2vol],
                                         stderr=subprocess.STDOUT)
-
-        # Move map to new location
-        if os.path.exists(bkdir+"/"+datavol+".deltamap"):
-            os.rename(bkdir+"/"+datavol+".deltamap", mapfile)
 
         # Future: Expand recovery to start send-resume
         if os.path.exists(mapfile+"-tmp"):
@@ -295,7 +296,7 @@ def get_lvm_deltas(datavols):
         snap1vol = datavol + ".tick"
         snap2vol = datavol + ".tock"
         try:
-            with open(deltafile+datavol, "w") as f:
+            with open(tmpdir+"/delta."+datavol, "w") as f:
                 cmd = ["thin_delta -m"
                     + " --thin1 " + lv_vols[snap1vol].thin_id
                     + " --thin2 " + lv_vols[snap2vol].thin_id
@@ -324,10 +325,9 @@ def update_delta_digest(datavol):
 
     print("Updating block change map: ", end="")
     os.rename(mapfile, mapfile+"-tmp")
-    dtree = xml.etree.ElementTree.parse(deltafile+datavol).getroot()
+    dtree = xml.etree.ElementTree.parse(tmpdir+"/delta."+datavol).getroot()
     dblocksize = int(dtree.get("data_block_size"))
     #if dblocksize % lvm_block_factor != 0:
-    #    print("file        =",deltafile+datavol)
     #    print("bkchunksize =", bkchunksize)
     #    print("dblocksize  =", dblocksize)
     #    print("bs          =", bs)
@@ -399,6 +399,7 @@ def send_volume(datavol):
     zeros = bytes(bkchunksize)
     count = bcount = zcount = 0
     thetime = time.time()
+    addrsplit = -address_split[1]
     if send_all:
         # sends all from this address forward
         sendall_addr = 0
@@ -482,7 +483,7 @@ def send_volume(datavol):
                             stream_started = True
 
                         # Add buffer to stream
-                        tar_info = tarfile.TarInfo(sdir+"-tmp/"+destfile[1:-7]
+                        tar_info = tarfile.TarInfo(sdir+"-tmp/"+destfile[1:addrsplit]
                                                        +"/"+destfile)
                         tar_info.size = len(buf)
                         tarf.addfile(tarinfo=tar_info, fileobj=io.BytesIO(buf))
@@ -766,11 +767,11 @@ def merge_sessions(datavol, sources, target, clear_target=False,
 
 
 # Receive volume from archive. If no same_path specified, then verify only.
-# If compare specified, compare with current source volume and record any
+# If diff specified, compare with current source volume and record any
 # differences in the volume's deltamap; can be used if the deltamap or snapshots
 # are lost or if the source volume reverted to an earlier state.
 
-def receive_volume(datavol, select_ses="", save_path="", compare=False):
+def receive_volume(datavol, select_ses="", save_path="", diff=False):
     global destmountpoint, destdir, bkdir, bkchunksize, vgname
 
     if save_path and os.path.exists(save_path) and not options.unattended:
@@ -816,17 +817,17 @@ def receive_volume(datavol, select_ses="", save_path="", compare=False):
         p = subprocess.check_output(cmd, shell=True)
 
     # Merge manifests and send to archive system:
-    # sed is used to expand chunk info into a path and filter out 
-    # any entries beyond the current last chunk, then piped
-    # to cat on destination.
+    # sed is used to expand chunk info into a path and filter out any entries
+    # beyond the current last chunk, then piped to cat on destination.
+    # Note address_split is used to bisect filename to construct the subdir.
     cmd = ["cd '"+pjoin(bkdir,datavol)
         +"' && sort -u -d -k 2,2 "+tmpdir+"/manifests.cat"
         +"  |  tee "+tmpdir+"/manifest.verify"
-        +"  |  sed -E 's|^.+ x(.{9})(.{7}) (S_.+)|\\3/\\1/x\\1\\2|;"
+        +"  |  sed -E 's|^.+\s+x(\S{" + str(address_split[0]) + "})(\S+)\s+"
+        +"(S_.+)|\\3/\\1/x\\1\\2|;"
         +" /"+last_chunk+"/q'"
         +"  | "+" ".join(vm_run_args[vmtype])
-        +" 'mkdir -p "+tmpdir
-        +"  && cat >"+tmpdir+"/receive.lst'"
+        +" 'cat >"+tmpdir+"-dest/receive.lst'"
         ]
     p = subprocess.check_output(cmd, shell=True)
 
@@ -835,15 +836,16 @@ def receive_volume(datavol, select_ses="", save_path="", compare=False):
     # Create retriever process using py program
     cmd = vm_run_args[vmtype] \
             +["cd '"+pjoin(destmountpoint,destdir,bkdir.strip("/"),datavol)
-            +"' && cat >"+tmpdir+"/receive_out.py"
-            +"  && python3 "+tmpdir+"/receive_out.py"
+            +"' && cat >"+tmpdir+"-dest/receive_out.py"
+            +"  && python3 "+tmpdir+"-dest/receive_out.py"
             ]
     getvol = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                     stdin=subprocess.PIPE)
 
     ##> START py program code <##
     getvol.stdin.write(b'''import os.path, sys
-with open("/tmp/sparsebak/receive.lst","rb") as list:
+with open("''' + bytes(tmpdir,encoding="UTF-8") + b'''-dest/receive.lst",
+          "r") as list:
     for line in list:
         fname = line.strip()
         fsize = os.path.getsize(fname)
@@ -879,10 +881,10 @@ with open("/tmp/sparsebak/receive.lst","rb") as list:
                 ["truncate", "-s", str(volsize), save_path])
         print("Saving to", save_path)
         savef = open(save_path, "w+b")
-    elif compare:
+    elif diff:
         # Fix: check info vs lvm volume size
         if not options.unattended:
-            print("\nFor resync compare, make sure the specified volume"
+            print("\nFor diff, make sure the specified volume"
                   " is unmounted first!")
             ans = input("Continue? (yes/no): ")
             if ans.lower() != "yes":
@@ -895,7 +897,7 @@ with open("/tmp/sparsebak/receive.lst","rb") as list:
                 stderr=subprocess.STDOUT)
             print("  Initial snapshot created for", datavol)
         if not os.path.exists(mapfile):
-            init_deltamap(mapfile)
+            init_deltamap(mapfile, bmap_size)
 
         cmpf  = open(pjoin("/dev",vgname,datavol+".tick"), "rb")
         bmapf = open(mapfile, "r+b")
@@ -921,7 +923,7 @@ with open("/tmp/sparsebak/receive.lst","rb") as list:
                 print("OK",end="\x0d")
                 if save_path:
                     savef.seek(bkchunksize, 1)
-                elif compare:
+                elif diff:
                     cmpf.seek(bkchunksize, 1)
                 continue
             if size > bkchunksize + (bkchunksize // 128) or size < 1:
@@ -935,8 +937,8 @@ with open("/tmp/sparsebak/receive.lst","rb") as list:
             if len(buf) != size:
                 raise BufferError("Got "+len(buf)+" bytes, expected "+size)
             if cksum != hashlib.sha256(buf).hexdigest():
-                #with open(tmpdir+"/bufdump", "wb") as dump:
-                #    dump.write(buf)
+                with open(tmpdir+"/bufdump", "wb") as dump:
+                    dump.write(buf)
                 raise ValueError("Bad hash "+fname
                     +" :: "+hashlib.sha256(buf).hexdigest())
 
@@ -947,13 +949,14 @@ with open("/tmp/sparsebak/receive.lst","rb") as list:
                 print("OK",end="\x0d")
             if save_path:
                 savef.write(buf)
-            elif compare:
+            elif diff:
                 buf2 = cmpf.read(bkchunksize)
                 if buf != buf2:
                     print("* delta", faddr, "    ")
                     volsegment = addr // bkchunksize 
                     bmap_pos = volsegment // 8
-                    bmap_mm[bmap_pos] |= 2** (volsegment % 8)
+                    if options.remap:
+                        bmap_mm[bmap_pos] |= 2** (volsegment % 8)
                     cmp_count += len(buf)
 
         print("\nReceived bytes :",addr)
@@ -961,12 +964,13 @@ with open("/tmp/sparsebak/receive.lst","rb") as list:
             raise RuntimeError("Error code from getvol process: "+rc)
         if save_path:
             savef.close()
-        elif compare:
+        elif diff:
             bmapf.close()
             cmpf.close()
-            print("Delta bytes re-mapped:", cmp_count)
-            if cmp_count > 0:
-                print("\nNext 'send' will bring this volume into sync.")
+            if options.remap:
+                print("Delta bytes re-mapped:", cmp_count)
+                if cmp_count > 0:
+                    print("\nNext 'send' will bring this volume into sync.")
 
 
 
@@ -998,8 +1002,6 @@ progversion = "0.2alphaX"
 progname = "sparsebak"
 topdir = "/"+progname # must be absolute path
 tmpdir = "/tmp/"+progname
-volfile = tmpdir+"/volumes.txt"
-deltafile = tmpdir+"/delta."
 volgroups = {}
 lv_vols = {}
 bs = 512
@@ -1010,7 +1012,8 @@ bkchunksize = 2 * lvm_block_factor * bs
 assert bkchunksize % (lvm_block_factor * bs) == 0
 max_address = 0xffffffffffffffff # 64bits
 # for 64bits, a subdir split of 9+7 allows 2048 files per dir
-addrsplit = [len(hex(max_address))-2-7, 7]
+address_split = [len(hex(max_address))-2-7, 7]
+
 
 # Root user required
 if os.getuid() > 0:
@@ -1036,7 +1039,7 @@ os.makedirs(tmpdir)
 # Parse arguments
 parser = argparse.ArgumentParser(description="")
 parser.add_argument("action", choices=["send","monitor","purge-metadata",
-                    "prune","receive","verify","resync","list","version"],
+                    "prune","receive","verify","diff","list","version"],
                     default="monitor", help="Action to take")
 parser.add_argument("-u", "--unattended", action="store_true", default=False,
                     help="Non-interactive, supress prompts")
@@ -1048,6 +1051,8 @@ parser.add_argument("--session",
                     help="YYYYMMDD-HHMMSS[,YYYYMMDD-HHMMSS] select session date(s), singular or range.")
 parser.add_argument("--save-to", dest="saveto", default="",
                     help="Path to store volume for receive")
+parser.add_argument("--remap", action="store_true", default=False,
+                    help="Remap volume during diff")
 parser.add_argument("volumes", nargs="*")
 options = parser.parse_args()
 #subparser = parser.add_subparsers(help="sub-command help")
@@ -1078,7 +1083,7 @@ for vol in options.volumes:
 
 # Process commands
 print()
-if options.action == "monitorXX":
+if options.action == "monitor":
     monitor_send(datavols, monitor_only=True)
 
 elif options.action   == "send":
@@ -1125,8 +1130,8 @@ elif options.action == "verify":
                    else options.session.split(",")[0],
                    save_path="")
 
-elif options.action == "resync":
-    receive_volume(options.volumes[0], save_path="", compare=True)
+elif options.action == "diff":
+    receive_volume(options.volumes[0], save_path="", diff=True)
 
 elif options.action == "list":
     for dv in options.volumes:

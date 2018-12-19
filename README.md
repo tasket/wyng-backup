@@ -100,19 +100,20 @@ Run `sparsebak.py` in a Linux environment using the following commands and optio
 in the form of `sparsebak.py [options] command [volume_name]`.
 
 ### Command summary
-  * `monitor` : Scan and collect volume change info for all enabled volumes.
+  * `list volume_name` : List volume sessions.
   * `send [volume_name]` : Perform a backup of enabled volumes.
   * `receive --save-to=path volume_name` : Restore a volume from the archive.
   * `verify volume_name`: Verify a volume.
-  * `list volume_name` : List volume sessions.
-  * `resync volume_name` : Re-synchronize delta map with archive
   * `prune --session=date-times [volume_name]` : Remove older backup sessions.
+  * `monitor` : Scan and collect volume change info for all enabled volumes.
+  * `diff volume_name` : Compare local volume with archive
 
 ### Options summary
   * `-u, --unattended` : Don't prompt for interactive input.
   * `--tarfile` : Store backups on destination as tar files (see notes).
   * `--save-to=path` : Required for `receive`.
   * `--session=date-time[,date-time]` : Select sessions by date-time (receive, verify, prune).
+  * `--remap` : Remap volume during `diff`
 
 #### send
 
@@ -128,17 +129,6 @@ incremental backup.
 like `prune` and `receive` from working; this can be resolved by manually un-taring the archive
 on the destination and changing format 'tar' to 'folders' in the local session 'info' file.
 In future, tar archives will have limited `prune` and full `receive` support.)
-
-#### monitor
-
-   $ sudo sparsebak.py monitor
-
-The `monitor` command takes no options and starts a monitor-only session
-that collects snapshot change metadata. This only takes a few seconds and is good
-to do on a frequent, regular basis (several times an hour or more) via cron or a
-systemd timer. This command isn't strictly necessary but
-exists to make sparsebak snapshots short-lived and relatively carefree --
-sparsebak snapshots will not eat up disk space by accumulating large amounts of old data.
 
 #### receive
 
@@ -176,6 +166,18 @@ If specific volumes aren't specified, `prune` will operate across all volumes
 enabled in the config file.
 
 
+#### monitor
+
+   $ sudo sparsebak.py monitor
+
+The `monitor` command takes no options and starts a monitor-only session
+that collects snapshot change metadata. This only takes a few seconds and is good
+to do on a frequent, regular basis (several times an hour or more) via cron or a
+systemd timer. This command isn't strictly necessary but
+exists to make sparsebak snapshots short-lived and relatively carefree --
+sparsebak snapshots will not eat up disk space by accumulating large amounts of old data.
+
+
 ### Other restore options
 
 The `spbk-assemble` tool can still be used to create a regular disk image from within
@@ -192,6 +194,33 @@ Another, [sparsebundle-loopback](https://github.com/jeffmahoney/sparsebundle-loo
 is written in Python.
 
 
+Tips
+----
+
+* To reduce the size of incremental backups it may be helpful to remove cache
+files, if they exist in your volume(s). Typically, the greatest cache space
+consumption comes from web browsers, so
+volumes holding paths like /home/user/.cache can impacted by this, depending
+on the amount and type of browser use associated with the volume. Two possible
+approaches are to delete /home/user/.cache dirs on browser exit or system/container
+shutdown (this reasonably assumes cached data is expendable), or to mount .cache
+on a separate volume that is not configured for backup.
+
+* The chunk size of your LVM thin pool can also affect disk space and I/O used when
+doing backups. The chunk size varies depending on considerations (such as curbing
+fragmentation) made at the time of pool creation. The smaller the pool chunk size
+(ranging from 64kB to 1GB) the
+better the resolution of metadata scanning. In pratical terms, larger pool chunk
+sizes mean larger incremental backups for volumes with lots of random writes,
+but little difference for volumes with mostly sequential writes. To see the
+chunksize for your pool(s) run `sudo lvs -o name,chunksize`.
+
+* Another factor in space/bandwidth use is how sparse your source volumes are in
+practice. Therefore it is best that the `discard` option is used when mounting
+your volumes for normal use (BTW, this is the Qubes 4.0 default for -root and
+-private).
+
+
 Testing
 ---
 
@@ -200,9 +229,10 @@ the destination volume is untrusted -- exercise caution.
 
 Otherwise, there are still reasons to be cautious such as not wasting X number of
 testing/trial hours. A good way to avoid losing archives to corruption/bugs is to
-make a quick linked copy of the sparsebak destination folder; either `cp` or `rsync` can
-do this efficiently. For example `cp -rl sparsebak backup-sparsebak`. At the same
-time, do a regular copy of the source metadata folder with `sudo cp /sparsebak /backup-sparsebak'.
+make a quick linked copy of the sparsebak destination folder; either `cp -rl` or
+`rsync -H` can do this efficiently. For example `cp -rl sparsebak backup-sparsebak`.
+At the same time, do a regular copy of the source metadata folder with
+`sudo cp -a /sparsebak /backup-sparsebak'.
 
 If you should need to start over again with a particular volume then deleting the
 volume's subfolders on both the source and destination should suffice. If it doesn't
@@ -250,7 +280,7 @@ Todo
 
 * Inclusion of system-specific metadata in backups (Qubes VM configs, etc.)
 
-* Additional functions: Untar, receive-archive, verify-archive
+* Additional functions: delete, untar, verify-archive
 
 * Show configured vs present volumes in list output
 
