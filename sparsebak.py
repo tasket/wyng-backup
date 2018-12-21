@@ -111,7 +111,7 @@ def get_lvm_vgs():
     with open(tmpdir+"/volumes.lst", "r") as vlistf:
         for ln in vlistf:
             members = ln.strip().split("::")
-            vgname = members[0]
+            vgname = members[0] # Fix: use colname index
             lvname = members[1]
             if vgname not in vgs.keys():
                 vgs[vgname] = Lvm_VolGroup(vgname)
@@ -566,12 +566,12 @@ def monitor_send(volumes=[], monitor_only=True):
         print("No new data.")
         exit(0)
 
-    dvs = []
-    for v in volumes:
-        if v in datavols+newvols:
-            dvs.append(v)
-    if len(dvs) > 0:
-        datavols = dvs
+    #dvs = []
+    #for v in volumes:
+    #    if v in datavols+newvols:
+    #        dvs.append(v)
+    #if len(dvs) > 0:
+    #    datavols = dvs
 
     if len(datavols) > 0:
         get_lvm_deltas(datavols)
