@@ -707,7 +707,7 @@ def merge_sessions(datavol, sources, target, clear_target=False,
         open(pjoin(tmpdir,"manifest.tmp"), "wb").close()
         cmd = vm_run_args[vmtype]+ \
             ["cd '"+pjoin(destmountpoint,destdir,bkdir.strip("/"),datavol)
-             +"' rm -rf "+target+" && mkdir -p "+target
+             +"' && rm -rf "+target+" && mkdir -p "+target
             ]
         p = subprocess.check_output(cmd)
     else:
