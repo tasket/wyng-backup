@@ -72,8 +72,8 @@ vm-personal-private = disable
 vm-banking-private = enable
 ```
 
-The `destvm` setting requires a prefix of `ssh://`, `qubes://` or `internal:` for
-local/admin access.
+The `destvm` setting requires a prefix of `ssh://`, `qubes://`, `qubes-ssh://`
+or `internal:` for local/admin storage.
 
 The resulting backup metadata is also saved to '/sparsebak'. Backups
 can be sent to a trusted Qubes VM with access to an

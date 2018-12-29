@@ -8,7 +8,7 @@
 
 import sys, os, stat, shutil, subprocess, time, datetime
 from os.path import join as pjoin
-import re, mmap, gzip, tarfile, io, fcntl
+import re, mmap, gzip, tarfile, io, fcntl, tempfile
 import xml.etree.ElementTree
 import argparse, configparser, hashlib
 #import qubesadmin.tools
@@ -41,7 +41,7 @@ class ArchiveSet:
         #           and e.name not in self.vols.keys()]
         #for key in fs_vols:
         #    self.vols[key] = self.Volume(key, self.path)
-        
+
     class Volume:
         def __init__(self, name, path, vgname):
             self.present = lv_exists(vgname, name)
@@ -139,7 +139,7 @@ def get_configs():
 
 
 # Detect features of internal and destination environments:
-def detect_vm_state():
+def detect_internal_state():
     global destvm
 
     if os.path.exists("/etc/qubes-release") and destvm[:8] == "qubes://":
@@ -148,35 +148,104 @@ def detect_vm_state():
     elif destvm[:6] == "ssh://":
         vmtype = "ssh"
         destvm = destvm[6:]
+    elif destvm[:12] == "qubes-ssh://":
+        vmtype = "qubes-ssh"
+        destvm = destvm[12:]
     elif destvm[:11] == "internal:":
         vmtype = "internal" # local shell environment
     else:
         raise ValueError("'destvm' not an accepted type.")
 
-    vm_run_args = {"internal":["sh","-c"],
-                   "ssh":["ssh",destvm],
-                   "qubes":["qvm-run", "-p", destvm]
-                  }
+    for prg in ["thin_delta","lvs","lvdisplay","lvcreate","blkdiscard",
+                "truncate","ssh" if vmtype=="ssh" else "sh"]:
+        if not shutil.which(prg):
+            raise RuntimeError("Required command not found: "+prg)
+
+    return vmtype
+
+
+def detect_dest_state(destvm):
 
     if options.action in ["send","receive","verify","diff","prune"] \
     and destvm != None:
+
+        if vmtype == "qubes-ssh":
+            dargs = vm_run_args["qubes"][:-1] + [destvm.split("|")[0]]
+
+            cmd = ["set -e; rm -rf "+tmpdir+"-old"
+                  +" && { if [ -d "+tmpdir+" ]; then mv "+tmpdir
+                  +" "+tmpdir+"-old; fi }"
+                  +"  && mkdir -p "+tmpdir+"/rpc"
+                  ]
+            p = subprocess.check_call(dargs + cmd)
+
+        # Fix: get OSTYPE env variable
         try:
-            t = subprocess.check_output(vm_run_args[vmtype]
-                +["mountpoint '"+destmountpoint
+            cmd =  \
+                ["mountpoint -q '"+destmountpoint
                 +"' && mkdir -p '"+destmountpoint+"/"+destdir+topdir
-                +"' && mkdir -p '"+tmpdir+"-dest"
                 +"' && cd '"+destmountpoint+"/"+destdir+topdir
                 +"' && touch archive.dat"
-                +"  && ln -f archive.dat .hardlink"])
+                +"  && ln -f archive.dat .hardlink"
+                +"  && rm -rf '"+tmpdir+"-old"
+                +"' && { if [ -d "+tmpdir+" ]; then mv "+tmpdir
+                +" "+tmpdir+"-old; fi }"
+                +"  && mkdir -p "+tmpdir+"/rpc"
+                ]
+
+            p = subprocess.check_call(
+                " ".join(dest_run_args(vmtype, cmd)), shell=True)
         except:
             raise RuntimeError("Destination not ready to receive commands.")
 
-    for cmd in ["thin_delta","lvs","lvdisplay","lvcreate","blkdiscard",
-                "truncate","ssh" if vmtype=="ssh" else "sh"]:
-        if not shutil.which(cmd):
-            raise RuntimeError("Required command not found: "+cmd)
 
-    return vmtype, vm_run_args
+# Run system commands
+def dest_run(commands, dest_type=None, dest=None):
+    if dest_type is None:
+        dest_type = vmtype
+
+    cmd = " ".join(dest_run_args(dest_type, commands))
+    p = subprocess.check_call(cmd, shell=True)
+
+    #else:
+    #    p = subprocess.check_output(cmd, **kwargs)
+
+
+def dest_run_args(dest_type, commands):
+
+    run_args =  vm_run_args ####
+
+    # shunt commands to tmp file
+    with tempfile.NamedTemporaryFile(dir=tmpdir, delete=False) as tmpf:
+        tmpf.write(bytes("set -e; "+" ".join(commands) + "\n",
+                        encoding="UTF-8"))
+        remotetmp = os.path.basename(tmpf.name)
+
+    if dest_type in ["qubes","qubes-ssh"]:
+
+        cmd = ["cat "+pjoin(tmpdir,remotetmp)
+              +" | qvm-run -p "
+              +(destvm if dest_type == "qubes" else destvm.split("|")[0])
+              +" 'mkdir -p "+pjoin(tmpdir,"rpc")
+              +" && cat >"+pjoin(tmpdir,"rpc",remotetmp)+"'"
+              ]
+        p = subprocess.check_call(cmd, shell=True)
+
+        if dest_type == "qubes":
+            add_cmd = ["'sh "+pjoin(tmpdir,"rpc",remotetmp)+"'"]
+        elif dest_type == "qubes-ssh":
+            add_cmd = ["'ssh "+destvm.split("|")[1]
+                      +" $(cat "+pjoin(tmpdir,"rpc",remotetmp)+")'"]
+
+    elif dest_type == "ssh":
+        add_cmd = [" $(cat "+pjoin(tmpdir,remotetmp)+")"]
+
+    elif dest_type == "internal":
+        add_cmd = [pjoin(tmpdir,remotetmp)]
+
+    ret = run_args[dest_type] + add_cmd
+    #print("CMD",ret)
+    return ret
 
 
 # Prepare snapshots and check consistency with metadata:
@@ -473,12 +542,13 @@ def send_volume(datavol):
                         # Start tar stream
                         if not stream_started:
                             print("Sending to", (vmtype+"://"+destvm) if \
-                                destvm != None else destmountpoint)
-                            untar = subprocess.Popen(vm_run_args[vmtype]
-                                    + untar_cmd,
+                                destvm != "internal:" else destmountpoint)
+                            cmd = " ".join(dest_run_args(vmtype, untar_cmd))
+                            untar = subprocess.Popen(cmd,
                                     stdin=subprocess.PIPE,
                                     stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL)
+                                    stderr=subprocess.DEVNULL,
+                                    shell=True)
                             tarf = tarfile.open(mode="w|", fileobj=untar.stdin)
                             stream_started = True
 
@@ -526,8 +596,7 @@ def send_volume(datavol):
                 # fix: verify archive dir contents here
 
         # Cleanup on VM/remote
-        p = subprocess.check_output(vm_run_args[vmtype]
-            +[ destcd
+        dest_run([ destcd
             +" && mv '."+sdir+"-tmp' '."+sdir+"'"
             +" && sync"])
         os.rename(sdir+"-tmp", sdir)
@@ -565,13 +634,6 @@ def monitor_send(volumes=[], monitor_only=True):
     if len(datavols)+len(newvols) == 0:
         print("No new data.")
         exit(0)
-
-    #dvs = []
-    #for v in volumes:
-    #    if v in datavols+newvols:
-    #        dvs.append(v)
-    #if len(dvs) > 0:
-    #    datavols = dvs
 
     if len(datavols) > 0:
         get_lvm_deltas(datavols)
@@ -705,11 +767,10 @@ def merge_sessions(datavol, sources, target, clear_target=False,
     # Prepare merging of manifests (starting with target session).
     if clear_target:
         open(pjoin(tmpdir,"manifest.tmp"), "wb").close()
-        cmd = vm_run_args[vmtype]+ \
-            ["cd '"+pjoin(destmountpoint,destdir,bkdir.strip("/"),datavol)
-             +"' && rm -rf "+target+" && mkdir -p "+target
+        cmd = ["cd '"+pjoin(destmountpoint,destdir,bkdir.strip("/"),datavol)
+              +"' && rm -rf "+target+" && mkdir -p "+target
             ]
-        p = subprocess.check_output(cmd)
+        dest_run(cmd)
     else:
         shutil.copy(pjoin(bkdir,datavol,target,"manifest"),
                     tmpdir+"/manifest.tmp")
@@ -722,11 +783,10 @@ def merge_sessions(datavol, sources, target, clear_target=False,
             ]
         p = subprocess.check_output(cmd, shell=True)
 
-        cmd = vm_run_args[vmtype]+ \
-            ["cd '"+pjoin(destmountpoint,destdir,bkdir.strip("/"),datavol)
-            +"' && cp -rlnT "+ses+" "+target
-            ]
-        p = subprocess.check_output(cmd)
+        cmd = ["cd '"+pjoin(destmountpoint,destdir,bkdir.strip("/"),datavol)
+              +"' && cp -rlnT "+ses+" "+target
+              ]
+        dest_run(cmd)
 
     # Reconcile merged manifest info with sort unique. The reverse date-time
     # ordering in above merge will result in only the newest instance of each
@@ -737,31 +797,31 @@ def merge_sessions(datavol, sources, target, clear_target=False,
         +"' && sort -u -d -k 2,2 "+tmpdir+"/manifest.tmp"
         +"  |  sed '/ "+last_chunk+"/q' >"+pjoin(target,"manifest")
         +"  && tar -cf - "+pjoin(target,"manifest")
-        +"  | "+" ".join(vm_run_args[vmtype])
-        +" 'cd "+'"'+pjoin(destmountpoint,destdir,bkdir.strip("/"),datavol)
-        +'" && tar -xmf -'+"'"
-        ]
+        +"  | "+" ".join(dest_run_args(vmtype,
+            ["cd "+'"'+pjoin(destmountpoint,destdir,bkdir.strip("/"),datavol)
+            +'" && tar -xmf -'])
+        )]
+
     p = subprocess.check_output(cmd, shell=True)
 
     # Trim chunks to volume size and remove pruned sessions.
     print("  Trimming volume...", end="")
-    cmd = vm_run_args[vmtype] + \
-        ["cd '"+pjoin(destmountpoint,destdir,bkdir.strip("/"),datavol)
+    cmd = ["cd '"+pjoin(destmountpoint,destdir,bkdir.strip("/"),datavol)
         +"' && find "+target+" -name 'x*' | sort -d"
         +"  |  sed '1,/"+last_chunk+"/d'"
         +"  |  xargs -r rm"
         ]
-    p = subprocess.check_call(cmd)
+    p = subprocess.check_call(" ".join(dest_run_args(vmtype, cmd)), shell=True)
 
     # Remove pruned sessions
     for ses in sources:
         print("..", end="")
         cmd = ["cd '"+pjoin(bkdir,datavol)
             +"' && rm -r "+ses
-            +"  && "+" ".join(vm_run_args[vmtype])
-            +" 'cd "+'"'+pjoin(destmountpoint,destdir,bkdir.strip("/"),datavol)
-            +'" && rm -r '+ses+"'"
-            ]
+            +"  && "+" ".join(dest_run_args(vmtype,
+                ["cd "+'"'+pjoin(destmountpoint,destdir,bkdir.strip("/"),datavol)
+                +'" && rm -r '+ses])
+            )]
         p = subprocess.check_call(cmd, shell=True)
     print()
 
@@ -826,25 +886,25 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         +"  |  sed -E 's|^.+\s+x(\S{" + str(address_split[0]) + "})(\S+)\s+"
         +"(S_.+)|\\3/\\1/x\\1\\2|;"
         +" /"+last_chunk+"/q'"
-        +"  | "+" ".join(vm_run_args[vmtype])
-        +" 'cat >"+tmpdir+"-dest/receive.lst'"
-        ]
+        +"  | "+" ".join(dest_run_args(vmtype,
+                        ["cat >"+tmpdir+"/rpc/receive.lst"])
+        )]
     p = subprocess.check_output(cmd, shell=True)
 
     print("\nReceiving volume", datavol, select_ses)
 
     # Create retriever process using py program
-    cmd = vm_run_args[vmtype] \
-            +["cd '"+pjoin(destmountpoint,destdir,bkdir.strip("/"),datavol)
-            +"' && cat >"+tmpdir+"-dest/receive_out.py"
-            +"  && python3 "+tmpdir+"-dest/receive_out.py"
-            ]
-    getvol = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                    stdin=subprocess.PIPE)
+    cmd = dest_run_args(vmtype,
+            ["cd '"+pjoin(destmountpoint,destdir,bkdir.strip("/"),datavol)
+            +"' && cat >"+tmpdir+"/rpc/receive_out.py"
+            +"  && python3 "+tmpdir+"/rpc/receive_out.py"
+            ])
+    getvol = subprocess.Popen(" ".join(cmd), stdout=subprocess.PIPE,
+                              stdin=subprocess.PIPE, shell=True)
 
     ##> START py program code <##
     getvol.stdin.write(b'''import os.path, sys
-with open("''' + bytes(tmpdir,encoding="UTF-8") + b'''-dest/receive.lst",
+with open("''' + bytes(tmpdir,encoding="UTF-8") + b'''/rpc/receive.lst",
           "r") as list:
     for line in list:
         fname = line.strip()
@@ -941,21 +1001,24 @@ with open("''' + bytes(tmpdir,encoding="UTF-8") + b'''-dest/receive.lst",
                     dump.write(buf)
                 raise ValueError("Bad hash "+fname
                     +" :: "+hashlib.sha256(buf).hexdigest())
-
-            buf = gzip.decompress(buf)
-            if len(buf) > bkchunksize:
-                raise BufferError("Decompressed to "+len(buf)+" bytes")
             if attended:
                 print("OK",end="\x0d")
+
             if save_path:
+                buf = gzip.decompress(buf)
+                if len(buf) > bkchunksize:
+                    raise BufferError("Decompressed to "+len(buf)+" bytes")
                 savef.write(buf)
             elif diff:
+                buf = gzip.decompress(buf)
+                if len(buf) > bkchunksize:
+                    raise BufferError("Decompressed to "+len(buf)+" bytes")
                 buf2 = cmpf.read(bkchunksize)
                 if buf != buf2:
                     print("* delta", faddr, "    ")
-                    volsegment = addr // bkchunksize 
-                    bmap_pos = volsegment // 8
                     if options.remap:
+                        volsegment = addr // bkchunksize 
+                        bmap_pos = volsegment // 8
                         bmap_mm[bmap_pos] |= 2** (volsegment % 8)
                     cmp_count += len(buf)
 
@@ -1066,14 +1129,21 @@ monitor_only = options.action == "monitor" # gather metadata without backing up
 conf = None
 vgname, poolname, destvm, destmountpoint, destdir, datavols \
 = get_configs()
+destcd = " cd '"+destmountpoint+"/"+destdir+"'"
 
 bkdir = topdir+"/"+vgname+"%"+poolname
 if not os.path.exists(bkdir):
     os.makedirs(bkdir)
 
-vmtype, vm_run_args \
-= detect_vm_state()
-destcd = " cd '"+destmountpoint+"/"+destdir+"'"
+vmtype = detect_internal_state()
+
+vm_run_args = {"internal":["sh"],
+                "ssh":["ssh",destvm],
+                "qubes":["qvm-run", "-p", destvm],
+                "qubes-ssh":["qvm-run", "-p", destvm.split("|")[0]]
+                }
+
+detect_dest_state(destvm)
 
 # Check volume args against config
 for vol in options.volumes:
