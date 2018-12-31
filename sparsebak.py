@@ -1061,7 +1061,7 @@ with open("''' + bytes(tmpdir,encoding="UTF-8") + b'''/rpc/receive.lst",
 
 
 # Constants
-progversion = "0.2alphaX"
+progversion = "0.2alpha4"
 progname = "sparsebak"
 topdir = "/"+progname # must be absolute path
 tmpdir = "/tmp/"+progname

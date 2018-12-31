@@ -1,6 +1,6 @@
 <h1 align="center">Sparsebak</h1>
 <p align="center">
-Fast <i>Time Machine</i>-like disk image backups for Qubes OS and Linux LVM.
+Fast <i>Time Machine</i>-like disk image backups for Linux LVM.
 </p>
 
 Introduction
@@ -14,16 +14,14 @@ archive operations.
 The upshot of this combination is that sparsebak has nearly instantaneous access to
 volume changes (no repeated scanning of volume data!), remains
 space-efficient regardless of file sizes within a volume,
-avoids snapshot space consumption pitfalls, and can make an indefinite* number of
+avoids snapshot space consumption pitfalls, and can make an indefinite number of
 frequent backups to an archive with relatively little CPU / disk IO overhead.
 
 Sparsebak is optimized to process data as *streams* whenever possible, which
 avoids writing temporary caches of data to disk. It also doesn't require the
 source admin system to ever mount processed volumes, meaning untrusted data
-and guest filesystems can be handled safely on Qubes OS and other security-oriented
-hypervisors.
-
-_(* See `prune` command for freeing space in the destination archive.)_
+in guest filesystems can be handled safely on systems that rely on
+container-based security.
 
 
 Status
@@ -56,14 +54,16 @@ which combine to a vm:dir/path specification for the backup destination. The
 `destmountpoint` is checked to make sure its mounted for several sparsebak commands
 including `send`, `receive`, `verify` and `prune`, but not `monitor`.
 
+Backup metadata is also saved to '/sparsebak' folder.
+
 #### Example config sparsebak.ini
 
 ```
 [var]
-vgname = qubes_dom0
+vgname = dom0
 poolname = pool00
-destvm = qubes://backupvm
-destmountpoint = /mnt/volume
+destvm = ssh://user@exmaple.com
+destmountpoint = /mnt/backupdrive
 destdir = backups
 
 [volumes]
@@ -72,13 +72,11 @@ vm-personal-private = disable
 vm-banking-private = enable
 ```
 
-The `destvm` setting requires a prefix of `ssh://`, `qubes://`, `qubes-ssh://`
-or `internal:` for local/admin storage.
-
-The resulting backup metadata is also saved to '/sparsebak'. Backups
-can be sent to a trusted Qubes VM with access to an
-encryped removable volume, for example, or an encrypted remote filesystem layer
-over sshfs or samba (see [Encryption options] below).
+The `destvm` setting accepts a format of `ssh://user@exmaple.com`, `qubes://vmname`,
+`qubes-ssh://vmname|user@example.com`, or `internal:` for local/admin storage. Backups
+can be sent to a trusted VM with access to an
+encryped removable volume, for example, or to an ssh: destination or an encrypted
+remote filesystem layer over sshfs or samba (see [Encryption options] below).
 
 Although not absolutely necessary, it is recommended that the `monitor`
 command be run at fairly frequent (10-20 min.)
@@ -89,7 +87,8 @@ may occupy. A rule in /etc/cron.d takes care of this:
 */20 * * * * root su -l -c '/usr/local/bin/sparsebak.py monitor'
 ```
 
-This will harvest each snapshot's delta metadata and rotate to fresh snapshots every 20 minutes.
+This will harvest the locations of changed data (but not the data itself) and
+rotate to fresh snapshots every 20 minutes.
 
 
 
@@ -103,7 +102,7 @@ in the form of `sparsebak.py [options] command [volume_name]`.
   * `list volume_name` : List volume sessions.
   * `send [volume_name]` : Perform a backup of enabled volumes.
   * `receive --save-to=path volume_name` : Restore a volume from the archive.
-  * `verify volume_name`: Verify a volume.
+  * `verify volume_name`: Verify a volume against SHA-256 manifest.
   * `prune --session=date-times [volume_name]` : Remove older backup sessions.
   * `monitor` : Scan and collect volume change info for all enabled volumes.
   * `diff volume_name` : Compare local volume with archive
@@ -140,8 +139,9 @@ with `--save-to`. If `--session` is used, only one date-time is accepted.
 
 ...restores a volume called 'vm-work-private' to 'myfile.img' in
 the current folder. Note its possible to specify any path, including block devices
-such as '/dev/mapper/qubes_dom0-vm--work--private'. In this case, a writeable and
-adequately sized block device (such as a thin LV) must already exist at the path.
+such as '/dev/vgname/vm-work-private'. In this case, a writeable
+block device (such as a thin LV) must already exist at the path, although
+sparsebak will handle resizing for you automatically.
 
 
 #### verify
@@ -170,7 +170,7 @@ enabled in the config file.
 
    $ sudo sparsebak.py monitor
 
-The `monitor` command takes no options and starts a monitor-only session
+The `monitor` command starts a monitor-only session
 that collects snapshot change metadata. This only takes a few seconds and is good
 to do on a frequent, regular basis (several times an hour or more) via cron or a
 systemd timer. This command isn't strictly necessary but
@@ -217,8 +217,15 @@ chunksize for your pool(s) run `sudo lvs -o name,chunksize`.
 
 * Another factor in space/bandwidth use is how sparse your source volumes are in
 practice. Therefore it is best that the `discard` option is used when mounting
-your volumes for normal use (BTW, this is the Qubes 4.0 default for -root and
--private).
+your volumes for normal use (this is the default for most Linux systems).
+
+
+Bugs
+---
+
+Issue #13 describes a bug triggered when the system's time jumps backward
+such as a 'fall back' from DST, time zone change or other major clock disruption.
+This could leave backup sessions in an incorrect order.
 
 
 Testing
@@ -252,13 +259,13 @@ Troubleshooting notes
 A recent change now requires a type prefix for the `destvm` setting. This was
 done to allow clear specification of the type of proceduced calls required and
 so protocols like `ssh` can be supported unambiguously. Existing users will
-have to change their .ini setting to add a `qubes://`, `ssh://` or `internal:`
+have to change their .ini setting to add a `ssh://`, `qubes://` or `internal:`
 prefix.
 
 ### Encryption options
 
 Sparsebak will likely support encryption in the future. In the meantime here is a
-brief description for ad-hoc locally-encrypted remote storage from Qubes OS:
+brief description for ad-hoc locally-encrypted remote storage from a Qubes laptop:
 
 1. Qube *remotefs* runs `sshfs` to access a remote filesystem and then `losetup` on a
 remote file (to size the file correctly during inital setup,
@@ -272,19 +279,19 @@ the volume in its encrypted form.
 A local USB storage option similar to the above can be achived by substituting *sys-usb*
 for *remotefs*.
 
+Other systems can utilize a simplified version of this procedure by omitting
+step 2 and performing steps 1 and 3 in a single context.
 
 Todo
 ---
 
-* Basic functions: Volume selection options, Delete
+* Inclusion of system-specific metadata in backups (VM/container configs, etc.)
 
-* Inclusion of system-specific metadata in backups (Qubes VM configs, etc.)
+* Encryption integration
 
 * Additional functions: delete, untar, verify-archive
 
 * Show configured vs present volumes in list output
-
-* Encryption integration
 
 * File name and sequence obfuscation
 
