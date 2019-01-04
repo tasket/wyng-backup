@@ -11,7 +11,6 @@ from os.path import join as pjoin
 import re, mmap, gzip, tarfile, io, fcntl, tempfile
 import xml.etree.ElementTree
 import argparse, configparser, hashlib
-#import qubesadmin.tools
 
 
 class ArchiveSet:
@@ -33,9 +32,9 @@ class ArchiveSet:
         for key in cp["volumes"]:
             if cp["volumes"][key] != "disable":
                 os.makedirs(pjoin(self.path,key), exist_ok=True)
-                self.vols[key] = self.Volume(key, self.path, self.vgname)
+                self.vols[key] = self.Volume(key, pjoin(self.path,key),
+                                             self.vgname)
                 self.vols[key].enabled = True
-                self.vols[key].present = True
 
         #fs_vols = [e.name for e in os.scandir(self.path) if e.is_dir()
         #           and e.name not in self.vols.keys()]
@@ -44,26 +43,102 @@ class ArchiveSet:
 
     class Volume:
         def __init__(self, name, path, vgname):
+            print(name) ####
+            self.name = name
+            self.path = path
+            self.vgname = vgname
             self.present = lv_exists(vgname, name)
+            self.enabled = False
+            # persisted:
+            self.format_ver = "0"
+            self.first = None
+            self.last = None
+            self.que_meta_update = "false"
 
             # Move map to new location
-            mapfile = pjoin(path, name, "deltamap")
-            if os.path.exists(path+"/"+name+".deltamap"):
-                os.rename(path+"/"+name+".deltamap", mapfile)
-
+            mapfile = pjoin(path, "deltamap")
+            if os.path.exists(path+".deltamap"):
+                os.rename(path+".deltamap", mapfile)
             self.mapped = os.path.exists(mapfile)
-            self.sessions ={e.name: self.Ses(e.name,pjoin(path,name)) for e \
-                in os.scandir(pjoin(path,name)) if e.name[:2]=="S_" \
+
+            # load volume info
+            if os.path.exists(pjoin(path,"volinfo")):
+                with open(pjoin(path,"volinfo"), "r") as f:
+                    for ln in f:
+                        vname, value = ln.strip().split(" = ")
+                        setattr(self, vname, value)
+
+            # load sessions
+            self.sessions ={e.name: self.Ses(e.name,pjoin(path,e.name)) \
+                for e in os.scandir(path) if e.name[:2]=="S_" \
                     and e.name[-3:]!="tmp"} if self.present else {}
+
+            # convert metadata to v1
+            if int(self.format_ver) < format_version and len(self.sessions)>0:
+                sesnames = sorted(list(self.sessions.keys()))
+                for i in range(0,len(sesnames)):
+                    s = self.sessions[sesnames[i]]
+                    if s.format not in ["folders","tar"]:
+                        s.format = "folders"
+                    s.previous = "none" if i==0 else sesnames[i-1]
+                    s.sequence = i
+                    s.save_info()
+                self.first = sesnames[0]
+                self.last = sesnames[-1]
+                self.format_ver = "1"
+                self.que_meta_update = "true"
+                self.save_info()
+
+            if int(self.format_ver) > format_version:
+                raise ValueError("Archive format ver = "+self.format_ver)
+
+            sesnames = []
+            sname = self.last
+            while sname != "none":
+                sesnames.insert(0, sname)
+                sname = self.sessions[sname].previous
+            self.sesnames = sesnames
+                
+            # check for continuity between sessions
+            continuity = True
+            for sname, s in self.sessions.items(): ####
+                if s.previous == "none" and self.first != sname:
+                    print("**** PREVIOUS MISMATCH",sname, self.first) ####
+                    continuity = False
+                elif s.previous not in sesnames+["none"]:
+                    print("**** PREVIOUS NOT FOUND",sname, s.previous) ####
+                    continuity = False
+
             # use latest volsize
-            self.volsize = self.sessions[sorted(self.sessions)[-1]].volsize \
+            self.volsize = self.sessions[self.last].volsize \
                             if len(self.sessions)>0 else 0
-            self.name = name
-            self.enabled = False
+
+        def save_info(self):
+            with open(pjoin(self.path,"volinfo"), "w") as f:
+                print("format_ver =", format_version, file=f)
+                print("first =", self.first, file=f)
+                print("last =", self.last, file=f)
+                print("que_meta_update =", self.que_meta_update, file=f)
+
+        def new_session(self, bksession):
+            ns = self.Ses(bksession)
+            ns.path = pjoin(self.path, bksession)
+            if self.first is None:
+                ns.sequence = 0
+                self.first = bksession
+            else:
+                ns.previous = self.last
+                ns.sequence = self.sessions[self.last].sequence + 1
+            self.last = bksession
+            self.sessions[bksession] = ns
+            return ns
+
 
         class Ses:
-            def  __init__(self, name, path):
+            def __init__(self, name, path=""):
                 self.name = name
+                self.path = path
+                # persisted:
                 self.localtime = None
                 self.volsize = None
                 self.chunksize = None
@@ -71,16 +146,33 @@ class ArchiveSet:
                 self.bytes = None
                 self.zeros = None
                 self.format = None
-                self.previous = None
-                self.manifest = None
-                a_ints = ["volsize","chunksize","chunks","bytes","zeros"]
+                self.sequence = None
+                self.previous = "none"
+                attr_str = ["localtime","format","previous"]
+                attr_int = ["volsize","chunksize","chunks","bytes","zeros",
+                            "sequence"]
 
-                with open(pjoin(path,name,"info"), "r") as sf:
-                    lines = sf.readlines()
-                for ln in lines:
-                    vname, value = ln.strip().split(" = ")
-                    setattr(self, vname, 
-                            int(value) if vname in a_ints else value)
+                if path:
+                    with open(pjoin(path,"info"), "r") as sf:
+                        for ln in sf:
+                            vname, value = ln.strip().split(" = ")
+                            setattr(self, vname, 
+                                int(value) if vname in attr_int else value)
+                ####print("  ",name, self.previous) ####
+
+            def save_info(self):
+                if not self.path:
+                    raise ValueError("Path not set for save_info")
+                with open(pjoin(self.path,"info"), "w") as f:
+                    print("localtime =", self.localtime, file=f)
+                    print("volsize =", self.volsize, file=f)
+                    print("chunksize =", self.chunksize, file=f)
+                    print("chunks =", self.chunks, file=f)
+                    print("bytes =", self.bytes, file=f)
+                    print("zeros =", self.zeros, file=f)
+                    print("format =", self.format, file=f)
+                    print("sequence =", self.sequence, file=f)
+                    print("previous =", self.previous, file=f)
 
 
 class Lvm_VolGroup:
@@ -91,13 +183,13 @@ class Lvm_VolGroup:
 class Lvm_Volume:
     colnames = ["vg_name","lv_name","lv_attr","lv_size","lv_time",
                 "pool_lv","thin_id","lv_path"]
-    a_ints = ["lv_size"]
+    attr_ints = ["lv_size"]
 
     def __init__(self, members):
         for attr in self.colnames:
             val = members[self.colnames.index(attr)]
             setattr(self, attr, int(re.sub("[^0-9]", "", val)) if attr \
-                in self.a_ints else val)
+                in self.attr_ints else val)
 
 
 # Retrieves survey of all LVs as vgs[].lvs[] dicts
@@ -179,6 +271,7 @@ def detect_dest_state(destvm):
                   ]
             p = subprocess.check_call(dargs + cmd)
 
+
         # Fix: get OSTYPE env variable
         try:
             cmd =  \
@@ -248,7 +341,8 @@ def dest_run_args(dest_type, commands):
     return ret
 
 
-# Prepare snapshots and check consistency with metadata:
+# Prepare snapshots and check consistency with metadata.
+# Must run get_lvm_vgs() again after this.
 
 def prepare_snapshots(datavols):
 
@@ -297,6 +391,7 @@ def prepare_snapshots(datavols):
                 p = subprocess.check_output(["lvcreate", "-pr", "-kn",
                     "-ay", "-s", vgname+"/"+datavol, "-n", snap1vol],
                     stderr=subprocess.STDOUT)
+                volgroups[vgname].lvs[snap1vol] = "placeholder"
                 print("  Initial snapshot created for", datavol)
             nvs.append(datavol)
 
@@ -316,13 +411,8 @@ def prepare_snapshots(datavols):
 
 
 def lv_exists(vgname, lvname):
-    try:
-        p = subprocess.check_output( ["lvdisplay", vgname+"/"+lvname],
-                                    stderr=subprocess.STDOUT )
-    except:
-        return False
-    else:
-        return True
+    return vgname in volgroups.keys() \
+            and lvname in volgroups[vgname].lvs.keys()
 
 
 def vg_exists(vgname):
@@ -367,8 +457,8 @@ def get_lvm_deltas(datavols):
         try:
             with open(tmpdir+"/delta."+datavol, "w") as f:
                 cmd = ["thin_delta -m"
-                    + " --thin1 " + lv_vols[snap1vol].thin_id
-                    + " --thin2 " + lv_vols[snap2vol].thin_id
+                    + " --thin1 " + l_vols[snap1vol].thin_id
+                    + " --thin2 " + l_vols[snap2vol].thin_id
                     + " /dev/mapper/"+vgname+"-"+poolname+"_tmeta"
                     + " | grep -v '<same .*\/>$'"
                     ]
@@ -563,23 +653,23 @@ def send_volume(datavol):
     if count > 0:
         print("  100%  ")
 
-        # Make info file and send with hashes
-        with open(sdir+"-tmp/info", "w") as f:
-            print("localtime =", localtime, file=f)
-            print("volsize =", snap2size, file=f)
-            print("chunksize =", bkchunksize, file=f)
-            print("chunks =", count, file=f)
-            print("bytes =", bcount, file=f)
-            print("zeros =", zcount, file=f)
-            print("format =", "tar" if options.tarfile else "folders", file=f)
-            print("previous =", "none" if send_all else sessions[-1], file=f)
-        tarf.add(sdir+"-tmp/info")
+        # Save session info
+        vol = aset.vols[datavol]
+        ses = vol.new_session(bksession)
+        ses.localtime = localtime
+        ses.volsize = snap2size
+        ses.chunksize = bkchunksize
+        ses.chunks = count
+        ses.bytes = bcount
+        ses.zeros = zcount
+        ses.format = "tar" if options.tarfile else "folders"
+        ses.path = sdir+"-tmp"
+        ses.save_info()
+        vol.save_info()
+
+        tarf.add(ses.path+"/info")
+        tarf.add(vol.path+"/volinfo")
         tarf.add(sdir+"-tmp/manifest")
-        if os.path.exists(mapfile+"-tmp"):
-            with open(mapfile+"-tmp", "rb") as f_in:
-                with gzip.open(sdir+"-tmp/deltamap.gz", "wb") as f_out:
-                    shutil.copyfileobj(f_in, f_out)
-            tarf.add(sdir+"-tmp/deltamap.gz")
 
         #print("Ending tar process ", end="")
         tarf.close()
@@ -610,7 +700,7 @@ def send_volume(datavol):
 # Controls flow of monitor and send_volume procedures:
 
 def monitor_send(volumes=[], monitor_only=True):
-    global datavols, newvols, volgroups, lv_vols
+    global datavols, newvols, volgroups, l_vols
     global bmap_size, snap1size, snap2size, snap1vol, snap2vol
     global map_exists, map_updated, mapfile, bksession, localtime
 
@@ -623,7 +713,7 @@ def monitor_send(volumes=[], monitor_only=True):
     volgroups = get_lvm_vgs()
     if vgname not in volgroups.keys():
         raise ValueError("Volume group "+vgname+" not present.")
-    lv_vols = volgroups[vgname].lvs
+    l_vols = volgroups[vgname].lvs
 
     if monitor_only:
         newvols = []
@@ -759,6 +849,10 @@ def merge_sessions(datavol, sources, target, clear_target=False,
             print("Cannot merge range containing tarfile session.")
             exit(1)
 
+    previous = aset.vols[datavol].sessions[sources[0]].previous
+    print("PREVIOUS =",previous) ####
+    exit(0) ####
+
     # Get volume size
     volsize = get_info_vol_size(datavol, target if not clear_target \
                                          else sources[-1])
@@ -769,7 +863,7 @@ def merge_sessions(datavol, sources, target, clear_target=False,
         open(pjoin(tmpdir,"manifest.tmp"), "wb").close()
         cmd = ["cd '"+pjoin(destmountpoint,destdir,bkdir.strip("/"),datavol)
               +"' && rm -rf "+target+" && mkdir -p "+target
-            ]
+              ]
         dest_run(cmd)
     else:
         shutil.copy(pjoin(bkdir,datavol,target,"manifest"),
@@ -788,15 +882,19 @@ def merge_sessions(datavol, sources, target, clear_target=False,
               ]
         dest_run(cmd)
 
+    # Update info record
+    aset.vols[datavol].sessions[target].previous = previous
+    aset.vols[datavol].sessions[target].save_info()
+
     # Reconcile merged manifest info with sort unique. The reverse date-time
     # ordering in above merge will result in only the newest instance of each
     # filename being retained. Then filter entries beyond current last chunk
-    # and send to the archive.
+    # and send updated metadata to the archive.
     print("  Merging manifests")
     cmd = ["cd '"+pjoin(bkdir,datavol)
         +"' && sort -u -d -k 2,2 "+tmpdir+"/manifest.tmp"
         +"  |  sed '/ "+last_chunk+"/q' >"+pjoin(target,"manifest")
-        +"  && tar -cf - "+pjoin(target,"manifest")
+        +"  && tar -cf - "+target
         +"  | "+" ".join(dest_run_args(vmtype,
             ["cd "+'"'+pjoin(destmountpoint,destdir,bkdir.strip("/"),datavol)
             +'" && tar -xmf -'])
@@ -826,9 +924,9 @@ def merge_sessions(datavol, sources, target, clear_target=False,
     print()
 
 
-# Receive volume from archive. If no same_path specified, then verify only.
-# If diff specified, compare with current source volume and record any
-# differences in the volume's deltamap; can be used if the deltamap or snapshots
+# Receive volume from archive. If no save_path specified, then verify only.
+# If diff specified, compare with current source volume; with --remap option
+# can be used to resync volume with archive if the deltamap or snapshots
 # are lost or if the source volume reverted to an earlier state.
 
 def receive_volume(datavol, select_ses="", save_path="", diff=False):
@@ -1061,12 +1159,14 @@ with open("''' + bytes(tmpdir,encoding="UTF-8") + b'''/rpc/receive.lst",
 
 
 # Constants
-progversion = "0.2alpha4"
+prog_version = "0.2alphaX"
+format_version = 1
 progname = "sparsebak"
 topdir = "/"+progname # must be absolute path
 tmpdir = "/tmp/"+progname
 volgroups = {}
-lv_vols = {}
+l_vols = {}
+aset = None
 bs = 512
 # LVM min blocks = 128 = 64kBytes
 lvm_block_factor = 128
@@ -1126,9 +1226,14 @@ options = parser.parse_args()
 
 monitor_only = options.action == "monitor" # gather metadata without backing up
 
-conf = None
+volgroups = get_lvm_vgs()
+####conf = None
 vgname, poolname, destvm, destmountpoint, destdir, datavols \
 = get_configs()
+
+if vgname not in volgroups.keys():
+    raise ValueError("Volume group "+vgname+" not present.")
+l_vols = volgroups[vgname].lvs
 destcd = " cd '"+destmountpoint+"/"+destdir+"'"
 
 bkdir = topdir+"/"+vgname+"%"+poolname
@@ -1159,16 +1264,9 @@ if options.action == "monitor":
 elif options.action   == "send":
     monitor_send(options.volumes, monitor_only=False)
 
-else:
-    # get lvs for funcs that don't create snapshots...
-    volgroups = get_lvm_vgs()
-    if vgname not in volgroups.keys():
-        raise ValueError("Volume group "+vgname+" not present.")
-    lv_vols = volgroups[vgname].lvs
-
 
 if options.action == "version":
-    print(progname, "version", progversion)
+    print(progname, "version", prog_version)
 
 elif options.action == "prune":
     if not options.session:
@@ -1238,4 +1336,4 @@ elif options.action == "untar":
     raise NotImplementedError()
 
 
-print("\nDone.\n")
+print("\nDone.\n")\
