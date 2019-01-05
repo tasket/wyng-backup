@@ -231,11 +231,9 @@ def get_configs():
     aset = ArchiveSet("", topdir, "sparsebak.ini")
     dvs = []
 
-    print("\nConfigured Volumes:")
     for vn,v in aset.vols.items():
         if v.enabled:
             dvs.append(v.name)
-            print(" ",v.name)
 
     # temporary kludge:
     return aset.vgname, aset.poolname, aset.destvm, aset.destmountpoint, \
@@ -457,7 +455,7 @@ def get_info_vol_size(datavol, ses=""):
 
 # Get raw lvm deltas between snapshots
 def get_lvm_deltas(datavols):
-    print("Acquiring LVM delta info.")
+    print("  Acquiring LVM deltas.")
     subprocess.call(["dmsetup","message", vgname+"-"+poolname+"-tpool",
         "0", "release_metadata_snap"], stderr=subprocess.DEVNULL)
     subprocess.check_call(["dmsetup", "message", vgname+"-"+poolname+"-tpool",
@@ -494,7 +492,7 @@ def update_delta_digest(datavol):
     if datavol in newvols:
         return False, False
 
-    print("Updating block change map: ", end="")
+    print("Updating block change map. ", end="")
     os.rename(mapfile, mapfile+"-tmp")
     dtree = xml.etree.ElementTree.parse(tmpdir+"/delta."+datavol).getroot()
     dblocksize = int(dtree.get("data_block_size"))
@@ -730,10 +728,6 @@ def monitor_send(volumes=[], monitor_only=True):
     if monitor_only:
         newvols = []
         volumes = []
-    else:
-        print("\nSending backup session", bksession)
-        print("to", (vmtype+"://"+destvm) if \
-            destvm != "internal:" else destmountpoint)
 
     if len(datavols)+len(newvols) == 0:
         print("No new data.")
@@ -742,8 +736,13 @@ def monitor_send(volumes=[], monitor_only=True):
     if len(datavols) > 0:
         get_lvm_deltas(datavols)
 
+    if not monitor_only:
+        print("\nSending backup session", bksession)
+        print("to", (vmtype+"://"+destvm) if \
+            destvm != "internal:" else destmountpoint)
+
     for datavol in datavols+newvols:
-        print("\nProcessing Volume :", datavol)
+        print("\nVolume :", datavol)
         snap1vol = datavol + ".tick"
         snap2vol = datavol + ".tock"
         snap1size = get_lvm_size(pjoin("/dev",vgname,snap1vol))
@@ -1176,7 +1175,7 @@ with open("''' + bytes(tmpdir,encoding="UTF-8") + b'''/rpc/receive.lst",
 
 
 # Constants
-prog_version = "0.2.0beta"
+prog_version = "0.2.0beta1"
 format_version = 1
 progname = "sparsebak"
 topdir = "/"+progname # must be absolute path
@@ -1316,16 +1315,31 @@ elif options.action == "verify":
                    save_path="")
 
 elif options.action == "diff":
-    receive_volume(options.volumes[0], save_path="", diff=True)
+    if options.volumes:
+        receive_volume(options.volumes[0], save_path="", diff=True)
 
 elif options.action == "list":
+    if not options.volumes:
+        print("Configured Volumes:\n")
+        for vol in datavols:
+            print(" ", vol)
+
     for dv in options.volumes:
-        print("\nSessions for volume",dv,":")
+        print("Sessions for volume",dv,":")
         sessions = get_sessions(dv)
+        lmonth = ""; count = 0; ending = "."
         for ses in sessions:
+            if ses[:8] != lmonth:
+                print("" if ending else "\n")
+                count = 0
             print(" ",ses[2:]+(" (tar)"
-                    if aset.vols[dv].sessions[ses].format == "tar"
-                    else ""))
+                        if aset.vols[dv].sessions[ses].format == "tar"
+                        else ""), end="")
+            ending = "\n" if count % 5 == 4 else ""
+            print("", end=ending)
+            lmonth = ses[:8]; count += 1
+
+    print("" if options.volumes and ending else "\n", end="")
 
 elif options.action == "purge-metadata":
     if options.unattended:
