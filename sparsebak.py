@@ -43,7 +43,6 @@ class ArchiveSet:
 
     class Volume:
         def __init__(self, name, path, vgname):
-            print(name) ####
             self.name = name
             self.path = path
             self.vgname = vgname
@@ -73,7 +72,7 @@ class ArchiveSet:
                 for e in os.scandir(path) if e.name[:2]=="S_" \
                     and e.name[-3:]!="tmp"} if self.present else {}
 
-            # convert metadata to v1
+            # convert metadata fron alpha to v1
             if int(self.format_ver) < format_version and len(self.sessions)>0:
                 sesnames = sorted(list(self.sessions.keys()))
                 for i in range(0,len(sesnames)):
@@ -120,18 +119,32 @@ class ArchiveSet:
                 print("last =", self.last, file=f)
                 print("que_meta_update =", self.que_meta_update, file=f)
 
-        def new_session(self, bksession):
-            ns = self.Ses(bksession)
-            ns.path = pjoin(self.path, bksession)
+        def new_session(self, sname):
+            ns = self.Ses(sname)
+            ns.path = pjoin(self.path, sname)
             if self.first is None:
                 ns.sequence = 0
-                self.first = bksession
+                self.first = sname
             else:
                 ns.previous = self.last
                 ns.sequence = self.sessions[self.last].sequence + 1
-            self.last = bksession
-            self.sessions[bksession] = ns
+
+            self.last = sname
+            self.sesnames.append(sname)
+            self.sessions[sname] = ns
             return ns
+
+        def delete_session(self, ses):
+            if ses == self.last:
+                raise NotImplementedError("Cannot delete last session")
+            index = self.sesnames.index(ses)
+            self.sessions[self.sesnames[index+1]].previous \
+                = self.sessions[ses].previous
+            if index == 0:
+                self.first = self.sesnames[1]
+            del self.sesnames[index]
+            del self.sessions[ses]
+            #return previous ???
 
 
         class Ses:
@@ -158,7 +171,6 @@ class ArchiveSet:
                             vname, value = ln.strip().split(" = ")
                             setattr(self, vname, 
                                 int(value) if vname in attr_int else value)
-                ####print("  ",name, self.previous) ####
 
             def save_info(self):
                 if not self.path:
@@ -540,8 +552,8 @@ def last_chunk_addr(volsize, chunksize):
 
 
 def get_sessions(datavol):
-    a = sorted(list(aset.vols[datavol].sessions.keys()))
-    return a
+    # do not sort session names
+    return aset.vols[datavol].sesnames
 
 
 # Send volume to destination:
@@ -631,8 +643,6 @@ def send_volume(datavol):
 
                         # Start tar stream
                         if not stream_started:
-                            print("Sending to", (vmtype+"://"+destvm) if \
-                                destvm != "internal:" else destmountpoint)
                             cmd = " ".join(dest_run_args(vmtype, untar_cmd))
                             untar = subprocess.Popen(cmd,
                                     stdin=subprocess.PIPE,
@@ -665,11 +675,13 @@ def send_volume(datavol):
         ses.format = "tar" if options.tarfile else "folders"
         ses.path = sdir+"-tmp"
         ses.save_info()
-        vol.save_info()
+        for session in vol.sessions.values() \
+                        if vol.que_meta_update == "true" else [ses]:
+            tarf.add(session.path)
 
-        tarf.add(ses.path+"/info")
+        vol.que_meta_update = "false"
+        vol.save_info()
         tarf.add(vol.path+"/volinfo")
-        tarf.add(sdir+"-tmp/manifest")
 
         #print("Ending tar process ", end="")
         tarf.close()
@@ -719,7 +731,9 @@ def monitor_send(volumes=[], monitor_only=True):
         newvols = []
         volumes = []
     else:
-        print("\nStarting backup session", bksession)
+        print("\nSending backup session", bksession)
+        print("to", (vmtype+"://"+destvm) if \
+            destvm != "internal:" else destmountpoint)
 
     if len(datavols)+len(newvols) == 0:
         print("No new data.")
@@ -844,14 +858,11 @@ def merge_sessions(datavol, sources, target, clear_target=False,
                    clear_sources=False):
     global destmountpoint, destdir, bkdir
 
+    volume = aset.vols[datavol]
     for ses in sources + [target]:
-        if aset.vols[datavol].sessions[ses].format == "tar":
+        if volume.sessions[ses].format == "tar":
             print("Cannot merge range containing tarfile session.")
             exit(1)
-
-    previous = aset.vols[datavol].sessions[sources[0]].previous
-    print("PREVIOUS =",previous) ####
-    exit(0) ####
 
     # Get volume size
     volsize = get_info_vol_size(datavol, target if not clear_target \
@@ -870,7 +881,7 @@ def merge_sessions(datavol, sources, target, clear_target=False,
                     tmpdir+"/manifest.tmp")
 
     # Merge each session to be pruned into the target.
-    for ses in reversed(sorted(sources)):
+    for ses in reversed(sources):
         print("  Merging session", ses, "into", target)
         cmd = ["cd '"+pjoin(bkdir,datavol)
             +"' && cat "+ses+"/manifest"+" >>"+tmpdir+"/manifest.tmp"
@@ -881,10 +892,13 @@ def merge_sessions(datavol, sources, target, clear_target=False,
               +"' && cp -rlnT "+ses+" "+target
               ]
         dest_run(cmd)
+        if clear_sources:
+            volume.delete_session(ses)
 
     # Update info record
-    aset.vols[datavol].sessions[target].previous = previous
-    aset.vols[datavol].sessions[target].save_info()
+    if clear_sources:
+        volume.sessions[target].save_info()
+        volume.save_info()
 
     # Reconcile merged manifest info with sort unique. The reverse date-time
     # ordering in above merge will result in only the newest instance of each
@@ -894,12 +908,11 @@ def merge_sessions(datavol, sources, target, clear_target=False,
     cmd = ["cd '"+pjoin(bkdir,datavol)
         +"' && sort -u -d -k 2,2 "+tmpdir+"/manifest.tmp"
         +"  |  sed '/ "+last_chunk+"/q' >"+pjoin(target,"manifest")
-        +"  && tar -cf - "+target
+        +"  && tar -cf - volinfo "+target
         +"  | "+" ".join(dest_run_args(vmtype,
             ["cd "+'"'+pjoin(destmountpoint,destdir,bkdir.strip("/"),datavol)
             +'" && tar -xmf -'])
         )]
-
     p = subprocess.check_output(cmd, shell=True)
 
     # Trim chunks to volume size and remove pruned sessions.
@@ -932,7 +945,8 @@ def merge_sessions(datavol, sources, target, clear_target=False,
 def receive_volume(datavol, select_ses="", save_path="", diff=False):
     global destmountpoint, destdir, bkdir, bkchunksize, vgname
 
-    if save_path and os.path.exists(save_path) and not options.unattended:
+    attended = not options.unattended
+    if save_path and os.path.exists(save_path) and attended:
         print("\n!! This will erase all existing data in",save_path)
         ans = input("   Are you sure? (yes/no): ")
         if ans.lower() != "yes":
@@ -954,19 +968,22 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
 
     print("\nReading manifests")
-    attended = not options.unattended
     volsize = get_info_vol_size(datavol, select_ses)
     last_chunk = "x"+format(last_chunk_addr(volsize, bkchunksize), "016x")
     zeros = bytes(bkchunksize)
     open(tmpdir+"/manifests.cat", "wb").close()
 
     # Collect session manifests
-    for ses in reversed(sorted(sessions)):
-        if ses > "S_"+select_ses:
+    include = False
+    for ses in reversed(sessions):
+        if ses == select_ses:
+            include = True
+        elif not include:
             continue
         if aset.vols[datavol].sessions[ses].format == "tar":
             raise NotImplementedError(
                 "Receive from tarfile not yet implemented: "+ses)
+
         # add session column to end of each line:
         cmd = ["cd '"+pjoin(bkdir,datavol)
             +"' && sed -E 's|$| "+ses+"|' "
@@ -1041,9 +1058,9 @@ with open("''' + bytes(tmpdir,encoding="UTF-8") + b'''/rpc/receive.lst",
         savef = open(save_path, "w+b")
     elif diff:
         # Fix: check info vs lvm volume size
-        if not options.unattended:
+        if attended:
             print("\nFor diff, make sure the specified volume"
-                  " is unmounted first!")
+                  " has been unmounted and sent first!")
             ans = input("Continue? (yes/no): ")
             if ans.lower() != "yes":
                 exit(0)
@@ -1159,7 +1176,7 @@ with open("''' + bytes(tmpdir,encoding="UTF-8") + b'''/rpc/receive.lst",
 
 
 # Constants
-prog_version = "0.2alphaX"
+prog_version = "0.2.0beta"
 format_version = 1
 progname = "sparsebak"
 topdir = "/"+progname # must be absolute path

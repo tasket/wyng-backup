@@ -220,13 +220,6 @@ practice. Therefore it is best that the `discard` option is used when mounting
 your volumes for normal use (this is the default for most Linux systems).
 
 
-Bugs
----
-
-Issue #13 describes a bug triggered when the system's time jumps backward
-such as a 'fall back' from DST, time zone change or other major clock disruption.
-This could leave backup sessions in an incorrect order.
-
 
 Testing
 ---
