@@ -10,7 +10,7 @@ import sys, os, stat, shutil, subprocess, time, datetime
 from os.path import join as pjoin
 import re, mmap, gzip, tarfile, io, fcntl, tempfile
 import xml.etree.ElementTree
-import argparse, configparser, hashlib
+import argparse, configparser, hashlib, uuid
 
 
 class ArchiveSet:
@@ -50,6 +50,7 @@ class ArchiveSet:
             self.enabled = False
             # persisted:
             self.format_ver = "0"
+            self.uuid = None
             self.first = None
             self.last = None
             self.que_meta_update = "false"
@@ -82,6 +83,7 @@ class ArchiveSet:
                     s.previous = "none" if i==0 else sesnames[i-1]
                     s.sequence = i
                     s.save_info()
+                self.uuid = str(uuid.uuid4())
                 self.first = sesnames[0]
                 self.last = sesnames[-1]
                 self.format_ver = "1"
@@ -114,7 +116,8 @@ class ArchiveSet:
 
         def save_info(self):
             with open(pjoin(self.path,"volinfo"), "w") as f:
-                print("format_ver =", format_version, file=f)
+                print("format_ver =", self.format_ver, file=f)
+                print("uuid =", self.uuid, file=f)
                 print("first =", self.first, file=f)
                 print("last =", self.last, file=f)
                 print("que_meta_update =", self.que_meta_update, file=f)
@@ -531,7 +534,7 @@ def update_delta_digest(datavol):
                 if bmap_pos != lastindex:
                     bmap_mm[lastindex] |= bmap_byte
                     bmap_byte = 0
-                bmap_byte |= 2** (volsegment % 8)
+                bmap_byte |= 1 << (volsegment % 8)
                 lastindex = bmap_pos
 
         bmap_mm[lastindex] |= bmap_byte
@@ -566,9 +569,12 @@ def send_volume(datavol):
     sdir=bkdir+"/"+datavol+"/"+bksession
     os.makedirs(sdir+"-tmp")
     zeros = bytes(bkchunksize)
+    empty = bytes(0)
     count = bcount = zcount = 0
     thetime = time.time()
     addrsplit = -address_split[1]
+    lchunk_addr = last_chunk_addr(snap2size, bkchunksize)
+
     if send_all:
         # sends all from this address forward
         sendall_addr = 0
@@ -608,15 +614,16 @@ def send_volume(datavol):
                 for addr in range(0, snap2size, bkchunksize):
 
                     # Calculate corresponding position in bitmap.
-                    bmap_pos = addr // bkchunksize // 8
-                    b = (addr // bkchunksize) % 8
+                    chunk = addr // bkchunksize
+                    bmap_pos = chunk // 8
+                    b = chunk % 8
 
                     # Should this chunk be sent?
-                    if addr >= sendall_addr or bmap_mm[bmap_pos] & (2** b):
-                        count += 1
+                    if addr >= sendall_addr or bmap_mm[bmap_pos] & (1 << b):
                         vf.seek(addr)
                         buf = vf.read(bkchunksize)
-                        destfile = "x"+format(addr,"016x")
+                        destfile = "x%016x" % addr
+                        count += 1
 
                         percent = int(bmap_pos/bmap_size*1000)
                         status = "  %.1f%%  %dMB  %s " \
@@ -624,14 +631,14 @@ def send_volume(datavol):
                             if percent >= checkpt else ""
 
                         # Compress & write only non-empty and last chunks
-                        if buf != zeros or addr >= snap2size-bkchunksize:
+                        if buf != zeros or addr >= lchunk_addr:
                             # Performance fix: move compression into separate processes
                             buf = gzip.compress(buf, compresslevel=4)
                             bcount += len(buf)
                             print(hashlib.sha256(buf).hexdigest(), destfile,
                                   file=hashf)
                         else: # record zero-length file
-                            buf = bytes(0)
+                            buf = empty
                             print(0, destfile, file=hashf)
                             zcount += 1
 
@@ -1133,7 +1140,7 @@ with open("''' + bytes(tmpdir,encoding="UTF-8") + b'''/rpc/receive.lst",
                     if options.remap:
                         volsegment = addr // bkchunksize 
                         bmap_pos = volsegment // 8
-                        bmap_mm[bmap_pos] |= 2** (volsegment % 8)
+                        bmap_mm[bmap_pos] |= 1 << (volsegment % 8)
                     cmp_count += len(buf)
 
         print("\nReceived bytes :",addr)
