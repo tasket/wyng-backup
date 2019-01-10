@@ -99,20 +99,21 @@ Run `sparsebak.py` in a Linux environment using the following commands and optio
 in the form of `sparsebak.py [options] command [volume_name]`.
 
 ### Command summary
-  * `list volume_name` : List volume sessions.
-  * `send [volume_name]` : Perform a backup of enabled volumes.
+  * `list volume_name` :  List volume sessions.
+  * `send [volume_name]` :  Perform a backup of enabled volumes.
   * `receive --save-to=path volume_name` : Restore a volume from the archive.
-  * `verify volume_name`: Verify a volume against SHA-256 manifest.
+  * `verify volume_name`:  Verify a volume against SHA-256 manifest.
   * `prune --session=date-times [volume_name]` : Remove older backup sessions.
-  * `monitor` : Scan and collect volume change info for all enabled volumes.
-  * `diff volume_name` : Compare local volume with archive
+  * `monitor` :  Scan and collect volume change info for all enabled volumes.
+  * `diff volume_name` :  Compare local volume with archive.
+  * `delete volume_name` :  Remove entire volume from archive.
 
 ### Options summary
-  * `-u, --unattended` : Don't prompt for interactive input.
-  * `--tarfile` : Store backups on destination as tar files (see notes).
-  * `--save-to=path` : Required for `receive`.
+  * `-u, --unattended` :  Don't prompt for interactive input.
+  * `--tarfile` :  Store backups on destination as tar files (see notes).
+  * `--save-to=path` :  Required for `receive`.
   * `--session=date-time[,date-time]` : Select sessions by date-time (receive, verify, prune).
-  * `--remap` : Remap volume during `diff`
+  * `--remap` :  Remap volume during `diff`.
 
 #### send
 
@@ -161,7 +162,7 @@ specific session, or two date-times as a range:
 
    $ sudo sparsebak.py prune --session=20180605-000000,20180701-140000
    
-...removes any backup sessions between midnight on June 5 through 2pm on July 1.
+...removes any backup sessions from midnight on June 5 through 2pm on July 1.
 If specific volumes aren't specified, `prune` will operate across all volumes
 enabled in the config file.
 
@@ -176,6 +177,25 @@ to do on a frequent, regular basis (several times an hour or more) via cron or a
 systemd timer. This command isn't strictly necessary but
 exists to make sparsebak snapshots short-lived and relatively carefree --
 sparsebak snapshots will not eat up disk space by accumulating large amounts of old data.
+
+
+#### diff
+
+   $ sudo sparsebak.py diff vm-work-private
+
+Compare a current configured volume with the archive copy and report any differences.
+This is useful for diagnostics and can also be useful after a verification
+error has occurred. The `--remap` option will record any differences into the
+volume's current change map, resulting in those blocks being backed-up on
+the next `send`.
+
+
+#### delete
+
+   $ sudo sparsebak.py delete vm-untrusted-private
+
+Removes an entire volume's data and metadata from the source system and
+destination archive. Use with caution!
 
 
 ### Other restore options
@@ -282,7 +302,7 @@ Todo
 
 * Encryption integration
 
-* Additional functions: delete, untar, verify-archive
+* Additional functions: untar, verify-archive
 
 * Show configured vs present volumes in list output
 
