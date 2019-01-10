@@ -14,8 +14,8 @@ archive operations.
 The upshot of this combination is that sparsebak has nearly instantaneous access to
 volume changes (no repeated scanning of volume data!), remains
 space-efficient regardless of file sizes within a volume,
-avoids snapshot space consumption pitfalls, and can make an indefinite number of
-frequent backups to an archive with relatively little CPU / disk IO overhead.
+avoids "*aging snapshot*" space consumption pitfalls, and can make an indefinite
+number of frequent backups using relatively little CPU / disk IO overhead.
 
 Sparsebak is optimized to process data as *streams* whenever possible, which
 avoids writing temporary caches of data to disk. It also doesn't require the
@@ -35,7 +35,7 @@ Data verification currently relies on SHA-256 manifests being safely stored on t
 source/admin system to maintain integrity. Encryption and key-based verification
 are not yet implemented.
 
-This tool is still in alpha/testing stage. Do NOT rely on it as your primary backup system!
+Sparsebak is in beta-testing and comes with no warranties expressed or implied.
 
 
 Setup & Requirements
@@ -139,10 +139,13 @@ with `--save-to`. If `--session` is used, only one date-time is accepted.
    $ sudo sparsebak.py --save-to=myfile.img receive vm-work-private
 
 ...restores a volume called 'vm-work-private' to 'myfile.img' in
-the current folder. Note its possible to specify any path, including block devices
-such as '/dev/vgname/vm-work-private'. In this case, a writeable
-block device (such as a thin LV) must already exist at the path, although
-sparsebak will handle resizing for you automatically.
+the current folder. Note that its possible to specify any path, including block
+devices such as '/dev/vgname/vm-work-private'. In this case, a writeable
+block device (such as a thin LV) must already exist at the path.
+
+Resizing is automatic if the path is a logical volume or regular file. For any
+`--save-to` type, sparsebak will try to `blkdiscard` or `truncate` old data
+before saving.
 
 
 #### verify
@@ -217,6 +220,9 @@ is written in Python.
 Tips
 ----
 
+* If the destination volume is not thoroughly trusted, its currently recommended
+to avoid backing up sensitive data to such a volume -- exercise caution.
+
 * To reduce the size of incremental backups it may be helpful to remove cache
 files, if they exist in your volume(s). Typically, the greatest cache space
 consumption comes from web browsers, so
@@ -244,21 +250,17 @@ your volumes for normal use (this is the default for most Linux systems).
 Testing
 ---
 
-Its currently recommended to avoid backing up sensitive data during testing if
-the destination volume is untrusted -- exercise caution.
-
-Otherwise, there are still reasons to be cautious such as not wasting X number of
-testing/trial hours. A good way to avoid losing archives to corruption/bugs is to
+Even with non-sensitive data, precaution can avoid wasting X number of
+testing hours. A good way to avoid losing archives to corruption/bugs is to
 make a quick linked copy of the sparsebak destination folder; either `cp -rl` or
 `rsync -H` can do this efficiently. For example `cp -rl sparsebak backup-sparsebak`.
 At the same time, do a regular copy of the source metadata folder with
 `sudo cp -a /sparsebak /backup-sparsebak'.
 
-If you should need to start over again with a particular volume then deleting the
-volume's subfolders on both the source and destination should suffice. If it doesn't
-suffice you may need to `lvremove` the volume's .tick and .tock snapshots. A new
-command `purge-metadata` was added to take care of these steps on the source system,
-but removal should still be done manually on the destination.
+If you should need to start fresh with a particular volume and using `delete`
+fails, the volume can be removed manually: Deleting the
+volume's subfolders on both the source and destination, then `lvremove` the
+volume's .tick and .tock snapshots.
 
 Avoid switching/swapping the /sparsebak dir and ini file, even for testing purposes.
 If you somehow must have more than one, there must be no overlap of names in
@@ -277,23 +279,27 @@ prefix.
 
 ### Encryption options
 
-Sparsebak will likely support encryption in the future. In the meantime here is a
+Sparsebak will likely integrate encryption in the future. In the meantime, here is a
 brief description for ad-hoc locally-encrypted remote storage from a Qubes laptop:
 
 1. Qube *remotefs* runs `sshfs` to access a remote filesystem and then `losetup` on a
 remote file (to size the file correctly during inital setup,
 use `truncate -s <size> myfile.img` before using `losetup`).
 
-2. *Domain0* then runs `qvm-block attach backup remotefs:loop0`.
+2. *Domain0* runs `qvm-block attach backup remotefs:loop0`.
 
-3. Qube *backup* (no net access) runs `cryptsetup` on /dev/xvdi to create/access
-the volume in its encrypted form.
+3. *Domain0* runs `cryptsetup` on /dev/xvdi to create/access the volume in its
+encrypted form. Finally, the resulting /dev/mapper device can be mounted for use.
+
+4. Configure sparsebak.ini on *Domain0* for an `internal:` destination type
+pointing to the mounted path.
 
 A local USB storage option similar to the above can be achived by substituting *sys-usb*
 for *remotefs*.
 
-Other systems can utilize a simplified version of this procedure by omitting
-step 2 and performing steps 1 and 3 in a single context.
+Other systems without Qubes' security model can utilize a simplified version of
+this procedure by omitting step 2 and performing steps 1 and 3 in a single context.
+
 
 Todo
 ---
