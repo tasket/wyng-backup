@@ -2,16 +2,17 @@
 
 
 ###  sparsebak
-###  Copyright Christopher Laprise 2018 / tasket@github.com
+###  Copyright Christopher Laprise 2018-2019 / tasket@github.com
 ###  Licensed under GNU General Public License v3. See file 'LICENSE'.
 
 
 import sys, os, stat, shutil, subprocess, time, datetime
-from os.path import join as pjoin
 import re, mmap, gzip, tarfile, io, fcntl, tempfile
 import xml.etree.ElementTree
 import argparse, configparser, hashlib, uuid
 
+
+# ArchiveSet manages configuration and configured volume info
 
 class ArchiveSet:
     def __init__(self, name, top, conf_file):
@@ -126,9 +127,9 @@ class ArchiveSet:
             # check for continuity between sessions
             for sname, s in self.sessions.items():
                 if s.previous == "none" and self.first != sname:
-                    print("**** PREVIOUS MISMATCH",sname, self.first) ####
+                    print("**** PREVIOUS MISMATCH",sname, self.first)
                 elif s.previous not in sesnames+["none"]:
-                    print("**** PREVIOUS NOT FOUND",sname, s.previous) ####
+                    print("**** PREVIOUS NOT FOUND",sname, s.previous)
 
             # use latest volsize
             self.volsize = self.sessions[self.last].volsize \
@@ -229,6 +230,7 @@ class Lvm_Volume:
 
 
 # Retrieves survey of all LVs as vgs[].lvs[] dicts
+
 def get_lvm_vgs():
 
     p = subprocess.check_call(["lvs --units=b --noheadings --separator ::"
@@ -249,6 +251,7 @@ def get_lvm_vgs():
 
 
 # Get global configuration settings:
+    
 def get_configs():
     global aset
 
@@ -265,6 +268,7 @@ def get_configs():
 
 
 # Detect features of internal and destination environments:
+    
 def detect_internal_state():
     global destvm
 
@@ -326,7 +330,8 @@ def detect_dest_state(destvm):
             x_it(1, "Destination not ready to receive commands.")
 
 
-# Run system commands
+# Run system commands on destination
+
 def dest_run(commands, dest_type=None, dest=None):
     if dest_type is None:
         dest_type = vmtype
@@ -478,6 +483,7 @@ def get_info_vol_size(datavol, ses=""):
 
 
 # Get raw lvm deltas between snapshots
+
 def get_lvm_deltas(datavols):
     print("  Acquiring LVM deltas.")
     subprocess.call(["dmsetup","message", vgname+"-"+poolname+"-tpool",
@@ -623,65 +629,65 @@ def send_volume(datavol):
         untar_cmd = [ destcd + " && tar -xmf -"]
 
     # Open source volume and its delta bitmap as r, session manifest as w.
-    with open(pjoin("/dev",vgname,snap2vol),"rb") as vf:
-        with open("/dev/zero" if send_all else mapfile+"-tmp","r+b") as bmapf:
-            bmap_mm = bytes(1) if send_all else mmap.mmap(bmapf.fileno(), 0)
-            with open(sdir+"-tmp/manifest", "w") as hashf:
+    with open(pjoin("/dev",vgname,snap2vol),"rb") as vf, \
+            open(sdir+"-tmp/manifest", "w") as hashf,    \
+            open("/dev/zero" if send_all else mapfile+"-tmp","r+b") as bmapf:
+        bmap_mm = bytes(1) if send_all else mmap.mmap(bmapf.fileno(), 0)
 
-                # Cycle over range of addresses in volume.
-                checkpt = checkpt_pct = 200 if options.unattended else 1
-                percent = 0; status = ""
-                for addr in range(0, snap2size, bkchunksize):
+        # Cycle over range of addresses in volume.
+        checkpt = checkpt_pct = 200 if options.unattended else 1
+        percent = 0; status = ""
+        for addr in range(0, snap2size, bkchunksize):
 
-                    # Calculate corresponding position in bitmap.
-                    chunk = addr // bkchunksize
-                    bmap_pos = chunk // 8
-                    b = chunk % 8
+            # Calculate corresponding position in bitmap.
+            chunk = addr // bkchunksize
+            bmap_pos = chunk // 8
+            b = chunk % 8
 
-                    # Should this chunk be sent?
-                    if addr >= sendall_addr or bmap_mm[bmap_pos] & (1 << b):
-                        vf.seek(addr)
-                        buf = vf.read(bkchunksize)
-                        destfile = "x%016x" % addr
-                        count += 1
+            # Should this chunk be sent?
+            if addr >= sendall_addr or bmap_mm[bmap_pos] & (1 << b):
+                vf.seek(addr)
+                buf = vf.read(bkchunksize)
+                destfile = "x%016x" % addr
+                count += 1
 
-                        percent = int(bmap_pos/bmap_size*1000)
-                        status = "  %.1f%%  %dMB  %s " \
-                            % (percent/10, bcount//1000000, destfile) \
-                            if percent >= checkpt else ""
+                percent = int(bmap_pos/bmap_size*1000)
+                status = "  %.1f%%  %dMB  %s " \
+                    % (percent/10, bcount//1000000, destfile) \
+                    if percent >= checkpt else ""
 
-                        # Compress & write only non-empty and last chunks
-                        if buf != zeros or addr >= lchunk_addr:
-                            # Performance fix: move compression into separate processes
-                            buf = gzip.compress(buf, compresslevel=4)
-                            bcount += len(buf)
-                            print(hashlib.sha256(buf).hexdigest(), destfile,
-                                  file=hashf)
-                        else: # record zero-length file
-                            buf = empty
-                            print(0, destfile, file=hashf)
-                            zcount += 1
+                # Compress & write only non-empty and last chunks
+                if buf != zeros or addr >= lchunk_addr:
+                    # Performance fix: move compression into separate processes
+                    buf = gzip.compress(buf, compresslevel=4)
+                    bcount += len(buf)
+                    print(hashlib.sha256(buf).hexdigest(), destfile,
+                            file=hashf)
+                else: # record zero-length file
+                    buf = empty
+                    print(0, destfile, file=hashf)
+                    zcount += 1
 
-                        if status:
-                            print(status, end="\x0d")
-                            checkpt += checkpt_pct
+                if status:
+                    print(status, end="\x0d")
+                    checkpt += checkpt_pct
 
-                        # Start tar stream
-                        if not stream_started:
-                            cmd = " ".join(dest_run_args(vmtype, untar_cmd))
-                            untar = subprocess.Popen(cmd,
-                                    stdin=subprocess.PIPE,
-                                    stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL,
-                                    shell=True)
-                            tarf = tarfile.open(mode="w|", fileobj=untar.stdin)
-                            stream_started = True
+                # Start tar stream
+                if not stream_started:
+                    cmd = " ".join(dest_run_args(vmtype, untar_cmd))
+                    untar = subprocess.Popen(cmd,
+                            stdin=subprocess.PIPE,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            shell=True)
+                    tarf = tarfile.open(mode="w|", fileobj=untar.stdin)
+                    stream_started = True
 
-                        # Add buffer to stream
-                        tar_info = tarfile.TarInfo(sdir+"-tmp/"+destfile[1:addrsplit]
-                                                       +"/"+destfile)
-                        tar_info.size = len(buf)
-                        tarf.addfile(tarinfo=tar_info, fileobj=io.BytesIO(buf))
+                # Add buffer to stream
+                tar_info = tarfile.TarInfo(sdir+"-tmp/"+destfile[1:addrsplit]
+                                                +"/"+destfile)
+                tar_info.size = len(buf)
+                tarf.addfile(tarinfo=tar_info, fileobj=io.BytesIO(buf))
 
 
     # Send session info, end stream and cleanup
@@ -892,69 +898,70 @@ def merge_sessions(datavol, sources, target, clear_target=False,
                                          else sources[-1])
     last_chunk = "x"+format(last_chunk_addr(volsize,bkchunksize), "016x")
 
-    # Prepare merging of manifests (starting with target session).
+    # Prepare target for merging.
     if clear_target:
         open(pjoin(tmpdir,"manifest.tmp"), "wb").close()
-        cmd = ["cd '"+pjoin(destmountpoint,destdir,bkdir.strip("/"),datavol)
-              +"' && rm -rf "+target+" && mkdir -p "+target
+        cmd = [destcd + bkdir+"/"+datavol
+              +" && rm -rf "+target+" && mkdir -p "+target
               ]
         dest_run(cmd)
     else:
+        # start with target manifest
         shutil.copy(pjoin(bkdir,datavol,target,"manifest"),
                     tmpdir+"/manifest.tmp")
 
-    # Merge each session to be pruned into the target.
+    # Merge each session into the target.
     for ses in reversed(sources):
         print("  Merging session", ses, "into", target)
-        cmd = ["cd '"+pjoin(bkdir,datavol)
-            +"' && cat "+ses+"/manifest"+" >>"+tmpdir+"/manifest.tmp"
-            ]
+        cmd = ["cd "+pjoin(bkdir,datavol)
+              +" && cat "+ses+"/manifest"+" >>"+tmpdir+"/manifest.tmp"
+              ]
         p = subprocess.check_output(cmd, shell=True)
 
-        cmd = ["cd '"+pjoin(destmountpoint,destdir,bkdir.strip("/"),datavol)
-              +"' && cp -rlnT "+ses+" "+target
+        cmd = [destcd + bkdir+"/"+datavol
+              +"  && cp -rlnT "+ses+" "+target
               ]
         dest_run(cmd)
+
         if clear_sources:
             volume.delete_session(ses)
 
-    # Update info record
+    # Update info records
     if clear_sources:
         volume.sessions[target].save_info()
         volume.save_volinfo()
 
     # Reconcile merged manifest info with sort unique. The reverse date-time
     # ordering in above merge will result in only the newest instance of each
-    # filename being retained. Then filter entries beyond current last chunk
+    # chunk file being retained. Then filter entries beyond current last chunk
     # and send updated metadata to the archive.
     print("  Merging manifests")
-    cmd = ["cd '"+pjoin(bkdir,datavol)
-        +"' && sort -u -d -k 2,2 "+tmpdir+"/manifest.tmp"
+    cmd = ["cd "+pjoin(bkdir,datavol)
+        +"  && sort -u -d -k 2,2 "+tmpdir+"/manifest.tmp"
         +"  |  sed '/ "+last_chunk+"/q' >"+pjoin(target,"manifest")
         +"  && tar -cf - volinfo "+target
-        +"  | "+" ".join(dest_run_args(vmtype,
-            ["cd "+'"'+pjoin(destmountpoint,destdir,bkdir.strip("/"),datavol)
-            +'" && tar -xmf -'])
+        +"  | "+" ".join(dest_run_args(vmtype, [destcd + bkdir+"/"+datavol
+            +' && tar -xmf -'])
         )]
     p = subprocess.check_output(cmd, shell=True)
 
-    # Trim chunks to volume size and remove pruned sessions.
+    # Trim chunks to volume size.
     print("  Trimming volume...", end="")
-    cmd = ["cd '"+pjoin(destmountpoint,destdir,bkdir.strip("/"),datavol)
-        +"' && find "+target+" -name 'x*' | sort -d"
+    cmd = [destcd + bkdir+"/"+datavol
+        +"  && find "+target+" -name 'x*' | sort -d"
         +"  |  sed '1,/"+last_chunk+"/d'"
         +"  |  xargs -r rm"
         ]
     p = subprocess.check_call(" ".join(dest_run_args(vmtype, cmd)), shell=True)
 
-    # Remove pruned sessions
-    for ses in sources:
+    # Remove source sessions.
+    for ses in sources if clear_sources else []:
         print("..", end="")
-        cmd = ["cd '"+pjoin(bkdir,datavol)
-            +"' && rm -r "+ses
+        cmd = ["cd "+pjoin(bkdir,datavol)
+            +"  && rm -r "+ses
             +"  && "+" ".join(dest_run_args(vmtype,
-                ["cd "+'"'+pjoin(destmountpoint,destdir,bkdir.strip("/"),datavol)
-                +'" && rm -r '+ses])
+                [destcd + bkdir+"/"+datavol
+                +' && rm -r '+ses])
             )]
         p = subprocess.check_call(cmd, shell=True)
     print()
@@ -1031,8 +1038,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
     # Create retriever process using py program
     cmd = dest_run_args(vmtype,
-            ["cd '"+pjoin(destmountpoint,destdir,bkdir.strip("/"),datavol)
-            +"' && cat >"+tmpdir+"/rpc/receive_out.py"
+            [destcd + bkdir+"/"+datavol
+            +" && cat >"+tmpdir+"/rpc/receive_out.py"
             +"  && python3 "+tmpdir+"/rpc/receive_out.py"
             ])
     getvol = subprocess.Popen(" ".join(cmd), stdout=subprocess.PIPE,
@@ -1099,7 +1106,7 @@ with open("''' + bytes(tmpdir,encoding="UTF-8") + b'''/rpc/receive.lst",
         bmapf = open(mapfile, "r+b")
         os.ftruncate(bmapf.fileno(), bmap_size)
         bmap_mm = mmap.mmap(bmapf.fileno(), 0)
-        cmp_count = 0
+        diff_count = 0
 
     # Open manifest then receive, check and save data
     with open(tmpdir+"/manifest.verify", "r") as mf:
@@ -1109,44 +1116,59 @@ with open("''' + bytes(tmpdir,encoding="UTF-8") + b'''/rpc/receive.lst",
                 print(int(addr/volsize*100),"%  ",faddr,end="  ")
 
             cksum, fname, ses = mf.readline().strip().split()
-            size = int.from_bytes(getvol.stdout.read(4),"big")
-
             if fname != faddr:
                 raise ValueError("Bad fname "+fname)
-            if cksum.strip() == "0":
-                if size != 0:
-                    raise ValueError("Expected zero length, got "+size)
+
+            # Read chunk size
+            untrusted_size = int.from_bytes(getvol.stdout.read(4),"big")
+
+            if untrusted_size == 0:
+                if cksum.strip() != "0":
+                    raise ValueError("Expected zero length, got "+untrusted_size)
+
                 print("OK",end="\x0d")
                 if save_path:
                     savef.seek(bkchunksize, 1)
                 elif diff:
                     cmpf.seek(bkchunksize, 1)
                 continue
-            if size > bkchunksize + (bkchunksize // 128) or size < 1:
-                raise BufferError("Bad chunk size: "+size)
 
-            buf = getvol.stdout.read(size)
+            # allow for slight expansion from compression algo
+            if untrusted_size > bkchunksize + (bkchunksize // 128) \
+                or untrusted_size < 1:
+                    raise BufferError("Bad chunk size: "+untrusted_size)
+
+            # Size is OK.
+            size = untrusted_size
+
+            # Read chunk buffer
+            untrusted_buf = getvol.stdout.read(size)
             rc  = getvol.poll()
-            if rc is not None and len(buf) == 0:
+            if rc is not None and len(untrusted_buf) == 0:
                 break
 
-            if len(buf) != size:
-                raise BufferError("Got "+len(buf)+" bytes, expected "+size)
-            if cksum != hashlib.sha256(buf).hexdigest():
+            if len(untrusted_buf) != size:
                 with open(tmpdir+"/bufdump", "wb") as dump:
-                    dump.write(buf)
+                    dump.write(untrusted_buf)
+                raise BufferError("Got "+len(untrusted_buf)
+                                  +" bytes, expected "+size)
+            if cksum != hashlib.sha256(untrusted_buf).hexdigest():
+                with open(tmpdir+"/bufdump", "wb") as dump:
+                    dump.write(untrusted_buf)
                 raise ValueError("Bad hash "+fname
-                    +" :: "+hashlib.sha256(buf).hexdigest())
+                    +" :: "+hashlib.sha256(untrusted_buf).hexdigest())
+
+            # Buffer is OK; Proceed with decompress.
             if attended:
                 print("OK",end="\x0d")
 
             if save_path:
-                buf = gzip.decompress(buf)
+                buf = gzip.decompress(untrusted_buf)
                 if len(buf) > bkchunksize:
                     raise BufferError("Decompressed to "+len(buf)+" bytes")
                 savef.write(buf)
             elif diff:
-                buf = gzip.decompress(buf)
+                buf = gzip.decompress(untrusted_buf)
                 if len(buf) > bkchunksize:
                     raise BufferError("Decompressed to "+len(buf)+" bytes")
                 buf2 = cmpf.read(bkchunksize)
@@ -1156,7 +1178,7 @@ with open("''' + bytes(tmpdir,encoding="UTF-8") + b'''/rpc/receive.lst",
                         volsegment = addr // bkchunksize 
                         bmap_pos = volsegment // 8
                         bmap_mm[bmap_pos] |= 1 << (volsegment % 8)
-                    cmp_count += len(buf)
+                    diff_count += len(buf)
 
         print("\nReceived bytes :",addr)
         if rc is not None and rc > 0:
@@ -1167,10 +1189,12 @@ with open("''' + bytes(tmpdir,encoding="UTF-8") + b'''/rpc/receive.lst",
             bmapf.close()
             cmpf.close()
             if options.remap:
-                print("Delta bytes re-mapped:", cmp_count)
-                if cmp_count > 0:
+                print("Delta bytes re-mapped:", diff_count)
+                if diff_count > 0:
                     print("\nNext 'send' will bring this volume into sync.")
 
+
+# Exit with simple message
 
 def x_it(code, text):
     sys.stderr.write(text+"\n")
@@ -1219,6 +1243,8 @@ assert bkchunksize % (lvm_block_factor * bs) == 0
 max_address = 0xffffffffffffffff # 64bits
 # for 64bits, a subdir split of 9+7 allows 2048 files per dir
 address_split = [len(hex(max_address))-2-7, 7]
+pjoin = os.path.join
+
 
 if sys.hexversion < 0x3050000:
     x_it(1, "Python ver. 3.5 or greater required.")
@@ -1276,11 +1302,11 @@ vgname, poolname, destvm, destmountpoint, destdir, datavols \
 if vgname not in volgroups.keys():
     raise ValueError("\nVolume group "+vgname+" not present.")
 l_vols = volgroups[vgname].lvs
-destcd = " cd '"+destmountpoint+"/"+destdir+"'"
 
 bkdir = topdir+"/"+vgname+"%"+poolname
 if not os.path.exists(bkdir):
     os.makedirs(bkdir)
+destcd = " cd '"+destmountpoint+"/"+destdir+"'"
 
 vmtype = detect_internal_state()
 
@@ -1393,7 +1419,6 @@ elif options.action == "delete":
     cmd = [destcd
           +" && rm -rf ." + path
           ]
-    print(cmd) ####
     dest_run(cmd)
 
 
