@@ -291,6 +291,16 @@ def detect_internal_state():
         if not shutil.which(prg):
             raise RuntimeError("Required command not found: "+prg)
 
+    p = subprocess.check_output(["thin_delta", "-V"])
+    ver = p[:5].decode("UTF-8").strip()
+    target_ver = "0.7.4"
+
+    print("VER", ver)
+    if ver < target_ver:
+        print("Note: Thin provisioning tools version", target_ver,
+              "or later is recommended for stabilty."
+              " Installed version =", ver+".")
+
     return vmtype
 
 
@@ -521,7 +531,9 @@ def update_delta_digest(datavol):
     if datavol in newvols:
         return False, False
 
-    print("Updating block change map. ", end="")
+    if monitor_only:
+        print("Updating block change map. ", end="")
+
     os.rename(mapfile, mapfile+"-tmp")
     dtree = xml.etree.ElementTree.parse(tmpdir+"/delta."+datavol).getroot()
     dblocksize = int(dtree.get("data_block_size"))
@@ -565,10 +577,10 @@ def update_delta_digest(datavol):
 
         bmap_mm[lastindex] |= bmap_byte
 
-    if dnewblocks+dfreedblocks > 0:
+    if monitor_only and dnewblocks+dfreedblocks > 0:
         print(dnewblocks * bs, "changed,",
               dfreedblocks * bs, "discarded.")
-    else:
+    elif monitor_only:
         print("No changes.")
 
     return True, dnewblocks+dfreedblocks > 0
@@ -736,7 +748,8 @@ def send_volume(datavol):
     else:
         shutil.rmtree(sdir+"-tmp")
 
-    print(" ", bcount, "bytes sent.")
+    if bcount == 0:
+        print(" ", bcount, "bytes sent.")
     return count > 0
 
 
@@ -804,7 +817,7 @@ def init_deltamap(bmfile, bmsize):
 
 def rotate_snapshots(datavol, rotate=True):
     if rotate:
-        print("Rotating snapshots for", datavol)
+        #print("Rotating snapshots for", datavol)
         # Review: this should be atomic
         p = subprocess.check_output(["lvremove","--force", vgname+"/"+snap1vol])
         p = subprocess.check_output(["lvrename",vgname+"/"+snap2vol, snap1vol])
@@ -1209,6 +1222,7 @@ def x_it(code, text):
     Config management, add/recognize disabled volumes
     Check free space on destination
     Encryption
+    Match configured pool to vg pool for receive; Auto-create lv in pool
     Add support for special source metadata (qubes.xml etc)
     Add other destination exec types (e.g. ssh to vm)
     Separate threads for encoding tasks
