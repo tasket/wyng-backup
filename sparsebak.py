@@ -255,7 +255,7 @@ def get_lvm_vgs():
 def get_configs():
     global aset
 
-    aset = ArchiveSet("", topdir, "sparsebak.ini")
+    aset = ArchiveSet("", topdir, prog_name+".ini")
     dvs = []
 
     for vn,v in aset.vols.items():
@@ -294,8 +294,6 @@ def detect_internal_state():
     p = subprocess.check_output(["thin_delta", "-V"])
     ver = p[:5].decode("UTF-8").strip()
     target_ver = "0.7.4"
-
-    print("VER", ver)
     if ver < target_ver:
         print("Note: Thin provisioning tools version", target_ver,
               "or later is recommended for stabilty."
@@ -521,7 +519,7 @@ def get_lvm_deltas(datavols):
         x_it(1, "ERROR running thin_delta process for "+str(td_err))
 
 
-# The critical focus of sparsebak: Translates raw lvm delta information
+# update_delta_digest: Translates raw lvm delta information
 # into a bitmap (actually chunk map) that repeatedly accumulates change status
 # for volume block ranges until a send command is successfully performed and
 # the mapfile is reinitialzed with zeros.
@@ -664,8 +662,8 @@ def send_volume(datavol):
                 count += 1
 
                 percent = int(bmap_pos/bmap_size*1000)
-                status = "  %.1f%%  %dMB  %s " \
-                    % (percent/10, bcount//1000000, destfile) \
+                status = "  %.1f%%   %dMB " \
+                    % (percent/10, bcount//1000000) \
                     if percent >= checkpt else ""
 
                 # Compress & write only non-empty and last chunks
@@ -704,7 +702,7 @@ def send_volume(datavol):
 
     # Send session info, end stream and cleanup
     if count > 0:
-        print("  100%  ")
+        print("  100%  ", ("%.1f" % (bcount/1000000)) +"MB")
 
         # Save session info
         vol = aset.vols[datavol]
@@ -729,7 +727,7 @@ def send_volume(datavol):
         #print("Ending tar process ", end="")
         tarf.close()
         untar.stdin.close()
-        for i in range(10):
+        for i in range(30):
             if untar.poll() != None:
                 break
             time.sleep(1)
@@ -749,7 +747,8 @@ def send_volume(datavol):
         shutil.rmtree(sdir+"-tmp")
 
     if bcount == 0:
-        print(" ", bcount, "bytes sent.")
+        print("  No changes.")
+    #print(" ", bcount, "bytes sent.")
     return count > 0
 
 
@@ -782,9 +781,9 @@ def monitor_send(volumes=[], monitor_only=True):
         get_lvm_deltas(datavols)
 
     if not monitor_only:
-        print("\nSending backup session", bksession)
-        print("to", (vmtype+"://"+destvm) if \
-            destvm != "internal:" else destmountpoint)
+        print("\nSending backup session", bksession,
+              "to", (vmtype+"://"+destvm) if \
+              destvm != "internal:" else destmountpoint)
 
     for datavol in datavols+newvols:
         print("\nVolume :", datavol)
@@ -1242,9 +1241,9 @@ def x_it(code, text):
 # Constants
 prog_version = "0.2.0beta1"
 format_version = 1
-progname = "sparsebak"
-topdir = "/"+progname # must be absolute path
-tmpdir = "/tmp/"+progname
+prog_name = "sparsebak"
+topdir = "/"+prog_name # must be absolute path
+tmpdir = "/tmp/"+prog_name
 volgroups = {}
 l_vols = {}
 aset = None
@@ -1268,12 +1267,12 @@ if os.getuid() > 0:
     x_it(1, "Must be root user.")
 
 # Allow only one instance at a time
-lockpath = "/var/lock/"+progname
+lockpath = "/var/lock/"+prog_name
 try:
     lockf = open(lockpath, "w")
     fcntl.lockf(lockf, fcntl.LOCK_EX|fcntl.LOCK_NB)
 except IOError:
-    x_it(1, "ERROR: sparsebak is already running.")
+    x_it(1, "ERROR: "+prog_name+" is already running.")
 
 # Create our tmp dir
 shutil.rmtree(tmpdir+"-old", ignore_errors=True)
@@ -1351,7 +1350,7 @@ elif options.action   == "send":
 
 
 if options.action == "version":
-    print(progname, "version", prog_version)
+    print(prog_name, "version", prog_version)
 
 
 elif options.action == "prune":
