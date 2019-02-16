@@ -135,8 +135,8 @@ class ArchiveSet:
             self.volsize = self.sessions[self.last].volsize \
                             if self.sessions else 0
 
-        def save_volinfo(self):
-            with open(pjoin(self.path,"volinfo"), "w") as f:
+        def save_volinfo(self, fname="volinfo"):
+            with open(pjoin(self.path,fname), "w") as f:
                 print("format_ver =", format_version, file=f)
                 print("uuid =", self.uuid if self.uuid else str(uuid.uuid4()),
                       file=f)
@@ -299,13 +299,38 @@ def detect_internal_state():
               "or later is recommended for stabilty."
               " Installed version =", ver+".")
 
+
+    dest_program = \
+    '''import os, sys
+cmd = sys.argv[1]
+with open("''' + tmpdir + '''/rpc/dest.lst", "r") as lstf:
+    if cmd == "receive":
+        for line in lstf:
+            fname = line.strip()
+            fsize = os.path.getsize(fname)
+            i = sys.stdout.buffer.write(fsize.to_bytes(4,"big"))
+            with open(fname,"rb") as dataf:
+                i = sys.stdout.buffer.write(dataf.read(fsize))
+    elif cmd == "merge":
+        subdirs = set()
+        for line in lstf:
+            first, source, dest = line.strip().split()
+            sdir = source.split("/")[-2]
+            if sdir not in subdirs:
+                os.makedirs(os.path.dirname(source), exist_ok=True)
+                subdirs.add(sdir)
+            os.replace(source, dest)
+    '''
+    with open(tmpdir +"/rpc/dest_helper.py", "wb") as progf:
+        progf.write(bytes(dest_program, encoding="UTF=8"))
+
     return vmtype
 
 
 def detect_dest_state(destvm):
 
     if options.action in {"send","receive","verify","diff","prune","delete"} \
-    and destvm != None:
+        and destvm != None:
 
         if vmtype == "qubes-ssh":
             dargs = vm_run_args["qubes"][:-1] + [destvm.split("|")[0]]
@@ -317,23 +342,26 @@ def detect_dest_state(destvm):
                   ]
             p = subprocess.check_call(dargs + cmd)
 
-
         # Fix: get OSTYPE env variable
         try:
-            cmd =  \
-                ["mountpoint -q '"+destmountpoint
-                +"' && mkdir -p '"+destmountpoint+"/"+destdir+topdir
-                +"' && cd '"+destmountpoint+"/"+destdir+topdir
-                +"' && touch archive.dat"
-                +"  && ln -f archive.dat .hardlink"
-                +"  && rm -rf '"+tmpdir+"-old"
-                +"' && { if [ -d "+tmpdir+" ]; then mv "+tmpdir
-                +" "+tmpdir+"-old; fi }"
-                +"  && mkdir -p "+tmpdir+"/rpc"
-                ]
+            cmd = ["mountpoint -q '"+destmountpoint
+                  +"' && mkdir -p '"+destmountpoint+"/"+destdir+topdir
+                  +"' && cd '"+destmountpoint+"/"+destdir+topdir
+                  +"' && touch archive.dat"
+                  ##+"  && ln -f archive.dat .hardlink"
+                  ]
 
             p = subprocess.check_call(
                 " ".join(dest_run_args(vmtype, cmd)), shell=True)
+
+            if vmtype != "internal":
+                cmd = ["rm -rf "+tmpdir
+                    +"  && mkdir -p "+tmpdir+"/rpc"
+                    +"  && cat >"+tmpdir +"/rpc/dest_helper.py"
+                    ]
+                p = subprocess.check_call(" ".join(
+                    ["cat " + tmpdir +"/rpc/dest_helper.py | "]
+                    + dest_run_args(vmtype, cmd)), shell=True)
         except:
             x_it(1, "Destination not ready to receive commands.")
 
@@ -553,7 +581,7 @@ def update_delta_digest(datavol):
         for delta in dtree.find("diff"):
             blockbegin = int(delta.get("begin")) * dblocksize
             blocklen   = int(delta.get("length")) * dblocksize
-            if delta.tag in ["different", "right_only"]:
+            if delta.tag in {"different", "right_only"}:
                 dnewblocks += blocklen
             elif delta.tag == "left_only":
                 dfreedblocks += blocklen
@@ -602,7 +630,7 @@ def send_volume(datavol):
     send_all = len(sessions) == 0
 
     # Make new session folder
-    sdir=bkdir+"/"+datavol+"/"+bksession
+    sdir = bkdir+"/"+datavol+"/"+bksession
     os.makedirs(sdir+"-tmp")
     zeros = bytes(bkchunksize)
     empty = bytes(0)
@@ -716,13 +744,12 @@ def send_volume(datavol):
         ses.format = "tar" if options.tarfile else "folders"
         ses.path = sdir+"-tmp"
         ses.save_info()
+        vol.que_meta_update = "false"
+        vol.save_volinfo("volinfo-tmp")
         for session in vol.sessions.values() \
                         if vol.que_meta_update == "true" else [ses]:
             tarf.add(session.path)
-
-        vol.que_meta_update = "false"
-        vol.save_volinfo()
-        tarf.add(vol.path+"/volinfo")
+        tarf.add(vol.path+"/volinfo-tmp")
 
         #print("Ending tar process ", end="")
         tarf.close()
@@ -741,8 +768,13 @@ def send_volume(datavol):
         # Cleanup on VM/remote
         dest_run([ destcd
             +" && mv '."+sdir+"-tmp' '."+sdir+"'"
+            +" && mv '."+os.path.dirname(sdir)+"/volinfo-tmp'"
+            +" '."+os.path.dirname(sdir)+"/volinfo'"
             +" && sync"])
-        os.rename(sdir+"-tmp", sdir)
+        os.replace(sdir+"-tmp", sdir)
+        os.replace(os.path.dirname(sdir)+"/volinfo-tmp",
+                   os.path.dirname(sdir)+"/volinfo")
+
     else:
         shutil.rmtree(sdir+"-tmp")
 
@@ -932,6 +964,7 @@ def merge_sessions(datavol, sources, target, clear_target=False,
 
         cmd = [destcd + bkdir+"/"+datavol
               +"  && cp -rlnT "+ses+" "+target
+              +"  && rm -r "+ses
               ]
         dest_run(cmd)
 
@@ -942,6 +975,64 @@ def merge_sessions(datavol, sources, target, clear_target=False,
     if clear_sources:
         volume.sessions[target].save_info()
         volume.save_volinfo()
+
+
+# Merge with mv instead of link:
+def merge_sessions2(datavol, sources, target, clear_target=False,
+                   clear_sources=False):
+    global destmountpoint, destdir, bkdir
+
+    volume = aset.vols[datavol]
+    for ses in sources + [target]:
+        if volume.sessions[ses].format == "tar":
+            x_it(1, "Cannot merge range containing tarfile session.")
+
+    # Get volume size
+    volsize = get_info_vol_size(datavol, target if not clear_target \
+                                         else sources[-1])
+    last_chunk = "x"+format(last_chunk_addr(volsize,bkchunksize), "016x")
+
+    # Prepare target for merging.
+    open(pjoin(tmpdir,"manifest.tmp"), "wb").close()
+    if clear_target:
+        cmd = [destcd + bkdir+"/"+datavol
+              +" && rm -rf "+target+" && mkdir -p "+target
+              ]
+        dest_run(cmd)
+    #else:
+    #    # start with target manifest
+    #    shutil.copy(pjoin(bkdir,datavol,target,"manifest"),
+    #                tmpdir+"/manifest.tmp")
+
+    # Get manifests
+    for ses in reversed(sources):
+        print("  Merging session", ses, "into", target)
+        cmd = ["cd "+pjoin(bkdir,datavol)
+              +" && sed -E 's|$| "+ses+"|' "+ses+"/manifest"
+              +" >>"+tmpdir+"/manifest.tmp"
+              ]
+        p = subprocess.check_output(cmd, shell=True)
+
+    # Merge filenames and output list in the form:
+    # rename src_session/subdir/xaddress target/subdir/xaddress
+    cmd = ["cd '"+pjoin(bkdir,datavol)
+        +"' && sort -u -d -k 2,2 "+tmpdir+"/manifest.tmp"
+        +"  |  sed -E 's|^.+\s+x(\S{" + str(address_split[0]) + "})(\S+)\s+"
+        +"(S_.+)|rename \\3/\\1/x\\1\\2 "+target+"/\\1/x\\1\\2|;"
+        +" /"+last_chunk+"/q'"
+        +"  | "+" ".join(dest_run_args(vmtype,
+                        ["cat >"+tmpdir+"/rpc/rename.lst"]))
+        ]
+    dest_run(cmd)
+
+    # Update info records
+    if clear_sources:
+        for ses in sources:
+            volume.delete_session(ses)
+            #### delete on dest
+        volume.sessions[target].save_info()
+        volume.save_volinfo()
+
 
     # Reconcile merged manifest info with sort unique. The reverse date-time
     # ordering in above merge will result in only the newest instance of each
@@ -1042,7 +1133,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         +"(S_.+)|\\3/\\1/x\\1\\2|;"
         +" /"+last_chunk+"/q'"
         +"  | "+" ".join(dest_run_args(vmtype,
-                        ["cat >"+tmpdir+"/rpc/receive.lst"])
+                        ["cat >"+tmpdir+"/rpc/dest.lst"])
         )]
     p = subprocess.check_output(cmd, shell=True)
 
@@ -1051,25 +1142,10 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     # Create retriever process using py program
     cmd = dest_run_args(vmtype,
             [destcd + bkdir+"/"+datavol
-            +" && cat >"+tmpdir+"/rpc/receive_out.py"
-            +"  && python3 "+tmpdir+"/rpc/receive_out.py"
+            +"  && python3 "+tmpdir+"/rpc/dest_helper.py receive"
             ])
     getvol = subprocess.Popen(" ".join(cmd), stdout=subprocess.PIPE,
-                              stdin=subprocess.PIPE, shell=True)
-
-    ##> START py program code <##
-    getvol.stdin.write(b'''import os.path, sys
-with open("''' + bytes(tmpdir,encoding="UTF-8") + b'''/rpc/receive.lst",
-          "r") as lstf:
-    for line in lstf:
-        fname = line.strip()
-        fsize = os.path.getsize(fname)
-        i = sys.stdout.buffer.write(fsize.to_bytes(4,"big"))
-        with open(fname,"rb") as dataf:
-            i = sys.stdout.buffer.write(dataf.read(fsize))
-    ''')
-    ##> END py program code <##
-    getvol.stdin.close() # <-program starts on destination
+                              shell=True)
 
 
     # Prepare save volume
@@ -1278,7 +1354,7 @@ except IOError:
 shutil.rmtree(tmpdir+"-old", ignore_errors=True)
 if os.path.exists(tmpdir):
     os.rename(tmpdir, tmpdir+"-old")
-os.makedirs(tmpdir)
+os.makedirs(tmpdir+"/rpc")
 
 
 # Parse arguments
