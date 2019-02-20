@@ -316,21 +316,23 @@ with open("''' + tmpdir + '''/rpc/dest.lst", "r") as lstf:
                 i = sys.stdout.buffer.write(dataf.read(fsize))
     elif cmd == "merge":
         merge_target, target = lstf.readline().strip().split()
-        del_list = []
+        src_list = []
         while True:
             ln = lstf.readline().strip()
             if ln == "###":
                 break
-            del_list.append(ln)
+            src_list.append(ln)
         subdirs = set()
+        for src in src_list:
+            for i in os.scandir(src):
+                if i.is_dir():
+                    subdirs.add(i.name)
+        for sdir in subdirs:
+            os.makedirs(merge_target+"/"+sdir, exist_ok=True)
         for line in lstf:
             first, source, dest = line.strip().split()
-            sdir = source.split("/")[-2]
-            if sdir not in subdirs:
-                os.makedirs(os.path.dirname(dest), exist_ok=True)
-                subdirs.add(sdir)
             os.replace(source, dest)
-        for dir in del_list:
+        for dir in src_list:
             shutil.rmtree(dir)
         os.replace(merge_target, target)
     '''
@@ -342,7 +344,7 @@ with open("''' + tmpdir + '''/rpc/dest.lst", "r") as lstf:
 
 def detect_dest_state(destvm):
 
-    if options.action not in {"monitor,"list","version"} \
+    if options.action not in {"monitor","list","version"} \
         and destvm != None:
 
         if vmtype == "qubes-ssh":
@@ -1134,12 +1136,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         savef = open(save_path, "w+b")
     elif diff:
         # Fix: check info vs lvm volume size
-        if attended:
-            print("\nFor diff, make sure the specified volume"
-                  " has been unmounted and sent first!")
-            ans = input("Continue? (yes/no): ")
-            if ans.lower() != "yes":
-                x_it(0,"")
+        print("(For diff, make sure the specified volume"
+                " has been recently sent.)\n")
         mapfile = pjoin(bkdir, datavol, "deltamap")
         bmap_size = (volsize // bkchunksize // 8) + 1
         if not lv_exists(vgname, datavol+".tick"):
@@ -1275,7 +1273,7 @@ def x_it(code, text):
 
 
 # Constants
-prog_version = "0.2.0beta1"
+prog_version = "0.2.0betaX"
 format_version = 1
 prog_name = "sparsebak"
 topdir = "/"+prog_name # must be absolute path

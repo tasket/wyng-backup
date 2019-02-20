@@ -286,7 +286,7 @@ brief description for ad-hoc locally-encrypted remote storage from a Qubes lapto
 remote file (to size the file correctly during inital setup,
 use `truncate -s <size> myfile.img` before using `losetup`).
 
-2. *Domain0* runs `qvm-block attach backup remotefs:loop0`.
+2. *Domain0* runs `qvm-block attach dom0 remotefs:loop0`.
 
 3. *Domain0* runs `cryptsetup` on /dev/xvdi to create/access the volume in its
 encrypted form. Finally, the resulting /dev/mapper device can be mounted for use.
