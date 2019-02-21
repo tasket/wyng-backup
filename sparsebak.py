@@ -1031,16 +1031,12 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
             +"  && export LC_ALL=C"
             +"  && tar -xmf -",
 
-            ##+( " && sed -E '1,/"+last_chunk+"/d; "
-            ##+  "s|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)|"
-            ##+  target+"/\\1/x\\1\\2|' "+target+"/manifest"
-
             ( " && cat "+target+"/delete  |  xargs -r rm"
             + " && rm "+target+"/delete"
             ) if len(ses_sizes)>1 else ""
             ])
         )]
-    p = subprocess.check_call(cmd, shell=True)
+    p = subprocess.check_call(" ".join(cmd), shell=True)
 
 
 # Receive volume from archive. If no save_path specified, then verify only.
