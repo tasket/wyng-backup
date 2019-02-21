@@ -140,8 +140,8 @@ with `--save-to`. If `--session` is used, only one date-time is accepted.
 
 ...restores a volume called 'vm-work-private' to 'myfile.img' in
 the current folder. Note that its possible to specify any path, including block
-devices such as '/dev/vgname/vm-work-private'. In this case, a writeable
-block device (such as a thin LV) must already exist at the path.
+devices such as '/dev/vgname/vm-work-private'. In this case, the lv volume will
+be automatically created if the configured volume group matches the save path.
 
 Resizing is automatic if the path is a logical volume or regular file. For any
 `--save-to` type, sparsebak will try to `blkdiscard` or `truncate` old data
@@ -157,8 +157,8 @@ code if the received data does not pass integrity checks.
 
 #### prune
 
-The `prune` command can remove any backup session you specify, except for the
-latest version, without re-writing the data archive or compromising volume integrity.
+The `prune` command can quickly remove any prior backup session you specify
+without re-writing the data archive or compromising volume integrity.
 This is a great way to reclaim space on a backup drive!
 To use, supply a single exact date-time in YYYYMMDD-HHMMSS format to remove a
 specific session, or two date-times as a range:
