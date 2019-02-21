@@ -548,7 +548,8 @@ def get_lvm_deltas(datavols):
         snap2vol = datavol + ".tock"
         try:
             with open(tmpdir+"/delta."+datavol, "w") as f:
-                cmd = ["thin_delta -m"
+                cmd = ["export LC_ALL=C"
+                    + " && thin_delta -m"
                     + " --thin1 " + l_vols[snap1vol].thin_id
                     + " --thin2 " + l_vols[snap2vol].thin_id
                     + " /dev/mapper/"+vgname+"-"+poolname+"_tmeta"
@@ -893,7 +894,7 @@ def finalize_bk_session(datavol, sent):
 def prune_sessions(datavol, times):
     global destmountpoint, destdir, bkdir
 
-    print("\nPruning Volume :", datavol)
+    print("Pruning Volume :", datavol)
     # Validate date-time params
     for dt in times:
         datetime.datetime.strptime(dt, "%Y%m%d-%H%M%S")
@@ -947,7 +948,9 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
     global destmountpoint, destdir, bkdir
 
     volume = aset.vols[datavol]
+    ses_sizes = set()
     for ses in sources + [target]:
+        ses_sizes.add(volume.sessions[ses].volsize)
         if volume.sessions[ses].format == "tar":
             x_it(1, "Cannot merge range containing tarfile session.")
 
@@ -960,49 +963,51 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
     # the merge_target will be renamed to the specified target. This avoids
     # processing the full range of volume chunks in the likely case that
     # the oldest (full) session is being pruned.
-    open(pjoin(tmpdir,"manifest.tmp"), "wb").close()
     srcf = open(pjoin(tmpdir,"sources.lst"), "w")
     merge_sources = ([target] + list(reversed(sources)))[:-1]
     merge_target  = sources[0]
-    manifests = ""
     print(merge_target, target, file=srcf)
 
-    # Get manifests
+    # Get manifests, append session name to eol, print session names to srcf.
     print("  Reading manifests")
+    manifests = ""
+    cmd = ["set -e", "export LC_ALL=C", "cd "+tmpdir]
     for ses in merge_sources:
         if clear_sources:
             print(ses, file=srcf)
-            manifests += ses+"/manifest "
-        cmd = ["cd "+pjoin(bkdir,datavol)
-              +"  && export LC_ALL=C"
-              +"  && sed -E 's|$| "+ses+"|' "+ses+"/manifest"
-              +"  >>"+tmpdir+"/manifest.tmp"
-              ]
-        p = subprocess.check_output(cmd, shell=True)
+            manifests += " man."+ses
+        cmd.append("sed -E 's|$| "+ses+"|' "
+                   +pjoin(bkdir,datavol,ses+"/manifest")
+                   +" >"+"man."+ses)
+
     print("###", file=srcf)
-    manifests += merge_target+"/manifest"
     srcf.close()
 
-    # Unique-merge filenames and output list in the sftp-friendly form:
+    # Unique-merge filenames: one for rename, one for new full manifest.
+    cmd.append("sort -u -m -d -k 2,2 "+manifests
+               +" >manifest.tmp")
+    cmd.append("sort -u -m -d -k 2,2 manifest.tmp "
+               +pjoin(bkdir,datavol,merge_target+"/manifest")
+               +" >manifest.new")
+    p = subprocess.check_call("\n".join(cmd), shell=True)
+
+    # Output manifest filenames in the sftp-friendly form:
     # 'rename src_session/subdir/xaddress target/subdir/xaddress'
     # then pipe to destination and run dest_helper.py.
     print("  Merging to", target)
     cmd = ["cd "+pjoin(bkdir,datavol)
         +"  && export LC_ALL=C"
-        +"  && sort -u -m -d -k 2,2 "+manifests+" >"+tmpdir+"/manifest.new"
-        +"  && sort -u -d -k 2,2 "+tmpdir+"/manifest.tmp"
-        +"  |  sed -E 's|^.+\s+x(\S{" + str(address_split[0]) + "})(\S+)\s+"
-        +"(S_.+)|rename \\3/\\1/x\\1\\2 "+merge_target+"/\\1/x\\1\\2|;"
-        +" /"+last_chunk+"/q' "
+        +"  && sed -E 's|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)\s+"
+        +"(S_\S+)|rename \\3/\\1/x\\1\\2 "+merge_target+"/\\1/x\\1\\2|;"
+        +" /"+last_chunk+"/q' "+tmpdir+"/manifest.tmp"
         +"  |  cat "+tmpdir+"/sources.lst -"
         +"  | "+" ".join(dest_run_args(vmtype, [destcd + bkdir+"/"+datavol
                +" && export LC_ALL=C"
-               +" && cat >"+tmpdir+"/rpc/dest.lst && "+destcd+bkdir+"/"+datavol
+               +" && cat >"+tmpdir+"/rpc/dest.lst"
                +" && python3 "+tmpdir+"/rpc/dest_helper.py merge"
                ]))
         ]
     p = subprocess.check_call(cmd, shell=True)
-    #exit(0) ####
 
     # Update info records and trim to target size
     if clear_sources:
@@ -1011,22 +1016,31 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
         volume.sessions[target].save_info()
         volume.save_volinfo()
 
-        cmd = ["cd "+pjoin(bkdir,datavol)
-            +"  && export LC_ALL=C"
-            +"  && sed ' /"+last_chunk+"/q' "
-            +tmpdir+"/manifest.new >"+target+"/manifest"
-            +"  && tar -cf - volinfo "+target
-            +"  | "+" ".join(dest_run_args(vmtype, [destcd + bkdir+"/"+datavol
-                +"  && export LC_ALL=C"
-                +"  && tar -xmf -"
-                +"  && find "+target+" -name 'x*' | sort -d"
-                +"  |  sed '1,/"+last_chunk+"/d'"
-                +"  |  xargs -r rm"
-                ])
-            )]
-        p = subprocess.check_call(cmd, shell=True)
+    cmd = ["cd "+pjoin(bkdir,datavol)
+        +"  && export LC_ALL=C"
+        +"  && sed -E 's/^(\S+\s+\S+).*/\\1/; /"+last_chunk+"/q' "
+        +tmpdir+"/manifest.new >"+target+"/manifest",
 
-    print()
+        ( " && sed -E '1,/"+last_chunk+"/d; "
+        +  "s|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)|"
+        +  target+"/\\1/x\\1\\2|' "+tmpdir+"/manifest.new >"+target+"/delete"
+        ) if len(ses_sizes)>1 else "",
+
+        "   && tar -cf - volinfo "+target
+        +"  | "+" ".join(dest_run_args(vmtype, [destcd + bkdir+"/"+datavol
+            +"  && export LC_ALL=C"
+            +"  && tar -xmf -",
+
+            ##+( " && sed -E '1,/"+last_chunk+"/d; "
+            ##+  "s|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)|"
+            ##+  target+"/\\1/x\\1\\2|' "+target+"/manifest"
+
+            ( " && cat "+target+"/delete  |  xargs -r rm"
+            + " && rm "+target+"/delete"
+            ) if len(ses_sizes)>1 else ""
+            ])
+        )]
+    p = subprocess.check_call(cmd, shell=True)
 
 
 # Receive volume from archive. If no save_path specified, then verify only.
@@ -1035,7 +1049,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
 # are lost or if the source volume reverted to an earlier state.
 
 def receive_volume(datavol, select_ses="", save_path="", diff=False):
-    global destmountpoint, destdir, bkdir, bkchunksize, vgname
+    global destmountpoint, destdir, bkdir, bkchunksize, vgname, poolname
 
     attended = not options.unattended
     if save_path and os.path.exists(save_path) and attended:
@@ -1090,8 +1104,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         +"' && export LC_ALL=C"
         +"  && sort -u -d -k 2,2 "+tmpdir+"/manifests.cat"
         +"  |  tee "+tmpdir+"/manifest.verify"
-        +"  |  sed -E 's|^.+\s+x(\S{" + str(address_split[0]) + "})(\S+)\s+"
-        +"(S_.+)|\\3/\\1/x\\1\\2|;"
+        +"  |  sed -E 's|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)\s+"
+        +"(S_\S+)|\\3/\\1/x\\1\\2|;"
         +" /"+last_chunk+"/q'"
         +"  | "+" ".join(dest_run_args(vmtype,
                         ["cat >"+tmpdir+"/rpc/dest.lst"])
@@ -1118,10 +1132,13 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             lv = os.path.basename(save_path)
             vg = os.path.basename(os.path.dirname(save_path))
             if not lv_exists(vg,lv):
-                # not possible to tell from path which thinpool to use
-                print("Please create LV before receiving.")
-                raise NotImplementedError("Automatic LV creation")
-            if volsize > get_lvm_size(save_path):
+                if vg != vgname:
+                    x_it(1, "Cannot auto-create volume:"
+                         " Volume group does not match config.")
+                p = subprocess.check_output(
+                    ["lvcreate -kn -ay -V "+str(volsize)+"b"
+                     +" --thin -n "+lv+" "+vg+"/"+poolname], shell=True)
+            else:
                 p = subprocess.check_output(["lvresize", "-L",str(volsize)+"b",
                                              "-f", save_path])
         if os.path.exists(save_path) \
@@ -1255,7 +1272,7 @@ def x_it(code, text):
     Config management, add/recognize disabled volumes
     Check free space on destination
     Encryption
-    Match configured pool to vg pool for receive; Auto-create lv in pool
+    Reconcile deltas or del archive vol when restoring from older session
     Add support for special source metadata (qubes.xml etc)
     Add other destination exec types (sftp)
     Separate threads for encoding tasks
@@ -1364,7 +1381,6 @@ vm_run_args = {"internal":["sh"],
                 }
 
 detect_dest_state(destvm)
-#exit(0)
 
 # Check volume args against config
 selected_vols = options.volumes[:]
