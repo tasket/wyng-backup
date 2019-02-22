@@ -34,7 +34,8 @@ class ArchiveSet:
 
         self.vols = {}
         for key in cp["volumes"]:
-            if cp["volumes"][key] != "disable":
+            if cp["volumes"][key] != "disable" \
+            and (len(options.volumes)==0 or key in options.volumes):
                 os.makedirs(pjoin(self.path,key), exist_ok=True)
                 self.vols[key] = self.Volume(key, pjoin(self.path,key),
                                              self.vgname)
@@ -178,19 +179,19 @@ class ArchiveSet:
             def __init__(self, name, path=""):
                 self.name = name
                 self.path = path
+                self.present = os.path.exists(pjoin(path,"manifest"))
                 # persisted:
                 self.localtime = None
                 self.volsize = None
                 self.chunksize = None
-                self.chunks = None
-                self.bytes = None
-                self.zeros = None
+                ##self.chunks = None
+                ##self.bytes = None
+                ##self.zeros = None
                 self.format = None
                 self.sequence = None
                 self.previous = "none"
                 attr_str = {"localtime","format","previous"}
-                attr_int = {"volsize","chunksize","chunks","bytes","zeros",
-                            "sequence"}
+                attr_int = {"volsize","chunksize","sequence"} ##chunks,bytes,zeros
 
                 if path:
                     with open(pjoin(path,"info"), "r") as sf:
@@ -198,6 +199,8 @@ class ArchiveSet:
                             vname, value = ln.strip().split(" = ")
                             setattr(self, vname, 
                                 int(value) if vname in attr_int else value)
+                    if self.localtime is None or self.localtime == "None":
+                        self.localtime = self.name[2:]
 
             def save_info(self):
                 if not self.path:
@@ -206,9 +209,9 @@ class ArchiveSet:
                     print("localtime =", self.localtime, file=f)
                     print("volsize =", self.volsize, file=f)
                     print("chunksize =", self.chunksize, file=f)
-                    print("chunks =", self.chunks, file=f)
-                    print("bytes =", self.bytes, file=f)
-                    print("zeros =", self.zeros, file=f)
+                    ##print("chunks =", self.chunks, file=f)
+                    ##print("bytes =", self.bytes, file=f)
+                    ##print("zeros =", self.zeros, file=f)
                     print("format =", self.format, file=f)
                     print("sequence =", self.sequence, file=f)
                     print("previous =", self.previous, file=f)
@@ -651,7 +654,7 @@ def send_volume(datavol):
     os.makedirs(sdir+"-tmp")
     zeros = bytes(bkchunksize)
     empty = bytes(0)
-    count = bcount = zcount = 0
+    count = bcount = zcount = 0 ##review
     thetime = time.time()
     addrsplit = -address_split[1]
     lchunk_addr = last_chunk_addr(snap2size, bkchunksize)
@@ -755,9 +758,9 @@ def send_volume(datavol):
         ses.localtime = localtime
         ses.volsize = snap2size
         ses.chunksize = bkchunksize
-        ses.chunks = count
-        ses.bytes = bcount
-        ses.zeros = zcount
+        ##ses.chunks = count
+        ##ses.bytes = bcount
+        ##ses.zeros = zcount
         ses.format = "tar" if options.tarfile else "folders"
         ses.path = sdir+"-tmp"
         ses.save_info()
@@ -1015,6 +1018,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
             affected = volume.delete_session(ses)
         volume.sessions[target].save_info()
         volume.save_volinfo()
+        print("  Removed", " ".join(sources))
 
     cmd = ["cd "+pjoin(bkdir,datavol)
         +"  && export LC_ALL=C"
