@@ -305,7 +305,8 @@ def detect_internal_state():
               " Installed version =", ver+".")
 
 
-    # Save helper program:
+    ####>  Save helper program  <####
+
     dest_program = \
     '''import os, sys, shutil
 cmd = sys.argv[1]
@@ -341,6 +342,8 @@ with open("''' + tmpdir + '''/rpc/dest.lst", "r") as lstf:
     '''
     with open(tmpdir +"/rpc/dest_helper.py", "wb") as progf:
         progf.write(bytes(dest_program, encoding="UTF=8"))
+
+    ####>  End helper program  <####
 
     return vmtype
 
@@ -707,7 +710,7 @@ def send_volume(datavol):
                 vf.seek(addr)
                 buf = vf.read(bkchunksize)
                 destfile = "x%016x" % addr
-                count += 1
+                ##count += 1
 
                 percent = int(bmap_pos/bmap_size*1000)
                 status = "  %.1f%%   %dMB " \
@@ -724,7 +727,7 @@ def send_volume(datavol):
                 else: # record zero-length file
                     buf = empty
                     print(0, destfile, file=hashf)
-                    zcount += 1
+                    ##zcount += 1
 
                 if status:
                     print(status, end="\x0d")
@@ -749,7 +752,7 @@ def send_volume(datavol):
 
 
     # Send session info, end stream and cleanup
-    if count > 0:
+    if stream_started:
         print("  100%  ", ("%.1f" % (bcount/1000000)) +"MB")
 
         # Save session info
@@ -801,7 +804,7 @@ def send_volume(datavol):
     if bcount == 0:
         print("  No changes.")
     #print(" ", bcount, "bytes sent.")
-    return count > 0
+    return stream_started
 
 
 # Controls flow of monitor and send_volume procedures:
@@ -1025,6 +1028,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
         +"  && sed -E 's/^(\S+\s+\S+).*/\\1/; /"+last_chunk+"/q' "
         +tmpdir+"/manifest.new >"+target+"/manifest",
 
+        # If volume size changed in this period then make trim list.
         ( " && sed -E '1,/"+last_chunk+"/d; "
         +  "s|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)|"
         +  target+"/\\1/x\\1\\2|' "+tmpdir+"/manifest.new >"+target+"/delete"
@@ -1035,7 +1039,8 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
             +"  && export LC_ALL=C"
             +"  && tar -xmf -",
 
-            ( " && cat "+target+"/delete  |  xargs -r rm"
+            # Trim on dest.
+            ( " && cat "+target+"/delete  |  xargs -r rm -f"
             + " && rm "+target+"/delete"
             ) if len(ses_sizes)>1 else ""
             ])
