@@ -305,7 +305,7 @@ def detect_internal_state():
               " Installed version =", ver+".")
 
 
-    ####>  Save helper program  <####
+    #####>  Begin helper program  <#####
 
     dest_program = \
     '''import os, sys, shutil
@@ -343,7 +343,7 @@ with open("''' + tmpdir + '''/rpc/dest.lst", "r") as lstf:
     with open(tmpdir +"/rpc/dest_helper.py", "wb") as progf:
         progf.write(bytes(dest_program, encoding="UTF=8"))
 
-    ####>  End helper program  <####
+    #####>  End helper program  <#####
 
     return vmtype
 
@@ -407,7 +407,7 @@ def dest_run_args(dest_type, commands):
 
     # shunt commands to tmp file
     with tempfile.NamedTemporaryFile(dir=tmpdir, delete=False) as tmpf:
-        tmpf.write(bytes("set -e; "+" ".join(commands) + "\n",
+        tmpf.write(bytes("set -e\n"+" ".join(commands) + "\n",
                         encoding="UTF-8"))
         remotetmp = os.path.basename(tmpf.name)
 
@@ -657,7 +657,7 @@ def send_volume(datavol):
     os.makedirs(sdir+"-tmp")
     zeros = bytes(bkchunksize)
     empty = bytes(0)
-    count = bcount = zcount = 0 ##review
+    bcount = 0
     thetime = time.time()
     addrsplit = -address_split[1]
     lchunk_addr = last_chunk_addr(snap2size, bkchunksize)
@@ -710,7 +710,6 @@ def send_volume(datavol):
                 vf.seek(addr)
                 buf = vf.read(bkchunksize)
                 destfile = "x%016x" % addr
-                ##count += 1
 
                 percent = int(bmap_pos/bmap_size*1000)
                 status = "  %.1f%%   %dMB " \
@@ -727,7 +726,6 @@ def send_volume(datavol):
                 else: # record zero-length file
                     buf = empty
                     print(0, destfile, file=hashf)
-                    ##zcount += 1
 
                 if status:
                     print(status, end="\x0d")
@@ -761,9 +759,6 @@ def send_volume(datavol):
         ses.localtime = localtime
         ses.volsize = snap2size
         ses.chunksize = bkchunksize
-        ##ses.chunks = count
-        ##ses.bytes = bcount
-        ##ses.zeros = zcount
         ses.format = "tar" if options.tarfile else "folders"
         ses.path = sdir+"-tmp"
         ses.save_info()
@@ -969,25 +964,25 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
     # the merge_target will be renamed to the specified target. This avoids
     # processing the full range of volume chunks in the likely case that
     # the oldest (full) session is being pruned.
-    srcf = open(pjoin(tmpdir,"sources.lst"), "w")
     merge_sources = ([target] + list(reversed(sources)))[:-1]
     merge_target  = sources[0]
-    print(merge_target, target, file=srcf)
 
-    # Get manifests, append session name to eol, print session names to srcf.
-    print("  Reading manifests")
-    manifests = ""
-    cmd = ["set -e", "export LC_ALL=C", "cd "+tmpdir]
-    for ses in merge_sources:
-        if clear_sources:
-            print(ses, file=srcf)
-            manifests += " man."+ses
-        cmd.append("sed -E 's|$| "+ses+"|' "
-                   +pjoin(bkdir,datavol,ses+"/manifest")
-                   +" >"+"man."+ses)
+    with open(pjoin(tmpdir,"sources.lst"), "w") as srcf:
+        print(merge_target, target, file=srcf)
 
-    print("###", file=srcf)
-    srcf.close()
+        # Get manifests, append session name to eol, print session names to srcf.
+        print("  Reading manifests")
+        manifests = ""
+        cmd = ["set -e", "export LC_ALL=C", "cd "+tmpdir]
+        for ses in merge_sources:
+            if clear_sources:
+                print(ses, file=srcf)
+                manifests += " man."+ses
+            cmd.append("sed -E 's|$| "+ses+"|' "
+                    +pjoin(bkdir,datavol,ses+"/manifest")
+                    +" >"+"man."+ses)
+
+        print("###", file=srcf)
 
     # Unique-merge filenames: one for rename, one for new full manifest.
     cmd.append("sort -u -m -d -k 2,2 "+manifests
@@ -1001,6 +996,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
     # 'rename src_session/subdir/xaddress target/subdir/xaddress'
     # then pipe to destination and run dest_helper.py.
     print("  Merging to", target)
+
     cmd = ["cd "+pjoin(bkdir,datavol)
         +"  && export LC_ALL=C"
         +"  && sed -E 's|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)\s+"
@@ -1042,6 +1038,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
             # Trim on dest.
             ( " && cat "+target+"/delete  |  xargs -r rm -f"
             + " && rm "+target+"/delete"
+            + " && find "+target+" -maxdepth 1 -type d -empty -delete"
             ) if len(ses_sizes)>1 else ""
             ])
         )]
