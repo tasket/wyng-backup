@@ -110,9 +110,10 @@ in the form of `sparsebak.py [options] command [volume_name]`.
 
 ### Options summary
   * `-u, --unattended` :  Don't prompt for interactive input.
-  * `--tarfile` :  Store backups on destination as tar files (see notes).
-  * `--save-to=path` :  Required for `receive`.
+  * `--all-before` :  Select all sessions before --session date-time.
   * `--session=date-time[,date-time]` : Select sessions by date-time (receive, verify, prune).
+  * `--save-to=path` :  Required for `receive`.
+  * `--tarfile` :  Store backups on destination as tar files (see notes).
   * `--remap` :  Remap volume during `diff`.
 
 #### send
@@ -166,8 +167,11 @@ specific session, or two date-times as a range:
    $ sudo sparsebak.py prune --session=20180605-000000,20180701-140000
    
 ...removes any backup sessions from midnight on June 5 through 2pm on July 1.
-If specific volumes aren't specified, `prune` will operate across all volumes
-enabled in the config file.
+Alternately, `--all-before` may be used with a single `--session` date-time
+to select all sessions prior to that time.
+
+If specific volumes aren't specified, `prune` will operate across all
+enabled volumes.
 
 
 #### monitor
@@ -271,11 +275,15 @@ configs.
 Troubleshooting notes
 ---
 
-A recent change now requires a type prefix for the `destvm` setting. This was
-done to allow clear specification of the type of proceduced calls required and
-so protocols like `ssh` can be supported unambiguously. Existing users will
-have to change their .ini setting to add a `ssh://`, `qubes://` or `internal:`
-prefix.
+* Sessions may be added seemingly out of order if the system's local time shifts
+substantially, such as when moving between time zones. This will show up
+in `list` output, for example, because most functions are done in natural
+sequence. The selection of date-time ranges (i.e. for `prune`) is also affected
+as the start time is scanned from the beginning of the session list while the end
+time is scanned backwards from the last entry; if this results in undesired
+selections, its possible to nail down the precisely desired range by
+observing the output of `list volumename` and using exact date-times from the
+listing.
 
 ### Encryption options
 
