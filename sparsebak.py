@@ -908,7 +908,6 @@ def finalize_bk_session(datavol, sent):
 def prune_sessions(datavol, times):
     global destmountpoint, destdir, bkdir
 
-    print("Pruning Volume :", datavol)
     # Validate date-time params
     for dt in times:
         datetime.datetime.strptime(dt, "%Y%m%d-%H%M%S")
@@ -925,15 +924,26 @@ def prune_sessions(datavol, times):
     if len(sessions) < 2:
         print("No extra sessions to prune.")
         return
-    if t1 == sessions[-1] or t2 >= sessions[-1]:
+    if t1 >= sessions[-1] or t2 >= sessions[-1]:
         print("Cannot prune most recent session; Skipping.")
         return
     if t2 != "" and t2 <= t1:
         x_it(1, "Error: second date-time must be later than first.")
 
-    # Find specific sessions to prune
+    # Find specific sessions to prune;
+    # Use contiguous ranges.
     to_prune = []
-    if t2 == "":
+    if options.allbefore:
+        end = None
+        for ses in reversed(sessions):
+            if ses < t1:
+                end = sessions.index(ses)
+                break
+        if end != None:
+            for ses in sessions[0:end+1]:
+                to_prune.append(ses)
+
+    elif t2 == "":
         if t1 in sessions:
             to_prune.append(t1)
 
@@ -952,7 +962,7 @@ def prune_sessions(datavol, times):
                 if ses < t2:
                     end = sessions.index(ses)
                     break
-        for ses in sessions(start:end+1):
+        for ses in sessions[start:end+1]:
             to_prune.append(ses)
 
     if len(to_prune) == 0:
@@ -962,6 +972,13 @@ def prune_sessions(datavol, times):
     # Determine target session where data will be merged.
     target_s = sessions[sessions.index(to_prune[-1]) + 1]
 
+    if not options.unattended and len(to_prune)>1:
+        print("This will remove multiple sessions:\n"," ".join(to_prune))
+        ans = input("Are you sure? (yes/no): ")
+        if ans.lower() != "yes":
+            x_it(0,"")
+
+    print("Pruning Volume :", datavol)
     merge_sessions(datavol, to_prune, target_s,
                    clear_sources=True)
 
@@ -1370,6 +1387,9 @@ parser.add_argument("-u", "--unattended", action="store_true", default=False,
                     help="Non-interactive, supress prompts")
 parser.add_argument("-a", "--all", action="store_true", default=False,
                     help="Apply action to all volumes")
+parser.add_argument("--all-before", dest="allbefore",
+                    action="store_true", default=False,
+                    help="Select all sessions before --session date-time.")
 parser.add_argument("--tarfile", action="store_true", dest="tarfile", default=False,
                     help="Store backup session as a tarfile")
 parser.add_argument("--session",
