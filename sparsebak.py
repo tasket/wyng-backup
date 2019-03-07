@@ -46,6 +46,25 @@ class ArchiveSet:
         #for key in fs_vols:
         #    self.vols[key] = self.Volume(key, self.path)
 
+    def add_volume(self, datavol):
+        if datavol in self.conf["volumes"].keys():
+            x_it(1, datavol+" is already configured.")
+
+        volname_check = re.compile("^[a-zA-Z0-9\+\._-]+$")
+        if volname_check.match(datavol) == None:
+            x_it(1, "Only characters A-Z 0-9 . + _ - are allowed"
+                " in volume names.")
+
+        if len(datavol) > 112:
+            x_it(1, "Volume name must be 112 characters or less.")
+
+        #self.vols[datavol] = self.Volume(datavol, pjoin(self.path,datavol),
+        #                                 self.vgname)
+
+        self.conf["volumes"][datavol] = "enable"
+        with open(self.confpath, "w") as f:
+            self.conf.write(f)
+
     def delete_volume(self, datavol):
         if datavol in self.conf["volumes"].keys():
             del(self.conf["volumes"][datavol])
@@ -184,9 +203,6 @@ class ArchiveSet:
                 self.localtime = None
                 self.volsize = None
                 self.chunksize = None
-                ##self.chunks = None
-                ##self.bytes = None
-                ##self.zeros = None
                 self.format = None
                 self.sequence = None
                 self.previous = "none"
@@ -209,9 +225,6 @@ class ArchiveSet:
                     print("localtime =", self.localtime, file=f)
                     print("volsize =", self.volsize, file=f)
                     print("chunksize =", self.chunksize, file=f)
-                    ##print("chunks =", self.chunks, file=f)
-                    ##print("bytes =", self.bytes, file=f)
-                    ##print("zeros =", self.zeros, file=f)
                     print("format =", self.format, file=f)
                     print("sequence =", self.sequence, file=f)
                     print("previous =", self.previous, file=f)
@@ -923,10 +936,24 @@ def prune_sessions(datavol, times):
     if t2 == "":
         if t1 in sessions:
             to_prune.append(t1)
+
     else:
-        for ses in sessions:
-            if t1 <= ses <= t2:
-                to_prune.append(ses)
+        if t1 in sessions:
+            start = sessions.index(t1)
+        else:
+            for ses in sessions:
+                if ses > t1:
+                    start = sessions.index(ses)
+                    break
+        if t2 in sessions:
+            end = sessions.index(t2)
+        else:
+            for ses in reversed(sessions):
+                if ses < t2:
+                    end = sessions.index(ses)
+                    break
+        for ses in sessions(start:end+1):
+            to_prune.append(ses)
 
     if len(to_prune) == 0:
         print("No sessions in this date-time range.")
@@ -1336,7 +1363,7 @@ os.makedirs(tmpdir+"/rpc")
 
 # Parse arguments
 parser = argparse.ArgumentParser(description="")
-parser.add_argument("action", choices=["send","monitor","delete",
+parser.add_argument("action", choices=["send","monitor","add","delete",
                     "prune","receive","verify","diff","list","version"],
                     default="monitor", help="Action to take")
 parser.add_argument("-u", "--unattended", action="store_true", default=False,
@@ -1387,7 +1414,7 @@ detect_dest_state(destvm)
 # Check volume args against config
 selected_vols = options.volumes[:]
 for vol in options.volumes:
-    if vol not in datavols and options.action != "delete":
+    if vol not in datavols and options.action not in {"add","delete"}:
         print("Volume "+vol+" not configured; Skipping.")
         del(selected_vols[selected_vols.index(vol)])
 
@@ -1468,24 +1495,31 @@ elif options.action == "list":
     print("" if selected_vols and ending else "\n", end="")
 
 
+elif options.action == "add":
+    if len(options.volumes) < 1:
+        x_it(1, "A volume name is required for 'add' command.")
+
+    aset.add_volume(options.volumes[0])
+    print("Volume", options.volumes[0], "added.")
+
+
 elif options.action == "delete":
     dv = selected_vols[0]
     if not options.unattended:
         print("Warning! Delete will remove ALL metadata AND archived data",
               "for volume", dv)
-        print()
 
         ans = input("Are you sure (y/N)? ")
         if ans.lower() not in {"y","yes"}:
             x_it(0,"")
 
-    print("Deleting", dv)
     path = aset.vols[dv].path
     aset.delete_volume(dv)
     cmd = [destcd
           +" && rm -rf ." + path
           ]
     dest_run(cmd)
+    print("\nVolume", dv, "deleted.")
 
 
 elif options.action == "untar":
