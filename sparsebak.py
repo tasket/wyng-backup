@@ -917,31 +917,32 @@ def prune_sessions(datavol, times):
     t1 = "S_"+times[0].strip()
     if len(times) > 1:
         t2 = "S_"+times[1].strip()
+        if t2 <= t1:
+            x_it(1, "Error: second date-time must be later than first.")
     else:
         t2 = ""
-    sessions = get_sessions(datavol)
 
+    print("Pruning Volume :", datavol)
+
+    sessions = get_sessions(datavol)
     if len(sessions) < 2:
-        print("No extra sessions to prune.")
+        print("  No extra sessions to prune.")
         return
     if t1 >= sessions[-1] or t2 >= sessions[-1]:
-        print("Cannot prune most recent session; Skipping.")
+        print("  Cannot prune most recent session; Skipping.")
         return
-    if t2 != "" and t2 <= t1:
-        x_it(1, "Error: second date-time must be later than first.")
 
     # Find specific sessions to prune;
     # Use contiguous ranges.
     to_prune = []
     if options.allbefore:
-        end = None
-        for ses in reversed(sessions):
-            if ses < t1:
+        end = 0
+        for ses in sessions:
+            if ses >= t1:
                 end = sessions.index(ses)
                 break
-        if end != None:
-            for ses in sessions[0:end+1]:
-                to_prune.append(ses)
+        for ses in sessions[0:end]:
+            to_prune.append(ses)
 
     elif t2 == "":
         if t1 in sessions:
@@ -966,7 +967,7 @@ def prune_sessions(datavol, times):
             to_prune.append(ses)
 
     if len(to_prune) == 0:
-        print("No sessions in this date-time range.")
+        print("  No sessions in this date-time range.")
         return
 
     # Determine target session where data will be merged.
@@ -978,7 +979,6 @@ def prune_sessions(datavol, times):
         if ans.lower() != "yes":
             x_it(0,"")
 
-    print("Pruning Volume :", datavol)
     merge_sessions(datavol, to_prune, target_s,
                    clear_sources=True)
 
