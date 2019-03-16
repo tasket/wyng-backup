@@ -111,6 +111,11 @@ class ArchiveSet:
 
             # Convert metadata fron alpha to v1:
             # move map to new location
+            no_manifest = [ses.name for ses in self.sessions.values()
+                           if not ses.present]
+            if len(no_manifest):
+                print("** WARNING: Some manifests do not exist for", name,
+                      "\n(Alpha format?)")
             mapfile = pjoin(path, "deltamap")
             if os.path.exists(path+".deltamap"):
                 os.rename(path+".deltamap", mapfile)
@@ -132,7 +137,8 @@ class ArchiveSet:
                 self.save_volinfo()
 
             if int(self.format_ver) > format_version:
-                raise ValueError("Archive format ver = "+self.format_ver)
+                raise ValueError("Archive format ver = "+self.format_ver+
+                                 ". Expected = "+format_version)
 
             # build ordered, linked list of names
             sesnames = []
@@ -660,18 +666,18 @@ def get_sessions(datavol):
 # Send volume to destination:
 
 def send_volume(datavol):
-    if not os.path.exists(bkdir+"/"+datavol):
-        os.makedirs(bkdir+"/"+datavol)
-    sessions = get_sessions(datavol)
-    send_all = len(sessions) == 0
+    vol = aset.vols[datavol]
+    sdir = vol.path+"/"+bksession
 
     # Make new session folder
-    sdir = bkdir+"/"+datavol+"/"+bksession
-    os.makedirs(sdir+"-tmp")
+    if not os.path.exists(sdir+"-tmp"):
+        os.makedirs(sdir+"-tmp")
+
+    sessions = get_sessions(datavol)
+    send_all = len(sessions) == 0
     zeros = bytes(bkchunksize)
     empty = bytes(0)
     bcount = 0
-    thetime = time.time()
     addrsplit = -address_split[1]
     lchunk_addr = last_chunk_addr(snap2size, bkchunksize)
 
@@ -708,9 +714,12 @@ def send_volume(datavol):
             open("/dev/zero" if send_all else mapfile+"-tmp","r+b") as bmapf:
         bmap_mm = bytes(1) if send_all else mmap.mmap(bmapf.fileno(), 0)
 
-        # Cycle over range of addresses in volume.
+        # Show progress in increments determined by 1000/checkpt_pct
+        # where '200' results in five updates i.e. in unattended mode.
         checkpt = checkpt_pct = 200 if options.unattended else 1
-        percent = 0; status = ""
+        percent = 0
+
+        # Cycle over range of addresses in volume.
         for addr in range(0, snap2size, bkchunksize):
 
             # Calculate corresponding position in bitmap.
@@ -718,16 +727,19 @@ def send_volume(datavol):
             bmap_pos = chunk // 8
             b = chunk % 8
 
-            # Should this chunk be sent?
+            # Send chunk if its above the send-all line
+            # or its bit is on in the deltamap.
             if addr >= sendall_addr or bmap_mm[bmap_pos] & (1 << b):
                 vf.seek(addr)
                 buf = vf.read(bkchunksize)
                 destfile = "x%016x" % addr
 
+                # Show progress.
                 percent = int(bmap_pos/bmap_size*1000)
-                status = "  %.1f%%   %dMB " \
-                    % (percent/10, bcount//1000000) \
-                    if percent >= checkpt else ""
+                if percent >= checkpt:
+                    print("  %.1f%%   %dMB " % (percent/10, bcount//1000000),
+                          end="\x0d")
+                    checkpt += checkpt_pct
 
                 # Compress & write only non-empty and last chunks
                 if buf != zeros or addr >= lchunk_addr:
@@ -739,10 +751,6 @@ def send_volume(datavol):
                 else: # record zero-length file
                     buf = empty
                     print(0, destfile, file=hashf)
-
-                if status:
-                    print(status, end="\x0d")
-                    checkpt += checkpt_pct
 
                 # Start tar stream
                 if not stream_started:
@@ -767,7 +775,6 @@ def send_volume(datavol):
         print("  100%  ", ("%.1f" % (bcount/1000000)) +"MB")
 
         # Save session info
-        vol = aset.vols[datavol]
         ses = vol.new_session(bksession)
         ses.localtime = localtime
         ses.volsize = snap2size
@@ -798,20 +805,17 @@ def send_volume(datavol):
 
         # Cleanup on VM/remote
         dest_run([ destcd
-            +" && mv '."+sdir+"-tmp' '."+sdir+"'"
-            +" && mv '."+os.path.dirname(sdir)+"/volinfo-tmp'"
-            +" '."+os.path.dirname(sdir)+"/volinfo'"
+            +" && mv ."+sdir+"-tmp ."+sdir
+            +" && mv ."+vol.path+"/volinfo-tmp ."+vol.path+"/volinfo"
             +" && sync"])
         os.replace(sdir+"-tmp", sdir)
-        os.replace(os.path.dirname(sdir)+"/volinfo-tmp",
-                   os.path.dirname(sdir)+"/volinfo")
+        os.replace(vol.path+"/volinfo-tmp", vol.path+"/volinfo")
 
     else:
         shutil.rmtree(sdir+"-tmp")
 
     if bcount == 0:
         print("  No changes.")
-    #print(" ", bcount, "bytes sent.")
     return stream_started
 
 
@@ -922,7 +926,7 @@ def prune_sessions(datavol, times):
     else:
         t2 = ""
 
-    print("Pruning Volume :", datavol)
+    print("\nPruning Volume :", datavol)
 
     sessions = get_sessions(datavol)
     if len(sessions) < 2:
@@ -936,12 +940,9 @@ def prune_sessions(datavol, times):
     # Use contiguous ranges.
     to_prune = []
     if options.allbefore:
-        end = 0
         for ses in sessions:
             if ses >= t1:
-                end = sessions.index(ses)
                 break
-        for ses in sessions[0:end]:
             to_prune.append(ses)
 
     elif t2 == "":
@@ -956,15 +957,15 @@ def prune_sessions(datavol, times):
                 if ses > t1:
                     start = sessions.index(ses)
                     break
+        end = 0
         if t2 in sessions:
-            end = sessions.index(t2)
+            end = sessions.index(t2)+1
         else:
             for ses in reversed(sessions):
                 if ses < t2:
-                    end = sessions.index(ses)
+                    end = sessions.index(ses)+1
                     break
-        for ses in sessions[start:end+1]:
-            to_prune.append(ses)
+        to_prune = sessions[start:end]
 
     if len(to_prune) == 0:
         print("  No sessions in this date-time range.")
@@ -1315,7 +1316,6 @@ def x_it(code, text):
 ##  Main  #####################################################################
 
 ''' ToDo:
-    Config management, add/recognize disabled volumes
     Check free space on destination
     Encryption
     Reconcile deltas or del archive vol when restoring from older session
@@ -1325,8 +1325,7 @@ def x_it(code, text):
     Option for live Qubes volumes (*-private-snap)
     Guard against vm snap rotation during receive-save
     Verify entire archive
-    Deleting volumes
-    Multiple storage pool configs
+    Rename and info commands
     Auto-pruning/rotation
     Auto-resume aborted backup session:
         Check dir/file presence, volume sizes, deltabmap size
@@ -1440,16 +1439,16 @@ for vol in options.volumes:
 
 
 # Process commands
-print()
-if options.action == "monitor":
+
+if options.action   == "monitor":
     monitor_send(datavols, monitor_only=True)
 
 
-elif options.action   == "send":
+elif options.action == "send":
     monitor_send(selected_vols, monitor_only=False)
 
 
-if options.action == "version":
+elif options.action == "version":
     print(prog_name, "version", prog_version)
 
 
