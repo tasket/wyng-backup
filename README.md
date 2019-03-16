@@ -106,11 +106,12 @@ in the form of `sparsebak.py [options] command [volume_name]`.
   * `prune --session=date-times [volume_name]` : Remove older backup sessions.
   * `monitor` :  Scan and collect volume change info for all enabled volumes.
   * `diff volume_name` :  Compare local volume with archive.
-  * `delete volume_name` :  Remove entire volume from archive.
+  * `add volume_name` :  Add a volume to the configuration.
+  * `delete volume_name` :  Remove entire volume from config and archive.
 
 ### Options summary
   * `-u, --unattended` :  Don't prompt for interactive input.
-  * `--all-before` :  Select all sessions before --session date-time.
+  * `--all-before` :  Select all sessions before the specified --session date-time.
   * `--session=date-time[,date-time]` : Select sessions by date-time (receive, verify, prune).
   * `--save-to=path` :  Required for `receive`.
   * `--tarfile` :  Store backups on destination as tar files (see notes).
@@ -197,12 +198,19 @@ volume's current change map, resulting in those blocks being backed-up on
 the next `send`.
 
 
+#### add
+
+   $ sudo sparsebak.py add vm-untrusted-private
+
+Adds a new entry to the list of volumes configured for backup.
+
+
 #### delete
 
    $ sudo sparsebak.py delete vm-untrusted-private
 
-Removes an entire volume's data and metadata from the source system and
-destination archive. Use with caution!
+Removes a volume's config, snapshots and metadata from the source system and
+all of its *data* from the destination archive. Use with caution!
 
 
 ### Other restore options
@@ -275,15 +283,11 @@ configs.
 Troubleshooting notes
 ---
 
-* Sessions may be added seemingly out of order if the system's local time shifts
-substantially, such as when moving between time zones. This will show up
-in `list` output, for example, because most functions are done in natural
-sequence. The selection of date-time ranges (i.e. for `prune`) is also affected
-as the start time is scanned from the beginning of the session list while the end
-time is scanned backwards from the last entry; if this results in undesired
-selections, its possible to nail down the precisely desired range by
-observing the output of `list volumename` and using exact date-times from the
-listing.
+* Sessions may be listed seemingly out of order if the system's local time shifts
+substantially between backups, such as when moving between time zones.
+If this results in undesired selections with `--session` parameters, its possible
+to nail down the precisely desired range by observing the output of
+`list volumename` and using exact date-times from the listing.
 
 ### Encryption options
 
@@ -311,8 +315,6 @@ this procedure by omitting step 2 and performing steps 1 and 3 in a single conte
 
 Todo
 ---
-
-* Inclusion of system-specific metadata in backups (VM/container configs, etc.)
 
 * Encryption integration
 
