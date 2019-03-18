@@ -90,6 +90,7 @@ class ArchiveSet:
             self.enabled = False
             self.error = False
             self.volsize = None
+            self.chunksize = bkchunksize
             # persisted:
             self.format_ver = "0"
             self.uuid = None
@@ -139,6 +140,10 @@ class ArchiveSet:
             if int(self.format_ver) > format_version:
                 raise ValueError("Archive format ver = "+self.format_ver+
                                  ". Expected = "+format_version)
+
+            # use last known chunk size
+            if len(self.sessions):
+                self.chunksize = self.sessions[self.last].chunksize
 
             # build ordered, linked list of names
             sesnames = []
@@ -213,7 +218,7 @@ class ArchiveSet:
                 self.sequence = None
                 self.previous = "none"
                 attr_str = {"localtime","format","previous"}
-                attr_int = {"volsize","chunksize","sequence"} ##chunks,bytes,zeros
+                attr_int = {"volsize","chunksize","sequence"}
 
                 if path:
                     with open(pjoin(path,"info"), "r") as sf:
@@ -479,7 +484,8 @@ def prepare_snapshots(datavols):
     dvs = []
     nvs = []
     for datavol in datavols:
-        sessions = get_sessions(datavol)
+        vol = aset.vols[datavol]
+        sessions = vol.sesnames
         snap1vol = datavol + ".tick"
         snap2vol = datavol + ".tock"
         mapfile = pjoin(bkdir, datavol, "deltamap")
@@ -551,14 +557,6 @@ def get_lvm_size(volpath):
     return size
 
 
-def get_info_vol_size(datavol, ses=""):
-    if ses == "":
-        # Select last session if none specified
-        ses = get_sessions(datavol)[-1]
-
-    return aset.vols[datavol].sessions[ses].volsize
-
-
 # Get raw lvm deltas between snapshots
 
 def get_lvm_deltas(datavols):
@@ -602,6 +600,8 @@ def update_delta_digest(datavol):
     if monitor_only:
         print("Updating block change map. ", end="")
 
+    vol = aset.vols[datavol]
+    bkchunksize = vol.chunksize
     os.rename(mapfile, mapfile+"-tmp")
     dtree = xml.etree.ElementTree.parse(tmpdir+"/delta."+datavol).getroot()
     dblocksize = int(dtree.get("data_block_size"))
@@ -632,7 +632,7 @@ def update_delta_digest(datavol):
 
             # blockpos iterates over disk blocks, with
             # thin LVM tools constant of 512 bytes/block.
-            # dblocksize (source) and and bkchunksize (dest) may be
+            # dblocksize (source) and and chunksize (dest) may be
             # somewhat independant of each other.
             for blockpos in range(blockbegin, blockbegin + blocklen):
                 volsegment = blockpos // (bkchunksize // bs)
@@ -658,23 +658,19 @@ def last_chunk_addr(volsize, chunksize):
     return (volsize-1) - ((volsize-1) % chunksize)
 
 
-def get_sessions(datavol):
-    # do not sort session names
-    return aset.vols[datavol].sesnames
-
-
 # Send volume to destination:
 
 def send_volume(datavol):
     vol = aset.vols[datavol]
+    sessions = vol.sesnames
     sdir = vol.path+"/"+bksession
+    send_all = len(sessions) == 0
+    bkchunksize = vol.chunksize
 
     # Make new session folder
     if not os.path.exists(sdir+"-tmp"):
         os.makedirs(sdir+"-tmp")
 
-    sessions = get_sessions(datavol)
-    send_all = len(sessions) == 0
     zeros = bytes(bkchunksize)
     empty = bytes(0)
     bcount = 0
@@ -690,7 +686,7 @@ def send_volume(datavol):
 
     # Check volume size vs prior backup session
     if len(sessions) > 0 and not send_all:
-        prior_size = get_info_vol_size(datavol)
+        prior_size = vol.volsize
         next_chunk_addr = last_chunk_addr(prior_size, bkchunksize) + bkchunksize
         if prior_size > snap2size:
             print("  Volume size has shrunk.")
@@ -854,11 +850,12 @@ def monitor_send(volumes=[], monitor_only=True):
 
     for datavol in datavols+newvols:
         print("\nVolume :", datavol)
+        vol = aset.vols[datavol]
         snap1vol = datavol + ".tick"
         snap2vol = datavol + ".tock"
         snap1size = get_lvm_size(pjoin("/dev",vgname,snap1vol))
         snap2size = get_lvm_size(pjoin("/dev",vgname,snap2vol))
-        bmap_size = (snap2size // bkchunksize // 8) + 1
+        bmap_size = (snap2size // vol.chunksize // 8) + 1
 
         mapfile = pjoin(bkdir,datavol,"deltamap")
         map_exists, map_updated \
@@ -928,7 +925,8 @@ def prune_sessions(datavol, times):
 
     print("\nPruning Volume :", datavol)
 
-    sessions = get_sessions(datavol)
+    volume = aset.vols[datavol]
+    sessions = volume.sesnames
     if len(sessions) < 2:
         print("  No extra sessions to prune.")
         return
@@ -1001,8 +999,8 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
             x_it(1, "Cannot merge range containing tarfile session.")
 
     # Get volume size
-    volsize = get_info_vol_size(datavol, target)
-    last_chunk = "x"+format(last_chunk_addr(volsize,bkchunksize), "016x")
+    volsize = volume.sessions[target].volsize
+    last_chunk = "x"+format(last_chunk_addr(volsize, volume.chunksize), "016x")
 
     # Prepare manifests for efficient merge using fs mv/replace. The target is
     # included as a source, and oldest source is our target for mv. At the end
@@ -1098,6 +1096,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
 def receive_volume(datavol, select_ses="", save_path="", diff=False):
     global destmountpoint, destdir, bkdir, bkchunksize, vgname, poolname
 
+    verify_only = not (diff or save_path!="")
     attended = not options.unattended
     if save_path and os.path.exists(save_path) and attended:
         print("\n!! This will erase all existing data in",save_path)
@@ -1105,7 +1104,10 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         if ans.lower() != "yes":
             x_it(0,"")
 
-    sessions = get_sessions(datavol)
+    vol = aset.vols[datavol]
+    volsize = vol.volsize
+    bkchunksize = vol.chunksize
+    sessions = vol.sesnames
     # Set the session to retrieve
     if select_ses:
         datetime.datetime.strptime(select_ses, "%Y%m%d-%H%M%S")
@@ -1119,7 +1121,6 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
 
     print("\nReading manifests")
-    volsize = get_info_vol_size(datavol, select_ses)
     last_chunk = "x"+format(last_chunk_addr(volsize, bkchunksize), "016x")
     zeros = bytes(bkchunksize)
     open(tmpdir+"/manifests.cat", "wb").close()
@@ -1131,7 +1132,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             include = True
         elif not include:
             continue
-        if aset.vols[datavol].sessions[ses].format == "tar":
+
+        if vol.sessions[ses].format == "tar":
             raise NotImplementedError(
                 "Receive from tarfile not yet implemented: "+ses)
 
@@ -1272,7 +1274,9 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             if attended:
                 print("OK",end="\x0d")
 
-            if save_path:
+            if verify_only:
+                continue
+            elif save_path:
                 buf = gzip.decompress(untrusted_buf)
                 if len(buf) > bkchunksize:
                     raise BufferError("Decompressed to "+len(buf)+" bytes")
@@ -1498,14 +1502,14 @@ elif options.action == "list":
 
     for dv in selected_vols:
         print("Sessions for volume",dv,":")
-        sessions = get_sessions(dv)
+        vol = aset.vols[dv]
         lmonth = ""; count = 0; ending = "."
-        for ses in sessions:
+        for ses in vol.sesnames:
             if ses[:8] != lmonth:
                 print("" if ending else "\n")
                 count = 0
             print(" ",ses[2:]+(" (tar)"
-                        if aset.vols[dv].sessions[ses].format == "tar"
+                        if vol.sessions[ses].format == "tar"
                         else ""), end="")
             ending = "\n" if count % 5 == 4 else ""
             print("", end=ending)
