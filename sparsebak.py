@@ -782,11 +782,11 @@ def send_volume(datavol):
         ses.format = "tar" if options.tarfile else "folders"
         ses.path = sdir+"-tmp"
         ses.save_info()
-        vol.que_meta_update = "false"
-        vol.save_volinfo("volinfo-tmp")
         for session in vol.sessions.values() \
                         if vol.que_meta_update == "true" else [ses]:
             tarf.add(session.path)
+        vol.que_meta_update = "false"
+        vol.save_volinfo("volinfo-tmp")
         tarf.add(vol.path+"/volinfo-tmp")
 
         #print("Ending tar process ", end="")
