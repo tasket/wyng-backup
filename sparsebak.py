@@ -1099,6 +1099,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
     verify_only = not (diff or save_path!="")
     attended = not options.unattended
+    remap = options.remap
     if save_path and os.path.exists(save_path) and attended:
         print("\n!! This will erase all existing data in",save_path)
         ans = input("   Are you sure? (yes/no): ")
@@ -1108,6 +1109,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     vol = aset.vols[datavol]
     volsize = vol.volsize
     bkchunksize = vol.chunksize
+    snap1vol = datavol+".tick"
     sessions = vol.sesnames
     # Set the session to retrieve
     if select_ses:
@@ -1201,30 +1203,40 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                 ["truncate", "-s", str(volsize), save_path])
         print("Saving to", save_path)
         savef = open(save_path, "w+b")
+
     elif diff:
-        # Fix: check info vs lvm volume size
-        print("(For diff, make sure the specified volume"
-                " has been recently sent.)\n")
         mapfile = pjoin(bkdir, datavol, "deltamap")
         bmap_size = (volsize // bkchunksize // 8) + 1
-        if not lv_exists(vgname, datavol+".tick"):
-            p = subprocess.check_output(["lvcreate", "-pr", "-kn",
-                "-ay", "-s", vgname+"/"+datavol, "-n", snap1vol],
-                stderr=subprocess.STDOUT)
-            print("  Initial snapshot created for", datavol)
-        if not os.path.exists(mapfile):
-            init_deltamap(mapfile, bmap_size)
 
-        cmpf  = open(pjoin("/dev",vgname,datavol+".tick"), "rb")
-        bmapf = open(mapfile, "r+b")
-        os.ftruncate(bmapf.fileno(), bmap_size)
-        bmap_mm = mmap.mmap(bmapf.fileno(), 0)
+        if remap:
+            if not lv_exists(vgname, snap1vol):
+                p = subprocess.check_output(["lvcreate", "-pr", "-kn",
+                    "-ay", "-s", vgname+"/"+datavol, "-n", snap1vol],
+                    stderr=subprocess.STDOUT)
+                print("  Initial snapshot created for", datavol)
+            if not os.path.exists(mapfile):
+                init_deltamap(mapfile, bmap_size)
+            bmapf = open(mapfile, "r+b")
+            os.ftruncate(bmapf.fileno(), bmap_size)
+            bmap_mm = mmap.mmap(bmapf.fileno(), 0)
+        else:
+            if not lv_exists(vgname, snap1vol):
+                print("Snapshot '.tick' not available; Comparing with"
+                      " source volume instead.")
+                snap1vol = datavol
+
+        if volsize != l_vols[snap1vol].lv_size:
+            x_it(1, "Volume sizes differ:"
+                 "\n  Archive = %d"
+                 "\n  Local   = %d" % (volsize, l_vols[snap1vol].lv_size))
+
+        cmpf  = open(pjoin("/dev",vgname,snap1vol), "rb")
         diff_count = 0
 
     # Open manifest then receive, check and save data
     with open(tmpdir+"/manifest.verify", "r") as mf:
         for addr in range(0, volsize, bkchunksize):
-            faddr = "x"+format(addr,"016x")
+            faddr = "x%016x" % addr
             if attended:
                 print(int(addr/volsize*100),"%  ",faddr,end="  ")
 
@@ -1237,7 +1249,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
             if untrusted_size == 0:
                 if cksum.strip() != "0":
-                    raise ValueError("Expected zero length, got "+untrusted_size)
+                    raise ValueError("Expected %s length, got %d." 
+                                     % (cksum, untrusted_size))
 
                 print("OK",end="\x0d")
                 if save_path:
@@ -1277,33 +1290,35 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
             if verify_only:
                 continue
-            elif save_path:
-                buf = gzip.decompress(untrusted_buf)
-                if len(buf) > bkchunksize:
-                    raise BufferError("Decompressed to "+len(buf)+" bytes")
+
+            buf = gzip.decompress(untrusted_buf)
+            if len(buf) > bkchunksize:
+                raise BufferError("Decompressed to "+len(buf)+" bytes")
+
+            if save_path:
                 savef.write(buf)
             elif diff:
-                buf = gzip.decompress(untrusted_buf)
-                if len(buf) > bkchunksize:
-                    raise BufferError("Decompressed to "+len(buf)+" bytes")
                 buf2 = cmpf.read(bkchunksize)
                 if buf != buf2:
                     print("* delta", faddr, "    ")
-                    if options.remap:
+                    if remap:
                         volsegment = addr // bkchunksize 
                         bmap_pos = volsegment // 8
                         bmap_mm[bmap_pos] |= 1 << (volsegment % 8)
                     diff_count += len(buf)
 
-        print("\nReceived bytes :",addr)
+        print("\nReceived byte range:", addr+len(buf))
         if rc is not None and rc > 0:
             raise RuntimeError("Error code from getvol process: "+rc)
+        if addr+len(buf) != volsize:
+            raise ValueError("Received range does not match volume size %d."
+                             % volsize)
         if save_path:
             savef.close()
         elif diff:
-            bmapf.close()
             cmpf.close()
-            if options.remap:
+            if remap:
+                bmapf.close()
                 print("Delta bytes re-mapped:", diff_count)
                 if diff_count > 0:
                     print("\nNext 'send' will bring this volume into sync.")
