@@ -797,13 +797,12 @@ def send_volume(datavol):
             if untar.poll() == None:
                 untar.terminate()
                 print("terminated untar process!")
-                # fix: verify archive dir contents here
 
         # Cleanup on VM/remote
         dest_run([ destcd
             +" && mv ."+sdir+"-tmp ."+sdir
             +" && mv ."+vol.path+"/volinfo-tmp ."+vol.path+"/volinfo"
-            +" && sync"])
+            +" && sync -f ."+vol.path+"/volinfo"])
         os.replace(sdir+"-tmp", sdir)
         os.replace(vol.path+"/volinfo-tmp", vol.path+"/volinfo")
 
@@ -1082,7 +1081,9 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
             ( " && cat "+target+"/delete  |  xargs -r rm -f"
             + " && rm "+target+"/delete"
             + " && find "+target+" -maxdepth 1 -type d -empty -delete"
-            ) if len(ses_sizes)>1 else ""
+            ) if len(ses_sizes)>1 else "",
+
+              " && sync -f volinfo"
             ])
         )]
     p = subprocess.check_call(" ".join(cmd), shell=True)
@@ -1540,6 +1541,7 @@ elif options.action == "delete":
     aset.delete_volume(dv)
     cmd = [destcd
           +" && rm -rf ." + path
+          +" && sync -f ."+ os.path.dirname(path)
           ]
     dest_run(cmd)
     print("\nVolume", dv, "deleted.")
