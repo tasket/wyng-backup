@@ -1252,11 +1252,14 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                     raise ValueError("Expected %s length, got %d." 
                                      % (cksum, untrusted_size))
 
-                print("OK",end="\x0d")
+                if attended:
+                    print("OK",end="\x0d")
+
                 if save_path:
                     savef.seek(bkchunksize, 1)
                 elif diff:
                     cmpf.seek(bkchunksize, 1)
+
                 continue
 
             # allow for slight expansion from compression algo
