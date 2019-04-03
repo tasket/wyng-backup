@@ -449,10 +449,11 @@ def dest_run_args(dest_type, commands):
             add_cmd = ["'sh "+pjoin(tmpdir,"rpc",remotetmp)+"'"]
         elif dest_type == "qubes-ssh":
             add_cmd = ["'ssh "+destvm.split("|")[1]
-                      +" $(cat "+pjoin(tmpdir,"rpc",remotetmp)+")'"]
+                      +' "$(cat '+pjoin(tmpdir,"rpc",remotetmp)+')"'
+                      +"'"]
 
     elif dest_type == "ssh":
-        add_cmd = [" $(cat "+pjoin(tmpdir,remotetmp)+")"]
+        add_cmd = [' "$(cat '+pjoin(tmpdir,remotetmp)+')"']
 
     elif dest_type == "internal":
         add_cmd = [pjoin(tmpdir,remotetmp)]
@@ -1265,7 +1266,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             # allow for slight expansion from compression algo
             if untrusted_size > bkchunksize + (bkchunksize // 1024) \
                 or untrusted_size < 0:
-                    raise BufferError("Bad chunk size: "+untrusted_size)
+                    raise BufferError("Bad chunk size: %d" % untrusted_size)
 
             # Size is OK.
             size = untrusted_size
@@ -1279,8 +1280,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             if len(untrusted_buf) != size:
                 with open(tmpdir+"/bufdump", "wb") as dump:
                     dump.write(untrusted_buf)
-                raise BufferError("Got "+len(untrusted_buf)
-                                  +" bytes, expected "+size)
+                raise BufferError("Got %d bytes, expected %d"
+                                  % (len(untrusted_buf), size))
             if cksum != hashlib.sha256(untrusted_buf).hexdigest():
                 with open(tmpdir+"/bufdump", "wb") as dump:
                     dump.write(untrusted_buf)
@@ -1296,7 +1297,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
             buf = gzip.decompress(untrusted_buf)
             if len(buf) > bkchunksize:
-                raise BufferError("Decompressed to "+len(buf)+" bytes")
+                raise BufferError("Decompressed to %d bytes" % len(buf))
 
             if save_path:
                 savef.write(buf)
@@ -1312,7 +1313,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
         print("\nReceived byte range:", addr+len(buf))
         if rc is not None and rc > 0:
-            raise RuntimeError("Error code from getvol process: "+rc)
+            raise RuntimeError("Error code from getvol process: "+str(rc))
         if addr+len(buf) != volsize:
             raise ValueError("Received range does not match volume size %d."
                              % volsize)
@@ -1336,26 +1337,7 @@ def x_it(code, text):
 
 
 
-##  Main  #####################################################################
-
-''' ToDo:
-    Check free space on destination
-    Encryption
-    Reconcile deltas or del archive vol when restoring from older session
-    Add support for special source metadata (qubes.xml etc)
-    Add other destination exec types (sftp)
-    Separate threads for encoding tasks
-    Option for live Qubes volumes (*-private-snap)
-    Guard against vm snap rotation during receive-save
-    Verify entire archive
-    Rename and info commands
-    Auto-pruning/rotation
-    Auto-resume aborted backup session:
-        Check dir/file presence, volume sizes, deltabmap size
-        Example: if deltamap-tmp exists, then perform checks on
-        which snapshots exist.
-'''
-
+##  MAIN  #####################################################################
 
 # Constants
 prog_version = "0.2.0betaX"
