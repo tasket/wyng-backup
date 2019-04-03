@@ -1263,8 +1263,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                 continue
 
             # allow for slight expansion from compression algo
-            if untrusted_size > bkchunksize + (bkchunksize // 128) \
-                or untrusted_size < 1:
+            if untrusted_size > bkchunksize + (bkchunksize // 1024) \
+                or untrusted_size < 0:
                     raise BufferError("Bad chunk size: "+untrusted_size)
 
             # Size is OK.
