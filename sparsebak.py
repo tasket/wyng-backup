@@ -1303,13 +1303,13 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             if attended:
                 print("OK",end="\x0d")
 
-            if verify_only:
-                continue
-
             # fix for zstd support
             buf = decompress(untrusted_buf, decomp_bits, chunksize)
             if len(buf) > chunksize:
                 raise BufferError("Decompressed to %d bytes" % len(buf))
+
+            if verify_only:
+                continue
 
             if save_path:
                 savef.write(buf)
