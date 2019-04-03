@@ -7,7 +7,7 @@
 
 
 import sys, os, stat, shutil, subprocess, time, datetime
-import re, mmap, gzip, tarfile, io, fcntl, tempfile
+import re, mmap, zlib, gzip, tarfile, io, fcntl, tempfile
 import xml.etree.ElementTree
 import argparse, configparser, hashlib, uuid
 
@@ -93,6 +93,8 @@ class ArchiveSet:
             self.chunksize = bkchunksize
             # persisted:
             self.format_ver = "0"
+            self.compression = "zlib"
+            self.compresslevel = "4"
             self.uuid = None
             self.first = None
             self.last = None
@@ -602,12 +604,12 @@ def update_delta_digest(datavol):
         print("Updating block change map. ", end="")
 
     vol = aset.vols[datavol]
-    bkchunksize = vol.chunksize
+    chunksize = vol.chunksize
     os.rename(mapfile, mapfile+"-tmp")
     dtree = xml.etree.ElementTree.parse(tmpdir+"/delta."+datavol).getroot()
     dblocksize = int(dtree.get("data_block_size"))
     #if dblocksize % lvm_block_factor != 0:
-    #    print("bkchunksize =", bkchunksize)
+    #    print("bkchunksize =", chunksize)
     #    print("dblocksize  =", dblocksize)
     #    print("bs          =", bs)
     #    raise ValueError("dblocksize error")
@@ -636,7 +638,7 @@ def update_delta_digest(datavol):
             # dblocksize (source) and and chunksize (dest) may be
             # somewhat independant of each other.
             for blockpos in range(blockbegin, blockbegin + blocklen):
-                volsegment = blockpos // (bkchunksize // bs)
+                volsegment = blockpos // (chunksize // bs)
                 bmap_pos = volsegment // 8
                 if bmap_pos != lastindex:
                     bmap_mm[lastindex] |= bmap_byte
@@ -666,17 +668,17 @@ def send_volume(datavol):
     sessions = vol.sesnames
     sdir = vol.path+"/"+bksession
     send_all = len(sessions) == 0
-    bkchunksize = vol.chunksize
+    chunksize = vol.chunksize
 
     # Make new session folder
     if not os.path.exists(sdir+"-tmp"):
         os.makedirs(sdir+"-tmp")
 
-    zeros = bytes(bkchunksize)
+    zeros = bytes(chunksize)
     empty = bytes(0)
     bcount = 0
     addrsplit = -address_split[1]
-    lchunk_addr = last_chunk_addr(snap2size, bkchunksize)
+    lchunk_addr = last_chunk_addr(snap2size, chunksize)
 
     if send_all:
         # sends all from this address forward
@@ -688,12 +690,17 @@ def send_volume(datavol):
     # Check volume size vs prior backup session
     if len(sessions) > 0 and not send_all:
         prior_size = vol.volsize
-        next_chunk_addr = last_chunk_addr(prior_size, bkchunksize) + bkchunksize
+        next_chunk_addr = last_chunk_addr(prior_size, chunksize) + chunksize
         if prior_size > snap2size:
             print("  Volume size has shrunk.")
         elif snap2size-1 >= next_chunk_addr:
             print("  Volume size has increased.")
             sendall_addr = next_chunk_addr
+
+    if vol.compression=="zlib":
+        compress = zlib.compress
+    # add zstd here.
+    compresslevel = int(vol.compresslevel)
 
     # Use tar to stream files to destination
     stream_started = False
@@ -717,10 +724,10 @@ def send_volume(datavol):
         percent = 0
 
         # Cycle over range of addresses in volume.
-        for addr in range(0, snap2size, bkchunksize):
+        for addr in range(0, snap2size, chunksize):
 
             # Calculate corresponding position in bitmap.
-            chunk = addr // bkchunksize
+            chunk = addr // chunksize
             bmap_pos = chunk // 8
             b = chunk % 8
 
@@ -728,7 +735,7 @@ def send_volume(datavol):
             # or its bit is on in the deltamap.
             if addr >= sendall_addr or bmap_mm[bmap_pos] & (1 << b):
                 vf.seek(addr)
-                buf = vf.read(bkchunksize)
+                buf = vf.read(chunksize)
                 destfile = "x%016x" % addr
 
                 # Show progress.
@@ -741,7 +748,7 @@ def send_volume(datavol):
                 # Compress & write only non-empty and last chunks
                 if buf != zeros or addr >= lchunk_addr:
                     # Performance fix: move compression into separate processes
-                    buf = gzip.compress(buf, compresslevel=4)
+                    buf = compress(buf, compresslevel)
                     bcount += len(buf)
                     print(hashlib.sha256(buf).hexdigest(), destfile,
                             file=hashf)
@@ -775,7 +782,7 @@ def send_volume(datavol):
         ses = vol.new_session(bksession)
         ses.localtime = localtime
         ses.volsize = snap2size
-        ses.chunksize = bkchunksize
+        ses.chunksize = chunksize
         ses.format = "tar" if options.tarfile else "folders"
         ses.path = sdir+"-tmp"
         ses.save_info()
@@ -1096,7 +1103,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
 # are lost or if the source volume reverted to an earlier state.
 
 def receive_volume(datavol, select_ses="", save_path="", diff=False):
-    global destmountpoint, destdir, bkdir, bkchunksize, vgname, poolname
+    global destmountpoint, destdir, bkdir, vgname, poolname
 
     verify_only = not (diff or save_path!="")
     attended = not options.unattended
@@ -1109,7 +1116,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
     vol = aset.vols[datavol]
     volsize = vol.volsize
-    bkchunksize = vol.chunksize
+    chunksize = vol.chunksize
     snap1vol = datavol+".tick"
     sessions = vol.sesnames
     # Set the session to retrieve
@@ -1123,10 +1130,14 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     else:
         x_it(1, "No sessions available.")
 
+    if vol.compression in {"zlib","gzip"}:
+        decompress  = zlib.decompress
+        decomp_bits = 32 + zlib.MAX_WBITS
+    # add zstd here.
 
     print("\nReading manifests")
-    last_chunk = "x"+format(last_chunk_addr(volsize, bkchunksize), "016x")
-    zeros = bytes(bkchunksize)
+    last_chunk = "x"+format(last_chunk_addr(volsize, chunksize), "016x")
+    zeros = bytes(chunksize)
     open(tmpdir+"/manifests.cat", "wb").close()
 
     # Collect session manifests
@@ -1207,7 +1218,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
     elif diff:
         mapfile = pjoin(bkdir, datavol, "deltamap")
-        bmap_size = (volsize // bkchunksize // 8) + 1
+        bmap_size = (volsize // chunksize // 8) + 1
 
         if remap:
             if not lv_exists(vgname, snap1vol):
@@ -1236,7 +1247,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
     # Open manifest then receive, check and save data
     with open(tmpdir+"/manifest.verify", "r") as mf:
-        for addr in range(0, volsize, bkchunksize):
+        for addr in range(0, volsize, chunksize):
             faddr = "x%016x" % addr
             if attended:
                 print(int(addr/volsize*100),"%  ",faddr,end="  ")
@@ -1257,14 +1268,14 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                     print("OK",end="\x0d")
 
                 if save_path:
-                    savef.seek(bkchunksize, 1)
+                    savef.seek(chunksize, 1)
                 elif diff:
-                    cmpf.seek(bkchunksize, 1)
+                    cmpf.seek(chunksize, 1)
 
                 continue
 
             # allow for slight expansion from compression algo
-            if untrusted_size > bkchunksize + (bkchunksize // 1024) \
+            if untrusted_size > chunksize + (chunksize // 1024) \
                 or untrusted_size < 0:
                     raise BufferError("Bad chunk size: %d" % untrusted_size)
 
@@ -1295,18 +1306,19 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             if verify_only:
                 continue
 
-            buf = gzip.decompress(untrusted_buf)
-            if len(buf) > bkchunksize:
+            # fix for zstd support
+            buf = decompress(untrusted_buf, decomp_bits, chunksize)
+            if len(buf) > chunksize:
                 raise BufferError("Decompressed to %d bytes" % len(buf))
 
             if save_path:
                 savef.write(buf)
             elif diff:
-                buf2 = cmpf.read(bkchunksize)
+                buf2 = cmpf.read(chunksize)
                 if buf != buf2:
                     print("* delta", faddr, "    ")
                     if remap:
-                        volsegment = addr // bkchunksize 
+                        volsegment = addr // chunksize 
                         bmap_pos = volsegment // 8
                         bmap_mm[bmap_pos] |= 1 << (volsegment % 8)
                     diff_count += len(buf)
@@ -1340,7 +1352,7 @@ def x_it(code, text):
 ##  MAIN  #####################################################################
 
 # Constants
-prog_version = "0.2.0betaX"
+prog_version = "0.2.0betaY"
 format_version = 1
 prog_name = "sparsebak"
 topdir = "/"+prog_name # must be absolute path
@@ -1348,14 +1360,15 @@ tmpdir = "/tmp/"+prog_name
 volgroups = {}
 l_vols = {}
 aset = None
+# Disk block size:
 bs = 512
-# LVM min blocks = 128 = 64kBytes
+# LVM min blocks = 128 = 64kBytes:
 lvm_block_factor = 128
-# Dest chunk size = 128kBytes
-bkchunksize = 2 * lvm_block_factor * bs
+# Default archive chunk size = 64kBytes:
+bkchunksize = 1 * lvm_block_factor * bs
 assert bkchunksize % (lvm_block_factor * bs) == 0
 max_address = 0xffffffffffffffff # 64bits
-# for 64bits, a subdir split of 9+7 allows 2048 files per dir
+# for 64bits, a subdir split of 9+7 allows 2048 files per dir:
 address_split = [len(hex(max_address))-2-7, 7]
 pjoin = os.path.join
 
@@ -1524,7 +1537,7 @@ elif options.action == "add":
         x_it(1, "A volume name is required for 'add' command.")
 
     aset.add_volume(options.volumes[0])
-    print("Volume", options.volumes[0], "added.")
+    print("Volume", options.volumes[0], "added to archive config.")
 
 
 elif options.action == "delete":
@@ -1544,7 +1557,7 @@ elif options.action == "delete":
           +" && sync -f ."+ os.path.dirname(path)
           ]
     dest_run(cmd)
-    print("\nVolume", dv, "deleted.")
+    print("\nVolume", dv, "deleted from archive.")
 
 
 elif options.action == "untar":
