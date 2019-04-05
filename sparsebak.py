@@ -717,6 +717,8 @@ def send_volume(datavol):
             open(sdir+"-tmp/manifest", "w") as hashf,    \
             open("/dev/zero" if send_all else mapfile+"-tmp","r+b") as bmapf:
         bmap_mm = bytes(1) if send_all else mmap.mmap(bmapf.fileno(), 0)
+        vf_seek = vf.seek; vf_read = vf.read
+        sha256 = hashlib.sha256; BytesIO = io.BytesIO
 
         # Show progress in increments determined by 1000/checkpt_pct
         # where '200' results in five updates i.e. in unattended mode.
@@ -734,8 +736,8 @@ def send_volume(datavol):
             # Send chunk if its above the send-all line
             # or its bit is on in the deltamap.
             if addr >= sendall_addr or bmap_mm[bmap_pos] & (1 << b):
-                vf.seek(addr)
-                buf = vf.read(chunksize)
+                vf_seek(addr)
+                buf = vf_read(chunksize)
                 destfile = "x%016x" % addr
 
                 # Show progress.
@@ -750,11 +752,11 @@ def send_volume(datavol):
                     # Performance fix: move compression into separate processes
                     buf = compress(buf, compresslevel)
                     bcount += len(buf)
-                    print(hashlib.sha256(buf).hexdigest(), destfile,
+                    print(sha256(buf).hexdigest(), destfile,
                             file=hashf)
                 else: # record zero-length file
                     buf = empty
-                    print(0, destfile, file=hashf)
+                    print("0", destfile, file=hashf)
 
                 # Start tar stream
                 if not stream_started:
@@ -765,13 +767,14 @@ def send_volume(datavol):
                             stderr=subprocess.DEVNULL,
                             shell=True)
                     tarf = tarfile.open(mode="w|", fileobj=untar.stdin)
+                    tarf_addfile = tarf.addfile; TarInfo = tarfile.TarInfo
                     stream_started = True
 
                 # Add buffer to stream
-                tar_info = tarfile.TarInfo(sdir+"-tmp/"+destfile[1:addrsplit]
-                                                +"/"+destfile)
+                tar_info = TarInfo("%s-tmp/%s/%s" % 
+                                   (sdir, destfile[1:addrsplit], destfile))
                 tar_info.size = len(buf)
-                tarf.addfile(tarinfo=tar_info, fileobj=io.BytesIO(buf))
+                tarf_addfile(tarinfo=tar_info, fileobj=BytesIO(buf))
 
 
     # Send session info, end stream and cleanup
