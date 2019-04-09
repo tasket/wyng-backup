@@ -520,7 +520,7 @@ def prepare_snapshots(datavols):
                 print("  Initial snapshot created for", datavol)
             nvs.append(datavol)
 
-        if not lv_exists(vgname, snap1vol):
+        if not lv_exists(vgname, snap1vol) and os.path.exists(mapfile):
             raise RuntimeError("ERROR: Map and snapshots in inconsistent state, "
                             +snap1vol+" is missing!")
 
