@@ -1205,7 +1205,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                 p = subprocess.check_output(
                     ["lvcreate -kn -ay -V "+str(volsize)+"b"
                      +" --thin -n "+lv+" "+vg+"/"+poolname], shell=True)
-            else:
+            elif l_vols[lv].lv_size != volsize:
                 p = subprocess.check_output(["lvresize", "-L",str(volsize)+"b",
                                              "-f", save_path])
         if os.path.exists(save_path) \
