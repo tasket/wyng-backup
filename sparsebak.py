@@ -46,6 +46,15 @@ class ArchiveSet:
         #for key in fs_vols:
         #    self.vols[key] = self.Volume(key, self.path)
 
+        if options.dedup:
+            hashindex = {}
+            for vname, vol in self.vols.items():
+                for sname, ses in vol.sessions.items():
+                    hashindex.update(ses.get_hashes())
+            self.hashindex = hashindex
+            print("Index:",len(hashindex))
+
+
     def add_volume(self, datavol):
         if datavol in self.conf["volumes"].keys():
             x_it(1, datavol+" is already configured.")
@@ -241,6 +250,16 @@ class ArchiveSet:
                     print("format =", self.format, file=f)
                     print("sequence =", self.sequence, file=f)
                     print("previous =", self.previous, file=f)
+
+            def get_hashes(self):
+                hashindex = {}
+                sp = self.path.split('/'); sespath = sp[-2]+'/'+sp[-1]
+                with open(pjoin(self.path,"manifest"),"r") as manf:
+                    for ln in manf:
+                        hashstr, chunkname = ln.strip().split()
+                        if hashstr not in hashindex:
+                            hashindex[hashstr] = (sespath, chunkname)
+                return hashindex
 
 
 class Lvm_VolGroup:
@@ -656,13 +675,16 @@ def last_chunk_addr(volsize, chunksize):
 def send_volume(datavol):
     vol = aset.vols[datavol]
     sessions = vol.sesnames
-    sdir = vol.path+"/"+bksession
-    send_all = len(sessions) == 0
     chunksize = vol.chunksize
+    sdir = pjoin(datavol, bksession)
+    send_all = len(sessions) == 0
+    dedup = options.dedup
+    if dedup:
+        dedup_idx = aset.hashindex
 
-    # Make new session folder
-    if not os.path.exists(sdir+"-tmp"):
-        os.makedirs(sdir+"-tmp")
+    # Set current dir and make new session folder
+    os.chdir(bkdir)
+    os.makedirs(sdir+"-tmp")
 
     zeros = bytes(chunksize)
     empty = bytes(0)
@@ -696,16 +718,17 @@ def send_volume(datavol):
     stream_started = False
     if options.tarfile:
         # don't untar at destination
-        untar_cmd = [ destcd
-                    +" && mkdir -p ."+sdir+"-tmp"
-                    +" && cat >."+pjoin(sdir+"-tmp",bksession+".tar")]
+        untar_cmd = [ destcd + bkdir
+                    +" && mkdir -p "+sdir+"-tmp"
+                    +" && cat >"+pjoin(sdir+"-tmp",bksession+".tar")]
     else:
-        untar_cmd = [ destcd + " && tar -xmf -"]
+        untar_cmd = [ destcd + bkdir + " && tar -xmf -"]
 
     # Open source volume and its delta bitmap as r, session manifest as w.
     with open(pjoin("/dev",vgname,snap2vol),"rb") as vf, \
-            open(sdir+"-tmp/manifest", "w") as hashf,    \
-            open("/dev/zero" if send_all else mapfile+"-tmp","r+b") as bmapf:
+         open(sdir+"-tmp/manifest", "w") as hashf,        \
+         open("/dev/zero" if send_all else mapfile+"-tmp","r+b") as bmapf:
+
         bmap_mm = bytes(1) if send_all else mmap.mmap(bmapf.fileno(), 0)
         vf_seek = vf.seek; vf_read = vf.read
         sha256 = hashlib.sha256; BytesIO = io.BytesIO
@@ -740,12 +763,14 @@ def send_volume(datavol):
                 # Compress & write only non-empty and last chunks
                 if buf != zeros or addr >= lchunk_addr:
                     # Performance fix: move compression into separate processes
-                    buf = compress(buf, compresslevel)
+                    buf   = compress(buf, compresslevel)
+                    bhash = sha256(buf).hexdigest()
                     bcount += len(buf)
-                    print(sha256(buf).hexdigest(), destfile,
-                            file=hashf)
+                    print(bhash, destfile, file=hashf)
+
                 else: # record zero-length file
                     buf = empty
+                    bhash = None
                     print("0", destfile, file=hashf)
 
                 # Start tar stream
@@ -759,12 +784,27 @@ def send_volume(datavol):
                             shell=True)
                     tarf = tarfile.open(mode="w|", fileobj=untar.stdin)
                     tarf_addfile = tarf.addfile; TarInfo = tarfile.TarInfo
+                    LNKTYPE = tarfile.LNKTYPE
                     stream_started = True
 
                 # Add buffer to stream
                 tar_info = TarInfo("%s-tmp/%s/%s" % 
                                    (sdir, destfile[1:addrsplit], destfile))
-                tar_info.size = len(buf)
+
+                # If chunk already in archive, link to it
+                if dedup and bhash in dedup_idx:
+                    tar_info.type = LNKTYPE
+                    tar_info.linkname = "%s/%s/%s" % \
+                                        (dedup_idx[bhash][0],
+                                         dedup_idx[bhash][1][1:addrsplit],
+                                         dedup_idx[bhash][1])
+                    buf = b''
+                    print("@", tar_info.linkname) ####
+                elif dedup:
+                    dedup_idx[bhash] = (sdir, destfile)
+                else:
+                    tar_info.size = len(buf)
+
                 tarf_addfile(tarinfo=tar_info, fileobj=BytesIO(buf))
 
 
@@ -778,14 +818,14 @@ def send_volume(datavol):
         ses.volsize = snap2size
         ses.chunksize = chunksize
         ses.format = "tar" if options.tarfile else "folders"
-        ses.path = sdir+"-tmp"
+        ses.path = vol.path+"/"+bksession+"-tmp"
         ses.save_info()
         for session in vol.sessions.values() \
                         if vol.que_meta_update == "true" else [ses]:
-            tarf.add(session.path)
+            tarf.add(pjoin(vol.name, os.path.basename(session.path)))
         vol.que_meta_update = "false"
         vol.save_volinfo("volinfo-tmp")
-        tarf.add(vol.path+"/volinfo-tmp")
+        tarf.add(datavol+"/volinfo-tmp")
 
         #print("Ending tar process ", end="")
         tarf.close()
@@ -801,15 +841,17 @@ def send_volume(datavol):
                 print("terminated untar process!")
 
         # Cleanup on VM/remote
-        dest_run([ destcd
-            +" && mv ."+sdir+"-tmp ."+sdir
-            +" && mv ."+vol.path+"/volinfo-tmp ."+vol.path+"/volinfo"
-            +" && sync -f ."+vol.path+"/volinfo"])
-        os.replace(sdir+"-tmp", sdir)
+        dest_run([ destcd + bkdir
+            +" && mv "+sdir+"-tmp "+sdir
+            +" && mv "+datavol+"/volinfo-tmp "+datavol+"/volinfo"
+            +" && sync -f "+datavol+"/volinfo"])
+        # Local cleanup, remove -tmp suffixes
+        os.replace(ses.path, ses.path[:-4])
+        ses.path = ses.path[:-4]
         os.replace(vol.path+"/volinfo-tmp", vol.path+"/volinfo")
 
     else:
-        shutil.rmtree(sdir+"-tmp")
+        shutil.rmtree(bkdir+"/"+sdir+"-tmp")
 
     if bcount == 0:
         print("  No changes.")
@@ -1404,6 +1446,12 @@ parser.add_argument("--save-to", dest="saveto", default="",
                     help="Path to store volume for receive")
 parser.add_argument("--remap", action="store_true", default=False,
                     help="Remap volume during diff")
+parser.add_argument("--testing-dedup", action="store_true", default=False,
+                    dest="dedup",
+                    help="Test experimental deduplication")
+parser.add_argument("--testing-dedup-post", action="store_true", default=False,
+                    dest="dedup-post",
+                    help="Test experimental deduplication")
 parser.add_argument("volumes", nargs="*")
 options = parser.parse_args()
 #subparser = parser.add_subparsers(help="sub-command help")
@@ -1425,6 +1473,8 @@ l_vols = volgroups[vgname].lvs
 bkdir = topdir+"/"+vgname+"%"+poolname
 if not os.path.exists(bkdir):
     os.makedirs(bkdir)
+
+destpath = pjoin(destmountpoint,destdir,bkdir)
 destcd = " cd '"+destmountpoint+"/"+destdir+"'"
 
 vmtype = detect_internal_state()
