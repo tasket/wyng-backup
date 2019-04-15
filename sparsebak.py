@@ -264,7 +264,8 @@ class Lvm_Volume:
 
 def get_lvm_vgs():
 
-    p = subprocess.check_call(["lvs --units=b --noheadings --separator ::"
+    p = subprocess.check_call([shell_prefix + \
+        "lvs --units=b --noheadings --separator ::"
         +" -o " + ",".join(Lvm_Volume.colnames)
         +" >"+tmpdir+"/volumes.lst"], shell=True)
 
@@ -382,12 +383,13 @@ def detect_dest_state(destvm):
         if vmtype == "qubes-ssh":
             dargs = vm_run_args["qubes"][:-1] + [destvm.split("|")[0]]
 
-            cmd = ["set -e; rm -rf "+tmpdir+"-old"
+            cmd = [shell_prefix \
+                  +"rm -rf "+tmpdir+"-old"
                   +" && { if [ -d "+tmpdir+" ]; then mv "+tmpdir
                   +" "+tmpdir+"-old; fi }"
                   +"  && mkdir -p "+tmpdir+"/rpc"
                   ]
-            p = subprocess.check_call(dargs + cmd)
+            p = subprocess.check_call(dargs + cmd, shell=True)
 
         # Fix: get OSTYPE env variable
         try:
@@ -397,9 +399,7 @@ def detect_dest_state(destvm):
                   +"' && touch archive.dat"
                   ##+"  && ln -f archive.dat .hardlink"
                   ]
-
-            p = subprocess.check_call(
-                " ".join(dest_run_args(vmtype, cmd)), shell=True)
+            dest_run(cmd)
 
             # send helper program to remote
             if vmtype != "internal":
@@ -420,7 +420,7 @@ def dest_run(commands, dest_type=None, dest=None):
     if dest_type is None:
         dest_type = vmtype
 
-    cmd = " ".join(dest_run_args(dest_type, commands))
+    cmd = shell_prefix + " ".join(dest_run_args(dest_type, commands))
     p = subprocess.check_call(cmd, shell=True)
 
     #else:
@@ -433,13 +433,14 @@ def dest_run_args(dest_type, commands):
 
     # shunt commands to tmp file
     with tempfile.NamedTemporaryFile(dir=tmpdir, delete=False) as tmpf:
-        tmpf.write(bytes("set -e\n"+" ".join(commands) + "\n",
-                        encoding="UTF-8"))
+        tmpf.write(bytes(shell_prefix + \
+                         " ".join(commands) + "\n", encoding="UTF-8"))
         remotetmp = os.path.basename(tmpf.name)
 
     if dest_type in {"qubes","qubes-ssh"}:
 
-        cmd = ["cat "+pjoin(tmpdir,remotetmp)
+        cmd = [shell_prefix \
+              +"cat "+pjoin(tmpdir,remotetmp)
               +" | qvm-run -p "
               +(destvm if dest_type == "qubes" else destvm.split("|")[0])
               +" 'mkdir -p "+pjoin(tmpdir,"rpc")
@@ -563,8 +564,8 @@ def get_lvm_deltas(datavols):
         snap2vol = datavol + ".tock"
         try:
             with open(tmpdir+"/delta."+datavol, "w") as f:
-                cmd = ["export LC_ALL=C"
-                    + " && thin_delta -m"
+                cmd = [shell_prefix \
+                    + " thin_delta -m"
                     + " --thin1 " + l_vols[snap1vol].thin_id
                     + " --thin2 " + l_vols[snap2vol].thin_id
                     + " /dev/mapper/"+vgname+"-"+poolname+"_tmeta"
@@ -749,7 +750,8 @@ def send_volume(datavol):
 
                 # Start tar stream
                 if not stream_started:
-                    cmd = " ".join(dest_run_args(vmtype, untar_cmd))
+                    cmd = shell_prefix + \
+                          " ".join(dest_run_args(vmtype, untar_cmd))
                     untar = subprocess.Popen(cmd,
                             stdin=subprocess.PIPE,
                             stdout=subprocess.DEVNULL,
@@ -1015,7 +1017,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
         # Get manifests, append session name to eol, print session names to srcf.
         print("  Reading manifests")
         manifests = ""
-        cmd = ["set -e", "export LC_ALL=C", "cd "+tmpdir]
+        cmd = ["cd "+tmpdir]
         for ses in merge_sources:
             if clear_sources:
                 print(ses, file=srcf)
@@ -1032,21 +1034,19 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
     cmd.append("sort -u -m -d -k 2,2 manifest.tmp "
                +pjoin(bkdir,datavol,merge_target+"/manifest")
                +" >manifest.new")
-    p = subprocess.check_call("\n".join(cmd), shell=True)
+    p = subprocess.check_call(shell_prefix + "\n".join(cmd), shell=True)
 
     # Output manifest filenames in the sftp-friendly form:
     # 'rename src_session/subdir/xaddress target/subdir/xaddress'
     # then pipe to destination and run dest_helper.py.
     print("  Merging to", target)
 
-    cmd = ["cd "+pjoin(bkdir,datavol)
-        +"  && export LC_ALL=C"
+    cmd = [shell_prefix + "cd "+pjoin(bkdir,datavol)
         +"  && sed -E 's|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)\s+"
         +"(S_\S+)|rename \\3/\\1/x\\1\\2 "+merge_target+"/\\1/x\\1\\2|;"
         +" /"+last_chunk+"/q' "+tmpdir+"/manifest.tmp"
         +"  |  cat "+tmpdir+"/sources.lst -"
         +"  | "+" ".join(dest_run_args(vmtype, [destcd + bkdir+"/"+datavol
-               +" && export LC_ALL=C"
                +" && cat >"+tmpdir+"/rpc/dest.lst"
                +" && python3 "+tmpdir+"/rpc/dest_helper.py merge"
                ]))
@@ -1061,8 +1061,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
         volume.save_volinfo()
         print("  Removed", " ".join(sources))
 
-    cmd = ["cd "+pjoin(bkdir,datavol)
-        +"  && export LC_ALL=C"
+    cmd = [shell_prefix + "cd "+pjoin(bkdir,datavol)
         +"  && sed -E 's/^(\S+\s+\S+).*/\\1/; /"+last_chunk+"/q' "
         +tmpdir+"/manifest.new >"+target+"/manifest",
 
@@ -1074,7 +1073,6 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
 
         "   && tar -cf - volinfo "+target
         +"  | "+" ".join(dest_run_args(vmtype, [destcd + bkdir+"/"+datavol
-            +"  && export LC_ALL=C"
             +"  && tar -xmf -",
 
             # Trim on dest.
@@ -1145,8 +1143,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                 "Receive from tarfile not yet implemented: "+ses)
 
         # add session column to end of each line:
-        cmd = ["cd "+pjoin(bkdir,datavol)
-            +"  && export LC_ALL=C"
+        cmd = [shell_prefix + "cd "+pjoin(bkdir,datavol)
             +"  && sed -E 's|$| "+ses+"|' "
             +pjoin(ses,"manifest")+" >>"+tmpdir+"/manifests.cat"
             ]
@@ -1156,9 +1153,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     # sed is used to expand chunk info into a path and filter out any entries
     # beyond the current last chunk, then piped to cat on destination.
     # Note address_split is used to bisect filename to construct the subdir.
-    cmd = ["cd '"+pjoin(bkdir,datavol)
-        +"' && export LC_ALL=C"
-        +"  && sort -u -d -k 2,2 "+tmpdir+"/manifests.cat"
+    cmd = [shell_prefix + "cd '"+pjoin(bkdir,datavol)
+        +"' && sort -u -d -k 2,2 "+tmpdir+"/manifests.cat"
         +"  |  tee "+tmpdir+"/manifest.verify"
         +"  |  sed -E 's|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)\s+"
         +"(S_\S+)|\\3/\\1/x\\1\\2|;"
@@ -1171,9 +1167,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     print("\nReceiving volume", datavol, select_ses)
 
     # Create retriever process using py program
-    cmd = dest_run_args(vmtype,
+    cmd = [shell_prefix] + dest_run_args(vmtype,
             [destcd + bkdir+"/"+datavol
-            +"  && export LC_ALL=C"
             +"  && python3 "+tmpdir+"/rpc/dest_helper.py receive"
             ])
     getvol = subprocess.Popen(" ".join(cmd), stdout=subprocess.PIPE,
@@ -1363,6 +1358,8 @@ max_address = 0xffffffffffffffff # 64bits
 # for 64bits, a subdir split of 9+7 allows 2048 files per dir:
 address_split = [len(hex(max_address))-2-7, 7]
 pjoin = os.path.join
+shell_prefix = "set -e && export LC_ALL=C\n"
+destcd = None
 
 
 if sys.hexversion < 0x3050000:
