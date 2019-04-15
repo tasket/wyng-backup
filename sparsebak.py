@@ -504,8 +504,7 @@ def prepare_snapshots(datavols):
 
         # Future: Expand recovery to start send-resume
         if os.path.exists(mapfile+"-tmp"):
-            print("  Delta map not finalized for",
-                  datavol, "...recovering.")
+            #print("  Delta map not finalized for", datavol, "...recovering.")
             os.rename(mapfile+"-tmp", mapfile)
 
         # Make initial snapshot if necessary:
@@ -520,14 +519,14 @@ def prepare_snapshots(datavols):
                 print("  Initial snapshot created for", datavol)
             nvs.append(datavol)
 
-        if not lv_exists(vgname, snap1vol) and os.path.exists(mapfile):
+        if os.path.exists(mapfile) and not lv_exists(vgname, snap1vol):
             raise RuntimeError("ERROR: Map and snapshots in inconsistent state, "
                             +snap1vol+" is missing!")
 
         # Make current snapshot
         p = subprocess.check_output( ["lvcreate", "-pr", "-kn", "-ay",
             "-s", vgname+"/"+datavol, "-n",snap2vol], stderr=subprocess.STDOUT)
-        print("  Current snapshot created:", snap2vol)
+        #print("  Current snapshot created:", snap2vol)
 
         if datavol not in nvs:
             dvs.append(datavol)
@@ -550,20 +549,10 @@ def vg_exists(vgname):
         return True
 
 
-def get_lvm_size(volpath):
-    line = subprocess.check_output( ["lvdisplay --units=b " + volpath
-        +  " | grep 'LV Size'"], shell=True).decode("UTF-8").strip()
-
-    size = int(re.sub("^.+ ([0-9]+) B", r'\1', line))
-    if size > max_address + 1:
-        raise ValueError("Volume size is larger than", max_address+1)
-    return size
-
-
 # Get raw lvm deltas between snapshots
 
 def get_lvm_deltas(datavols):
-    print("  Acquiring LVM deltas.")
+    print("Acquiring deltas.")
     subprocess.call(["dmsetup","message", vgname+"-"+poolname+"-tpool",
         "0", "release_metadata_snap"], stderr=subprocess.DEVNULL)
     subprocess.check_call(["dmsetup", "message", vgname+"-"+poolname+"-tpool",
@@ -587,7 +576,7 @@ def get_lvm_deltas(datavols):
     subprocess.check_call(["dmsetup","message", vgname+"-"+poolname+"-tpool",
         "0", "release_metadata_snap"] )
     if td_err:
-        x_it(1, "ERROR running thin_delta process for "+str(td_err))
+        x_it(1, "ERROR running thin_delta process for "+td_err)
 
 
 # update_delta_digest: Translates raw lvm delta information
@@ -722,7 +711,7 @@ def send_volume(datavol):
 
         # Show progress in increments determined by 1000/checkpt_pct
         # where '200' results in five updates i.e. in unattended mode.
-        checkpt = checkpt_pct = 200 if options.unattended else 1
+        checkpt = checkpt_pct = 335 if options.unattended else 1
         percent = 0
 
         # Cycle over range of addresses in volume.
@@ -863,8 +852,8 @@ def monitor_send(volumes=[], monitor_only=True):
         vol = aset.vols[datavol]
         snap1vol = datavol + ".tick"
         snap2vol = datavol + ".tock"
-        snap1size = get_lvm_size(pjoin("/dev",vgname,snap1vol))
-        snap2size = get_lvm_size(pjoin("/dev",vgname,snap2vol))
+        snap1size = l_vols[snap1vol].lv_size
+        snap2size = l_vols[snap2vol].lv_size
         bmap_size = (snap2size // vol.chunksize // 8) + 1
 
         mapfile = pjoin(bkdir,datavol,"deltamap")
@@ -984,8 +973,8 @@ def prune_sessions(datavol, times):
 
     if not options.unattended and len(to_prune)>1:
         print("This will remove multiple sessions:\n"," ".join(to_prune))
-        ans = input("Are you sure? (yes/no): ")
-        if ans.lower() != "yes":
+        ans = input("Are you sure? [y/N]: ")
+        if ans.lower() not in {"y","yes"}:
             x_it(0,"")
 
     merge_sessions(datavol, to_prune, target_s,
@@ -1112,9 +1101,9 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     attended = not options.unattended
     remap = options.remap
     if save_path and os.path.exists(save_path) and attended:
-        print("\n!! This will erase all existing data in",save_path)
-        ans = input("   Are you sure? (yes/no): ")
-        if ans.lower() != "yes":
+        print("\n!! This will erase all existing data in",save_path,"!!")
+        ans = input("   Are you sure? [y/N]: ")
+        if ans.lower() not in {"y","yes"}:
             x_it(0,"")
 
     vol = aset.vols[datavol]
@@ -1549,7 +1538,7 @@ elif options.action == "delete":
         print("Warning! Delete will remove ALL metadata AND archived data",
               "for volume", dv)
 
-        ans = input("Are you sure (y/N)? ")
+        ans = input("Are you sure? [y/N]: ")
         if ans.lower() not in {"y","yes"}:
             x_it(0,"")
 
