@@ -34,8 +34,8 @@ class ArchiveSet:
 
         self.vols = {}
         for key in cp["volumes"]:
-            if cp["volumes"][key] != "disable" \
-            and (len(options.volumes)==0 or key in options.volumes):
+            if cp["volumes"][key] != "disable" and \
+            (len(options.volumes)==0 or key in options.volumes or options.dedup):
                 os.makedirs(pjoin(self.path,key), exist_ok=True)
                 self.vols[key] = self.Volume(key, pjoin(self.path,key),
                                              self.vgname)
@@ -47,13 +47,12 @@ class ArchiveSet:
         #    self.vols[key] = self.Volume(key, self.path)
 
         if options.dedup:
+            print("Building index...")
             hashindex = {}
             for vname, vol in self.vols.items():
                 for sname, ses in vol.sessions.items():
                     hashindex.update(ses.get_hashes())
             self.hashindex = hashindex
-            print("Index:",len(hashindex))
-
 
     def add_volume(self, datavol):
         if datavol in self.conf["volumes"].keys():
@@ -253,12 +252,12 @@ class ArchiveSet:
 
             def get_hashes(self):
                 hashindex = {}
-                sp = self.path.split('/'); sespath = sp[-2]+'/'+sp[-1]
+                spath = self.path.split('/')
                 with open(pjoin(self.path,"manifest"),"r") as manf:
                     for ln in manf:
                         hashstr, chunkname = ln.strip().split()
-                        if hashstr not in hashindex:
-                            hashindex[hashstr] = (sespath, chunkname)
+                        if hashstr != "0" and hashstr not in hashindex:
+                            hashindex[hashstr] = (spath[-2], spath[-1], chunkname)
                 return hashindex
 
 
@@ -385,6 +384,13 @@ with open("''' + tmpdir + '''/rpc/dest.lst", "r") as lstf:
         for dir in src_list:
             shutil.rmtree(dir)
         os.replace(merge_target, target)
+    elif cmd == "dedup":
+        for line in lstf:
+            source, dest = line.strip().split()
+            ## FIX: check for same inode ##
+            os.rename(dest, dest+"-del")
+            os.link(source, dest)
+            os.remove(dest+"-del")
     '''
     with open(tmpdir +"/rpc/dest_helper.py", "wb") as progf:
         progf.write(bytes(dest_program, encoding="UTF=8"))
@@ -676,6 +682,7 @@ def send_volume(datavol):
     vol = aset.vols[datavol]
     sessions = vol.sesnames
     chunksize = vol.chunksize
+    bksession = bksession
     sdir = pjoin(datavol, bksession)
     send_all = len(sessions) == 0
     dedup = options.dedup
@@ -688,7 +695,7 @@ def send_volume(datavol):
 
     zeros = bytes(chunksize)
     empty = bytes(0)
-    bcount = 0
+    bcount = ddcount = 0
     addrsplit = -address_split[1]
     lchunk_addr = last_chunk_addr(snap2size, chunksize)
 
@@ -749,29 +756,10 @@ def send_volume(datavol):
             # Send chunk if its above the send-all line
             # or its bit is on in the deltamap.
             if addr >= sendall_addr or bmap_mm[bmap_pos] & (1 << b):
+
                 vf_seek(addr)
                 buf = vf_read(chunksize)
                 destfile = "x%016x" % addr
-
-                # Show progress.
-                percent = int(bmap_pos/bmap_size*1000)
-                if percent >= checkpt:
-                    print("  %.1f%%   %dMB " % (percent/10, bcount//1000000),
-                          end="\x0d")
-                    checkpt += checkpt_pct
-
-                # Compress & write only non-empty and last chunks
-                if buf != zeros or addr >= lchunk_addr:
-                    # Performance fix: move compression into separate processes
-                    buf   = compress(buf, compresslevel)
-                    bhash = sha256(buf).hexdigest()
-                    bcount += len(buf)
-                    print(bhash, destfile, file=hashf)
-
-                else: # record zero-length file
-                    buf = empty
-                    bhash = None
-                    print("0", destfile, file=hashf)
 
                 # Start tar stream
                 if not stream_started:
@@ -791,26 +779,49 @@ def send_volume(datavol):
                 tar_info = TarInfo("%s-tmp/%s/%s" % 
                                    (sdir, destfile[1:addrsplit], destfile))
 
-                # If chunk already in archive, link to it
-                if dedup and bhash in dedup_idx:
-                    tar_info.type = LNKTYPE
-                    tar_info.linkname = "%s/%s/%s" % \
-                                        (dedup_idx[bhash][0],
-                                         dedup_idx[bhash][1][1:addrsplit],
-                                         dedup_idx[bhash][1])
-                    buf = b''
-                    print("@", tar_info.linkname) ####
-                elif dedup:
-                    dedup_idx[bhash] = (sdir, destfile)
-                else:
-                    tar_info.size = len(buf)
+                # Show progress.
+                percent = int(bmap_pos/bmap_size*1000)
+                if percent >= checkpt:
+                    print("  %.1f%%   %dMB " % (percent/10, bcount//1000000),
+                          end="\x0d")
+                    checkpt += checkpt_pct
 
+                # Compress & write only non-empty and last chunks
+                if buf != zeros or addr >= lchunk_addr:
+                    # Performance fix: move compression into separate processes
+                    buf   = compress(buf, compresslevel)
+                    bhash = sha256(buf).hexdigest()
+                    bcount += len(buf)
+                    print(bhash, destfile, file=hashf)
+
+                    # If chunk already in archive, link to it
+                    if dedup:
+                        if bhash in dedup_idx:
+                            tar_info.type = LNKTYPE
+                            ddvol, ddses, ddfl = dedup_idx[bhash]
+                            tar_info.linkname = "%s/%s/%s/%s" % \
+                                (ddvol, 
+                                 ddses+"-tmp" if ddses==bksession else ddses,
+                                 ddfl[1:addrsplit], 
+                                 ddfl)
+                            ddcount += len(buf)
+                            tarf_addfile(tarinfo=tar_info)
+                            continue
+                        else:
+                            dedup_idx[bhash] = (datavol, bksession, destfile)
+
+                else: # record zero-length file
+                    buf = empty
+                    bhash = None
+                    print("0", destfile, file=hashf)
+
+                tar_info.size = len(buf)
                 tarf_addfile(tarinfo=tar_info, fileobj=BytesIO(buf))
-
 
     # Send session info, end stream and cleanup
     if stream_started:
-        print("  100%  ", ("%.1f" % (bcount/1000000)) +"MB")
+        print("  100%  ", ("%.1f" % (bcount/1000000)) +"MB",
+              (" (dd: -"+str(ddcount)+" bytes.)") if dedup else "")
 
         # Save session info
         ses = vol.new_session(bksession)
@@ -856,6 +867,41 @@ def send_volume(datavol):
     if bcount == 0:
         print("  No changes.")
     return stream_started
+
+
+# Deduplicate data already in archive
+
+def dedup_post():
+    dedup_idx = {}
+    addrsplit = -address_split[1]
+
+    with open(tmpdir+"/dedup.lst", "w") as dedupf:
+        for vol in aset.vols.values():
+            for sname in vol.sesnames:
+                ses = vol.sessions[sname]
+                sp = ses.path.split('/'); sespath = sp[-2]+'/'+sp[-1]
+                with open(pjoin(ses.path,"manifest"),"r") as manf:
+                    for ln in manf:
+                        bhash, chname = ln.strip().split()
+                        if bhash == "0":
+                            continue
+                        elif bhash not in dedup_idx:
+                            dedup_idx[bhash] = (sespath, chname)
+                        else:
+                            ddtup = dedup_idx[bhash]
+                            print("%s/%s/%s %s/%s/%s" % \
+                                    (ddtup[0], ddtup[1][1:addrsplit], ddtup[1],
+                                     sespath, chname[1:addrsplit], chname),
+                                  file=dedupf)
+
+    cmd = [shell_prefix
+        +"cat "+tmpdir+"/dedup.lst"
+        +"  | "+" ".join(dest_run_args(vmtype, [destcd + bkdir
+               +" && cat >"+tmpdir+"/rpc/dest.lst"
+               +" && python3 "+tmpdir+"/rpc/dest_helper.py dedup"
+               ]))
+        ]
+    p = subprocess.check_call(cmd, shell=True)
 
 
 # Controls flow of monitor and send_volume procedures:
@@ -1290,8 +1336,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
             if untrusted_size == 0:
                 if cksum.strip() != "0":
-                    raise ValueError("Expected %s length, got %d." 
-                                     % (cksum, untrusted_size))
+                    raise ValueError("Expected %s %s %s,\ngot %d." 
+                                     % (cksum, fname, ses, untrusted_size))
 
                 if attended:
                     print("OK",end="\x0d")
@@ -1450,7 +1496,7 @@ parser.add_argument("--testing-dedup", action="store_true", default=False,
                     dest="dedup",
                     help="Test experimental deduplication")
 parser.add_argument("--testing-dedup-post", action="store_true", default=False,
-                    dest="dedup-post",
+                    dest="deduppost",
                     help="Test experimental deduplication")
 parser.add_argument("volumes", nargs="*")
 options = parser.parse_args()
@@ -1496,6 +1542,10 @@ for vol in options.volumes:
 
 
 # Process commands
+
+if options.deduppost: ####
+    dedup_post()
+    exit(0)
 
 if options.action   == "monitor":
     monitor_send(datavols, monitor_only=True)

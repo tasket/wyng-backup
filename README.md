@@ -262,19 +262,26 @@ your volumes for normal use (this is the default for most Linux systems).
 Testing
 ---
 
-Even with non-sensitive data, precaution can avoid wasting X number of
+* Deduplication has been added as an experimental feature for v0.2beta; this is
+a means to reduce allocated disk space, network traffic and overall backup times.
+  - To deduplicate existing archive data, issue the command
+`sparsebak.py --testing-dedup-post list`.
+  - To deduplicate while backing up (to reduce net bandwidth), issue the command
+`sparsebak.py --testing-dedup send`.
+
+* Even with non-sensitive data, precaution can avoid wasting X number of
 testing hours. A good way to avoid losing archives to corruption/bugs is to
 make a quick linked copy of the sparsebak destination folder; either `cp -rl` or
 `rsync -H` can do this efficiently. For example `cp -rl sparsebak backup-sparsebak`.
 At the same time, do a regular copy of the source metadata folder with
 `sudo cp -a /sparsebak /backup-sparsebak'.
 
-If you should need to start fresh with a particular volume and using `delete`
+* If you should need to start fresh with a particular volume and using `delete`
 fails, the volume can be removed manually: Deleting the
 volume's subfolders on both the source and destination, then `lvremove` the
 volume's .tick and .tock snapshots.
 
-Avoid switching/swapping the /sparsebak dir and ini file, even for testing purposes.
+* Avoid switching/swapping the /sparsebak dir and ini file, even for testing purposes.
 If you somehow must have more than one, there must be no overlap of names in
 the volumes section. In the future sparsebak will support multiple archive ini
 configs.
