@@ -265,8 +265,8 @@ Testing
 * Deduplication has been added as an experimental feature for v0.2beta; this is
 a means to reduce allocated disk space, network traffic and overall backup times.
   - To deduplicate existing archive data, issue the command
-`sparsebak.py --testing-dedup-post list`.
-  - To deduplicate while backing up (to reduce net bandwidth), issue the command
+`sparsebak.py testing-dedup-existing`.
+  - To deduplicate while backing up (also reduces net bandwidth), issue the command
 `sparsebak.py --testing-dedup send`.
 
 * Even with non-sensitive data, precaution can avoid wasting X number of
