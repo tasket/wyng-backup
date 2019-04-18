@@ -390,7 +390,7 @@ with open("''' + tmpdir + '''/rpc/dest.lst", "r") as lstf:
 
 def detect_dest_state(destvm):
 
-    if options.action not in {"monitor","list","version"} \
+    if options.action not in {"monitor","list","version","add"} \
         and destvm != None:
 
         if vmtype == "qubes-ssh":
@@ -676,6 +676,13 @@ def send_volume(datavol):
     if dedup:
         dedup_idx = aset.hashindex
 
+    ses = vol.new_session(bksession)
+    ses.localtime = localtime
+    ses.volsize = snap2size
+    ses.chunksize = chunksize
+    ses.format = "tar" if options.tarfile else "folders"
+    ses.path = vol.path+"/"+bksession+"-tmp"
+
     # Set current dir and make new session folder
     os.chdir(bkdir)
     os.makedirs(sdir+"-tmp")
@@ -778,29 +785,32 @@ def send_volume(datavol):
                     # Performance fix: move compression into separate processes
                     buf   = compress(buf, compresslevel)
                     bhash = sha256(buf).hexdigest()
-                    print(bhash, destfile, file=hashf)
 
                     # If chunk already in archive, link to it
                     if dedup:
-                        if bhash in dedup_idx:
+                        bhashi = int(bhash,16)
+                        if bhashi in dedup_idx:
                             tar_info.type = LNKTYPE
-                            ddvol, ddses, ddfl = dedup_idx[bhash]
-                            tar_info.linkname = "%s/%s/%s/%s" % \
-                                (ddvol, 
-                                 ddses+"-tmp" if ddses==bksession else ddses,
-                                 ddfl[1:addrsplit], 
-                                 ddfl)
+                            #ddvol, ddses, ddfl = dedup_idx[bhash]
+                            ddses, ddch = dedup_idx[bhashi]
+                            ddchx = "%016x" % ddch
+                            tar_info.linkname = "%s/%s/%s/x%s" % \
+                                (ddses.volume.name,
+                                 ddses.name+"-tmp" if ddses==ses else ddses.name,
+                                 ddchx[:addrsplit],
+                                 ddchx)
                             ddcount += len(buf)
                             tarf_addfile(tarinfo=tar_info)
                             continue
                         else:
-                            dedup_idx[bhash] = (datavol, bksession, destfile)
+                            #dedup_idx[bhash] = (datavol, bksession, destfile)
+                            dedup_idx[bhashi] = (ses, addr)
 
                     bcount += len(buf)
+                    print(bhash, destfile, file=hashf)
 
                 else: # record zero-length file
                     buf = empty
-                    bhash = None
                     print("0", destfile, file=hashf)
 
                 tar_info.size = len(buf)
@@ -813,12 +823,6 @@ def send_volume(datavol):
               if ddcount else "")
 
         # Save session info
-        ses = vol.new_session(bksession)
-        ses.localtime = localtime
-        ses.volsize = snap2size
-        ses.chunksize = chunksize
-        ses.format = "tar" if options.tarfile else "folders"
-        ses.path = vol.path+"/"+bksession+"-tmp"
         ses.save_info()
         for session in vol.sessions.values() \
                         if vol.que_meta_update == "true" else [ses]:
@@ -893,12 +897,57 @@ def build_dedup_index(listfile=""):
     if listfile:
         dedupf.close()
 
+    if options.action in ("test1","test2"):
+        import resource
+        print("Dedup1:", len(dedup_idx), sys.getsizeof(dedup_idx))
+        print(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * resource.getpagesize() //1024//1024)
+
+def build_dedup_index2(listfile=""):
+    dedup_idx = aset.hashindex
+    addrsplit = -address_split[1]
+
+    sessions = []
+    for vol in aset.vols.values():
+        sessions += vol.sessions.values()
+    # Sort sessions globally by date; oldest are referenced first.
+    sessions.sort(key=lambda x: x.localtime)
+
+    if listfile:
+        dedupf = open(tmpdir+"/"+listfile, "w")
+
+    for ses in sessions:
+        volname = ses.volume.name; sesname = ses.name
+        with open(pjoin(ses.path,"manifest"),"r") as manf:
+            for ln in manf:
+                line = ln.strip().split()
+                if line[0] == "0":
+                    continue
+                bhashi = int(line[0],16); addr = int(line[1][1:],16)
+                if bhashi not in dedup_idx:
+                    dedup_idx[bhashi] = (ses, addr)
+                    continue
+                elif listfile:
+                    ddses, ddch = dedup_idx[bhashi]
+                    ddchx = "%016x" % ddch
+                    print("%s/%s/%s/x%s %s/%s/%s/%s" % \
+                        (ddses.volume.name, ddses.name, ddchx[:addrsplit], ddchx,
+                         volname, sesname, line[1][1:addrsplit], line[1]),
+                        file=dedupf)
+
+    if listfile:
+        dedupf.close()
+
+    if options.action in ("test1","test2"):
+        import resource
+        print("Dedup2:", len(dedup_idx), sys.getsizeof(dedup_idx))
+        print(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * resource.getpagesize() // 1024//1024)
+
 
 # Deduplicate data already in archive
 
 def dedup_post():
     print("Building deduplication index...")
-    build_dedup_index("dedup.lst")
+    build_dedup_index2("dedup.lst")
 
     print("Linking...")
     cmd = [shell_prefix
@@ -923,7 +972,7 @@ def monitor_send(volumes=[], monitor_only=True):
 
     if options.dedup:
         print("Building index...")
-        build_dedup_index()
+        build_dedup_index2()
 
     datavols, newvols \
         = prepare_snapshots(volumes if len(volumes) >0 else datavols)
@@ -1487,7 +1536,7 @@ os.makedirs(tmpdir+"/rpc")
 parser = argparse.ArgumentParser(description="")
 parser.add_argument("action", choices=["send","monitor","add","delete",
                     "prune","receive","verify","diff","list","version",
-                    "testing-dedup-existing"],
+                    "testing-dedup-existing","test1","test2"],
                     default="monitor", help="Action to take")
 parser.add_argument("-u", "--unattended", action="store_true", default=False,
                     help="Non-interactive, supress prompts")
@@ -1551,6 +1600,11 @@ for vol in options.volumes:
 
 
 # Process commands
+
+if options.action   == "test1":
+    build_dedup_index()
+if options.action   == "test2":
+    build_dedup_index2()
 
 if options.action   == "monitor":
     monitor_send(datavols, monitor_only=True)
