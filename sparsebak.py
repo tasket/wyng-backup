@@ -721,10 +721,13 @@ def send_volume(datavol):
     if options.tarfile:
         # don't untar at destination
         untar_cmd = [ destcd + bkdir
+                    +" && rm -f .set"
                     +" && mkdir -p "+sdir+"-tmp"
                     +" && cat >"+pjoin(sdir+"-tmp",bksession+".tar")]
     else:
-        untar_cmd = [ destcd + bkdir + " && tar -xmf - && sync -f "+datavol]
+        untar_cmd = [ destcd + bkdir
+                    +" && rm -f .set"
+                    +" && tar -xmf - && sync -f "+datavol]
 
     # Open source volume and its delta bitmap as r, session manifest as w.
     with open(pjoin("/dev",vgname,snap2vol),"rb") as vf, \
