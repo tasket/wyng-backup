@@ -344,10 +344,11 @@ with open("''' + tmpdir + '''/rpc/dest.lst", "r") as lstf:
     if cmd == "receive":
         for line in lstf:
             fname = line.strip()
-            fsize = os.path.getsize(fname)
+            fsize = os.path.getsize(fname) if os.path.exists(fname) else 0
             i = sys.stdout.buffer.write(fsize.to_bytes(4,"big"))
-            with open(fname,"rb") as dataf:
-                i = sys.stdout.buffer.write(dataf.read(fsize))
+            if fsize:
+                with open(fname,"rb") as dataf:
+                    i = sys.stdout.buffer.write(dataf.read(fsize))
     elif cmd == "merge":
         merge_target, target = lstf.readline().strip().split()
         src_list = []
@@ -723,7 +724,7 @@ def send_volume(datavol):
                     +" && mkdir -p "+sdir+"-tmp"
                     +" && cat >"+pjoin(sdir+"-tmp",bksession+".tar")]
     else:
-        untar_cmd = [ destcd + bkdir + " && tar -xmf -"]
+        untar_cmd = [ destcd + bkdir + " && tar -xmf - && sync -f "+datavol]
 
     # Open source volume and its delta bitmap as r, session manifest as w.
     with open(pjoin("/dev",vgname,snap2vol),"rb") as vf, \
@@ -785,13 +786,13 @@ def send_volume(datavol):
                     # Performance fix: move compression into separate processes
                     buf   = compress(buf, compresslevel)
                     bhash = sha256(buf).hexdigest()
+                    print(bhash, destfile, file=hashf)
 
                     # If chunk already in archive, link to it
                     if dedup:
                         bhashi = int(bhash,16)
                         if bhashi in dedup_idx:
                             tar_info.type = LNKTYPE
-                            #ddvol, ddses, ddfl = dedup_idx[bhash]
                             ddses, ddch = dedup_idx[bhashi]
                             ddchx = "%016x" % ddch
                             tar_info.linkname = "%s/%s/%s/x%s" % \
@@ -803,11 +804,9 @@ def send_volume(datavol):
                             tarf_addfile(tarinfo=tar_info)
                             continue
                         else:
-                            #dedup_idx[bhash] = (datavol, bksession, destfile)
                             dedup_idx[bhashi] = (ses, addr)
 
                     bcount += len(buf)
-                    print(bhash, destfile, file=hashf)
 
                 else: # record zero-length file
                     buf = empty
@@ -846,6 +845,7 @@ def send_volume(datavol):
 
         # Cleanup on VM/remote
         dest_run([ destcd + bkdir
+            +" && touch .set"
             +" && mv "+sdir+"-tmp "+sdir
             +" && mv "+datavol+"/volinfo-tmp "+datavol+"/volinfo"
             +" && sync -f "+datavol+"/volinfo"])
@@ -864,48 +864,11 @@ def send_volume(datavol):
 
 # Build deduplication hash index and list
 
-def build_dedup_index(listfile=""):
-    dedup_idx = aset.hashindex
-    addrsplit = -address_split[1]
-
-    sessions = []
-    for vol in aset.vols.values():
-        sessions += vol.sessions.values()
-    # Sort sessions globally by date; oldest are referenced first.
-    sessions.sort(key=lambda x: x.localtime)
-
-    if listfile:
-        dedupf = open(tmpdir+"/"+listfile, "w")
-
-    for ses in sessions:
-        volname = ses.volume.name; sesname = ses.name
-        with open(pjoin(ses.path,"manifest"),"r") as manf:
-            for ln in manf:
-                bhash, chname = ln.strip().split()
-                if bhash == "0":
-                    continue
-                elif bhash not in dedup_idx:
-                    dedup_idx[bhash] = (volname, sesname, chname)
-                    continue
-                elif listfile:
-                    ddvol, ddses, ddch = dedup_idx[bhash]
-                    print("%s/%s/%s/%s %s/%s/%s/%s" % \
-                          (ddvol, ddses, ddch[1:addrsplit], ddch,
-                           volname, sesname, chname[1:addrsplit], chname),
-                         file=dedupf)
-
-    if listfile:
-        dedupf.close()
-
-    if options.action in ("test1","test2"):
-        import resource
-        print("Dedup1:", len(dedup_idx), sys.getsizeof(dedup_idx))
-        print(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * resource.getpagesize() //1024//1024)
-
 def build_dedup_index2(listfile=""):
     dedup_idx = aset.hashindex
     addrsplit = -address_split[1]
 
+    #a=bytearray() ####
     sessions = []
     for vol in aset.vols.values():
         sessions += vol.sessions.values()
@@ -925,6 +888,7 @@ def build_dedup_index2(listfile=""):
                 bhashi = int(line[0],16); addr = int(line[1][1:],16)
                 if bhashi not in dedup_idx:
                     dedup_idx[bhashi] = (ses, addr)
+                    #a.extend(bhashi.to_bytes(32,"big")[:4]) ####
                     continue
                 elif listfile:
                     ddses, ddch = dedup_idx[bhashi]
@@ -936,11 +900,6 @@ def build_dedup_index2(listfile=""):
 
     if listfile:
         dedupf.close()
-
-    if options.action in ("test1","test2"):
-        import resource
-        print("Dedup2:", len(dedup_idx), sys.getsizeof(dedup_idx))
-        print(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * resource.getpagesize() // 1024//1024)
 
 
 # Deduplicate data already in archive
@@ -1601,8 +1560,6 @@ for vol in options.volumes:
 
 # Process commands
 
-if options.action   == "test1":
-    build_dedup_index()
 if options.action   == "test2":
     build_dedup_index2()
 
@@ -1715,5 +1672,11 @@ elif options.action == "testing-dedup-existing":
 elif options.action == "untar":
     raise NotImplementedError()
 
+
+####
+import resource
+print("Memory use:  index count", len(aset.hashindex), #, sys.getsizeof(a))
+    resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * resource.getpagesize() // 1024//1024, "MB")
+####
 
 print("\nDone.\n")\
