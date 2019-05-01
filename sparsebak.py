@@ -10,6 +10,9 @@ import sys, os, stat, shutil, subprocess, time, datetime
 import re, mmap, zlib, gzip, tarfile, io, fcntl, tempfile
 import xml.etree.ElementTree
 import argparse, configparser, hashlib, uuid
+# For deduplication tests:
+import ctypes, sqlite3, resource
+from array import array
 
 
 # ArchiveSet manages configuration and configured volume info
@@ -32,28 +35,29 @@ class ArchiveSet:
         self.destmountpoint = c['destmountpoint']
         self.destdir = c['destdir']
 
+        dedup = options.dedup > 0
         self.hashindex = {}
         self.vols = {}
+        self.allsessions = []
+
         for key in cp["volumes"]:
             if cp["volumes"][key] != "disable" and \
-            (len(options.volumes)==0 or key in options.volumes or options.dedup):
+            (len(options.volumes)==0 or key in options.volumes or dedup):
                 os.makedirs(pjoin(self.path,key), exist_ok=True)
-                self.vols[key] = self.Volume(key, pjoin(self.path,key),
+                self.vols[key] = self.Volume(self, key, pjoin(self.path,key),
                                              self.vgname)
                 self.vols[key].enabled = True
+                self.allsessions += self.vols[key].sessions.values()
 
-        #fs_vols = [e.name for e in os.scandir(self.path) if e.is_dir()
-        #           and e.name not in self.vols.keys()]
-        #for key in fs_vols:
-        #    self.vols[key] = self.Volume(key, self.path)
-
+        # Created master session list sorted by date-time
+        self.allsessions.sort(key=lambda x: x.localtime)
 
     def add_volume(self, datavol):
         if datavol in self.conf["volumes"].keys():
             x_it(1, datavol+" is already configured.")
 
         volname_check = re.compile("^[a-zA-Z0-9\+\._-]+$")
-        if volname_check.match(datavol) == None:
+        if volname_check.match(datavol) is None:
             x_it(1, "Only characters A-Z 0-9 . + _ - are allowed"
                 " in volume names.")
 
@@ -84,8 +88,9 @@ class ArchiveSet:
 
 
     class Volume:
-        def __init__(self, name, path, vgname):
+        def __init__(self, archive, name, path, vgname):
             self.name = name
+            self.archive = archive
             self.path = path
             self.vgname = vgname
             self.present = lv_exists(vgname, name)
@@ -112,7 +117,7 @@ class ArchiveSet:
             # load sessions
             self.sessions ={e.name: self.Ses(self,e.name,pjoin(path,e.name)) \
                 for e in os.scandir(path) if e.name[:2]=="S_" \
-                    and e.name[-3:]!="tmp"} if self.present else {}
+                    and e.name[-3:]!="tmp"} ##if self.present else {}
 
             # Convert metadata fron alpha to v1:
             # move map to new location
@@ -192,20 +197,24 @@ class ArchiveSet:
             self.last = sname
             self.sesnames.append(sname)
             self.sessions[sname] = ns
+            self.archive.allsessions.append(ns)
             return ns
 
-        def delete_session(self, ses):
-            if ses == self.last:
+        def delete_session(self, sname):
+            ses = self.sessions[sname]
+            if sname == self.last:
                 raise NotImplementedError("Cannot delete last session")
-            index = self.sesnames.index(ses)
+            index = self.sesnames.index(sname)
             affected = self.sesnames[index+1]
-            self.sessions[affected].previous \
-                = self.sessions[ses].previous
+            self.sessions[affected].previous = ses.previous
             if index == 0:
                 self.first = self.sesnames[1]
             del self.sesnames[index]
-            del self.sessions[ses]
-            shutil.rmtree(pjoin(self.path, ses))
+            del self.sessions[sname]
+            vs = self.archive.allsessions
+            for i in range(len(vs)):
+                if vs[i] == ses: del vs[i]
+            shutil.rmtree(pjoin(self.path, sname))
             return affected
 
 
@@ -303,7 +312,7 @@ def get_configs():
 
 
 # Detect features of internal and destination environments:
-    
+
 def detect_internal_state():
     global destvm
 
@@ -391,19 +400,19 @@ with open("''' + tmpdir + '''/rpc/dest.lst", "r") as lstf:
 
 def detect_dest_state(destvm):
 
-    if options.action not in {"monitor","list","version","add"} \
-        and destvm != None:
+    if options.action not in {"index-test","monitor","list","version","add"} \
+                            and destvm is not None:
 
         if vmtype == "qubes-ssh":
             dargs = vm_run_args["qubes"][:-1] + [destvm.split("|")[0]]
 
-            cmd = [shell_prefix \
+            cmd = dargs + [shell_prefix \
                   +"rm -rf "+tmpdir+"-old"
                   +" && { if [ -d "+tmpdir+" ]; then mv "+tmpdir
                   +" "+tmpdir+"-old; fi }"
                   +"  && mkdir -p "+tmpdir+"/rpc"
                   ]
-            p = subprocess.check_call(dargs + cmd, shell=True)
+            p = subprocess.check_call(cmd)
 
         # Fix: get OSTYPE env variable
         try:
@@ -612,11 +621,6 @@ def update_delta_digest(datavol):
     os.rename(mapfile, mapfile+"-tmp")
     dtree = xml.etree.ElementTree.parse(tmpdir+"/delta."+datavol).getroot()
     dblocksize = int(dtree.get("data_block_size"))
-    #if dblocksize % lvm_block_factor != 0:
-    #    print("bkchunksize =", chunksize)
-    #    print("dblocksize  =", dblocksize)
-    #    print("bs          =", bs)
-    #    raise ValueError("dblocksize error")
 
     bmap_byte = 0
     lastindex = 0
@@ -668,14 +672,31 @@ def last_chunk_addr(volsize, chunksize):
 # Send volume to destination:
 
 def send_volume(datavol):
+
     vol = aset.vols[datavol]
+    allsessions = aset.allsessions
     sessions = vol.sesnames
     chunksize = vol.chunksize
     sdir = pjoin(datavol, bksession)
     send_all = len(sessions) == 0
+    dedup_idx = dedup_db = None
+    # testing two deduplication types:
     dedup = options.dedup
-    if dedup:
-        dedup_idx = aset.hashindex
+    if dedup == 2:   # dict
+            dedup_idx = aset.hashindex
+    elif dedup == 3: # sql
+        dedup_db = aset.hashindex
+        cursor = dedup_db.cursor()
+        c_uint64 = ctypes.c_uint64
+        c_int64 = ctypes.c_int64
+    elif dedup == 4: # array tree
+        idxcount, hashtree, ht_ksize, hashdigits, hash_w, hash0len, \
+        dataf, chtree, chdigits, ch_w, ses_w \
+            = aset.hashindex
+    elif dedup == 5: # bytearray tree
+        idxcount, hashtree, ht_ksize, hashdigits, hash_w, hash0len, \
+        dataf, chtree, chdigits, ch_w, ses_w \
+            = aset.hashindex
 
     ses = vol.new_session(bksession)
     ses.localtime = localtime
@@ -683,6 +704,7 @@ def send_volume(datavol):
     ses.chunksize = chunksize
     ses.format = "tar" if options.tarfile else "folders"
     ses.path = vol.path+"/"+bksession+"-tmp"
+    ses_index = allsessions.index(ses)
 
     # Set current dir and make new session folder
     os.chdir(bkdir)
@@ -690,7 +712,7 @@ def send_volume(datavol):
 
     zeros = bytes(chunksize)
     empty = bytes(0)
-    bcount = ddcount = 0
+    bcount = ddbytes = 0
     addrsplit = -address_split[1]
     lchunk_addr = last_chunk_addr(snap2size, chunksize)
 
@@ -718,15 +740,16 @@ def send_volume(datavol):
 
     # Use tar to stream files to destination
     stream_started = False
+    untar_cmd = destcd \
+                +" && mkdir -p ."+bkdir+"/"+sdir+"-tmp" \
+                +" && "+destcd + bkdir                  \
+                +" && rm -f .set"
     if options.tarfile:
         # don't untar at destination
-        untar_cmd = [ destcd + bkdir
-                    +" && rm -f .set"
-                    +" && mkdir -p "+sdir+"-tmp"
+        untar_cmd = [ untar_cmd
                     +" && cat >"+pjoin(sdir+"-tmp",bksession+".tar")]
     else:
-        untar_cmd = [ destcd + bkdir
-                    +" && rm -f .set"
+        untar_cmd = [ untar_cmd
                     +" && tar -xmf - && sync -f "+datavol]
 
     # Open source volume and its delta bitmap as r, session manifest as w.
@@ -788,26 +811,50 @@ def send_volume(datavol):
                 if buf != zeros or addr >= lchunk_addr:
                     # Performance fix: move compression into separate processes
                     buf   = compress(buf, compresslevel)
-                    bhash = sha256(buf).hexdigest()
-                    print(bhash, destfile, file=hashf)
+                    bhash = sha256(buf)
+                    print(bhash.hexdigest(), destfile, file=hashf)
 
                     # If chunk already in archive, link to it
-                    if dedup:
-                        bhashi = int(bhash,16)
+                    if dedup == 2:
+                        bhashi = int(bhash.hexdigest(),16)
                         if bhashi in dedup_idx:
                             tar_info.type = LNKTYPE
+                            
                             ddses, ddch = dedup_idx[bhashi]
                             ddchx = "%016x" % ddch
                             tar_info.linkname = "%s/%s/%s/x%s" % \
                                 (ddses.volume.name,
-                                 ddses.name+"-tmp" if ddses==ses else ddses.name,
-                                 ddchx[:addrsplit],
-                                 ddchx)
-                            ddcount += len(buf)
+                                    ddses.name+"-tmp" if ddses==ses else ddses.name,
+                                    ddchx[:addrsplit],
+                                    ddchx)
+                            ddbytes += len(buf)
                             tarf_addfile(tarinfo=tar_info)
                             continue
                         else:
                             dedup_idx[bhashi] = (ses, addr)
+
+                    elif dedup == 3:
+                        bhashb = bhash.digest()
+                        row = cursor.execute("SELECT chunk,ses_id FROM hashindex "
+                                "WHERE id = ?", (bhashb,)).fetchone()
+                        if row:
+                            ddch, ddses_i = row
+                            ddses = allsessions[ddses_i]
+                            ddchx = "%016x" % (c_uint64(ddch).value)
+                            tar_info.type = LNKTYPE
+                            tar_info.linkname = "%s/%s/%s/x%s" % \
+                                (ddses.volume.name,
+                                    ddses.name+"-tmp" if ddses==ses else ddses.name,
+                                    ddchx[:addrsplit],
+                                    ddchx)
+                            ddbytes += len(buf)
+                            tarf_addfile(tarinfo=tar_info)
+                            continue
+                        else:
+                            # perf fix: use execute_many + index of waiting inserts
+                            cursor.execute("INSERT INTO hashindex(id,chunk,ses_id)"
+                                " VALUES(?,?,?)", 
+                                (bhashb, c_int64(addr).value, ses_index))
 
                     bcount += len(buf)
 
@@ -821,8 +868,8 @@ def send_volume(datavol):
     # Send session info, end stream and cleanup
     if stream_started:
         print("  100%  ", ("%.1f" % (bcount/1000000)) +"MB",
-              ("  ( dd: %0.1fMB reduced. )" % (ddcount/1000000)) 
-              if ddcount else "")
+              ("  ( dd: %0.1fMB reduced. )" % (ddbytes/1000000)) 
+              if ddbytes else "")
 
         # Save session info
         ses.save_info()
@@ -837,12 +884,12 @@ def send_volume(datavol):
         tarf.close()
         untar.stdin.close()
         for i in range(30):
-            if untar.poll() != None:
+            if untar.poll() is not None:
                 break
             time.sleep(1)
-        if untar.poll() == None:
+        if untar.poll() is None:
             time.sleep(5)
-            if untar.poll() == None:
+            if untar.poll() is None:
                 untar.terminate()
                 print("terminated untar process!")
 
@@ -862,21 +909,24 @@ def send_volume(datavol):
 
     if bcount == 0:
         print("  No changes.")
+
+    if dedup:
+        show_mem_stats() ####
+
     return stream_started
 
 
 # Build deduplication hash index and list
 
-def build_dedup_index2(listfile=""):
-    dedup_idx = aset.hashindex
-    addrsplit = -address_split[1]
+def init_dedup_index2(listfile=""):
 
-    #a=bytearray() ####
-    sessions = []
-    for vol in aset.vols.values():
-        sessions += vol.sessions.values()
-    # Sort sessions globally by date; oldest are referenced first.
-    sessions.sort(key=lambda x: x.localtime)
+    dedup_idx = {}
+    addrsplit = -address_split[1]
+    chdigits  = max_address.bit_length() // 4
+    chformat  = "%0"+str(chdigits)+"x"
+    ctime = time.time()
+
+    sessions = aset.allsessions
 
     if listfile:
         dedupf = open(tmpdir+"/"+listfile, "w")
@@ -891,11 +941,10 @@ def build_dedup_index2(listfile=""):
                 bhashi = int(line[0],16); addr = int(line[1][1:],16)
                 if bhashi not in dedup_idx:
                     dedup_idx[bhashi] = (ses, addr)
-                    #a.extend(bhashi.to_bytes(32,"big")[:4]) ####
                     continue
                 elif listfile:
                     ddses, ddch = dedup_idx[bhashi]
-                    ddchx = "%016x" % ddch
+                    ddchx = chformat % ddch
                     print("%s/%s/%s/x%s %s/%s/%s/%s" % \
                         (ddses.volume.name, ddses.name, ddchx[:addrsplit], ddchx,
                          volname, sesname, line[1][1:addrsplit], line[1]),
@@ -904,12 +953,257 @@ def build_dedup_index2(listfile=""):
     if listfile:
         dedupf.close()
 
+    aset.hashindex = dedup_idx
+
+    print("\nIndexed in %.1f seconds." % int(time.time()-ctime))
+    vsz, rss = map(int, os.popen("ps -up"+str(os.getpid())).readlines()[-1].split()[4:6])
+    print("\nMemory use: Max %dMB, index count: %d" %
+        (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * resource.getpagesize() // 1024//1024,
+        len(aset.hashindex))
+        )
+    print("Current: vsize %d, rsize %d" % (vsz/1000,rss/1000))
+
+
+def init_dedup_index3(listfile=""):
+
+    addrsplit = -address_split[1]
+    sessions  = aset.allsessions
+    c_int64   = ctypes.c_int64
+    chdigits  = max_address.bit_length() // 4
+    chformat  = "%0"+str(chdigits)+"x"
+    ctime     = time.time()
+
+    db = sqlite3.connect(tmpdir+"/indextest")
+    #db = sqlite3.connect(":memory:")
+    cursor = db.cursor()
+    cursor.execute('''
+        CREATE TABLE hashindex(id BLOB PRIMARY KEY ON CONFLICT IGNORE,
+        chunk INTEGER, ses_id INTEGER
+        )''')
+    insert_phrase = 'INSERT INTO hashindex(id, chunk, ses_id) VALUES(?,?,?)'
+    #cursor.execute('PRAGMA synchronous = OFF')
+    #cursor.execute('PRAGMA journal_mode = OFF')
+
+    if listfile:
+        dedupf = open(tmpdir+"/"+listfile, "w")
+
+    inserts = []; rows = 0
+    for sesnum, ses in enumerate(sessions):
+        volname = ses.volume.name; sesname = ses.name
+        with open(pjoin(ses.path,"manifest"),"r") as manf:
+            for ln in manf:
+                line = ln.strip().split()
+                if line[0] == "0":
+                    continue
+                bhash = bytes().fromhex(line[0])
+                uint = int(line[1][1:],16); addr = c_int64(uint)
+
+                inserts.append((bhash, addr.value, sesnum))
+                # Insert only 1 at a time when generating a listfile.
+                if listfile or not len(inserts) % 10000:
+                    cursor.executemany(insert_phrase, inserts)
+                    inserts.clear()
+                    rows += cursor.rowcount
+
+                    if listfile and cursor.rowcount < 1:
+                        row = cursor.execute("SELECT chunk,ses_id FROM hashindex "
+                                "WHERE id = ?", (bhash,)).fetchone()
+                        if row:
+                            ddch, ddses_i = row
+                            ddses = sessions[ddses_i]
+                            ddchx = chformat % ddch
+                            print("%s/%s/%s/x%s %s/%s/%s/%s" % \
+                                (ddses.volume.name, ddses.name, ddchx[:addrsplit], ddchx,
+                                volname, sesname, line[1][1:addrsplit], line[1]),
+                                file=dedupf)
+
+    if len(inserts):
+        cursor.executemany(insert_phrase, inserts)
+        rows += cursor.rowcount
+    db.commit()
+    aset.hashindex = db
+
+    if listfile:
+        dedupf.close()
+
+    ####
+    print("\nIndexed in %.1f seconds." % int(time.time()-ctime))
+    vsz, rss = map(int, os.popen("ps -up"+str(os.getpid())).readlines()[-1].split()[4:6])
+    print("\nMemory use: Max %dMB, index count: %d" %
+        (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * resource.getpagesize() // 1024//1024,
+        rows)
+        )
+    print("Current: vsize %d, rsize %d" % (vsz/1000,rss/1000))
+
+
+def init_dedup_index4(listfile=""):
+
+    sessions = aset.allsessions
+    addrsplit = -address_split[1]
+    ctime = time.time()
+
+    # Define arrays and element widths
+    hashdigits = 256 // 4 # 4bits per hex digit
+    hash_w     = hashdigits // 2
+    hash0len   = 8       # "Q" ulonglong = 8bytes
+    ht_ksize   = 4 # hex digits for tree key
+    hashtree   = [array("Q") for x in range(2**(ht_ksize*4))]
+    chtree     = [array("L") for x in range(2**(ht_ksize*4))]
+    chdigits   = max_address.bit_length() // 4 # 4bits per digit
+    ses_w = 2; ch_w = chdigits //2
+
+    dataf = open(tmpdir+"/hashindex.dat","w+b")
+    if listfile:
+        raise NotImplementedError()
+        dedupf = open(tmpdir+"/"+listfile, "w")
+
+    count = match = 0
+    for sesnum, ses in enumerate(sessions):
+        volname = ses.volume.name; sesname = ses.name
+        with open(pjoin(ses.path,"manifest"),"r") as manf:
+            for ln in manf:
+                ln1, ln2 = ln.strip().split()
+                if ln1 == "0":
+                    continue
+                bhashb = bytes().fromhex(ln1)
+                #bhash = int(ln1[:hash0len*2], 16)
+                i = int(ln1[:ht_ksize], 16)
+
+                ht = hashtree[i]
+                while True:
+                    try:
+                        pos = ht.index(int.from_bytes(bhashb[:hash0len],
+                                                      "little"))
+                    except ValueError:
+                        hashtree[i].frombytes(bhashb)
+                        chtree[i].append(count)
+                        dataf.write(sesnum.to_bytes(ses_w,"big"))
+                        dataf.write(bytes().fromhex(ln2[1:]))
+                        count += 1
+                        break
+
+                    if pos % hash_w == 0:
+                        # First hash segment matched; test remaining segments.
+                        test = True
+                        for ai, offset in enumerate(range(
+                                        hash0len, hash_w, hash0len)):
+                            if int.from_bytes(bhashb[offset:offset+hash0len],
+                                              "little") != ht[pos+ai+1]:
+                                test = False
+                                break
+
+                        if test:
+                            if listfile:
+                                data_i = chtree[i][pos//hash_w]
+                                dataf.seek(data_i*(ses_w+ch_w))
+                                ddses = sessions[int.from_bytes(dataf.read(ses_w))]
+                                ddchx = dataf.read(ch_w).hex().zfill(chdigits)
+                                print("%s/%s/%s/x%s %s/%s/%s/%s" % \
+                                    (ddses.volume.name, ddses.name, ddchx[:addrsplit], ddchx,
+                                    volname, sesname, ln2[1:addrsplit], ln2),
+                                    file=dedupf)
+                                dataf.seek(-1)
+                            match += 1
+                            break
+
+                    ht = ht[pos:]
+
+                    #else:
+                        #ht = ht[pos:]
+                        #print("B",end="",flush=True)
+
+                #if count % 5000 == 0:
+                    #print(count, end=" ", flush=True)
+
+    if listfile:
+        dedupf.close()
+        dataf.close()
+
+    aset.hashindex = (count, hashtree, ht_ksize, hashdigits, hash_w, hash0len,
+                      dataf, chtree, chdigits, ch_w, ses_w)
+
+    print("\n %d matches in %.1f seconds." % (match, int(time.time()-ctime)))
+    vsz, rss = map(int, os.popen("ps -up"+str(os.getpid())).readlines()[-1].split()[4:6])
+    print("\nMemory use: Max %dMB, index count: %d" %
+        (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * resource.getpagesize() // 1024//1024,
+         count)
+        )
+    print("Current: vsize %d, rsize %d" % (vsz/1000,rss/1000))
+
+
+def init_dedup_index5(listfile=""):
+
+    sessions = aset.allsessions
+    addrsplit = -address_split[1]
+    ctime = time.time()
+
+    # Define arrays and element widths
+    hashdigits = 256 // 4  # sha256 @4bits per hex digit
+    hash_w     = hashdigits // 2
+    ht_ksize   = 4 # hex digits for tree key
+    hashtree   = [bytearray() for x in range(2**(ht_ksize*4))]
+    chtree     = [array("L") for x in range(2**(ht_ksize*4))]
+    chdigits   = max_address.bit_length() // 4 # 4bits per digit
+    ses_w = 2; ch_w = chdigits //2
+
+    dataf  = open(tmpdir+"/hashindex.dat","w+b")
+    if listfile:
+        dedupf = open(tmpdir+"/"+listfile, "w")
+
+    count = match = 0
+    for sesnum, ses in enumerate(sessions):
+        volname = ses.volume.name; sesname = ses.name
+        with open(pjoin(ses.path,"manifest"),"r") as manf:
+            for ln in manf:
+                ln1, ln2 = ln.strip().split()
+                if ln1 == "0":
+                    continue
+                bhashb = bytes().fromhex(ln1)
+                i = int(ln1[:ht_ksize], 16)
+
+                pos = hashtree[i].find(bhashb)
+                if pos % hash_w == 0:
+                    match += 1
+                    if listfile:
+                        data_i = chtree[i][pos//hash_w]
+                        dataf.seek(data_i*(ses_w+ch_w))
+                        ddses = sessions[int.from_bytes(dataf.read(ses_w))]
+                        ddchx = dataf.read(ch_w).hex().zfill(chdigits)
+                        print("%s/%s/%s/x%s %s/%s/%s/%s" % \
+                            (ddses.volume.name, ddses.name, ddchx[:addrsplit], ddchx,
+                            volname, sesname, ln2[1:addrsplit], ln2),
+                            file=dedupf)
+                        dataf.seek(-1)
+                else:
+                    hashtree[i].extend(bhashb)
+                    chtree[i].append(count)
+                    dataf.write(sesnum.to_bytes(ses_w,"big"))
+                    dataf.write(bytes().fromhex(ln2[1:]))
+                    count += 1
+
+    if listfile:
+        dedupf.close()
+        dataf.close()
+
+    aset.hashindex = (count, hashtree, hashdigits, hash_w, hash0len,
+                      dataf, chtree, chdigits, ch_w, ses_w)
+
+    print("\nIndexed in %.1f seconds." % int(time.time()-ctime))
+    vsz, rss = map(int, os.popen("ps -up"+str(os.getpid())).readlines()[-1].split()[4:6])
+    print("\nMemory use: Max %dMB, index count: %d, matches: %d" %
+        (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * resource.getpagesize() // 1024//1024,
+         count, match)
+        )
+    print("Current: vsize %d, rsize %d" % (vsz/1000,rss/1000))
+    #print("idx size: %d" % sys.getsizeof(idx))
+
 
 # Deduplicate data already in archive
 
 def dedup_post():
+
     print("Building deduplication index...")
-    build_dedup_index2("dedup.lst")
+    init_dedup_index("dedup.lst")
 
     print("Linking...")
     cmd = [shell_prefix
@@ -925,6 +1219,7 @@ def dedup_post():
 # Controls flow of monitor and send_volume procedures:
 
 def monitor_send(volumes=[], monitor_only=True):
+
     global datavols, newvols, volgroups, l_vols
     global bmap_size, snap1size, snap2size, snap1vol, snap2vol
     global map_exists, map_updated, mapfile, bksession, localtime
@@ -933,8 +1228,7 @@ def monitor_send(volumes=[], monitor_only=True):
     bksession = "S_"+localtime
 
     if options.dedup:
-        print("Building index...")
-        build_dedup_index2()
+        init_dedup_index()
 
     datavols, newvols \
         = prepare_snapshots(volumes if len(volumes) >0 else datavols)
@@ -1018,6 +1312,7 @@ def finalize_bk_session(datavol, sent):
 # in YYYYMMDD-HHMMSS format.
 
 def prune_sessions(datavol, times):
+
     global destmountpoint, destdir, bkdir
 
     # Validate date-time params
@@ -1100,6 +1395,7 @@ def prune_sessions(datavol, times):
 # target. Caution: clear_sources is destructive.
 
 def merge_sessions(datavol, sources, target, clear_sources=False):
+
     global destmountpoint, destdir, bkdir
 
     volume = aset.vols[datavol]
@@ -1203,6 +1499,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
 # are lost or if the source volume reverted to an earlier state.
 
 def receive_volume(datavol, select_ses="", save_path="", diff=False):
+
     global destmountpoint, destdir, bkdir, vgname, poolname
 
     verify_only = not (diff or save_path!="")
@@ -1435,6 +1732,16 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                 print("Delta bytes re-mapped:", diff_count)
                 if diff_count > 0:
                     print("\nNext 'send' will bring this volume into sync.")
+            elif diff_count:
+                x_it(1, diff_count+" bytes differ.")
+
+
+def show_mem_stats():
+    vsz, rss = map(int, os.popen("ps -up"+str(os.getpid())).readlines()[-1].split()[4:6])
+    print("\nMemory use: Max %dMB" %
+        (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * resource.getpagesize() // 1024//1024)
+        )
+    print("Current: vsize %d, rsize %d" % (vsz/1000,rss/1000))
 
 
 # Exit with simple message
@@ -1494,11 +1801,11 @@ if os.path.exists(tmpdir):
 os.makedirs(tmpdir+"/rpc")
 
 
-# Parse arguments
+# Parse Arguments:
 parser = argparse.ArgumentParser(description="")
 parser.add_argument("action", choices=["send","monitor","add","delete",
                     "prune","receive","verify","diff","list","version",
-                    "testing-dedup-existing","test1","test2"],
+                    "dedup-existing","testing-wipe-all","index-test"],
                     default="monitor", help="Action to take")
 parser.add_argument("-u", "--unattended", action="store_true", default=False,
                     help="Non-interactive, supress prompts")
@@ -1515,8 +1822,7 @@ parser.add_argument("--save-to", dest="saveto", default="",
                     help="Path to store volume for receive")
 parser.add_argument("--remap", action="store_true", default=False,
                     help="Remap volume during diff")
-parser.add_argument("--testing-dedup", action="store_true", default=False,
-                    dest="dedup",
+parser.add_argument("--testing-dedup", dest="dedup", type=int, default=0,
                     help="Test experimental deduplication (send)")
 parser.add_argument("volumes", nargs="*")
 options = parser.parse_args()
@@ -1524,7 +1830,11 @@ options = parser.parse_args()
 #prs_prune = subparser.add_parser("prune",help="prune help")
 
 
-# General configuration
+# General Configuration:
+
+# Select dedup test algorithm.
+init_dedup_index = [None, None, init_dedup_index2, init_dedup_index3,
+                    init_dedup_index4, init_dedup_index5][options.dedup]
 
 monitor_only = options.action == "monitor" # gather metadata without backing up
 
@@ -1532,8 +1842,8 @@ volgroups = get_lvm_vgs()
 vgname, poolname, destvm, destmountpoint, destdir, datavols \
 = get_configs()
 
-if vgname not in volgroups.keys():
-    raise ValueError("\nVolume group "+vgname+" not present.")
+## if vgname not in volgroups.keys():
+##    raise ValueError("\nVolume group "+vgname+" not present.")
 l_vols = volgroups[vgname].lvs
 
 bkdir = topdir+"/"+vgname+"%"+poolname
@@ -1562,9 +1872,6 @@ for vol in options.volumes:
 
 
 # Process commands
-
-if options.action   == "test2":
-    build_dedup_index2()
 
 if options.action   == "monitor":
     monitor_send(datavols, monitor_only=True)
@@ -1658,28 +1965,48 @@ elif options.action == "delete":
         if ans.lower() not in {"y","yes"}:
             x_it(0,"")
 
-    path = aset.vols[dv].path
-    aset.delete_volume(dv)
-    cmd = [destcd
-          +" && rm -rf ." + path
-          +" && sync -f ."+ os.path.dirname(path)
+    print("\nDeleting volume", dv, "from archive.")
+    cmd = [destcd + bkdir
+          +" && rm -rf " + dv
+          +" && sync -f ."
           ]
     dest_run(cmd)
-    print("\nVolume", dv, "deleted from archive.")
 
-
-elif options.action == "testing-dedup-existing":
-    dedup_post()
+    if dv in aset.vols:
+        aset.delete_volume(dv)
 
 
 elif options.action == "untar":
     raise NotImplementedError()
 
 
-####
-import resource
-print("Memory use:  index count", len(aset.hashindex), #, sys.getsizeof(a))
-    resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * resource.getpagesize() // 1024//1024, "MB")
-####
+elif options.action == "testing-wipe-all":
+    print("Warning! Wipe-all will remove ALL metadata AND archived data, "
+          "leaving only the configuration!")
+
+    ans = input("Are you sure? [y/N]: ")
+    if ans.lower() not in {"y","yes"}:
+        x_it(0,"")
+
+    for dv in list(aset.vols):
+        aset.delete_volume(dv)
+
+    print("\nDeleting entire archive...")
+    cmd = [destcd
+          +" && rm -rf ."+bkdir
+          +" && sync -f ."
+          ]
+    dest_run(cmd)
+
+
+elif options.action == "dedup-existing":
+    if options.dedup:
+        dedup_post()
+
+
+if options.action   == "index-test":
+    init_dedup_index()
+
+
 
 print("\nDone.\n")\
