@@ -262,13 +262,6 @@ your volumes for normal use (this is the default for most Linux systems).
 Testing
 ---
 
-* Deduplication has been added as an experimental feature for v0.2beta; this is
-a means to reduce allocated disk space, network traffic and overall backup times.
-  - To deduplicate existing archive data, issue the command
-`sparsebak.py testing-dedup-existing`.
-  - To deduplicate while backing up (also reduces net bandwidth), issue the command
-`sparsebak.py --testing-dedup send`.
-
 * Even with non-sensitive data, precaution can avoid wasting X number of
 testing hours. A good way to avoid losing archives to corruption/bugs is to
 make a quick linked copy of the sparsebak destination folder; either `cp -rl` or
@@ -285,6 +278,24 @@ volume's .tick and .tock snapshots.
 If you somehow must have more than one, there must be no overlap of names in
 the volumes section. In the future sparsebak will support multiple archive ini
 configs.
+
+* *Deduplication* has been added as an experimental feature for v0.2beta; this is
+a means to reduce allocated disk space, network traffic and (sometimes) overall
+backup times.
+  - To deduplicate existing archive data, issue the command:
+  `sparsebak.py --testing-dedup=N dedup-existing`
+  where 'N' is the algorithm number to be tested. Current available choices are
+  2, 3, 4 and 5 for *dict*, *sqlite*, *array tree* and *bytearray tree*. The 2/dict
+  option, however, is not a contender for general release due to its very heavy
+  memory footprint.
+  - To deduplicate while backing up (also reduces net bandwidth), issue the command
+`sparsebak.py --testing-dedup=N send`.
+  - No committment is implied by using dedup options: You can try the options
+  with the above commands whenever you like, switch between algorithms or switch
+  between using dedup and not using it.
+  - Dedup requires a hardlink-capable filesystem for the archive/destination.
+  Trying to use it without this (rather common) capability will cause the
+  operation to fail.
 
 
 Troubleshooting notes
@@ -327,12 +338,8 @@ Todo
 
 * Additional functions: untar, verify-archive
 
-* Show configured vs present volumes in list output
-
 * File name and sequence obfuscation
-
-* Pool-based Deduplication
 
 * Additional sanity checks
 
-* Btrfs, XFS, ZFS support
+* Btrfs and ZFS support
