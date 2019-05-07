@@ -1768,13 +1768,13 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             if addr == lchunk_addr and len(untrusted_decomp) != volsize - lchunk_addr:
                 raise BufferError("Decompressed to %d bytes." % len(untrusted_decomp))
 
-            if verify_only:
-                continue
-
             # Buffer is OK...
             buf = untrusted_decomp
             if attended:
                 print("OK",end="\x0d")
+
+            if verify_only:
+                continue
 
             if save_path:
                 savef.write(buf)
