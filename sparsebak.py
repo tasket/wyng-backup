@@ -1597,9 +1597,10 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             x_it(0,"")
 
     print("\nReading manifests")
-    chdigits   = max_address.bit_length() // 4 # 4bits per digit
-    chformat  = "x%0"+str(chdigits)+"x"
-    last_chunk = chformat % last_chunk_addr(volsize, chunksize)
+    chdigits    = max_address.bit_length() // 4 # 4bits per digit
+    chformat    = "x%0"+str(chdigits)+"x"
+    lchunk_addr = last_chunk_addr(volsize, chunksize)
+    last_chunkx = chformat % lchunk_addr
     open(tmpdir+"/manifests.cat", "wb").close()
 
     # Collect session manifests
@@ -1630,7 +1631,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         +"  |  tee "+tmpdir+"/manifest.verify"
         +"  |  sed -E 's|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)\s+"
         +"(S_\S+)|\\3/\\1/x\\1\\2|;"
-        +" /"+last_chunk+"/q'"
+        +" /"+last_chunkx+"/q'"
         +"  | "+" ".join(dest_run_args(vmtype,
                         ["cat >"+tmpdir+"/rpc/dest.lst"])
         )]
@@ -1759,17 +1760,21 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                 raise ValueError("Bad hash "+fname
                     +" :: "+hashlib.sha256(untrusted_buf).hexdigest())
 
-            # Buffer is OK; Proceed with decompress.
-            if attended:
-                print("OK",end="\x0d")
-
+            # Proceed with decompress.
             # fix for zstd support
-            buf = decompress(untrusted_buf, decomp_bits, chunksize)
-            if len(buf) > chunksize:
-                raise BufferError("Decompressed to %d bytes" % len(buf))
+            untrusted_decomp = decompress(untrusted_buf, decomp_bits, chunksize)
+            if len(untrusted_decomp) != chunksize and addr < lchunk_addr:
+                raise BufferError("Decompressed to %d bytes." % len(untrusted_decomp))
+            if addr == lchunk_addr and len(untrusted_decomp) != volsize - lchunk_addr:
+                raise BufferError("Decompressed to %d bytes." % len(untrusted_decomp))
 
             if verify_only:
                 continue
+
+            # Buffer is OK...
+            buf = untrusted_decomp
+            if attended:
+                print("OK",end="\x0d")
 
             if save_path:
                 savef.write(buf)
