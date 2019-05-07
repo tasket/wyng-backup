@@ -1553,12 +1553,12 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
     def diff_compare(dbuf,z):
         if dbuf != cmpf.read(chunksize):
-            print("* delta", faddr, " ZZZ " if z else "    ")
+            print("* delta", faddr, "Z   " if z else "    ")
             if remap:
                 volsegment = addr // chunksize 
                 bmap_pos = volsegment // 8
                 bmap_mm[bmap_pos] |= 1 << (volsegment % 8)
-            return len(buf)
+            return len(dbuf)
         else:
             return 0
 
