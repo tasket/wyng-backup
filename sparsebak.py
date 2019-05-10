@@ -456,7 +456,7 @@ def detect_dest_state(destsys):
                 p = subprocess.check_call(" ".join(
                     ["cat " + tmpdir +"/rpc/dest_helper.py | "]
                     + dest_run_args(desttype, cmd)), shell=True)
-        except:
+        except subprocess.CalledProcessError:
             x_it(1, "Destination not ready to receive commands.")
 
 
@@ -591,7 +591,7 @@ def vg_exists(vgname):
     try:
         p = subprocess.check_output( ["vgdisplay", vgname],
                                     stderr=subprocess.STDOUT )
-    except:
+    except subprocess.CalledProcessError:
         return False
     else:
         return True
@@ -603,30 +603,29 @@ def get_lvm_deltas(datavols):
     vgname   = aset.vgname
     poolname = aset.poolname
     print("Acquiring deltas.")
+
     subprocess.call(["dmsetup","message", vgname+"-"+poolname+"-tpool",
         "0", "release_metadata_snap"], stderr=subprocess.DEVNULL)
-    subprocess.check_call(["dmsetup", "message", vgname+"-"+poolname+"-tpool",
-        "0", "reserve_metadata_snap"])
-    td_err = []
+    cmd =  [shell_prefix,
+            "dmsetup message "+vgname+"-"+poolname+"-tpool"
+           +" 0 reserve_metadata_snap"]
     for datavol in datavols:
         snap1vol = datavol + ".tick"
         snap2vol = datavol + ".tock"
-        try:
-            with open(tmpdir+"/delta."+datavol, "w") as f:
-                cmd = [shell_prefix \
-                    + " thin_delta -m"
-                    + " --thin1 " + l_vols[snap1vol].thin_id
-                    + " --thin2 " + l_vols[snap2vol].thin_id
-                    + " /dev/mapper/"+vgname+"-"+poolname+"_tmeta"
-                    + " | grep -v '<same .*\/>$'"
-                    ]
-                subprocess.check_call(cmd, shell=True, stdout=f)
-        except:
-            td_err.append(datavol)
-    subprocess.check_call(["dmsetup","message", vgname+"-"+poolname+"-tpool",
-        "0", "release_metadata_snap"] )
-    if td_err:
-        x_it(1, "ERROR running thin_delta process for "+td_err)
+        cmd += ["thin_delta -m"
+                + " --thin1 " + l_vols[snap1vol].thin_id
+                + " --thin2 " + l_vols[snap2vol].thin_id
+                + " /dev/mapper/"+vgname+"-"+poolname+"_tmeta"
+                + " | grep -v '<same .*\/>$'"
+                + " >" + tmpdir+"/delta."+datavol
+                ]
+    try:
+        subprocess.check_call("\n".join(cmd), shell=True)
+    except:
+        x_it(1, "ERROR running thin_delta process.")
+    finally:
+        subprocess.call(["dmsetup","message", vgname+"-"+poolname+"-tpool",
+            "0", "release_metadata_snap"], stderr=subprocess.DEVNULL)
 
 
 # update_delta_digest: Translates raw lvm delta information
@@ -1357,7 +1356,7 @@ def rotate_snapshots(vol, rotate=True):
         l_vols[snap2vol].lv_path = l_vols[snap1vol].lv_path
         l_vols[snap1vol] = l_vols[snap2vol]
         del l_vols[snap2vol]
-        
+
     else:
         p = subprocess.check_output(
             ["lvremove","--force",aset.vgname+"/"+snap2vol])
