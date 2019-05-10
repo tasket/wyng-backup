@@ -805,17 +805,17 @@ def send_volume(datavol):
                     LNKTYPE = tarfile.LNKTYPE
                     stream_started = True
 
-                # Compress & write only non-empty and last chunks
-                if buf == zeros and addr < lchunk_addr:
-                    print("0", destfile, file=hashf)
-                    continue
-
                 # Show progress.
                 percent = int(bmap_pos/bmap_size*1000)
                 if percent >= checkpt:
                     print("  %.1f%%   %dMB " % (percent/10, bcount//1000000),
                           end="\x0d", flush=True)
                     checkpt += checkpt_pct
+
+                # Compress & write only non-empty and last chunks
+                if buf == zeros and addr < lchunk_addr:
+                    print("0", destfile, file=hashf)
+                    continue
 
                 # Performance fix: move compression into separate processes
                 buf      = compress(buf, compresslevel)
@@ -1025,7 +1025,7 @@ def init_dedup_index3(listfile=""):
     chformat  = "%0"+str(chdigits)+"x"
     ctime     = time.time()
 
-    db     = sqlite3.connect(tmpdir+"/indextest")
+    db     = sqlite3.connect(tmpdir+"/hashindex.db")
     #db    = sqlite3.connect(":memory:")
     cursor = db.cursor()
     cursor.execute('''
@@ -1440,17 +1440,17 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
     global destmountpoint, destdir, bkdir
 
     volume = aset.vols[datavol]
-    ses_sizes = set()
     for ses in sources + [target]:
-        ses_sizes.add(volume.sessions[ses].volsize)
         if volume.sessions[ses].format == "tar":
             x_it(1, "Cannot merge range containing tarfile session.")
 
     # Get volume size
     chdigits   = max_address.bit_length() // 4 # 4bits per digit
-    chformat  = "x%0"+str(chdigits)+"x"
+    chformat   = "x%0"+str(chdigits)+"x"
     volsize    = volume.sessions[target].volsize
+    vol_shrank = True if volsize < volume.sessions[sources[0]].volsize else False
     last_chunk = chformat % last_chunk_addr(volsize, volume.chunksize)
+    lc_filter  = '"'+last_chunk+'"'
 
     # Prepare manifests for efficient merge using fs mv/replace. The target is
     # included as a source, and oldest source is our target for mv. At the end
@@ -1491,7 +1491,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
     print("  Merging to", target)
 
     cmd = [shell_prefix + "cd "+pjoin(bkdir,datavol)
-        +" && awk '$2<="+'"'+last_chunk+'"'+"' "+tmpdir+"/manifest.tmp"
+        +" && awk '$2<="+lc_filter+"' " + tmpdir+"/manifest.tmp"
         +" |  sed -E "
 
         +"'s|^0 x(\S{" + str(address_split[0]) + "})(\S+)\s+(S_\S+)|"
@@ -1517,14 +1517,14 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
         print("  Removed", " ".join(sources))
 
     cmd = [shell_prefix + "cd "+pjoin(bkdir,datavol)
-        +"  && sed -E 's/^(\S+\s+\S+).*/\\1/; /"+last_chunk+"/q' "
+        +"  && awk '$2<="+lc_filter+" {print $1, $2}' "
         +tmpdir+"/manifest.new >"+target+"/manifest",
 
-        # If volume size changed in this period then make trim list.
-        ( " && sed -E '1,/"+last_chunk+"/d; "
-        +  "s|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)|"
-        +  target+"/\\1/x\\1\\2|' "+tmpdir+"/manifest.new >"+target+"/delete"
-        ) if len(ses_sizes)>1 else "",
+        # If volume size shrank in this period then make trim list.
+        ( " && awk '$2>"+lc_filter+"' " + tmpdir+"/manifest.new"
+        + " |  sed -E 's|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)|"
+        +  target+"/\\1/x\\1\\2|' >"+target+"/delete"
+        ) if vol_shrank else "",
 
         "   && tar -cf - volinfo "+target
         +"  | "+" ".join(dest_run_args(vmtype, [destcd + bkdir+"/"+datavol
@@ -1534,7 +1534,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
             ( " && cat "+target+"/delete  |  xargs -r rm -f"
             + " && rm "+target+"/delete"
             + " && find "+target+" -maxdepth 1 -type d -empty -delete"
-            ) if len(ses_sizes)>1 else "",
+            ) if vol_shrank else "",
 
               " && sync -f volinfo"
             ])
