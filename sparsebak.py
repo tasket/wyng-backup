@@ -31,7 +31,7 @@ class ArchiveSet:
         self.vgname = c['vgname']
         self.poolname = c['poolname']
         self.path = pjoin(top,self.vgname+"%"+self.poolname)
-        self.destvm = c['destvm']
+        self.destsys = c['destvm']
         self.destmountpoint = c['destmountpoint']
         self.destdir = c['destdir']
 
@@ -295,7 +295,7 @@ def get_lvm_vgs():
 
 
 # Get global configuration settings:
-    
+
 def get_configs():
     global aset
 
@@ -307,31 +307,31 @@ def get_configs():
             dvs.append(v.name)
 
     # temporary kludge:
-    return aset.vgname, aset.poolname, aset.destvm, aset.destmountpoint, \
+    return aset.vgname, aset.poolname, aset.destsys, aset.destmountpoint, \
         aset.destdir, dvs
 
 
 # Detect features of internal and destination environments:
 
 def detect_internal_state():
-    global destvm
+    global destsys
 
-    if os.path.exists("/etc/qubes-release") and destvm[:8] == "qubes://":
-        vmtype = "qubes" # Qubes OS guest VM
-        destvm = destvm[8:]
-    elif destvm[:6] == "ssh://":
-        vmtype = "ssh"
-        destvm = destvm[6:]
-    elif destvm[:12] == "qubes-ssh://":
-        vmtype = "qubes-ssh"
-        destvm = destvm[12:]
-    elif destvm[:11] == "internal:":
-        vmtype = "internal" # local shell environment
+    if os.path.exists("/etc/qubes-release") and destsys[:8] == "qubes://":
+        desttype = "qubes" # Qubes OS guest VM
+        destsys = destsys[8:]
+    elif destsys[:6] == "ssh://":
+        desttype = "ssh"
+        destsys = destsys[6:]
+    elif destsys[:12] == "qubes-ssh://":
+        desttype = "qubes-ssh"
+        destsys = destsys[12:]
+    elif destsys[:11] == "internal:":
+        desttype = "internal" # local shell environment
     else:
-        raise ValueError("'destvm' not an accepted type.")
+        raise ValueError("'destsys' not an accepted type.")
 
     for prg in {"thin_delta","lvs","lvdisplay","lvcreate","blkdiscard",
-                "truncate","ssh" if vmtype=="ssh" else "sh"}:
+                "truncate","ssh" if desttype=="ssh" else "sh"}:
         if not shutil.which(prg):
             raise RuntimeError("Required command not found: "+prg)
 
@@ -397,16 +397,16 @@ with open("''' + tmpdir + '''/rpc/dest.lst", "r") as lstf:
 
     #####>  End helper program  <#####
 
-    return vmtype
+    return desttype
 
 
-def detect_dest_state(destvm):
+def detect_dest_state(destsys):
 
     if options.action not in {"index-test","monitor","list","version","add"} \
-                            and destvm is not None:
+                            and destsys is not None:
 
-        if vmtype == "qubes-ssh":
-            dargs = vm_run_args["qubes"][:-1] + [destvm.split("|")[0]]
+        if desttype == "qubes-ssh":
+            dargs = dest_run_map["qubes"][:-1] + [destsys.split("|")[0]]
 
             cmd = dargs + [shell_prefix \
                   +"rm -rf "+tmpdir+"-old"
@@ -427,14 +427,14 @@ def detect_dest_state(destvm):
             dest_run(cmd)
 
             # send helper program to remote
-            if vmtype != "internal":
+            if desttype != "internal":
                 cmd = ["rm -rf "+tmpdir
                     +"  && mkdir -p "+tmpdir+"/rpc"
                     +"  && cat >"+tmpdir +"/rpc/dest_helper.py"
                     ]
                 p = subprocess.check_call(" ".join(
                     ["cat " + tmpdir +"/rpc/dest_helper.py | "]
-                    + dest_run_args(vmtype, cmd)), shell=True)
+                    + dest_run_args(desttype, cmd)), shell=True)
         except:
             x_it(1, "Destination not ready to receive commands.")
 
@@ -443,7 +443,7 @@ def detect_dest_state(destvm):
 
 def dest_run(commands, dest_type=None, dest=None):
     if dest_type is None:
-        dest_type = vmtype
+        dest_type = desttype
 
     cmd = shell_prefix + " ".join(dest_run_args(dest_type, commands))
     p = subprocess.check_call(cmd, shell=True)
@@ -454,7 +454,7 @@ def dest_run(commands, dest_type=None, dest=None):
 
 def dest_run_args(dest_type, commands):
 
-    run_args =  vm_run_args ####
+    run_args =  dest_run_map ####
 
     # shunt commands to tmp file
     with tempfile.NamedTemporaryFile(dir=tmpdir, delete=False) as tmpf:
@@ -467,7 +467,7 @@ def dest_run_args(dest_type, commands):
         cmd = [shell_prefix \
               +"cat "+pjoin(tmpdir,remotetmp)
               +" | qvm-run -p "
-              +(destvm if dest_type == "qubes" else destvm.split("|")[0])
+              +(destsys if dest_type == "qubes" else destsys.split("|")[0])
               +" 'mkdir -p "+pjoin(tmpdir,"rpc")
               +" && cat >"+pjoin(tmpdir,"rpc",remotetmp)+"'"
               ]
@@ -476,7 +476,7 @@ def dest_run_args(dest_type, commands):
         if dest_type == "qubes":
             add_cmd = ["'sh "+pjoin(tmpdir,"rpc",remotetmp)+"'"]
         elif dest_type == "qubes-ssh":
-            add_cmd = ["'ssh "+destvm.split("|")[1]
+            add_cmd = ["'ssh "+destsys.split("|")[1]
                       +' "$(cat '+pjoin(tmpdir,"rpc",remotetmp)+')"'
                       +"'"]
 
@@ -794,7 +794,7 @@ def send_volume(datavol):
                 # Start tar stream
                 if not stream_started:
                     cmd   = shell_prefix + \
-                            " ".join(dest_run_args(vmtype, untar_cmd))
+                            " ".join(dest_run_args(desttype, untar_cmd))
                     untar = subprocess.Popen(cmd,
                             stdin =subprocess.PIPE,
                             stdout=subprocess.DEVNULL,
@@ -1249,7 +1249,7 @@ def dedup_existing():
     print("Linking...")
     cmd = [shell_prefix
         +"cat "+tmpdir+"/dedup.lst"
-        +"  | "+" ".join(dest_run_args(vmtype, [destcd + bkdir
+        +"  | "+" ".join(dest_run_args(desttype, [destcd + bkdir
                +" && cat >"+tmpdir+"/rpc/dest.lst"
                +" && python3 "+tmpdir+"/rpc/dest_helper.py dedup"
                ]))
@@ -1291,8 +1291,8 @@ def monitor_send(volumes=[], monitor_only=True):
 
     if not monitor_only:
         print("\nSending backup session", bksession,
-              "to", (vmtype+"://"+destvm) if \
-              destvm != "internal:" else destmountpoint)
+              "to", (desttype+"://"+destsys) if \
+              destsys != "internal:" else destmountpoint)
 
     for datavol in datavols+newvols:
         print("\nVolume :", datavol)
@@ -1448,7 +1448,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
     chdigits   = max_address.bit_length() // 4 # 4bits per digit
     chformat   = "x%0"+str(chdigits)+"x"
     volsize    = volume.sessions[target].volsize
-    vol_shrank = True if volsize < volume.sessions[sources[0]].volsize else False
+    vol_shrank = volsize < volume.sessions[sources[0]].volsize
     last_chunk = chformat % last_chunk_addr(volsize, volume.chunksize)
     lc_filter  = '"'+last_chunk+'"'
 
@@ -1501,7 +1501,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
         +"rename \\3/\\1/x\\1\\2 "+merge_target+"/\\1/x\\1\\2|'"
 
         +"  |  cat "+tmpdir+"/sources.lst -"
-        +"  | "+" ".join(dest_run_args(vmtype, [destcd + bkdir+"/"+datavol
+        +"  | "+" ".join(dest_run_args(desttype, [destcd + bkdir+"/"+datavol
                +" && cat >"+tmpdir+"/rpc/dest.lst"
                +" && python3 "+tmpdir+"/rpc/dest_helper.py merge"
                ]))
@@ -1527,7 +1527,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
         ) if vol_shrank else "",
 
         "   && tar -cf - volinfo "+target
-        +"  | "+" ".join(dest_run_args(vmtype, [destcd + bkdir+"/"+datavol
+        +"  | "+" ".join(dest_run_args(desttype, [destcd + bkdir+"/"+datavol
             +"  && tar -xmf -",
 
             # Trim on dest.
@@ -1632,7 +1632,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         +"  |  sed -E 's|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)\s+"
         +"(S_\S+)|\\3/\\1/x\\1\\2|;"
         +" /"+last_chunkx+"/q'"
-        +"  | "+" ".join(dest_run_args(vmtype,
+        +"  | "+" ".join(dest_run_args(desttype,
                         ["cat >"+tmpdir+"/rpc/dest.lst"])
         )]
     p = subprocess.check_output(cmd, shell=True)
@@ -1640,7 +1640,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     print("\nReceiving volume", datavol, select_ses)
 
     # Create retriever process using py program
-    cmd = [shell_prefix] + dest_run_args(vmtype,
+    cmd = [shell_prefix] + dest_run_args(desttype,
             [destcd + bkdir+"/"+datavol
             +"  && python3 "+tmpdir+"/rpc/dest_helper.py receive"
             ])
@@ -1819,28 +1819,28 @@ def x_it(code, text):
 
 ##  MAIN  #####################################################################
 
-# Constants
-prog_version = "0.2.0betaZ"
-format_version = 1
-prog_name = "sparsebak"
-topdir = "/"+prog_name # must be absolute path
-tmpdir = "/tmp/"+prog_name
-volgroups = {}
-l_vols = {}
-aset = None
+# Constants / Globals
+prog_version          = "0.2.0betaZ"
+format_version        = 1
+prog_name             = "sparsebak"
+topdir                = "/"+prog_name # must be absolute path
+tmpdir                = "/tmp/"+prog_name
+volgroups             = {}
+l_vols                = {}
+aset                  = None
 # Disk block size:
-bs = 512
+bs                    = 512
 # LVM min blocks = 128 = 64kBytes:
-lvm_block_factor = 128
+lvm_block_factor      = 128
 # Default archive chunk size = 64kBytes:
-bkchunksize = 1 * lvm_block_factor * bs
+bkchunksize           = 1 * lvm_block_factor * bs
 assert bkchunksize % (lvm_block_factor * bs) == 0
-max_address = 0xffffffffffffffff # 64bits
+max_address           = 0xffffffffffffffff # 64bits
 # for 64bits, a subdir split of 9+7 allows 2048 files per dir:
-address_split = [len(hex(max_address))-2-7, 7]
-pjoin = os.path.join
-shell_prefix = "set -e && export LC_ALL=C\n"
-destcd = None
+address_split         = [len(hex(max_address))-2-7, 7]
+pjoin                 = os.path.join
+shell_prefix          = "set -e && export LC_ALL=C\n"
+destcd                = None
 
 
 if sys.hexversion < 0x3050000:
@@ -1869,7 +1869,8 @@ os.makedirs(tmpdir+"/rpc")
 parser = argparse.ArgumentParser(description="")
 parser.add_argument("action", choices=["send","monitor","add","delete",
                     "prune","receive","verify","diff","list","version",
-                    "dedup-existing","testing-wipe-all","index-test"],
+                    "arch-create","arch-delete",
+                    "dedup-existing","index-test"],
                     default="monitor", help="Action to take")
 parser.add_argument("-u", "--unattended", action="store_true", default=False,
                     help="Non-interactive, supress prompts")
@@ -1886,6 +1887,12 @@ parser.add_argument("--save-to", dest="saveto", default="",
                     help="Path to store volume for receive")
 parser.add_argument("--remap", action="store_true", default=False,
                     help="Remap volume during diff")
+parser.add_argument("--source", dest="source", default="",
+                    help="LVM volgroup/pool containing source volumes")
+parser.add_argument("--dest", dest="dest", default="",
+                    help="Type:location of archive")
+parser.add_argument("--subdir", dest="subdir", default="",
+                    help="Optional subdir for --dest")
 parser.add_argument("--testing-dedup", dest="dedup", type=int, default=0,
                     help="Test experimental deduplication (send)")
 parser.add_argument("volumes", nargs="*")
@@ -1903,7 +1910,8 @@ init_dedup_index = [None, None, init_dedup_index2, init_dedup_index3,
 monitor_only = options.action == "monitor" # gather metadata without backing up
 
 volgroups = get_lvm_vgs()
-vgname, poolname, destvm, destmountpoint, destdir, datavols \
+
+vgname, poolname, destsys, destmountpoint, destdir, datavols \
 = get_configs()
 
 ## if vgname not in volgroups.keys():
@@ -1917,15 +1925,15 @@ if not os.path.exists(bkdir):
 destpath = pjoin(destmountpoint,destdir,bkdir)
 destcd = " cd '"+destmountpoint+"/"+destdir+"'"
 
-vmtype = detect_internal_state()
+desttype = detect_internal_state()
 
-vm_run_args = {"internal":["sh"],
-                "ssh":["ssh",destvm],
-                "qubes":["qvm-run", "-p", destvm],
-                "qubes-ssh":["qvm-run", "-p", destvm.split("|")[0]]
+dest_run_map = {"internal":["sh"],
+                "ssh":["ssh",destsys],
+                "qubes":["qvm-run", "-p", destsys],
+                "qubes-ssh":["qvm-run", "-p", destsys.split("|")[0]]
                 }
 
-detect_dest_state(destvm)
+detect_dest_state(destsys)
 
 # Check volume args against config
 selected_vols = options.volumes[:]
@@ -2043,8 +2051,24 @@ elif options.action == "delete":
 elif options.action == "untar":
     raise NotImplementedError()
 
+elif options.action == "arch-create":
+    arch_create()
 
-elif options.action == "testing-wipe-all":
+
+def arch_create():
+    if not aset:
+        if options.source and options.dest:
+            source = options.source
+            dest   = options.dest
+        else:
+            x_it(1,"--source and --dest are required.")
+
+        subdir = options.subdir
+
+###
+
+
+elif options.action == "arch-delete":
     print("Warning! Wipe-all will remove ALL metadata AND archived data, "
           "leaving only the configuration!")
 
