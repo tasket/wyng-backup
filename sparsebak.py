@@ -18,7 +18,8 @@ from array import array
 # ArchiveSet manages configuration and configured volume info
 
 class ArchiveSet:
-    def __init__(self, name, top, conf_file):
+    def __init__(self, name, top, init=False):
+        conf_file = name+".ini"
         self.name = name
         self.confpath = pjoin(top,conf_file)
 
@@ -98,6 +99,7 @@ class ArchiveSet:
             self.error = False
             self.volsize = None
             self.chunksize = bkchunksize
+            self.mapfile = path+"/deltamap"
             # persisted:
             self.format_ver = "0"
             self.compression = "zlib"
@@ -174,6 +176,13 @@ class ArchiveSet:
             # use latest volsize
             self.volsize = self.sessions[self.last].volsize \
                             if self.sessions else 0
+
+
+        def map_exists(self):
+            return os.path.exists(self.mapfile)
+
+        def mapsize(self):
+            return (self.volsize // self.chunksize // 8) + 1
 
         def save_volinfo(self, fname="volinfo"):
             with open(pjoin(self.path,fname), "w") as f:
@@ -294,28 +303,42 @@ def get_lvm_vgs():
     return vgs
 
 
+def arch_create():
+    if not aset:
+        if options.source and options.dest:
+            source = options.source
+            dest   = options.dest
+        else:
+            x_it(1,"--source and --dest are required.")
+
+        subdir = options.subdir
+
+###
+
+
 # Get global configuration settings:
 
 def get_configs():
-    global aset
 
-    aset = ArchiveSet("", topdir, prog_name+".ini")
+    aset = ArchiveSet("default", topdir)
     dvs = []
 
     for vn,v in aset.vols.items():
         if v.enabled:
             dvs.append(v.name)
 
+    return aset, dvs
     # temporary kludge:
-    return aset.vgname, aset.poolname, aset.destsys, aset.destmountpoint, \
-        aset.destdir, dvs
+    #return aset.vgname, aset.poolname, aset.destsys, aset.destmountpoint, \
+    #    aset.destdir, dvs
 
 
 # Detect features of internal and destination environments:
 
 def detect_internal_state():
-    global destsys
+    global destsys, desttype
 
+    destsys = aset.destsys
     if os.path.exists("/etc/qubes-release") and destsys[:8] == "qubes://":
         desttype = "qubes" # Qubes OS guest VM
         destsys = destsys[8:]
@@ -397,8 +420,6 @@ with open("''' + tmpdir + '''/rpc/dest.lst", "r") as lstf:
 
     #####>  End helper program  <#####
 
-    return desttype
-
 
 def detect_dest_state(destsys):
 
@@ -418,9 +439,9 @@ def detect_dest_state(destsys):
 
         # Fix: get OSTYPE env variable
         try:
-            cmd = ["mountpoint -q '"+destmountpoint
-                  +"' && mkdir -p '"+destmountpoint+"/"+destdir+topdir
-                  +"' && cd '"+destmountpoint+"/"+destdir+topdir
+            cmd = ["mountpoint -q '"+aset.destmountpoint
+                  +"' && mkdir -p '"+aset.destmountpoint+"/"+aset.destdir+topdir
+                  +"' && cd '"+aset.destmountpoint+"/"+aset.destdir+topdir
                   +"' && touch archive.dat"
                   ##+"  && ln -f archive.dat .hardlink"
                   ]
@@ -510,14 +531,15 @@ def prepare_snapshots(datavols):
     '''
 
     print("Preparing snapshots...")
-    dvs = []
-    nvs = []
+    dvs    = []
+    nvs    = []
+    vgname = aset.vgname
     for datavol in datavols:
-        vol = aset.vols[datavol]
+        vol      = aset.vols[datavol]
         sessions = vol.sesnames
         snap1vol = datavol + ".tick"
         snap2vol = datavol + ".tock"
-        mapfile = pjoin(bkdir, datavol, "deltamap")
+        mapfile  = vol.mapfile
 
         if not lv_exists(vgname, datavol):
             print("Warning:", datavol, "does not exist!")
@@ -578,6 +600,8 @@ def vg_exists(vgname):
 # Get raw lvm deltas between snapshots
 
 def get_lvm_deltas(datavols):
+    vgname   = aset.vgname
+    poolname = aset.poolname
     print("Acquiring deltas.")
     subprocess.call(["dmsetup","message", vgname+"-"+poolname+"-tpool",
         "0", "release_metadata_snap"], stderr=subprocess.DEVNULL)
@@ -612,15 +636,15 @@ def get_lvm_deltas(datavols):
 
 def update_delta_digest(datavol):
 
-    if datavol in newvols:
-        return False, False
-
     if monitor_only:
         print("Updating block change map. ", end="")
 
     vol = aset.vols[datavol]
+    if len(vol.sessions) == 0:
+        return False
+
     chunksize = vol.chunksize
-    os.rename(mapfile, mapfile+"-tmp")
+    os.rename(vol.mapfile, vol.mapfile+"-tmp")
     dtree = xml.etree.ElementTree.parse(tmpdir+"/delta."+datavol).getroot()
     dblocksize = int(dtree.get("data_block_size"))
 
@@ -629,8 +653,8 @@ def update_delta_digest(datavol):
     dnewblocks = 0
     dfreedblocks = 0
 
-    with open(mapfile+"-tmp", "r+b") as bmapf:
-        os.ftruncate(bmapf.fileno(), bmap_size)
+    with open(vol.mapfile+"-tmp", "r+b") as bmapf:
+        os.ftruncate(bmapf.fileno(), vol.mapsize())
         bmap_mm = mmap.mmap(bmapf.fileno(), 0)
 
         for delta in dtree.find("diff"):
@@ -664,7 +688,7 @@ def update_delta_digest(datavol):
     elif monitor_only:
         print("No changes.")
 
-    return True, dnewblocks+dfreedblocks > 0
+    return dnewblocks+dfreedblocks > 0
 
 
 def last_chunk_addr(volsize, chunksize):
@@ -673,14 +697,18 @@ def last_chunk_addr(volsize, chunksize):
 
 # Send volume to destination:
 
-def send_volume(datavol):
+def send_volume(datavol, localtime):
 
-    vol = aset.vols[datavol]
+    vol         = aset.vols[datavol]
+    snap2vol    = vol.name + ".tock"
+    snap2size   = l_vols[snap2vol].lv_size
     allsessions = aset.allsessions
     sessions    = vol.sesnames
     chunksize   = vol.chunksize
+    bmap_size   = vol.mapsize()
     chdigits    = max_address.bit_length() // 4
     chformat    = "%0"+str(chdigits)+"x"
+    bksession   = "S_"+localtime
     sdir        = pjoin(datavol, bksession)
     send_all    = len(sessions) == 0
 
@@ -762,9 +790,9 @@ def send_volume(datavol):
                     +" && tar -xmf - && sync -f "+datavol]
 
     # Open source volume and its delta bitmap as r, session manifest as w.
-    with open(pjoin("/dev",vgname,snap2vol),"rb") as vf, \
-         open(sdir+"-tmp/manifest", "w") as hashf,        \
-         open("/dev/zero" if send_all else mapfile+"-tmp","r+b") as bmapf:
+    with open(pjoin("/dev",aset.vgname,snap2vol),"rb") as vf, \
+         open(sdir+"-tmp/manifest", "w") as hashf,             \
+         open("/dev/zero" if send_all else vol.mapfile+"-tmp","r+b") as bmapf:
 
         bmap_mm = bytes(1) if send_all else mmap.mmap(bmapf.fileno(), 0)
         vf_seek = vf.seek; vf_read = vf.read
@@ -1259,25 +1287,22 @@ def dedup_existing():
 
 # Controls flow of monitor and send_volume procedures:
 
-def monitor_send(volumes=[], monitor_only=True):
+def monitor_send(datavols, selected=[], monitor_only=True):
 
-    global datavols, newvols, volgroups, l_vols
-    global bmap_size, snap1size, snap2size, snap1vol, snap2vol
-    global map_exists, map_updated, mapfile, bksession, localtime
+    global volgroups, l_vols
 
     localtime = time.strftime("%Y%m%d-%H%M%S")
-    bksession = "S_"+localtime
 
     if options.dedup:
         init_dedup_index()
 
     datavols, newvols \
-        = prepare_snapshots(volumes if len(volumes) >0 else datavols)
+        = prepare_snapshots(selected if len(selected) >0 else datavols)
 
     volgroups = get_lvm_vgs()
-    if vgname not in volgroups.keys():
-        raise ValueError("Volume group "+vgname+" not present.")
-    l_vols = volgroups[vgname].lvs
+    if aset.vgname not in volgroups.keys():
+        raise ValueError("Volume group "+aset.vgname+" not present.")
+    l_vols = volgroups[aset.vgname].lvs
 
     if monitor_only:
         newvols = []
@@ -1290,29 +1315,23 @@ def monitor_send(volumes=[], monitor_only=True):
         get_lvm_deltas(datavols)
 
     if not monitor_only:
-        print("\nSending backup session", bksession,
+        print("\nSending backup session", localtime,
               "to", (desttype+"://"+destsys) if \
-              destsys != "internal:" else destmountpoint)
+                  destsys != "internal:" else aset.destmountpoint)
 
     for datavol in datavols+newvols:
         print("\nVolume :", datavol)
         vol = aset.vols[datavol]
-        snap1vol = datavol + ".tick"
-        snap2vol = datavol + ".tock"
-        snap1size = l_vols[snap1vol].lv_size
-        snap2size = l_vols[snap2vol].lv_size
-        bmap_size = (snap2size // vol.chunksize // 8) + 1
 
-        mapfile = pjoin(bkdir,datavol,"deltamap")
-        map_exists, map_updated \
-        = update_delta_digest(datavol)
+        map_updated \
+                = update_delta_digest(datavol)
 
         if not monitor_only:
             sent \
-            = send_volume(datavol)
-            finalize_bk_session(datavol, sent)
+                = send_volume(datavol, localtime)
+            finalize_bk_session(vol, sent)
         else:
-            finalize_monitor_session(datavol, map_updated)
+            finalize_monitor_session(vol, map_updated)
 
 
 def init_deltamap(bmfile, bmsize):
@@ -1324,25 +1343,36 @@ def init_deltamap(bmfile, bmsize):
         os.ftruncate(bmapf.fileno(), bmsize)
 
 
-def rotate_snapshots(datavol, rotate=True):
+def rotate_snapshots(vol, rotate=True):
+    snap1vol = vol.name+".tick"
+    snap2vol = vol.name+".tock"
     if rotate:
         #print("Rotating snapshots for", datavol)
         # Review: this should be atomic
-        p = subprocess.check_output(["lvremove","--force", vgname+"/"+snap1vol])
-        p = subprocess.check_output(["lvrename",vgname+"/"+snap2vol, snap1vol])
+        p = subprocess.check_output(
+            ["lvremove","--force", aset.vgname+"/"+snap1vol])
+        p = subprocess.check_output(
+            ["lvrename",aset.vgname+"/"+snap2vol, snap1vol])
+        l_vols[snap2vol].lv_name = l_vols[snap1vol].lv_name
+        l_vols[snap2vol].lv_path = l_vols[snap1vol].lv_path
+        l_vols[snap1vol] = l_vols[snap2vol]
+        del l_vols[snap2vol]
+        
     else:
-        p = subprocess.check_output(["lvremove","--force",vgname+"/"+snap2vol])
+        p = subprocess.check_output(
+            ["lvremove","--force",aset.vgname+"/"+snap2vol])
+        del l_vols[snap2vol]
 
 
-def finalize_monitor_session(datavol, map_updated):
-    rotate_snapshots(datavol, rotate=map_updated)
-    os.rename(mapfile+"-tmp", mapfile)
+def finalize_monitor_session(vol, map_updated):
+    rotate_snapshots(vol, rotate=map_updated)
+    os.rename(vol.mapfile+"-tmp", vol.mapfile)
     os.sync()
 
 
-def finalize_bk_session(datavol, sent):
-    rotate_snapshots(datavol, rotate=sent)
-    init_deltamap(mapfile, bmap_size)
+def finalize_bk_session(vol, sent):
+    rotate_snapshots(vol, rotate=sent)
+    init_deltamap(vol.mapfile, vol.mapsize())
     os.sync()
 
 
@@ -1353,8 +1383,6 @@ def finalize_bk_session(datavol, sent):
 # in YYYYMMDD-HHMMSS format.
 
 def prune_sessions(datavol, times):
-
-    global destmountpoint, destdir, bkdir
 
     # Validate date-time params
     for dt in times:
@@ -1436,8 +1464,6 @@ def prune_sessions(datavol, times):
 # target. Caution: clear_sources is destructive.
 
 def merge_sessions(datavol, sources, target, clear_sources=False):
-
-    global destmountpoint, destdir, bkdir
 
     volume = aset.vols[datavol]
     for ses in sources + [target]:
@@ -1549,8 +1575,6 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
 
 def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
-    global destmountpoint, destdir, bkdir, vgname, poolname
-
     def diff_compare(dbuf,z):
         if dbuf != cmpf.read(chunksize):
             print("* delta", faddr, "Z   " if z else "    ")
@@ -1567,6 +1591,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     attended    = not options.unattended
     remap       = options.remap
 
+    vgname    = aset.vgname
     vol       = aset.vols[datavol]
     volsize   = vol.volsize
     chunksize = vol.chunksize
@@ -1661,7 +1686,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                          " Volume group does not match config.")
                 p = subprocess.check_output(
                     ["lvcreate -kn -ay -V "+str(volsize)+"b"
-                     +" --thin -n "+lv+" "+vg+"/"+poolname], shell=True)
+                     +" --thin -n "+lv+" "+vg+"/"+aset.poolname], shell=True)
             elif l_vols[lv].lv_size != volsize:
                 p = subprocess.check_output(["lvresize", "-L",str(volsize)+"b",
                                              "-f", save_path])
@@ -1827,7 +1852,6 @@ topdir                = "/"+prog_name # must be absolute path
 tmpdir                = "/tmp/"+prog_name
 volgroups             = {}
 l_vols                = {}
-aset                  = None
 # Disk block size:
 bs                    = 512
 # LVM min blocks = 128 = 64kBytes:
@@ -1840,7 +1864,6 @@ max_address           = 0xffffffffffffffff # 64bits
 address_split         = [len(hex(max_address))-2-7, 7]
 pjoin                 = os.path.join
 shell_prefix          = "set -e && export LC_ALL=C\n"
-destcd                = None
 
 
 if sys.hexversion < 0x3050000:
@@ -1906,32 +1929,28 @@ options = parser.parse_args()
 # Select dedup test algorithm.
 init_dedup_index = [None, None, init_dedup_index2, init_dedup_index3,
                     init_dedup_index4, init_dedup_index5][options.dedup]
-
-monitor_only = options.action == "monitor" # gather metadata without backing up
-
-volgroups = get_lvm_vgs()
-
-vgname, poolname, destsys, destmountpoint, destdir, datavols \
-= get_configs()
-
+monitor_only     = options.action == "monitor" # gather metadata without backing up
+volgroups        = get_lvm_vgs()
+aset             = None
+destsys          = None
+desttype         = None
+aset, datavols   = get_configs()
 ## if vgname not in volgroups.keys():
 ##    raise ValueError("\nVolume group "+vgname+" not present.")
-l_vols = volgroups[vgname].lvs
-
-bkdir = topdir+"/"+vgname+"%"+poolname
+l_vols           = volgroups[aset.vgname].lvs
+bkdir            = topdir+"/"+aset.vgname+"%"+aset.poolname
 if not os.path.exists(bkdir):
     os.makedirs(bkdir)
+destpath         = pjoin(aset.destmountpoint,aset.destdir,bkdir)
+destcd           = " cd '"+aset.destmountpoint+"/"+aset.destdir+"'"
 
-destpath = pjoin(destmountpoint,destdir,bkdir)
-destcd = " cd '"+destmountpoint+"/"+destdir+"'"
+detect_internal_state()
 
-desttype = detect_internal_state()
-
-dest_run_map = {"internal":["sh"],
-                "ssh":["ssh",destsys],
-                "qubes":["qvm-run", "-p", destsys],
-                "qubes-ssh":["qvm-run", "-p", destsys.split("|")[0]]
-                }
+dest_run_map     = {"internal":["sh"],
+                    "ssh":["ssh",destsys],
+                    "qubes":["qvm-run", "-p", destsys],
+                    "qubes-ssh":["qvm-run", "-p", destsys.split("|")[0]]
+                    }
 
 detect_dest_state(destsys)
 
@@ -1943,14 +1962,14 @@ for vol in options.volumes:
         del(selected_vols[selected_vols.index(vol)])
 
 
-# Process commands
+# Process Commands:
 
 if options.action   == "monitor":
     monitor_send(datavols, monitor_only=True)
 
 
 elif options.action == "send":
-    monitor_send(selected_vols, monitor_only=False)
+    monitor_send(datavols, selected_vols, monitor_only=False)
 
 
 elif options.action == "version":
@@ -2051,21 +2070,9 @@ elif options.action == "delete":
 elif options.action == "untar":
     raise NotImplementedError()
 
+
 elif options.action == "arch-create":
     arch_create()
-
-
-def arch_create():
-    if not aset:
-        if options.source and options.dest:
-            source = options.source
-            dest   = options.dest
-        else:
-            x_it(1,"--source and --dest are required.")
-
-        subdir = options.subdir
-
-###
 
 
 elif options.action == "arch-delete":
