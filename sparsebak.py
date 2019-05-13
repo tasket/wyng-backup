@@ -1824,10 +1824,10 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                     print("  Initial snapshot created for", datavol)
                 if not os.path.exists(vol.mapfile):
                     init_deltamap(vol.mapfile, vol.mapsize())
-                    if select_ses != sessions[-1]:
-                        print("Restored from older session: Volume may be out of"
-                            " sync with archive until '%s --remap diff %s' is run!"
-                            % (prog_name, datavol))
+                if select_ses != sessions[-1]:
+                    print("Restored from older session: Volume may be out of"
+                        " sync with archive until '%s --remap diff %s' is run!"
+                        % (prog_name, datavol))
         elif diff:
             cmpf.close()
             if remap:
