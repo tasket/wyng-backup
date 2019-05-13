@@ -181,8 +181,11 @@ class ArchiveSet:
         def map_exists(self):
             return os.path.exists(self.mapfile)
 
-        def mapsize(self):
-            return (self.volsize // self.chunksize // 8) + 1
+        # Based on last session size unless volume_size is specified.
+        def mapsize(self, volume_size=None):
+            if not volume_size:
+                volume_size = self.volsize
+            return (volume_size // self.chunksize // 8) + 1
 
         def save_volinfo(self, fname="volinfo"):
             with open(pjoin(self.path,fname), "w") as f:
@@ -255,6 +258,7 @@ class ArchiveSet:
             def save_info(self):
                 if not self.path:
                     raise ValueError("Path not set for save_info")
+                self.volume.volsize = self.volsize
                 with open(pjoin(self.path,"info"), "w") as f:
                     print("localtime =", self.localtime, file=f)
                     print("volsize =", self.volsize, file=f)
@@ -638,22 +642,22 @@ def update_delta_digest(datavol):
     if monitor_only:
         print("Updating block change map. ", end="")
 
-    vol = aset.vols[datavol]
+    vol         = aset.vols[datavol]
     if len(vol.sessions) == 0:
         return False
-
-    chunksize = vol.chunksize
+    snap2vol    = vol.name + ".tock"
+    snap2size   = l_vols[snap2vol].lv_size
+    chunksize   = vol.chunksize
     os.rename(vol.mapfile, vol.mapfile+"-tmp")
-    dtree = xml.etree.ElementTree.parse(tmpdir+"/delta."+datavol).getroot()
-    dblocksize = int(dtree.get("data_block_size"))
-
-    bmap_byte = 0
-    lastindex = 0
-    dnewblocks = 0
+    dtree       = xml.etree.ElementTree.parse(tmpdir+"/delta."+datavol).getroot()
+    dblocksize  = int(dtree.get("data_block_size"))
+    bmap_byte   = 0
+    lastindex   = 0
+    dnewblocks  = 0
     dfreedblocks = 0
 
     with open(vol.mapfile+"-tmp", "r+b") as bmapf:
-        os.ftruncate(bmapf.fileno(), vol.mapsize())
+        os.ftruncate(bmapf.fileno(), vol.mapsize(snap2size))
         bmap_mm = mmap.mmap(bmapf.fileno(), 0)
 
         for delta in dtree.find("diff"):
@@ -704,7 +708,7 @@ def send_volume(datavol, localtime):
     allsessions = aset.allsessions
     sessions    = vol.sesnames
     chunksize   = vol.chunksize
-    bmap_size   = vol.mapsize()
+    bmap_size   = vol.mapsize(snap2size)
     chdigits    = max_address.bit_length() // 4
     chformat    = "%0"+str(chdigits)+"x"
     bksession   = "S_"+localtime
@@ -1661,17 +1665,6 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         )]
     p = subprocess.check_output(cmd, shell=True)
 
-    print("\nReceiving volume", datavol, select_ses)
-
-    # Create retriever process using py program
-    cmd = [shell_prefix] + dest_run_args(desttype,
-            [destcd + bkdir+"/"+datavol
-            +"  && python3 "+tmpdir+"/rpc/dest_helper.py receive"
-            ])
-    getvol = subprocess.Popen(" ".join(cmd), stdout=subprocess.PIPE,
-                              shell=True)
-
-
     # Prepare save volume
     if save_path:
         # Discard all data in destination if this is a block device
@@ -1679,6 +1672,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         if vg_exists(os.path.dirname(save_path)):
             lv = os.path.basename(save_path)
             vg = os.path.basename(os.path.dirname(save_path))
+            # Does save path == original path?
+            returned_home = lv == datavol
             if not lv_exists(vg,lv):
                 if vg != vgname:
                     x_it(1, "Cannot auto-create volume:"
@@ -1701,19 +1696,18 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         savef = open(save_path, "w+b")
 
     elif diff:
-        mapfile = pjoin(bkdir, datavol, "deltamap")
-        bmap_size = (volsize // chunksize // 8) + 1
-
+        if not lv_exists(vgname, datavol):
+            x_it(1, "Local volume must exist for diff.")
         if remap:
             if not lv_exists(vgname, snap1vol):
                 p = subprocess.check_output(["lvcreate", "-pr", "-kn",
                     "-ay", "-s", vgname+"/"+datavol, "-n", snap1vol],
                     stderr=subprocess.STDOUT)
                 print("  Initial snapshot created for", datavol)
-            if not os.path.exists(mapfile):
-                init_deltamap(mapfile, bmap_size)
-            bmapf = open(mapfile, "r+b")
-            os.ftruncate(bmapf.fileno(), bmap_size)
+            if not os.path.exists(vol.mapfile):
+                init_deltamap(vol.mapfile, vol.mapsize())
+            bmapf = open(vol.mapfile, "r+b")
+            os.ftruncate(bmapf.fileno(), vol.mapsize())
             bmap_mm = mmap.mmap(bmapf.fileno(), 0)
         else:
             if not lv_exists(vgname, snap1vol):
@@ -1721,13 +1715,22 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                       " source volume instead.")
                 snap1vol = datavol
 
-        if volsize != l_vols[snap1vol].lv_size:
-            x_it(1, "Volume sizes differ:"
-                 "\n  Archive = %d"
-                 "\n  Local   = %d" % (volsize, l_vols[snap1vol].lv_size))
+            if volsize != l_vols[snap1vol].lv_size:
+                x_it(1, "Volume sizes differ:"
+                    "\n  Archive = %d"
+                    "\n  Local   = %d" % (volsize, l_vols[snap1vol].lv_size))
 
         cmpf  = open(pjoin("/dev",vgname,snap1vol), "rb")
         diff_count = 0
+
+    print("\nReceiving volume", datavol, select_ses)
+    # Create retriever process using py program
+    cmd = [shell_prefix] + dest_run_args(desttype,
+            [destcd + bkdir+"/"+datavol
+            +"  && python3 "+tmpdir+"/rpc/dest_helper.py receive"
+            ])
+    getvol = subprocess.Popen(" ".join(cmd), stdout=subprocess.PIPE,
+                              shell=True)
 
     # Open manifest then receive, check and save data
     with open(tmpdir+"/manifest.verify", "r") as mf:
@@ -1813,6 +1816,18 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                              % volsize)
         if save_path:
             savef.close()
+            if returned_home:
+                if not lv_exists(vgname, snap1vol):
+                    p = subprocess.check_output(["lvcreate", "-pr", "-kn",
+                        "-ay", "-s", vgname+"/"+datavol, "-n", snap1vol],
+                        stderr=subprocess.STDOUT)
+                    print("  Initial snapshot created for", datavol)
+                if not os.path.exists(vol.mapfile):
+                    init_deltamap(vol.mapfile, vol.mapsize())
+                    if select_ses != sessions[-1]:
+                        print("Restored from older session: Volume may be out of"
+                            " sync with archive until '%s --remap diff %s' is run!"
+                            % (prog_name, datavol))
         elif diff:
             cmpf.close()
             if remap:
