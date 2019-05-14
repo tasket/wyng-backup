@@ -307,7 +307,7 @@ def get_lvm_vgs():
     return vgs
 
 
-def arch_create():
+def arch_init():
     if not aset:
         if options.source and options.dest:
             source = options.source
@@ -332,15 +332,11 @@ def get_configs():
             dvs.append(v.name)
 
     return aset, dvs
-    # temporary kludge:
-    #return aset.vgname, aset.poolname, aset.destsys, aset.destmountpoint, \
-    #    aset.destdir, dvs
 
 
 # Detect features of internal and destination environments:
 
 def detect_internal_state():
-    global destsys, desttype
 
     destsys = aset.destsys
     if os.path.exists("/etc/qubes-release") and destsys[:8] == "qubes://":
@@ -424,6 +420,8 @@ with open("''' + tmpdir + '''/rpc/dest.lst", "r") as lstf:
 
     #####>  End helper program  <#####
 
+    return destsys, desttype
+
 
 def detect_dest_state(destsys):
 
@@ -479,8 +477,6 @@ def dest_run(commands, dest_type=None, dest=None):
 
 def dest_run_args(dest_type, commands):
 
-    run_args =  dest_run_map ####
-
     # shunt commands to tmp file
     with tempfile.NamedTemporaryFile(dir=tmpdir, delete=False) as tmpf:
         tmpf.write(bytes(shell_prefix + \
@@ -511,7 +507,7 @@ def dest_run_args(dest_type, commands):
     elif dest_type == "internal":
         add_cmd = [pjoin(tmpdir,remotetmp)]
 
-    ret = run_args[dest_type] + add_cmd
+    ret = dest_run_map[dest_type] + add_cmd
     #print("CMD",ret)
     return ret
 
@@ -1296,9 +1292,6 @@ def monitor_send(datavols, selected=[], monitor_only=True):
 
     localtime = time.strftime("%Y%m%d-%H%M%S")
 
-    if options.dedup:
-        init_dedup_index()
-
     datavols, newvols \
         = prepare_snapshots(selected if len(selected) >0 else datavols)
 
@@ -1316,6 +1309,9 @@ def monitor_send(datavols, selected=[], monitor_only=True):
 
     if len(datavols) > 0:
         get_lvm_deltas(datavols)
+
+    if options.dedup:
+        init_dedup_index()
 
     if not monitor_only:
         print("\nSending backup session", localtime,
@@ -1949,23 +1945,19 @@ aset             = None
 destsys          = None
 desttype         = None
 aset, datavols   = get_configs()
-## if vgname not in volgroups.keys():
-##    raise ValueError("\nVolume group "+vgname+" not present.")
-l_vols           = volgroups[aset.vgname].lvs
+if aset.vgname in volgroups.keys():
+    l_vols       = volgroups[aset.vgname].lvs
 bkdir            = topdir+"/"+aset.vgname+"%"+aset.poolname
 if not os.path.exists(bkdir):
     os.makedirs(bkdir)
 destpath         = pjoin(aset.destmountpoint,aset.destdir,bkdir)
 destcd           = " cd '"+aset.destmountpoint+"/"+aset.destdir+"'"
-
-detect_internal_state()
-
+destsys, desttype= detect_internal_state()
 dest_run_map     = {"internal":["sh"],
                     "ssh":["ssh",destsys],
                     "qubes":["qvm-run", "-p", destsys],
                     "qubes-ssh":["qvm-run", "-p", destsys.split("|")[0]]
                     }
-
 detect_dest_state(destsys)
 
 # Check volume args against config
@@ -2085,8 +2077,8 @@ elif options.action == "untar":
     raise NotImplementedError()
 
 
-elif options.action == "arch-create":
-    arch_create()
+elif options.action == "arch-init":
+    arch_init()
 
 
 elif options.action == "arch-delete":
