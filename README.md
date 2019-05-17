@@ -46,9 +46,9 @@ must reside in lvm thin-provisioned pools.
 
 `sparsebak.py` is currently distributed as a single python script with no complex
 supporting modules or other program files; it can be placed in '/usr/local/bin'
-or another place of your choosing. It looks in '/sparsebak/sparsebak.ini'
-for global settings and a list of volume names to be monitored
-and backed up. Some settings you can change are `vgname` and `poolname`
+or another place of your choosing. It looks in '/sparsebak/default.ini'
+for settings and a list of volume names to be monitored and backed up.
+Some settings you can change are `vgname` and `poolname`
 for the volume group and pool, in addition to `destvm`, `destmountpoint` and `destdir`
 which combine to a vm:dir/path specification for the backup destination. The
 `destmountpoint` is checked to make sure its mounted for several sparsebak commands
@@ -56,7 +56,7 @@ including `send`, `receive`, `verify` and `prune`, but not `monitor`.
 
 Backup metadata is also saved to '/sparsebak' folder.
 
-#### Example config sparsebak.ini
+#### Example config default.ini
 
 ```
 [var]
@@ -321,7 +321,7 @@ use `truncate -s <size> myfile.img` before using `losetup`).
 3. *Domain0* runs `cryptsetup` on /dev/xvdi to create/access the volume in its
 encrypted form. Finally, the resulting /dev/mapper device can be mounted for use.
 
-4. Configure sparsebak.ini on *Domain0* for an `internal:` destination type
+4. Configure default.ini on *Domain0* for an `internal:` destination type
 pointing to the mounted path.
 
 A local USB storage option similar to the above can be achived by substituting *sys-usb*

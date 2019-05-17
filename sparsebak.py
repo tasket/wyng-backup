@@ -702,14 +702,13 @@ def send_volume(datavol, localtime):
     snap2vol    = vol.name + ".tock"
     snap2size   = l_vols[snap2vol].lv_size
     allsessions = aset.allsessions
-    sessions    = vol.sesnames
     chunksize   = vol.chunksize
     bmap_size   = vol.mapsize(snap2size)
     chdigits    = max_address.bit_length() // 4
     chformat    = "%0"+str(chdigits)+"x"
     bksession   = "S_"+localtime
     sdir        = pjoin(datavol, bksession)
-    send_all    = len(sessions) == 0
+    send_all    = len(vol.sessions) == 0
 
     # testing four deduplication types:
     dedup_idx     = dedup_db = None
@@ -760,9 +759,9 @@ def send_volume(datavol, localtime):
         sendall_addr = snap2size + 1
 
     # Check volume size vs prior backup session
-    if len(sessions) > 0 and not send_all:
-        prior_size = vol.volsize
-        next_chunk_addr = last_chunk_addr(prior_size, chunksize) + chunksize
+    if not send_all:
+        prior_size       = vol.volsize
+        next_chunk_addr  = last_chunk_addr(prior_size, chunksize) + chunksize
         if prior_size > snap2size:
             print("  Volume size has shrunk.")
         elif snap2size-1 >= next_chunk_addr:
