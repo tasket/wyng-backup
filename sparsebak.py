@@ -1059,6 +1059,7 @@ def init_dedup_index3(listfile=""):
         chunk INTEGER, ses_id INTEGER
         )''')
     insert_phrase = 'INSERT INTO hashindex(id, chunk, ses_id) VALUES(?,?,?)'
+    cursor.execute('PRAGMA cache_size = 10000')
     #cursor.execute('PRAGMA synchronous = OFF')
     #cursor.execute('PRAGMA journal_mode = OFF')
 
@@ -1079,10 +1080,10 @@ def init_dedup_index3(listfile=""):
 
                 inserts.append((bhash, addr.value, sesnum))
                 # Insert only 1 at a time when generating a listfile.
-                if listfile or not len(inserts) % 10000:
+                if listfile or not len(inserts) % 2000:
                     cursor.executemany(insert_phrase, inserts)
-                    inserts.clear()
                     rows += cursor.rowcount
+                    inserts.clear()
 
                     if listfile and cursor.rowcount < 1:
                         row = cursor.execute("SELECT chunk,ses_id FROM hashindex "
@@ -1226,8 +1227,7 @@ def init_dedup_index5(listfile=""):
                     continue
                 bhashb = bytes().fromhex(ln1)
                 i      = int(ln1[:ht_ksize], 16)
-
-                pos = hashtree[i].find(bhashb)
+                pos    = hashtree[i].find(bhashb)
                 if pos % hash_w == 0:
                     match += 1
                     if listfile:
