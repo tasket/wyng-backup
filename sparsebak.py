@@ -19,26 +19,24 @@ from array import array
 
 class ArchiveSet:
     def __init__(self, name, top, init=False):
-        conf_file = name+".ini"
-        self.name = name
-        self.confpath = pjoin(top,conf_file)
+        conf_file      = name+".ini"
+        self.name      = name
+        self.confpath  = pjoin(top,conf_file)
 
         cp = configparser.ConfigParser()
         cp.optionxform = lambda option: option
         cp.read(self.confpath)
-        c = cp["var"]
-        self.conf = cp
-
-        self.vgname = c['vgname']
-        self.poolname = c['poolname']
-        self.path = pjoin(top,self.vgname+"%"+self.poolname)
-        self.destsys = c['destvm']
+        self.conf      = cp; c = cp["var"]
+        self.vgname    = c['vgname']
+        self.poolname  = c['poolname']
+        self.path      = pjoin(top,self.vgname+"%"+self.poolname)
+        self.destsys   = c['destvm']
+        self.destdir   = c['destdir']
         self.destmountpoint = c['destmountpoint']
-        self.destdir = c['destdir']
 
-        dedup = options.dedup > 0
+        dedup          = options.dedup > 0
         self.hashindex = {}
-        self.vols = {}
+        self.vols      = {}
         self.allsessions = []
 
         for key in cp["volumes"]:
@@ -50,8 +48,20 @@ class ArchiveSet:
                 self.vols[key].enabled = True
                 self.allsessions += self.vols[key].sessions.values()
 
-        # Created master session list sorted by date-time
+        # Create master session list sorted by date-time
         self.allsessions.sort(key=lambda x: x.localtime)
+
+        self.chunksize   = int(c['chunksize']) if 'chunksize' in c else bkchunksize
+        c['chunksize']   = self.chunksize
+        self.compression = c['compression'] if 'compression' in c else "zlib"
+        c['compression'] = self.compression
+        self.compr_level = c['compr_level'] if 'compr_level' in c else "4"
+        c['compr_level'] = self.compr_level
+
+
+    def save_conf():
+        with open(self.confpath, "w") as f:
+            self.conf.write(f)
 
     def add_volume(self, datavol):
         if datavol in self.conf["volumes"].keys():
@@ -69,14 +79,12 @@ class ArchiveSet:
         #                                 self.vgname)
 
         self.conf["volumes"][datavol] = "enable"
-        with open(self.confpath, "w") as f:
-            self.conf.write(f)
+        self.save_conf()
 
     def delete_volume(self, datavol):
         if datavol in self.conf["volumes"].keys():
             del(self.conf["volumes"][datavol])
-            with open(self.confpath, "w") as f:
-                self.conf.write(f)
+            self.save_conf()
 
         for ext in {".tick",".tock"}:
             if lv_exists(vgname, datavol+ext):
@@ -90,23 +98,20 @@ class ArchiveSet:
 
     class Volume:
         def __init__(self, archive, name, path, vgname):
-            self.name = name
+            self.name    = name
             self.archive = archive
-            self.path = path
-            self.vgname = vgname
+            self.path    = path
+            self.vgname  = vgname
             self.present = lv_exists(vgname, name)
             self.enabled = False
-            self.error = False
+            self.error   = False
             self.volsize = None
-            self.chunksize = bkchunksize
             self.mapfile = path+"/deltamap"
             # persisted:
             self.format_ver = "0"
-            self.compression = "zlib"
-            self.compresslevel = "4"
-            self.uuid = None
-            self.first = None
-            self.last = None
+            self.uuid    = None
+            self.first   = None
+            self.last    = None
             self.que_meta_update = "false"
 
             # load volume info
@@ -142,8 +147,8 @@ class ArchiveSet:
                     s.previous = "none" if i==0 else sesnames[i-1]
                     s.sequence = i
                     s.save_info()
-                self.first = sesnames[0]
-                self.last = sesnames[-1]
+                self.first      = sesnames[0]
+                self.last       = sesnames[-1]
                 self.format_ver = str(format_version)
                 self.que_meta_update = "true"
                 self.save_volinfo()
@@ -151,10 +156,6 @@ class ArchiveSet:
             if int(self.format_ver) > format_version:
                 raise ValueError("Archive format ver = "+self.format_ver+
                                  ". Expected = "+format_version)
-
-            # use last known chunk size
-            if len(self.sessions):
-                self.chunksize = self.sessions[self.last].chunksize
 
             # build ordered, linked list of names
             sesnames = []
@@ -185,7 +186,7 @@ class ArchiveSet:
         def mapsize(self, volume_size=None):
             if not volume_size:
                 volume_size = self.volsize
-            return (volume_size // self.chunksize // 8) + 1
+            return (volume_size // self.archive.chunksize // 8) + 1
 
         def save_volinfo(self, fname="volinfo"):
             with open(pjoin(self.path,fname), "w") as f:
@@ -232,19 +233,18 @@ class ArchiveSet:
 
         class Ses:
             def __init__(self, volume, name, path=""):
-                self.name = name
-                self.path = path
-                self.present = os.path.exists(pjoin(path,"manifest"))
-                self.volume = volume
+                self.name     = name
+                self.path     = path
+                self.present  = os.path.exists(pjoin(path,"manifest"))
+                self.volume   = volume
                 # persisted:
                 self.localtime = None
-                self.volsize = None
-                self.chunksize = None
-                self.format = None
+                self.volsize  = None
+                self.format   = None
                 self.sequence = None
                 self.previous = "none"
-                attr_str = {"localtime","format","previous"}
-                attr_int = {"volsize","chunksize","sequence"}
+                attr_str      = {"localtime","format","previous"}
+                attr_int      = {"volsize","sequence"}
 
                 if path:
                     with open(pjoin(path,"info"), "r") as sf:
@@ -261,21 +261,20 @@ class ArchiveSet:
                 self.volume.volsize = self.volsize
                 with open(pjoin(self.path,"info"), "w") as f:
                     print("localtime =", self.localtime, file=f)
-                    print("volsize =", self.volsize, file=f)
-                    print("chunksize =", self.chunksize, file=f)
-                    print("format =", self.format, file=f)
-                    print("sequence =", self.sequence, file=f)
-                    print("previous =", self.previous, file=f)
+                    print("volsize =",   self.volsize, file=f)
+                    print("format =",    self.format, file=f)
+                    print("sequence =",  self.sequence, file=f)
+                    print("previous =",  self.previous, file=f)
 
 
 class Lvm_VolGroup:
     def __init__(self, name):
         self.name = name
-        self.lvs = {}
+        self.lvs  = {}
 
 class Lvm_Volume:
-    colnames = ["vg_name","lv_name","lv_attr","lv_size","lv_time",
-                "pool_lv","thin_id","lv_path"]
+    colnames  = ["vg_name","lv_name","lv_attr","lv_size","lv_time",
+                 "pool_lv","thin_id","lv_path"]
     attr_ints = ["lv_size"]
 
     def __init__(self, members):
@@ -307,7 +306,7 @@ def get_lvm_vgs():
     return vgs
 
 
-def arch_init():
+def arch_create():
     if not aset:
         if options.source and options.dest:
             source = options.source
@@ -643,7 +642,7 @@ def update_delta_digest(datavol):
         return False
     snap2vol    = vol.name + ".tock"
     snap2size   = l_vols[snap2vol].lv_size
-    chunksize   = vol.chunksize
+    chunksize   = aset.chunksize
     os.rename(vol.mapfile, vol.mapfile+"-tmp")
     dtree       = xml.etree.ElementTree.parse(tmpdir+"/delta."+datavol).getroot()
     dblocksize  = int(dtree.get("data_block_size"))
@@ -702,7 +701,7 @@ def send_volume(datavol, localtime):
     snap2vol    = vol.name + ".tock"
     snap2size   = l_vols[snap2vol].lv_size
     allsessions = aset.allsessions
-    chunksize   = vol.chunksize
+    chunksize   = aset.chunksize
     bmap_size   = vol.mapsize(snap2size)
     chdigits    = max_address.bit_length() // 4
     chformat    = "%0"+str(chdigits)+"x"
@@ -737,7 +736,6 @@ def send_volume(datavol, localtime):
     ses = vol.new_session(bksession)
     ses.localtime = localtime
     ses.volsize   = snap2size
-    ses.chunksize = chunksize
     ses.format    = "tar" if options.tarfile else "folders"
     ses.path      = vol.path+"/"+bksession+"-tmp"
     ses_index     = allsessions.index(ses)
@@ -768,10 +766,10 @@ def send_volume(datavol, localtime):
             print("  Volume size has increased.")
             sendall_addr = next_chunk_addr
 
-    if vol.compression=="zlib":
+    if aset.compression=="zlib":
         compress = zlib.compress
     # add zstd here.
-    compresslevel = int(vol.compresslevel)
+    compresslevel = int(aset.compr_level)
 
     # Use tar to stream files to destination
     stream_started = False
@@ -1473,7 +1471,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
     chformat   = "x%0"+str(chdigits)+"x"
     volsize    = volume.sessions[target].volsize
     vol_shrank = volsize < volume.sessions[sources[0]].volsize
-    last_chunk = chformat % last_chunk_addr(volsize, volume.chunksize)
+    last_chunk = chformat % last_chunk_addr(volsize, aset.chunksize)
     lc_filter  = '"'+last_chunk+'"'
 
     # Prepare manifests for efficient merge using fs mv/replace. The target is
@@ -1592,7 +1590,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     vgname    = aset.vgname
     vol       = aset.vols[datavol]
     volsize   = vol.volsize
-    chunksize = vol.chunksize
+    chunksize = aset.chunksize
     zeros     = bytes(chunksize)
     snap1vol  = datavol+".tick"
     sessions  = vol.sesnames
@@ -1608,7 +1606,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     else:
         x_it(1, "No sessions available.")
 
-    if vol.compression in {"zlib","gzip"}:
+    if aset.compression in {"zlib","gzip"}:
         decompress  = zlib.decompress
         decomp_bits = 32 + zlib.MAX_WBITS
     # add zstd here.
@@ -1952,9 +1950,9 @@ if not os.path.exists(bkdir):
 destpath         = pjoin(aset.destmountpoint,aset.destdir,bkdir)
 destcd           = " cd '"+aset.destmountpoint+"/"+aset.destdir+"'"
 destsys, desttype= detect_internal_state()
-dest_run_map     = {"internal":["sh"],
-                    "ssh":["ssh",destsys],
-                    "qubes":["qvm-run", "-p", destsys],
+dest_run_map     = {"internal": ["sh"],
+                    "ssh":      ["ssh",destsys],
+                    "qubes":    ["qvm-run", "-p", destsys],
                     "qubes-ssh":["qvm-run", "-p", destsys.split("|")[0]]
                     }
 detect_dest_state(destsys)
@@ -2076,8 +2074,8 @@ elif options.action == "untar":
     raise NotImplementedError()
 
 
-elif options.action == "arch-init":
-    arch_init()
+elif options.action == "arch-create":
+    arch_create()
 
 
 elif options.action == "arch-delete":
