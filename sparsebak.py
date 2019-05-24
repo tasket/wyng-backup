@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 
 
 ###  sparsebak
@@ -19,25 +19,35 @@ from array import array
 
 class ArchiveSet:
     def __init__(self, name, top, init=False):
-        conf_file      = name+".ini"
-        self.name      = name
-        self.confpath  = pjoin(top,conf_file)
-
-        cp = configparser.ConfigParser()
-        cp.optionxform = lambda option: option
-        cp.read(self.confpath)
-        self.conf      = cp; c = cp["var"]
-        self.vgname    = c['vgname']
-        self.poolname  = c['poolname']
-        self.path      = pjoin(top,self.vgname+"%"+self.poolname)
-        self.destsys   = c['destvm']
-        self.destdir   = c['destdir']
-        self.destmountpoint = c['destmountpoint']
-
-        dedup          = options.dedup > 0
-        self.hashindex = {}
-        self.vols      = {}
+        conf_file        = name+".ini"
+        self.name        = name
+        self.confpath    = pjoin(top,conf_file)
+        self.path        = None
+        self.hashindex   = {}
+        self.vols        = {}
         self.allsessions = []
+        # persisted:
+        self.chunksize   = bkchunksize
+        self.compression = "zlib"
+        self.compr_level = "4"
+        self.hashtype    = "sha256"
+        self.vgname      = None
+        self.poolname    = None
+        self.destsys     = None
+        self.destdir     = None
+        self.destmountpoint = None
+        if not os.path.exists(self.confpath):
+            return self
+
+        self.conf = cp   = configparser.ConfigParser()
+        cp.optionxform   = lambda option: option
+        cp.read(self.confpath)
+        for name in cp["var"].keys():
+            setattr(self, name, cp["var"][name])
+        if "destvm" in cp["var"].keys(): ##
+            self.destsys = self.destvm   ##
+        self.path        = pjoin(top,self.vgname+"%"+self.poolname) ##
+        dedup            = options.dedup > 0
 
         for key in cp["volumes"]:
             if cp["volumes"][key] != "disable" and \
@@ -51,15 +61,18 @@ class ArchiveSet:
         # Create master session list sorted by date-time
         self.allsessions.sort(key=lambda x: x.localtime)
 
-        self.chunksize   = int(c['chunksize']) if 'chunksize' in c else bkchunksize
-        c['chunksize']   = self.chunksize
-        self.compression = c['compression'] if 'compression' in c else "zlib"
-        c['compression'] = self.compression
-        self.compr_level = c['compr_level'] if 'compr_level' in c else "4"
-        c['compr_level'] = self.compr_level
-
 
     def save_conf():
+        c = self.conf['var']
+        c['chunksize']   = self.chunksize
+        c['compression'] = self.compression
+        c['compr_level'] = self.compr_level
+        c['hashtype']    = self.hashtype
+        c['vgname']      = self.vgname
+        c['poolname']    = self.poolname
+        c['destsys']     = self.destsys
+        c['destdir']     = self.destdir
+        c['destmountpoint'] = self.destmountpoint
         with open(self.confpath, "w") as f:
             self.conf.write(f)
 
@@ -88,8 +101,7 @@ class ArchiveSet:
 
         for ext in {".tick",".tock"}:
             if lv_exists(vgname, datavol+ext):
-                p = subprocess.check_output(["lvremove",
-                                                "-f",vgname+"/"+datavol+ext])
+                do_exec([["lvremove", "-f", vgname+"/"+datavol+ext]])
                 print("Removed snapshot", vgname+"/"+datavol+ext)
 
         if os.path.exists(pjoin(self.path,datavol)):
@@ -288,10 +300,9 @@ class Lvm_Volume:
 
 def get_lvm_vgs():
 
-    p = subprocess.check_call([shell_prefix + \
-        "lvs --units=b --noheadings --separator ::"
-        +" -o " + ",".join(Lvm_Volume.colnames)
-        +" >"+tmpdir+"/volumes.lst"], shell=True)
+    do_exec([["lvs", "--units=b", "--noheadings", "--separator=::",
+                "--options=" + ",".join(Lvm_Volume.colnames)]],
+            out=tmpdir+"/volumes.lst")
 
     vgs = {}
     with open(tmpdir+"/volumes.lst", "r") as vlistf:
@@ -436,16 +447,16 @@ def detect_dest_state(destsys):
                   +" "+tmpdir+"-old; fi }"
                   +"  && mkdir -p "+tmpdir+"/rpc"
                   ]
-            p = subprocess.check_call(cmd)
+            do_exec([cmd])
 
         # Fix: get OSTYPE env variable
         try:
             cmd = ["mountpoint -q '"+aset.destmountpoint
-                  +"' && mkdir -p '"+aset.destmountpoint+"/"+aset.destdir+topdir
-                  +"' && cd '"+aset.destmountpoint+"/"+aset.destdir+topdir
-                  +"' && touch archive.dat"
-                  ##+"  && ln -f archive.dat .hardlink"
-                  ]
+                    +"' && mkdir -p '"+aset.destmountpoint+"/"+aset.destdir+topdir
+                    +"' && cd '"+aset.destmountpoint+"/"+aset.destdir+topdir
+                    +"' && touch archive.dat"
+                    ##+"  && ln -f archive.dat .hardlink"
+                    ]
             dest_run(cmd)
 
             # send helper program to remote
@@ -461,14 +472,46 @@ def detect_dest_state(destsys):
             x_it(1, "Destination not ready to receive commands.")
 
 
+# Run system commands with pipes, without shell:
+# 'commands' is a list of lists, each element a command line.
+# If multiple command lines, then they are piped together.
+# 'out' redirects the last command output to a file; append mode can be
+# selected by beginning 'out' path with '>>'.
+
+def do_exec(commands, env=None, cwd=None, check=True, out=""):
+    if env is None:
+        env = cmd_env
+    if out[:2] == ">>":
+        out = out[2:]
+        outmode = "ab"
+    else:
+        outmode = "wb"
+
+    procs = []
+    outf = open(out, outmode) if out else subprocess.DEVNULL
+    for i, clist in enumerate(commands):
+        p = subprocess.Popen(clist, stdin=subprocess.DEVNULL if i==0 else procs[i-1].stdout,
+                             stdout=outf if i==len(commands)-1 else subprocess.PIPE,
+                             cwd=cwd, env=env)
+        procs.append(p)
+
+    err = None
+    for p in reversed(procs):
+        if p.wait() != 0 and check:
+            #print("Error:", p.args)
+            err = p
+    if err and check:
+        raise subprocess.CalledProcessError(err.returncode, err.args)
+
+
 # Run system commands on destination
 
 def dest_run(commands, dest_type=None, dest=None):
     if dest_type is None:
         dest_type = desttype
 
-    cmd = shell_prefix + " ".join(dest_run_args(dest_type, commands))
-    p = subprocess.check_call(cmd, shell=True)
+    cmd = dest_run_args(dest_type, commands)
+    do_exec([cmd])
 
     #else:
     #    p = subprocess.check_output(cmd, **kwargs)
@@ -521,12 +564,6 @@ def prepare_snapshots(datavols):
     it to the older snap1vol. Then, depending on monitor or backup mode, we'll
     accumulate delta info and possibly use snap2vol as source for a
     backup session.
-
-    Associated rule: Latest session cannot
-    be simply pruned; an earlier target must first be restored to system
-    then snap1 and info file synced (possibly by adding an empty session on
-    top of the target session in the archive); alternative is to save deltamaps
-    to the archive and when deleting the latest session import its deltamap.
     '''
 
     print("Preparing snapshots...")
@@ -588,8 +625,7 @@ def lv_exists(vgname, lvname):
 
 def vg_exists(vgname):
     try:
-        p = subprocess.check_output( ["vgdisplay", vgname],
-                                    stderr=subprocess.STDOUT )
+        do_exec([["vgdisplay", vgname]])
     except subprocess.CalledProcessError:
         return False
     else:
@@ -603,28 +639,31 @@ def get_lvm_deltas(datavols):
     poolname = aset.poolname
     print("Acquiring deltas.")
 
-    subprocess.call(["dmsetup","message", vgname+"-"+poolname+"-tpool",
-        "0", "release_metadata_snap"], stderr=subprocess.DEVNULL)
-    cmd =  [shell_prefix,
-            "dmsetup message "+vgname+"-"+poolname+"-tpool"
-           +" 0 reserve_metadata_snap"]
+    do_exec([["dmsetup","message", vgname+"-"+poolname+"-tpool",
+              "0", "release_metadata_snap"]], check=False)
+    do_exec([["dmsetup","message", vgname+"-"+poolname+"-tpool",
+              "0", "reserve_metadata_snap"]])
+    err = False
     for datavol in datavols:
         snap1vol = datavol + ".tick"
         snap2vol = datavol + ".tock"
-        cmd += ["thin_delta -m"
-                + " --thin1 " + l_vols[snap1vol].thin_id
-                + " --thin2 " + l_vols[snap2vol].thin_id
-                + " /dev/mapper/"+vgname+"-"+poolname+"_tmeta"
-                + " | grep -v '<same .*\/>$'"
-                + " >" + tmpdir+"/delta."+datavol
-                ]
-    try:
-        subprocess.check_call("\n".join(cmd), shell=True)
-    except:
+        try:
+            do_exec([["thin_delta", "-m",
+                      "--thin1=" + l_vols[snap1vol].thin_id,
+                      "--thin2=" + l_vols[snap2vol].thin_id,
+                      "/dev/mapper/"+vgname+"-"+poolname+"_tmeta"],
+                     ["grep", "-v", "<same .*\/>$"]
+                    ],  out=tmpdir+"/delta."+datavol
+                   )
+        except:
+            err = True
+            break
+
+    do_exec([["dmsetup","message", vgname+"-"+poolname+"-tpool",
+              "0", "release_metadata_snap"]], check=False)
+
+    if err:
         x_it(1, "ERROR running thin_delta process.")
-    finally:
-        subprocess.call(["dmsetup","message", vgname+"-"+poolname+"-tpool",
-            "0", "release_metadata_snap"], stderr=subprocess.DEVNULL)
 
 
 # update_delta_digest: Translates raw lvm delta information
@@ -667,7 +706,7 @@ def update_delta_digest(datavol):
 
             # blockpos iterates over disk blocks, with
             # thin LVM tools constant of 512 bytes/block.
-            # dblocksize (source) and and chunksize (dest) may be
+            # dblocksize (source) and chunksize (dest) may be
             # somewhat independant of each other.
             for blockpos in range(blockbegin, blockbegin + blocklen):
                 volsegment = blockpos // (chunksize // bs)
@@ -817,13 +856,9 @@ def send_volume(datavol, localtime):
 
                 # Start tar stream
                 if not stream_started:
-                    cmd   = shell_prefix + \
-                            " ".join(dest_run_args(desttype, untar_cmd))
-                    untar = subprocess.Popen(cmd,
-                            stdin =subprocess.PIPE,
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                            shell =True)
+                    untar = subprocess.Popen(dest_run_args(desttype, untar_cmd),
+                            stdin =subprocess.PIPE,    stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
                     tarf = tarfile.open(mode="w|", fileobj=untar.stdin)
                     tarf_addfile = tarf.addfile; TarInfo = tarfile.TarInfo
                     LNKTYPE = tarfile.LNKTYPE
@@ -1271,14 +1306,12 @@ def dedup_existing():
     init_dedup_index("dedup.lst")
 
     print("Linking...")
-    cmd = [shell_prefix
-        +"cat "+tmpdir+"/dedup.lst"
-        +"  | "+" ".join(dest_run_args(desttype, [destcd + bkdir
+    do_exec([["cat", tmpdir+"/dedup.lst"],
+             dest_run_args(desttype, [destcd + bkdir
                +" && cat >"+tmpdir+"/rpc/dest.lst"
                +" && python3 "+tmpdir+"/rpc/dest_helper.py dedup"
-               ]))
-        ]
-    p = subprocess.check_call(cmd, shell=True)
+               ])
+            ])
 
 
 # Controls flow of monitor and send_volume procedures:
@@ -1345,18 +1378,15 @@ def rotate_snapshots(vol, rotate=True):
     if rotate:
         #print("Rotating snapshots for", datavol)
         # Review: this should be atomic
-        p = subprocess.check_output(
-            ["lvremove","--force", aset.vgname+"/"+snap1vol])
-        p = subprocess.check_output(
-            ["lvrename",aset.vgname+"/"+snap2vol, snap1vol])
+        do_exec([["lvremove","--force", aset.vgname+"/"+snap1vol]])
+        do_exec([["lvrename",aset.vgname+"/"+snap2vol, snap1vol]])
         l_vols[snap2vol].lv_name = l_vols[snap1vol].lv_name
         l_vols[snap2vol].lv_path = l_vols[snap1vol].lv_path
         l_vols[snap1vol] = l_vols[snap2vol]
         del l_vols[snap2vol]
 
     else:
-        p = subprocess.check_output(
-            ["lvremove","--force",aset.vgname+"/"+snap2vol])
+        do_exec([["lvremove","--force",aset.vgname+"/"+snap2vol]])
         del l_vols[snap2vol]
 
 
@@ -1487,48 +1517,46 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
 
         # Get manifests, append session name to eol, print session names to srcf.
         print("  Reading manifests")
-        manifests = ""
-        cmd = ["cd "+tmpdir]
+        manifests = []
+        ###cmd = ["cd "+tmpdir]
         for ses in merge_sources:
             if clear_sources:
                 print(ses, file=srcf)
-                manifests += " man."+ses
-            cmd.append("sed -E 's|$| "+ses+"|' "
-                    +pjoin(bkdir,datavol,ses+"/manifest")
-                    +" >"+"man."+ses)
+                manifests.append("man."+ses)
+            do_exec([["sed", "-E", "s|$| "+ses+"|",
+                      pjoin(bkdir,datavol,ses+"/manifest")
+                    ]], out="man."+ses, cwd=tmpdir)
 
         print("###", file=srcf)
 
     # Unique-merge filenames: one for rename, one for new full manifest.
-    cmd.append("sort -u -m -d -k 2,2 "+manifests
-               +" >manifest.tmp")
-    cmd.append("sort -u -m -d -k 2,2 manifest.tmp "
-               +pjoin(bkdir,datavol,merge_target+"/manifest")
-               +" >manifest.new")
-    p = subprocess.check_call(shell_prefix + "\n".join(cmd), shell=True)
+    do_exec([["sort", "-umd", "-k2,2"] + manifests],
+             out="manifest.tmp", cwd=tmpdir)
+    do_exec([["sort", "-umd", "-k2,2", "manifest.tmp",
+              pjoin(bkdir,datavol,merge_target+"/manifest")
+            ]], out="manifest.new", cwd=tmpdir)
 
     # Output manifest filenames in the sftp-friendly form:
     # 'rename src_session/subdir/xaddress target/subdir/xaddress'
     # then pipe to destination and run dest_helper.py.
     print("  Merging to", target)
 
-    cmd = [shell_prefix + "cd "+pjoin(bkdir,datavol)
-        +" && awk '$2<="+lc_filter+"' " + tmpdir+"/manifest.tmp"
-        +" |  sed -E "
+    do_exec([
+            ["awk", "$2<="+lc_filter, tmpdir+"/manifest.tmp"],
+            ["sed", "-E",
 
-        +"'s|^0 x(\S{" + str(address_split[0]) + "})(\S+)\s+(S_\S+)|"
-        +"rm "+merge_target+"/\\1/x\\1\\2|; t; "
+             "s|^0 x(\S{" + str(address_split[0]) + "})(\S+)\s+(S_\S+)|"
+             "rm "+merge_target+"/\\1/x\\1\\2|; t; "
 
-        +"s|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)\s+(S_\S+)|"
-        +"rename \\3/\\1/x\\1\\2 "+merge_target+"/\\1/x\\1\\2|'"
-
-        +"  |  cat "+tmpdir+"/sources.lst -"
-        +"  | "+" ".join(dest_run_args(desttype, [destcd + bkdir+"/"+datavol
-               +" && cat >"+tmpdir+"/rpc/dest.lst"
-               +" && python3 "+tmpdir+"/rpc/dest_helper.py merge"
-               ]))
-        ]
-    p = subprocess.check_call(cmd, shell=True)
+             "s|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)\s+(S_\S+)|"
+             "rename \\3/\\1/x\\1\\2 "+merge_target+"/\\1/x\\1\\2|'"
+            ],
+            ["cat", tmpdir+"/sources.lst", "-"],
+            dest_run_args(desttype, [destcd + bkdir+"/"+datavol
+                +" && cat >"+tmpdir+"/rpc/dest.lst"
+                +" && python3 "+tmpdir+"/rpc/dest_helper.py merge"
+                ])
+            ], cwd=pjoin(bkdir,datavol))
 
     # Update info records and trim to target size
     if clear_sources:
@@ -1538,31 +1566,28 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
         volume.save_volinfo()
         print("  Removed", " ".join(sources))
 
-    cmd = [shell_prefix + "cd "+pjoin(bkdir,datavol)
-        +"  && awk '$2<="+lc_filter+" {print $1, $2}' "
-        +tmpdir+"/manifest.new >"+target+"/manifest",
+    do_exec([["awk", "$2<="+lc_filter+" {print $1, $2}", tmpdir+"/manifest.new"]],
+            out=target+"/manifest", cwd=pjoin(bkdir,datavol)) 
 
+    if vol_shrank:
         # If volume size shrank in this period then make trim list.
-        ( " && awk '$2>"+lc_filter+"' " + tmpdir+"/manifest.new"
-        + " |  sed -E 's|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)|"
-        +  target+"/\\1/x\\1\\2|' >"+target+"/delete"
-        ) if vol_shrank else "",
+        do_exec([["awk", "$2>"+lc_filter, tmpdir+"/manifest.new"],
+                 ["sed", "-E", "s|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)|"
+                  +target+"/\\1/x\\1\\2|"],
+                ], out=target+"/delete", cwd=pjoin(bkdir,datavol))
 
-        "   && tar -cf - volinfo "+target
-        +"  | "+" ".join(dest_run_args(desttype, [destcd + bkdir+"/"+datavol
-            +"  && tar -xmf -",
+    do_exec([["tar", "-cf", "-", "volinfo", target],
+             dest_run_args(desttype, [destcd + bkdir+"/"+datavol
+                    +"  && tar -xmf -",
 
-            # Trim on dest.
-            ( " && cat "+target+"/delete  |  xargs -r rm -f"
-            + " && rm "+target+"/delete"
-            + " && find "+target+" -maxdepth 1 -type d -empty -delete"
-            ) if vol_shrank else "",
+                    # Trim on dest.
+                    ( " && cat "+target+"/delete  |  xargs -r rm -f"
+                    + " && rm "+target+"/delete"
+                    + " && find "+target+" -maxdepth 1 -type d -empty -delete"
+                    ) if vol_shrank else ""
+             ])], cwd=pjoin(bkdir,datavol))
 
-              " && sync -f volinfo"
-            ])
-        )]
-    p = subprocess.check_call(" ".join(cmd), shell=True)
-
+    do_exec([["sync", "-f", "volinfo"]], cwd=pjoin(bkdir,datavol))
 
 # Receive volume from archive. If no save_path specified, then verify only.
 # If diff specified, compare with current source volume; with --remap option
@@ -1637,26 +1662,32 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                 "Receive from tarfile not yet implemented: "+ses)
 
         # add session column to end of each line:
-        cmd = [shell_prefix + "cd "+pjoin(bkdir,datavol)
-            +"  && sed -E 's|$| "+ses+"|' "
-            +pjoin(ses,"manifest")+" >>"+tmpdir+"/manifests.cat"
-            ]
-        p = subprocess.check_output(cmd, shell=True)
+        do_exec([["sed", "-E", "s|$| "+ses+"|", pjoin(ses,"manifest")]],
+                cwd=pjoin(bkdir,datavol), out=">>"+tmpdir+"/manifests.cat")
 
     # Merge manifests and send to archive system:
     # sed is used to expand chunk info into a path and filter out any entries
     # beyond the current last chunk, then piped to cat on destination.
     # Note address_split is used to bisect filename to construct the subdir.
-    cmd = [shell_prefix + "cd '"+pjoin(bkdir,datavol)
-        +"' && sort -u -d -k 2,2 "+tmpdir+"/manifests.cat"
-        +"  |  tee "+tmpdir+"/manifest.verify"
-        +"  |  sed -E 's|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)\s+"
-        +"(S_\S+)|\\3/\\1/x\\1\\2|;"
-        +" /"+last_chunkx+"/q'"
-        +"  | "+" ".join(dest_run_args(desttype,
-                        ["cat >"+tmpdir+"/rpc/dest.lst"])
-        )]
-    p = subprocess.check_output(cmd, shell=True)
+    cmds = [["sort", "-u", "-d", "-k2,2", tmpdir+"/manifests.cat"],
+            ["tee", tmpdir+"/manifest.verify"],
+            ["sed", "-E", "s|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)\s+"
+            +"(S_\S+)|\\3/\\1/x\\1\\2|;"
+            +" /"+last_chunkx+"/q"],
+            dest_run_args(desttype, ["cat >"+tmpdir+"/rpc/dest.lst"])
+            ]
+    do_exec(cmds, cwd=pjoin(bkdir,datavol))
+
+    #cmd = [shell_prefix + "cd '"+pjoin(bkdir,datavol)
+        #+"' && sort -u -d -k 2,2 "+tmpdir+"/manifests.cat"
+        #+"  |  tee "+tmpdir+"/manifest.verify"
+        #+"  |  sed -E 's|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)\s+"
+        #+"(S_\S+)|\\3/\\1/x\\1\\2|;"
+        #+" /"+last_chunkx+"/q'"
+        #+"  | "+" ".join(dest_run_args(desttype,
+                        #["cat >"+tmpdir+"/rpc/dest.lst"])
+        #)]
+    #p = subprocess.check_output(cmd, shell=True)
 
     # Prepare save volume
     if save_path:
@@ -1671,20 +1702,17 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                 if vg != vgname:
                     x_it(1, "Cannot auto-create volume:"
                          " Volume group does not match config.")
-                p = subprocess.check_output(
-                    ["lvcreate -kn -ay -V "+str(volsize)+"b"
-                     +" --thin -n "+lv+" "+vg+"/"+aset.poolname], shell=True)
+                do_exec([["lvcreate", "-kn", "-ay", "-V", str(volsize)+"b",
+                          "--thin", "-n", lv, vg+"/"+aset.poolname]])
             elif l_vols[lv].lv_size != volsize:
-                p = subprocess.check_output(["lvresize", "-L",str(volsize)+"b",
-                                             "-f", save_path])
+                do_exec([["lvresize", "-L", str(volsize)+"b", "-f", save_path]])
+
         if os.path.exists(save_path) \
         and stat.S_ISBLK(os.stat(save_path).st_mode):
-            p = subprocess.check_output(["blkdiscard", save_path])
+            do_exec([["blkdiscard", save_path]])
         else: # file
-            p = subprocess.check_output(
-                ["truncate", "-s", "0", save_path])
-            p = subprocess.check_output(
-                ["truncate", "-s", str(volsize), save_path])
+            do_exec([["truncate", "-s", "0", save_path]])
+            do_exec([["truncate", "-s", str(volsize), save_path]])
         print("Saving to", save_path)
         savef = open(save_path, "w+b")
 
@@ -1693,9 +1721,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             x_it(1, "Local volume must exist for diff.")
         if remap:
             if not lv_exists(vgname, snap1vol):
-                p = subprocess.check_output(["lvcreate", "-pr", "-kn",
-                    "-ay", "-s", vgname+"/"+datavol, "-n", snap1vol],
-                    stderr=subprocess.STDOUT)
+                do_exec([["lvcreate", "-pr", "-kn", "-ay", "-s", vgname+"/"+datavol,
+                          "-n", snap1vol]])
                 print("  Initial snapshot created for", datavol)
             if not os.path.exists(vol.mapfile):
                 init_deltamap(vol.mapfile, vol.mapsize())
@@ -1718,12 +1745,12 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
     print("\nReceiving volume", datavol, select_ses)
     # Create retriever process using py program
-    cmd = [shell_prefix] + dest_run_args(desttype,
+    cmd = dest_run_args(desttype,
             [destcd + bkdir+"/"+datavol
             +"  && python3 "+tmpdir+"/rpc/dest_helper.py receive"
             ])
-    getvol = subprocess.Popen(" ".join(cmd), stdout=subprocess.PIPE,
-                              shell=True)
+    getvol = subprocess.Popen(cmd, stdout=subprocess.PIPE, env=cmd_env,
+                              cwd=aset.destmountpoint+"/"+aset.destdir) ###
 
     # Open manifest then receive, check and save data
     with open(tmpdir+"/manifest.verify", "r") as mf:
@@ -1811,9 +1838,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             savef.close()
             if returned_home:
                 if not lv_exists(vgname, snap1vol):
-                    p = subprocess.check_output(["lvcreate", "-pr", "-kn",
-                        "-ay", "-s", vgname+"/"+datavol, "-n", snap1vol],
-                        stderr=subprocess.STDOUT)
+                    do_exec([["lvcreate", "-pr", "-kn",
+                        "-ay", "-s", vgname+"/"+datavol, "-n", snap1vol]])
                     print("  Initial snapshot created for", datavol)
                 if not os.path.exists(vol.mapfile):
                     init_deltamap(vol.mapfile, vol.mapsize())
@@ -1871,6 +1897,7 @@ max_address           = 0xffffffffffffffff # 64bits
 address_split         = [len(hex(max_address))-2-7, 7]
 pjoin                 = os.path.join
 shell_prefix          = "set -e && export LC_ALL=C\n"
+cmd_env               = os.environ.update({"LC_ALL": "C"})
 
 
 if sys.hexversion < 0x3050000:
