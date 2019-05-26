@@ -42,8 +42,9 @@ class ArchiveSet:
         self.conf = cp   = configparser.ConfigParser()
         cp.optionxform   = lambda option: option
         cp.read(self.confpath)
+        self.a_ints      = {"chunksize"}
         for name in cp["var"].keys():
-            setattr(self, name, cp["var"][name])
+            setattr(self, name, int(cp["var"][name]) if name in self.a_ints else cp["var"][name])
         if "destvm" in cp["var"].keys(): ##
             self.destsys = self.destvm   ##
         self.path        = pjoin(top,self.vgname+"%"+self.poolname) ##
@@ -62,9 +63,9 @@ class ArchiveSet:
         self.allsessions.sort(key=lambda x: x.localtime)
 
 
-    def save_conf():
+    def save_conf(self):
         c = self.conf['var']
-        c['chunksize']   = self.chunksize
+        c['chunksize']   = str(self.chunksize)
         c['compression'] = self.compression
         c['compr_level'] = self.compr_level
         c['hashtype']    = self.hashtype
@@ -408,7 +409,7 @@ with open("''' + tmpdir + '''/rpc/dest.lst", "r") as lstf:
             os.makedirs(merge_target+"/"+sdir, exist_ok=True)
         for line in lstf:
             ln = line.strip().split()
-            if ln[0] == "rename":
+            if ln[0] == "rename" and os.path.exists(ln[1]):
                 os.replace(ln[1], ln[2])
             elif ln[0] == "rm" and os.path.exists(ln[1]):
                 os.remove(ln[1])
@@ -462,12 +463,10 @@ def detect_dest_state(destsys):
             # send helper program to remote
             if desttype != "internal":
                 cmd = ["rm -rf "+tmpdir
-                    +"  && mkdir -p "+tmpdir+"/rpc"
-                    +"  && cat >"+tmpdir +"/rpc/dest_helper.py"
-                    ]
-                p = subprocess.check_call(" ".join(
-                    ["cat " + tmpdir +"/rpc/dest_helper.py | "]
-                    + dest_run_args(desttype, cmd)), shell=True)
+                      +" && mkdir -p "+tmpdir+"/rpc"
+                      +" && cat >"+tmpdir+"/rpc/dest_helper.py"
+                      ]
+                dest_run(cmd, infile=tmpdir+"/rpc/dest_helper.py")
         except subprocess.CalledProcessError:
             x_it(1, "Destination not ready to receive commands.")
 
@@ -478,40 +477,44 @@ def detect_dest_state(destsys):
 # 'out' redirects the last command output to a file; append mode can be
 # selected by beginning 'out' path with '>>'.
 
-def do_exec(commands, env=None, cwd=None, check=True, out=""):
-    if env is None:
-        env = cmd_env
+def do_exec(commands, cwd=None, check=True, out="", infile=""):
     if out[:2] == ">>":
-        out = out[2:]
+        out = out[2:].strip()
         outmode = "ab"
     else:
         outmode = "wb"
+    if cwd and out and out[0] != "/":
+        out = pjoin(cwd,out)
+    if cwd and infile and infile[0] != "/":
+        infile = pjoin(cwd,infile)
 
     procs = []
     outf = open(out, outmode) if out else subprocess.DEVNULL
+    inf  = open(infile, "rb") if infile else subprocess.DEVNULL
     for i, clist in enumerate(commands):
-        p = subprocess.Popen(clist, stdin=subprocess.DEVNULL if i==0 else procs[i-1].stdout,
+        p = subprocess.Popen(clist, stdin=inf if i==0 else procs[i-1].stdout,
                              stdout=outf if i==len(commands)-1 else subprocess.PIPE,
-                             cwd=cwd, env=env)
+                             stderr=subprocess.DEVNULL, cwd=cwd) #, env=env)
         procs.append(p)
 
     err = None
-    for p in reversed(procs):
+    for p in procs:
         if p.wait() != 0 and check:
             #print("Error:", p.args)
             err = p
+            break
     if err and check:
         raise subprocess.CalledProcessError(err.returncode, err.args)
 
 
 # Run system commands on destination
 
-def dest_run(commands, dest_type=None, dest=None):
+def dest_run(commands, dest_type=None, infile=""):
     if dest_type is None:
         dest_type = desttype
 
     cmd = dest_run_args(dest_type, commands)
-    do_exec([cmd])
+    do_exec([cmd], infile=infile)
 
     #else:
     #    p = subprocess.check_output(cmd, **kwargs)
@@ -521,30 +524,25 @@ def dest_run_args(dest_type, commands):
 
     # shunt commands to tmp file
     with tempfile.NamedTemporaryFile(dir=tmpdir, delete=False) as tmpf:
-        tmpf.write(bytes(shell_prefix + \
-                         " ".join(commands) + "\n", encoding="UTF-8"))
+        cmd = bytes(shell_prefix + " ".join(commands) + "\n", encoding="UTF-8")
+        tmpf.write(cmd)
         remotetmp = os.path.basename(tmpf.name)
 
     if dest_type in {"qubes","qubes-ssh"}:
-
-        cmd = [shell_prefix \
-              +"cat "+pjoin(tmpdir,remotetmp)
-              +" | qvm-run -p "
-              +(destsys if dest_type == "qubes" else destsys.split("|")[0])
-              +" 'mkdir -p "+pjoin(tmpdir,"rpc")
-              +" && cat >"+pjoin(tmpdir,"rpc",remotetmp)+"'"
-              ]
-        p = subprocess.check_call(cmd, shell=True)
-
+        do_exec([["qvm-run", "-p",
+                  (destsys if dest_type == "qubes" else destsys.split("|")[0]),
+                  "mkdir -p "+pjoin(tmpdir,"rpc")
+                  +" && cat >"+pjoin(tmpdir,"rpc",remotetmp)
+                ]], infile=pjoin(tmpdir,remotetmp))
         if dest_type == "qubes":
-            add_cmd = ["'sh "+pjoin(tmpdir,"rpc",remotetmp)+"'"]
+            add_cmd = ["sh "+pjoin(tmpdir,"rpc",remotetmp)]
         elif dest_type == "qubes-ssh":
-            add_cmd = ["'ssh "+destsys.split("|")[1]
-                      +' "$(cat '+pjoin(tmpdir,"rpc",remotetmp)+')"'
-                      +"'"]
+            add_cmd = ["ssh "+destsys.split("|")[1]
+                      +' "$(cat '+pjoin(tmpdir,"rpc",remotetmp)+')"']
 
     elif dest_type == "ssh":
-        add_cmd = [' "$(cat '+pjoin(tmpdir,remotetmp)+')"']
+        #add_cmd = [' "$(cat '+pjoin(tmpdir,remotetmp)+')"']
+        add_cmd = [cmd]
 
     elif dest_type == "internal":
         add_cmd = [pjoin(tmpdir,remotetmp)]
@@ -660,7 +658,7 @@ def get_lvm_deltas(datavols):
             break
 
     do_exec([["dmsetup","message", vgname+"-"+poolname+"-tpool",
-              "0", "release_metadata_snap"]], check=False)
+              "0", "release_metadata_snap"]], check=not err)
 
     if err:
         x_it(1, "ERROR running thin_delta process.")
@@ -1306,12 +1304,11 @@ def dedup_existing():
     init_dedup_index("dedup.lst")
 
     print("Linking...")
-    do_exec([["cat", tmpdir+"/dedup.lst"],
-             dest_run_args(desttype, [destcd + bkdir
+    do_exec([dest_run_args(desttype, [destcd + bkdir
                +" && cat >"+tmpdir+"/rpc/dest.lst"
                +" && python3 "+tmpdir+"/rpc/dest_helper.py dedup"
                ])
-            ])
+            ], infile=tmpdir+"/dedup.lst")
 
 
 # Controls flow of monitor and send_volume procedures:
@@ -1518,15 +1515,13 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
         # Get manifests, append session name to eol, print session names to srcf.
         print("  Reading manifests")
         manifests = []
-        ###cmd = ["cd "+tmpdir]
         for ses in merge_sources:
             if clear_sources:
                 print(ses, file=srcf)
                 manifests.append("man."+ses)
             do_exec([["sed", "-E", "s|$| "+ses+"|",
                       pjoin(bkdir,datavol,ses+"/manifest")
-                    ]], out="man."+ses, cwd=tmpdir)
-
+                    ]], cwd=tmpdir, out="man."+ses)
         print("###", file=srcf)
 
     # Unique-merge filenames: one for rename, one for new full manifest.
@@ -1541,6 +1536,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
     # then pipe to destination and run dest_helper.py.
     print("  Merging to", target)
 
+    os.chdir(pjoin(bkdir,datavol))
     do_exec([
             ["awk", "$2<="+lc_filter, tmpdir+"/manifest.tmp"],
             ["sed", "-E",
@@ -1549,14 +1545,14 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
              "rm "+merge_target+"/\\1/x\\1\\2|; t; "
 
              "s|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)\s+(S_\S+)|"
-             "rename \\3/\\1/x\\1\\2 "+merge_target+"/\\1/x\\1\\2|'"
+             "rename \\3/\\1/x\\1\\2 "+merge_target+"/\\1/x\\1\\2|"
             ],
             ["cat", tmpdir+"/sources.lst", "-"],
             dest_run_args(desttype, [destcd + bkdir+"/"+datavol
                 +" && cat >"+tmpdir+"/rpc/dest.lst"
                 +" && python3 "+tmpdir+"/rpc/dest_helper.py merge"
                 ])
-            ], cwd=pjoin(bkdir,datavol))
+            ])
 
     # Update info records and trim to target size
     if clear_sources:
@@ -1567,14 +1563,14 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
         print("  Removed", " ".join(sources))
 
     do_exec([["awk", "$2<="+lc_filter+" {print $1, $2}", tmpdir+"/manifest.new"]],
-            out=target+"/manifest", cwd=pjoin(bkdir,datavol)) 
+            out=target+"/manifest") 
 
     if vol_shrank:
         # If volume size shrank in this period then make trim list.
         do_exec([["awk", "$2>"+lc_filter, tmpdir+"/manifest.new"],
                  ["sed", "-E", "s|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)|"
                   +target+"/\\1/x\\1\\2|"],
-                ], out=target+"/delete", cwd=pjoin(bkdir,datavol))
+                ], out=target+"/delete")
 
     do_exec([["tar", "-cf", "-", "volinfo", target],
              dest_run_args(desttype, [destcd + bkdir+"/"+datavol
@@ -1585,9 +1581,9 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
                     + " && rm "+target+"/delete"
                     + " && find "+target+" -maxdepth 1 -type d -empty -delete"
                     ) if vol_shrank else ""
-             ])], cwd=pjoin(bkdir,datavol))
+             ])])
 
-    do_exec([["sync", "-f", "volinfo"]], cwd=pjoin(bkdir,datavol))
+    do_exec([["sync", "-f", "volinfo"]])
 
 # Receive volume from archive. If no save_path specified, then verify only.
 # If diff specified, compare with current source volume; with --remap option
@@ -1675,24 +1671,14 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             +"(S_\S+)|\\3/\\1/x\\1\\2|;"
             +" /"+last_chunkx+"/q"],
             dest_run_args(desttype, ["cat >"+tmpdir+"/rpc/dest.lst"])
-            ]
+           ]
     do_exec(cmds, cwd=pjoin(bkdir,datavol))
-
-    #cmd = [shell_prefix + "cd '"+pjoin(bkdir,datavol)
-        #+"' && sort -u -d -k 2,2 "+tmpdir+"/manifests.cat"
-        #+"  |  tee "+tmpdir+"/manifest.verify"
-        #+"  |  sed -E 's|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)\s+"
-        #+"(S_\S+)|\\3/\\1/x\\1\\2|;"
-        #+" /"+last_chunkx+"/q'"
-        #+"  | "+" ".join(dest_run_args(desttype,
-                        #["cat >"+tmpdir+"/rpc/dest.lst"])
-        #)]
-    #p = subprocess.check_output(cmd, shell=True)
 
     # Prepare save volume
     if save_path:
         # Discard all data in destination if this is a block device
         # then open for writing
+        returned_home = False
         if vg_exists(os.path.dirname(save_path)):
             lv = os.path.basename(save_path)
             vg = os.path.basename(os.path.dirname(save_path))
@@ -1749,8 +1735,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             [destcd + bkdir+"/"+datavol
             +"  && python3 "+tmpdir+"/rpc/dest_helper.py receive"
             ])
-    getvol = subprocess.Popen(cmd, stdout=subprocess.PIPE, env=cmd_env,
-                              cwd=aset.destmountpoint+"/"+aset.destdir) ###
+    getvol = subprocess.Popen(cmd, stdout=subprocess.PIPE)
 
     # Open manifest then receive, check and save data
     with open(tmpdir+"/manifest.verify", "r") as mf:
@@ -1828,12 +1813,14 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             elif diff:
                 diff_count += diff_compare(buf,False)
 
-        print("\nReceived byte range:", addr+len(buf))
         if rc is not None and rc > 0:
             raise RuntimeError("Error code from getvol process: "+str(rc))
         if addr+len(buf) != volsize:
-            raise ValueError("Received range does not match volume size %d."
-                             % volsize)
+            raise ValueError("Received range %d does not match volume size %d."
+                             % (addr+len(buf), volsize))
+        print("100%")
+        print("Received byte range:", addr+len(buf))
+
         if save_path:
             savef.close()
             if returned_home:
@@ -1897,7 +1884,7 @@ max_address           = 0xffffffffffffffff # 64bits
 address_split         = [len(hex(max_address))-2-7, 7]
 pjoin                 = os.path.join
 shell_prefix          = "set -e && export LC_ALL=C\n"
-cmd_env               = os.environ.update({"LC_ALL": "C"})
+os.environ["LC_ALL"]  = "C"
 
 
 if sys.hexversion < 0x3050000:
@@ -1945,11 +1932,13 @@ parser.add_argument("--save-to", dest="saveto", default="",
 parser.add_argument("--remap", action="store_true", default=False,
                     help="Remap volume during diff")
 parser.add_argument("--source", dest="source", default="",
-                    help="LVM volgroup/pool containing source volumes")
+                    help="Init: LVM volgroup/pool containing source volumes")
 parser.add_argument("--dest", dest="dest", default="",
-                    help="Type:location of archive")
+                    help="Init: type:location of archive")
 parser.add_argument("--subdir", dest="subdir", default="",
-                    help="Optional subdir for --dest")
+                    help="Init: optional subdir for --dest")
+parser.add_argument("--chunk-factor", dest="chfactor", type=int,
+                    help="Init: set chunk size to N*64kB")
 parser.add_argument("--testing-dedup", dest="dedup", type=int, default=0,
                     help="Test experimental deduplication (send)")
 parser.add_argument("volumes", nargs="*")
@@ -2056,7 +2045,7 @@ elif options.action == "list":
         lmonth = ""; count = 0; ending = "."
         for ses in vol.sesnames:
             if ses[:8] != lmonth:
-                print("" if ending else "\n")
+                print("" if ending else "\n", flush=True)
                 count = 0
             print(" ",ses[2:]+(" (tar)"
                         if vol.sessions[ses].format == "tar"
