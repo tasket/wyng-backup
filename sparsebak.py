@@ -451,7 +451,7 @@ with open("''' + tmpdir + '''/rpc/dest.lst", "r") as lstf:
             source, dest = line.strip().split()
             if os.stat(source).st_ino != os.stat(dest).st_ino:
                 os.link(source, dest+"-lnk")
-                os.replace(dest-"lnk", dest)
+                os.replace(dest+"-lnk", dest)
                 ddcount += 1
         print(ddcount, "reduced.")
     '''
