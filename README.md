@@ -41,45 +41,40 @@ Sparsebak is in beta-testing and comes with no warranties expressed or implied.
 Setup & Requirements
 ---
 
-Required packages: thin-provisioning-tools, lvm2, python3. Configured volumes
-must reside in lvm thin-provisioned pools.
+Before starting, thin-provisioning-tools, lvm2, and python >=3.5.4 must be installed. Configured volumes must reside in a LVM thin-provisioned pool.
 
 `sparsebak.py` is currently distributed as a single python script with no complex
 supporting modules or other program files; it can be placed in '/usr/local/bin'
 or another place of your choosing. It looks in '/sparsebak/default.ini'
-for settings and a list of volume names to be monitored and backed up.
-Some settings you can change are `vgname` and `poolname`
-for the volume group and pool, in addition to `destvm`, `destmountpoint` and `destdir`
-which combine to a vm:dir/path specification for the backup destination. The
-`destmountpoint` is checked to make sure its mounted for several sparsebak commands
-including `send`, `receive`, `verify` and `prune`, but not `monitor`.
+for settings that define what to back up and where the backup archive will
+be located as well as the archive's metadata.
 
-Backup metadata is also saved to '/sparsebak' folder.
-
-#### Example config default.ini
+Settings are initialized with `arch-init`. Please note that dashed arguments are
+always placed before the command:
 
 ```
-[var]
-vgname = dom0
-poolname = pool00
-destvm = ssh://user@exmaple.com
-destmountpoint = /mnt/backupdrive
-destdir = backups
-
-[volumes]
-vm-untrusted-private = enable
-vm-personal-private = disable
-vm-banking-private = enable
+sparsebak.py --source=vg/pool --dest=ssh://me@exmaple.com/mnt/bkdrive arch-init
 ```
 
-The `destvm` setting accepts a format of `ssh://user@exmaple.com`, `qubes://vmname`,
-`qubes-ssh://vmname|user@example.com`, or `internal:` for local/admin storage. Backups
-can be sent to a trusted VM with access to an
-encryped removable volume, for example, or to an ssh: destination or an encrypted
-remote filesystem layer over sshfs or samba (see [Encryption options] below).
+...or...
 
-Although not absolutely necessary, it is recommended that the `monitor`
-command be run at fairly frequent (10-20 min.)
+```
+sparsebak.py --source=vg/poolname --dest=internal:/ --subdir=home/user arch-init
+```
+
+The `--dest` argument always ends in a _mountpoint_ (mounted volume) absolute path.
+In the second example, the destination system has no unique mountpoint in the
+desired backup path, so `--dest` ends with the root '/' path and the `--subdir`
+argument is supplied to complete the archive path.
+
+The destination mountpoint is automatically checked to make sure its mounted
+before executing certain sparsebak commands
+including `send`, `receive`, `verify`, `delete` and `prune`.
+
+(See the `arch-init` summary below for more details.)
+
+Although not absolutely necessary, it is also recommended that the `monitor`
+command be run at fairly frequent (10-30 min.)
 intervals to minimize the amount of disk space that sparsebak-managed snapshots
 may occupy. A rule in /etc/cron.d takes care of this:
 
@@ -96,7 +91,7 @@ Operation
 ---
 
 Run `sparsebak.py` in a Linux environment using the following commands and options
-in the form of `sparsebak.py [options] command [volume_name]`.
+in the form of `sparsebak.py [--options] command [volume_name]`.
 
 ### Command summary
   * `list volume_name` :  List volume sessions.
@@ -108,6 +103,8 @@ in the form of `sparsebak.py [options] command [volume_name]`.
   * `diff volume_name` :  Compare local volume with archive.
   * `add volume_name` :  Add a volume to the configuration.
   * `delete volume_name` :  Remove entire volume from config and archive.
+  * `arch-init --source --dest` : Initialize archive configuration.
+  * `arch-delete` : Remove data and metadata for all volumes.
 
 ### Options summary
   * `-u, --unattended` :  Don't prompt for interactive input.
@@ -116,6 +113,11 @@ in the form of `sparsebak.py [options] command [volume_name]`.
   * `--save-to=path` :  Required for `receive`.
   * `--tarfile` :  Store backups on destination as tar files (see notes).
   * `--remap` :  Remap volume during `diff`.
+  * `--source`  :  (arch-init) Specify source for backups.
+  * `--dest`  :  (arch-init) Specify destination of backup archive.
+  * `--subdir`  :  (arch-init) Optional subdirectory bewlow mountpoint.
+  * `--compression`  :  (arch-init) Set compression type:level.
+  * `--chunk-factor`  :  (arch-init) Set archive chunk size.
 
 #### send
 
@@ -211,6 +213,30 @@ Adds a new entry to the list of volumes configured for backup.
 
 Removes a volume's config, snapshots and metadata from the source system and
 all of its *data* from the destination archive. Use with caution!
+
+
+#### arch-init
+
+Initializes the settings for an archive. Parameters:
+
+`--source` is required and
+takes the source volumes' volume group and pool as `--source=vgname/poolname`.
+These LVM objects don't have to exist before using `arch-init` but they will
+have to be there later, of course.
+
+`--dest` is required and accepts one of the following forms
+– always ending in a mountpoint path:
+
+   `ssh://user@exmaple.com/mpoint`
+   `internal:/mpoint`
+   `qubes://vm-name/mpoint`
+   `qubes-ssh://vm-name|me@example.com/mpoint`
+
+`--subdir` allows you to specify a subdirectory below the mountpoint.
+
+`--compression=zlib:4` accepts the form `type:level`. However, only zlib compression
+is supported at this time so this option is currently only useful to set the
+compression level.
 
 
 ### Other restore options

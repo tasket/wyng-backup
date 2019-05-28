@@ -34,17 +34,20 @@ class ArchiveSet:
         self.vgname      = None
         self.poolname    = None
         self.destsys     = None
-        self.destdir     = None
+        self.destdir     = "."
         self.destmountpoint = None
-        if not os.path.exists(self.confpath):
-            return self
 
         self.conf = cp   = configparser.ConfigParser()
         cp.optionxform   = lambda option: option
+        cp["var"]        = {}
+        cp["volumes"]    = {}
+        if not os.path.exists(self.confpath):
+            return
         cp.read(self.confpath)
         self.a_ints      = {"chunksize"}
         for name in cp["var"].keys():
-            setattr(self, name, int(cp["var"][name]) if name in self.a_ints else cp["var"][name])
+            setattr(self, name, int(cp["var"][name]) \
+                                if name in self.a_ints else cp["var"][name])
         if "destvm" in cp["var"].keys(): ##
             self.destsys = self.destvm   ##
         self.path        = pjoin(top,self.vgname+"%"+self.poolname) ##
@@ -74,6 +77,7 @@ class ArchiveSet:
         c['destsys']     = self.destsys
         c['destdir']     = self.destdir
         c['destmountpoint'] = self.destmountpoint
+        os.makedirs(os.path.dirname(self.confpath), exist_ok=True)
         with open(self.confpath, "w") as f:
             self.conf.write(f)
 
@@ -101,9 +105,9 @@ class ArchiveSet:
             self.save_conf()
 
         for ext in {".tick",".tock"}:
-            if lv_exists(vgname, datavol+ext):
-                do_exec([["lvremove", "-f", vgname+"/"+datavol+ext]])
-                print("Removed snapshot", vgname+"/"+datavol+ext)
+            if lv_exists(self.vgname, datavol+ext):
+                do_exec([["lvremove", "-f", self.vgname+"/"+datavol+ext]])
+                print("Removed snapshot", self.vgname+"/"+datavol+ext)
 
         if os.path.exists(pjoin(self.path,datavol)):
             shutil.rmtree(pjoin(self.path,datavol))
@@ -139,32 +143,13 @@ class ArchiveSet:
                 for e in os.scandir(path) if e.name[:2]=="S_" \
                     and e.name[-3:]!="tmp"} ##if self.present else {}
 
-            # Convert metadata fron alpha to v1:
-            # move map to new location
             no_manifest = [ses.name for ses in self.sessions.values()
                            if not ses.present]
             if len(no_manifest):
-                print("** WARNING: Some manifests do not exist for", name,
-                      "\n(Alpha format?)")
+                x_it(1, "ERROR: Some manifests do not exist for "+name
+                        +".\n(Alpha format?)")
             mapfile = pjoin(path, "deltamap")
-            if os.path.exists(path+".deltamap"):
-                os.rename(path+".deltamap", mapfile)
             self.mapped = os.path.exists(mapfile)
-
-            if int(self.format_ver) < format_version and len(self.sessions)>0:
-                sesnames = sorted(list(self.sessions.keys()))
-                for i in range(0,len(sesnames)):
-                    s = self.sessions[sesnames[i]]
-                    if s.format not in {"folders","tar"}:
-                        s.format = "folders"
-                    s.previous = "none" if i==0 else sesnames[i-1]
-                    s.sequence = i
-                    s.save_info()
-                self.first      = sesnames[0]
-                self.last       = sesnames[-1]
-                self.format_ver = str(format_version)
-                self.que_meta_update = "true"
-                self.save_volinfo()
 
             if int(self.format_ver) > format_version:
                 raise ValueError("Archive format ver = "+self.format_ver+
@@ -318,17 +303,52 @@ def get_lvm_vgs():
     return vgs
 
 
-def arch_create():
-    if not aset:
-        if options.source and options.dest:
-            source = options.source
-            dest   = options.dest
-        else:
-            x_it(1,"--source and --dest are required.")
+# Initialize a new ArchiveSet:
 
-        subdir = options.subdir
+def arch_init(aset):
+    if not options.source or not options.dest:
+        x_it(1,"--source and --dest are required.")
 
-###
+    vgname, poolname = options.source.split("/")
+    if not vg_exists(vgname):
+        print("Warning: Volume group '%s' does not exist." % vgname)
+    if not lv_exists(vgname, poolname):
+        print("Warning: LV pool '%s' does not exist." % poolname)
+    aset.vgname   = vgname
+    aset.poolname = poolname
+
+    dest    = options.dest
+    dtypes  = ["qubes://","ssh://","qubes-ssh://","internal:"]
+    destsys = delim = mountpoint = ""
+    for i in dtypes:
+        if dest.startswith(i):
+            destsys, delim, mountpoint = dest.replace(i,"",1).partition("/")
+            break
+    if not mountpoint and not delim:
+        x_it(1,"Error: Malformed --dest specification.")
+
+    aset.destsys        = i+destsys
+    aset.destmountpoint = delim+mountpoint
+
+    if options.subdir:
+        aset.destdir    = options.subdir
+
+    if options.compression:
+        if ":" in options.compression:
+            compression, compr_level = options.compression.strip().split(":")
+            aset.compr_level = compr_level
+        if compression not in {"zlib"}:
+            x_it(1, "Invalid compression spec.")
+        aset.compression = compression
+
+    if options.chfactor:
+        aset.chunksize = int(options.chfactor) * bkchunksize
+        if aset.chunksize > 16 * 1024 * 1024:
+            x_it(1, "Requested chunk size not supported.")
+        if aset.chunksize > 256 * 1024:
+            print("Large chunk size set:", aset.chunksize)
+
+    aset.save_conf()
 
 
 # Get global configuration settings:
@@ -336,6 +356,15 @@ def arch_create():
 def get_configs():
 
     aset = ArchiveSet("default", topdir)
+    if options.action == "arch-init" and not aset.destsys:
+        aset = arch_init(aset)
+        x_it(0, "Done.")
+    elif options.action == "arch-init":
+        x_it(1, "Archive already initialized for "
+                +aset.destsys+aset.destmountpoint+aset.destdir)
+    elif not aset.destsys:
+        x_it(1, "Archive configuration not found.")
+
     dvs = []
 
     for vn,v in aset.vols.items():
@@ -1913,7 +1942,7 @@ os.makedirs(tmpdir+"/rpc")
 parser = argparse.ArgumentParser(description="")
 parser.add_argument("action", choices=["send","monitor","add","delete",
                     "prune","receive","verify","diff","list","version",
-                    "arch-create","arch-delete",
+                    "arch-init","arch-delete",
                     "dedup-existing","index-test"],
                     default="monitor", help="Action to take")
 parser.add_argument("-u", "--unattended", action="store_true", default=False,
@@ -1931,11 +1960,13 @@ parser.add_argument("--save-to", dest="saveto", default="",
                     help="Path to store volume for receive")
 parser.add_argument("--remap", action="store_true", default=False,
                     help="Remap volume during diff")
-parser.add_argument("--source", dest="source", default="",
+parser.add_argument("--source", default="",
                     help="Init: LVM volgroup/pool containing source volumes")
-parser.add_argument("--dest", dest="dest", default="",
+parser.add_argument("--dest", default="",
                     help="Init: type:location of archive")
-parser.add_argument("--subdir", dest="subdir", default="",
+parser.add_argument("--subdir", default="",
+                    help="Init: optional subdir for --dest")
+parser.add_argument("--compression", default="",
                     help="Init: optional subdir for --dest")
 parser.add_argument("--chunk-factor", dest="chfactor", type=int,
                     help="Init: set chunk size to N*64kB")
@@ -2088,10 +2119,6 @@ elif options.action == "delete":
 
 elif options.action == "untar":
     raise NotImplementedError()
-
-
-elif options.action == "arch-create":
-    arch_create()
 
 
 elif options.action == "arch-delete":
