@@ -19,9 +19,8 @@ from array import array
 
 class ArchiveSet:
     def __init__(self, name, top, init=False):
-        conf_file        = name+".ini"
         self.name        = name
-        self.confpath    = pjoin(top,conf_file)
+        self.confpath    = pjoin(top,name+".ini")
         self.path        = None
         self.hashindex   = {}
         self.vols        = {}
@@ -50,6 +49,8 @@ class ArchiveSet:
                                 if name in self.a_ints else cp["var"][name])
         if "destvm" in cp["var"].keys(): ##
             self.destsys = self.destvm   ##
+            del cp["var"]["destvm"]
+            self.save_conf()
         self.path        = pjoin(top,self.vgname+"%"+self.poolname) ##
         dedup            = options.dedup > 0
 
@@ -791,11 +792,13 @@ def send_volume(datavol, localtime):
                   = aset.hashindex
         ht_ksize  = ht_ksize//2
         hsegs     = hash_w//hash0len
+        chtree_max= 2**(chtree[0].itemsize*8)
         idxcount  = dataf.tell() // (ch_w+ses_w)
     elif dedup == 5: # bytearray tree
         hashtree, ht_ksize, hashdigits, hash_w, \
         dataf, chtree, chdigits, ch_w, ses_w \
                   = aset.hashindex
+        chtree_max= 2**(chtree[0].itemsize*8)
         ht_ksize  = ht_ksize//2
         idxcount  = dataf.tell() // (ch_w+ses_w)
 
@@ -948,12 +951,13 @@ def send_volume(datavol, localtime):
                             pos = ht.index(int.from_bytes(bhashb[:hash0len],
                                                         "little"))
                         except ValueError:
-                            hashtree[i].frombytes(bhashb)
-                            chtree[i].append(idxcount)
-                            dataf.write(ses_index.to_bytes(ses_w,"big"))
-                            dataf.write(addr.to_bytes(ch_w,"big"))
-                            idxcount += 1
-                            break # while
+                            if idxcount < chtree_max:
+                                hashtree[i].frombytes(bhashb)
+                                chtree[i].append(idxcount)
+                                dataf.write(ses_index.to_bytes(ses_w,"big"))
+                                dataf.write(addr.to_bytes(ch_w,"big"))
+                                idxcount += 1
+                                break # while
 
                         if pos % hsegs == 0 and \
                             ht[pos+1:pos+hsegs].tobytes() == bhashb[hash0len:]:
@@ -983,7 +987,7 @@ def send_volume(datavol, localtime):
                         ddchx = dataf.read(ch_w).hex().zfill(chdigits)
                         dataf.seek(0,2)
                         tar_info.type = LNKTYPE
-                    else:
+                    elif idxcount < chtree_max:
                         hashtree[i].extend(bhashb)
                         chtree[i].append(idxcount)
                         dataf.write(ses_index.to_bytes(ses_w,"big"))
@@ -1178,10 +1182,7 @@ def init_dedup_index3(listfile=""):
 
 def init_dedup_index4(listfile=""):
 
-    sessions  = aset.allsessions
-    addrsplit = -address_split[1]
     ctime     = time.time()
-
     # Define arrays and element widths
     hashdigits = 256 // 4 # 4bits per hex digit
     hash_w     = hashdigits // 2
@@ -1190,8 +1191,12 @@ def init_dedup_index4(listfile=""):
     ht_ksize   = 4 # hex digits for tree key
     hashtree   = [array("Q") for x in range(2**(ht_ksize*4))]
     chtree     = [array("I") for x in range(2**(ht_ksize*4))]
+    chtree_max = 2**(chtree[0].itemsize*8) # "I" has 32bit range
     chdigits   = max_address.bit_length() // 4 # 4bits per digit
     ses_w = 2; ch_w = chdigits //2
+    # limit number of sessions to ses_w + room for vol set:
+    sessions   = aset.allsessions[:2**(ses_w*8)-(len(aset.vols))-1]
+    addrsplit  = -address_split[1]
 
     dataf = open(tmpdir+"/hashindex.dat","w+b")
     if listfile:
@@ -1215,12 +1220,13 @@ def init_dedup_index4(listfile=""):
                         pos = ht.index(int.from_bytes(bhashb[:hash0len],
                                                       "little"))
                     except ValueError:
-                        hashtree[i].frombytes(bhashb)
-                        chtree[i].append(count)
-                        dataf.write(sesnum.to_bytes(ses_w,"big"))
-                        dataf.write(bytes().fromhex(ln2[1:]))
-                        count += 1
-                        break # while
+                        if count < chtree_max:
+                            hashtree[i].frombytes(bhashb)
+                            chtree[i].append(count)
+                            dataf.write(sesnum.to_bytes(ses_w,"big"))
+                            dataf.write(bytes().fromhex(ln2[1:]))
+                            count += 1
+                            break # while
 
                     if pos % hsegs == 0 and \
                        ht[pos+1:pos+hsegs].tobytes() == bhashb[hash0len:]:
@@ -1260,18 +1266,19 @@ def init_dedup_index4(listfile=""):
 
 def init_dedup_index5(listfile=""):
 
-    sessions = aset.allsessions
-    addrsplit = -address_split[1]
     ctime = time.time()
-
     # Define arrays and element widths
     hashdigits = 256 // 4  # sha256 @4bits per hex digit
     hash_w     = hashdigits // 2
     ht_ksize   = 4 # hex digits for tree key
     hashtree   = [bytearray() for x in range(2**(ht_ksize*4))]
     chtree     = [array("I") for x in range(2**(ht_ksize*4))]
+    chtree_max = 2**(chtree[0].itemsize*8) # "I" has 32bit range
     chdigits   = max_address.bit_length() // 4 # 4bits per digit
     ses_w = 2; ch_w = chdigits //2
+    # limit number of sessions to ses_w range:
+    sessions   = aset.allsessions[:2**(ses_w*8)-(len(aset.vols))-1]
+    addrsplit  = -address_split[1]
 
     dataf  = open(tmpdir+"/hashindex.dat","w+b")
     if listfile:
@@ -1301,7 +1308,7 @@ def init_dedup_index5(listfile=""):
                             volname, sesname, ln2[1:addrsplit], ln2),
                             file=dedupf)
                         dataf.seek(0,2)
-                else:
+                elif count < chtree_max:
                     hashtree[i].extend(bhashb)
                     chtree[i].append(count)
                     dataf.write(sesnum.to_bytes(ses_w,"big"))
