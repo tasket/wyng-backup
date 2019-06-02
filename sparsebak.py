@@ -35,6 +35,7 @@ class ArchiveSet:
         self.destsys     = None
         self.destdir     = "."
         self.destmountpoint = None
+        self.uuid        = None
 
         self.conf = cp   = configparser.ConfigParser()
         cp.optionxform   = lambda option: option
@@ -47,11 +48,16 @@ class ArchiveSet:
         for name in cp["var"].keys():
             setattr(self, name, int(cp["var"][name]) \
                                 if name in self.a_ints else cp["var"][name])
+
+        # Convert old path to new
+        if os.path.exists(top+"/"+self.vgname+"%"+self.poolname):
+            os.rename(top+"/"+self.vgname+"%"+self.poolname, top+"/"+self.name)
+
         if "destvm" in cp["var"].keys(): ##
             self.destsys = self.destvm   ##
             del cp["var"]["destvm"]
             self.save_conf()
-        self.path        = pjoin(top,self.vgname+"%"+self.poolname) ##
+        self.path        = pjoin(top,self.name)
         dedup            = options.dedup > 0
 
         for key in cp["volumes"]:
@@ -78,6 +84,7 @@ class ArchiveSet:
         c['destsys']     = self.destsys
         c['destdir']     = self.destdir
         c['destmountpoint'] = self.destmountpoint
+        c['uuid']        = self.uuid if self.uuid else str(uuid.uuid4())
         os.makedirs(os.path.dirname(self.confpath), exist_ok=True)
         with open(self.confpath, "w") as f:
             self.conf.write(f)
@@ -332,7 +339,9 @@ def arch_init(aset):
     aset.destmountpoint = delim+mountpoint
 
     if options.subdir:
-        aset.destdir    = options.subdir
+        if options.subdir.strip()[0] == "/":
+            x_it(1,"Subdir cannot be absolute path.")
+        aset.destdir    = options.subdir.strip()
 
     if options.compression:
         if ":" in options.compression:
@@ -356,13 +365,21 @@ def arch_init(aset):
 
 def get_configs():
 
-    aset = ArchiveSet("default", topdir)
+    # Convert old path to new
+    if os.path.exists(topdir) and not os.path.exists(metadir+topdir):
+        if os.stat(topdir).st_dev == os.stat(metadir).st_dev:
+            os.rename(topdir, metadir+topdir)
+        else:
+            shutil.copytree(topdir, metadir+topdir)
+            os.rename(topdir, topdir+"-old")
+
+    aset = ArchiveSet("default", metadir+topdir)
     if options.action == "arch-init" and not aset.destsys:
         aset = arch_init(aset)
         x_it(0, "Done.")
     elif options.action == "arch-init":
         x_it(1, "Archive already initialized for "
-                +aset.destsys+aset.destmountpoint+aset.destdir)
+                +aset.name)
     elif not aset.destsys:
         x_it(1, "Archive configuration not found.")
 
@@ -484,9 +501,13 @@ def detect_dest_state(destsys):
         try:
             cmd = ["mountpoint -q '"+aset.destmountpoint
                     +"' && mkdir -p '"+aset.destmountpoint+"/"+aset.destdir+topdir
-                    +"' && cd '"+aset.destmountpoint+"/"+aset.destdir+topdir
-                    +"' && touch archive.dat"
-                    ##+"  && ln -f archive.dat .hardlink"
+                    +"' && cd '"+aset.destmountpoint+"/"+aset.destdir+topdir+"'"
+
+                    +"  && { if [ -d "+aset.vgname+"%"+aset.poolname+" ]; then"
+                    +"  mv "+aset.vgname+"%"+aset.poolname+" "+aset.name+"; fi }"
+
+                    +"  && touch archive.dat"
+                    +(" && ln -f archive.dat .hardlink" if options.dedup else "")
                     ]
             dest_run(cmd)
 
@@ -779,9 +800,7 @@ def send_volume(datavol, localtime):
     # testing four deduplication types:
     dedup_idx     = dedup_db = None
     dedup         = options.dedup
-    if dedup == 2:   # dict
-        dedup_idx = aset.hashindex
-    elif dedup == 3: # sql
+    if dedup == 3: # sql
         dedup_db  = aset.hashindex
         cursor    = dedup_db.cursor()
         c_uint64  = ctypes.c_uint64
@@ -810,7 +829,7 @@ def send_volume(datavol, localtime):
     ses_index     = allsessions.index(ses)
 
     # Set current dir and make new session folder
-    os.chdir(bkdir)
+    os.chdir(metadir+bkdir)
     os.makedirs(sdir+"-tmp")
 
     zeros     = bytes(chunksize)
@@ -917,15 +936,6 @@ def send_volume(datavol, localtime):
                 # If chunk already in archive, link to it
                 if not dedup:
                     pass
-
-                elif dedup == 2:
-                    bhashi = int(bhash.hexdigest(),16)
-                    if bhashi in dedup_idx:
-                        ddses, ddch = dedup_idx[bhashi]
-                        ddchx = chformat % ddch
-                        tar_info.type = LNKTYPE
-                    else:
-                        dedup_idx[bhashi] = (ses, addr)
 
                 elif dedup == 3:
                     bhashb = bhash.digest()
@@ -1047,7 +1057,7 @@ def send_volume(datavol, localtime):
         os.replace(vol.path+"/volinfo-tmp", vol.path+"/volinfo")
 
     else:
-        shutil.rmtree(bkdir+"/"+sdir+"-tmp")
+        shutil.rmtree(metadir+bkdir+"/"+sdir+"-tmp")
 
     if bcount == 0:
         print("  No changes.")
@@ -1059,52 +1069,6 @@ def send_volume(datavol, localtime):
 
 
 # Build deduplication hash index and list
-
-def init_dedup_index2(listfile=""):
-
-    dedup_idx = {}
-    addrsplit = -address_split[1]
-    chdigits  = max_address.bit_length() // 4
-    chformat  = "%0"+str(chdigits)+"x"
-    ctime = time.time()
-
-    sessions = aset.allsessions
-
-    if listfile:
-        dedupf = open(tmpdir+"/"+listfile, "w")
-
-    for ses in sessions:
-        volname = ses.volume.name; sesname = ses.name
-        with open(pjoin(ses.path,"manifest"),"r") as manf:
-            for ln in manf:
-                line = ln.strip().split()
-                if line[0] == "0":
-                    continue
-                bhashi = int(line[0],16); addr = int(line[1][1:],16)
-                if bhashi not in dedup_idx:
-                    dedup_idx[bhashi] = (ses, addr)
-                    continue
-                elif listfile:
-                    ddses, ddch = dedup_idx[bhashi]
-                    ddchx = chformat % ddch
-                    print("%s/%s/%s/x%s %s/%s/%s/%s" % \
-                        (ddses.volume.name, ddses.name, ddchx[:addrsplit], ddchx,
-                         volname, sesname, line[1][1:addrsplit], line[1]),
-                        file=dedupf)
-
-    if listfile:
-        dedupf.close()
-
-    aset.hashindex = dedup_idx
-
-    print("\nIndexed in %.1f seconds." % int(time.time()-ctime))
-    vsz, rss = map(int, os.popen("ps -up"+str(os.getpid())).readlines()[-1].split()[4:6])
-    print("\nMemory use: Max %dMB, index count: %d" %
-        (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * resource.getpagesize() // 1024//1024,
-        len(aset.hashindex))
-        )
-    print("Current: vsize %d, rsize %d" % (vsz/1000,rss/1000))
-
 
 def init_dedup_index3(listfile=""):
 
@@ -1556,7 +1520,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
                 print(ses, file=srcf)
                 manifests.append("man."+ses)
             do_exec([["sed", "-E", "s|$| "+ses+"|",
-                      pjoin(bkdir,datavol,ses+"/manifest")
+                      pjoin(metadir+bkdir,datavol,ses+"/manifest")
                     ]], cwd=tmpdir, out="man."+ses)
         print("###", file=srcf)
 
@@ -1564,7 +1528,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
     do_exec([["sort", "-umd", "-k2,2"] + manifests],
              out="manifest.tmp", cwd=tmpdir)
     do_exec([["sort", "-umd", "-k2,2", "manifest.tmp",
-              pjoin(bkdir,datavol,merge_target+"/manifest")
+              pjoin(metadir+bkdir,datavol,merge_target+"/manifest")
             ]], out="manifest.new", cwd=tmpdir)
 
     # Output manifest filenames in the sftp-friendly form:
@@ -1572,7 +1536,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
     # then pipe to destination and run dest_helper.py.
     print("  Merging to", target)
 
-    os.chdir(pjoin(bkdir,datavol))
+    os.chdir(pjoin(metadir+bkdir,datavol))
     do_exec([
             ["awk", "$2<="+lc_filter, tmpdir+"/manifest.tmp"],
             ["sed", "-E",
@@ -1695,7 +1659,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
         # add session column to end of each line:
         do_exec([["sed", "-E", "s|$| "+ses+"|", pjoin(ses,"manifest")]],
-                cwd=pjoin(bkdir,datavol), out=">>"+tmpdir+"/manifests.cat")
+                cwd=pjoin(metadir+bkdir,datavol), out=">>"+tmpdir+"/manifests.cat")
 
     # Merge manifests and send to archive system:
     # sed is used to expand chunk info into a path and filter out any entries
@@ -1708,7 +1672,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             +" /"+last_chunkx+"/q"],
             dest_run_args(desttype, ["cat >"+tmpdir+"/rpc/dest.lst"])
            ]
-    do_exec(cmds, cwd=pjoin(bkdir,datavol))
+    do_exec(cmds, cwd=pjoin(metadir+bkdir,datavol))
 
     # Prepare save volume
     if save_path:
@@ -1904,7 +1868,8 @@ def x_it(code, text):
 prog_version          = "0.2.0betaZ"
 format_version        = 1
 prog_name             = "sparsebak"
-topdir                = "/"+prog_name # must be absolute path
+topdir                = "/"+prog_name
+metadir               = "/var/lib"
 tmpdir                = "/tmp/"+prog_name
 volgroups             = {}
 l_vols                = {}
@@ -1950,7 +1915,7 @@ parser = argparse.ArgumentParser(description="")
 parser.add_argument("action", choices=["send","monitor","add","delete",
                     "prune","receive","verify","diff","list","version",
                     "arch-init","arch-delete",
-                    "dedup-existing","index-test"],
+                    "arch-deduplicate","index-test"],
                     default="monitor", help="Action to take")
 parser.add_argument("-u", "--unattended", action="store_true", default=False,
                     help="Non-interactive, supress prompts")
@@ -1988,7 +1953,7 @@ options = parser.parse_args()
 # General Configuration:
 
 # Select dedup test algorithm.
-init_dedup_index = [None, None, init_dedup_index2, init_dedup_index3,
+init_dedup_index = [None, None, None, init_dedup_index3,
                     init_dedup_index4, init_dedup_index5][options.dedup]
 monitor_only     = options.action == "monitor" # gather metadata without backing up
 volgroups        = get_lvm_vgs()
@@ -1998,11 +1963,11 @@ desttype         = None
 aset, datavols   = get_configs()
 if aset.vgname in volgroups.keys():
     l_vols       = volgroups[aset.vgname].lvs
-bkdir            = topdir+"/"+aset.vgname+"%"+aset.poolname
-if not os.path.exists(bkdir):
-    os.makedirs(bkdir)
-destpath         = pjoin(aset.destmountpoint,aset.destdir,bkdir)
-destcd           = " cd '"+aset.destmountpoint+"/"+aset.destdir+"'"
+bkdir            = topdir+"/"+aset.name
+if not os.path.exists(metadir+bkdir):
+    os.makedirs(metadir+bkdir)
+destpath         = os.path.normpath(pjoin(aset.destmountpoint,aset.destdir))
+destcd           = " cd '"+destpath+"'"
 destsys, desttype= detect_internal_state()
 dest_run_map     = {"internal": ["sh"],
                     "ssh":      ["ssh",destsys],
@@ -2147,7 +2112,7 @@ elif options.action == "arch-delete":
     dest_run(cmd)
 
 
-elif options.action == "dedup-existing":
+elif options.action == "arch-deduplicate":
     if options.dedup:
         dedup_existing()
     else:
