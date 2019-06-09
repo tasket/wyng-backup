@@ -20,7 +20,8 @@ from array import array
 class ArchiveSet:
     def __init__(self, name, top, init=False):
         self.name        = name
-        self.confpath    = pjoin(top,name+".ini")
+        self.path        = pjoin(top,name)
+        self.confpath    = pjoin(self.path,"archive.ini")
         self.path        = None
         self.hashindex   = {}
         self.vols        = {}
@@ -57,9 +58,8 @@ class ArchiveSet:
             self.destsys = self.destvm   ##
             del cp["var"]["destvm"]
             self.save_conf()
-        self.path        = pjoin(top,self.name)
-        dedup            = options.dedup > 0
 
+        dedup = options.dedup > 0
         for key in cp["volumes"]:
             if cp["volumes"][key] != "disable" and \
             (len(options.volumes)==0 or key in options.volumes or dedup):
@@ -365,13 +365,15 @@ def arch_init(aset):
 
 def get_configs():
 
-    # Convert old path to new
+    # Convert old paths to new
     if os.path.exists(topdir) and not os.path.exists(metadir+topdir):
         if os.stat(topdir).st_dev == os.stat(metadir).st_dev:
             os.rename(topdir, metadir+topdir)
         else:
             shutil.copytree(topdir, metadir+topdir)
             os.rename(topdir, topdir+"-old")
+    if os.path.exists(metadir+topdir+"/default.ini"):
+        os.rename(metadir+topdir+"/default.ini", metadir+topdir+"/default/archive.ini")
 
     aset = ArchiveSet("default", metadir+topdir)
     if options.action == "arch-init" and not aset.destsys:
@@ -554,6 +556,8 @@ def do_exec(commands, cwd=None, check=True, out="", infile=""):
             #print("Error:", p.args)
             err = p
             break
+    for f in [inf, outf]:
+        if type(f) is not int: f.close()
     if err and check:
         raise subprocess.CalledProcessError(err.returncode, err.args)
 
@@ -1031,6 +1035,7 @@ def send_volume(datavol, localtime):
         vol.que_meta_update = "false"
         vol.save_volinfo("volinfo-tmp")
         tarf.add(datavol+"/volinfo-tmp")
+        tarf.add(os.path.basename(aset.confpath))
 
         #print("Ending tar process ", end="")
         tarf.close()

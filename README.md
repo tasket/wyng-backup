@@ -146,7 +146,8 @@ If sparsebak has no metadata on file about a
 volume, its treated as a new addition to the backup set so an initial snapshot will
 be made and a full backup will be sent to the archive;
 otherwise it will automatically use snapshot delta information to send a much faster
-incremental backup.
+incremental backup. Whenever a `send` operation is completed, snapshots are
+renewed just as with the `monitor` command.
 
 
 #### receive
@@ -197,15 +198,14 @@ enabled volumes.
 
    $ sudo sparsebak.py monitor
 
-The `monitor` command collects change metadata (deltas) from your configured
-source volumes auto-rotates to fresh snapshots. This only takes a few seconds
-and is good to run on a frequent, regular basis (several times an hour or more).
+The `monitor` command frees disk space that is increasingly occupied by aging
+snapshots, thereby addressing a common resource usage issue with snapshot-based
+backups. After harvesting their change metadata, the older snapshots are replaced with
+new ones. Running `monitor` isn't strictly necessary, but it only takes a few seconds
+and is good to run on a frequent, regular basis (several times an hour or more)
+if you have some volumes that are very active.
 
-Running `monitor` isn't strictly necessary, but doing so
-will make sparsebak snapshots short-lived so they will not eat up disk space
-by accumulating large amounts of old data between backup sessions.
-
-This rule in /etc/cron.d runs monitor every 20 minutes:
+This rule in /etc/cron.d runs `monitor` every 20 minutes:
 
 ```
 */20 * * * * root su -l -c '/usr/local/bin/sparsebak.py monitor'
