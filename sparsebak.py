@@ -22,7 +22,6 @@ class ArchiveSet:
         self.name        = name
         self.path        = pjoin(top,name)
         self.confpath    = pjoin(self.path,"archive.ini")
-        self.path        = None
         self.hashindex   = {}
         self.vols        = {}
         self.allsessions = []
@@ -53,11 +52,11 @@ class ArchiveSet:
         # Convert old path to new
         if os.path.exists(top+"/"+self.vgname+"%"+self.poolname):
             os.rename(top+"/"+self.vgname+"%"+self.poolname, top+"/"+self.name)
-
+        if not self.uuid: self.uuid = str(uuid.uuid4())
         if "destvm" in cp["var"].keys(): ##
             self.destsys = self.destvm   ##
             del cp["var"]["destvm"]
-            self.save_conf()
+        self.save_conf()
 
         dedup = options.dedup > 0
         for key in cp["volumes"]:
@@ -84,7 +83,7 @@ class ArchiveSet:
         c['destsys']     = self.destsys
         c['destdir']     = self.destdir
         c['destmountpoint'] = self.destmountpoint
-        c['uuid']        = self.uuid if self.uuid else str(uuid.uuid4())
+        c['uuid']        = self.uuid
         os.makedirs(os.path.dirname(self.confpath), exist_ok=True)
         with open(self.confpath, "w") as f:
             self.conf.write(f)
@@ -1926,15 +1925,16 @@ parser.add_argument("-u", "--unattended", action="store_true", default=False,
                     help="Non-interactive, supress prompts")
 parser.add_argument("-a", "--all", action="store_true", default=False,
                     help="Apply action to all volumes")
-parser.add_argument("--all-before", dest="allbefore",
-                    action="store_true", default=False,
+parser.add_argument("--all-before", dest="allbefore", action="store_true", default=False,
                     help="Select all sessions before --session date-time.")
 parser.add_argument("--tarfile", action="store_true", dest="tarfile", default=False,
                     help="Store backup session as a tarfile")
-parser.add_argument("--session",
-                    help="YYYYMMDD-HHMMSS[,YYYYMMDD-HHMMSS] select session date(s), singular or range.")
+parser.add_argument("--session", help="YYYYMMDD-HHMMSS[,YYYYMMDD-HHMMSS]"
+                                 " select session date(s), singular or range.")
 parser.add_argument("--save-to", dest="saveto", default="",
                     help="Path to store volume for receive")
+parser.add_argument("--from", dest="from", default="",
+                    help="Address+Path of other non-configured archive (receive, verify)")
 parser.add_argument("--remap", action="store_true", default=False,
                     help="Remap volume during diff")
 parser.add_argument("--source", default="",
