@@ -29,7 +29,7 @@ in guest filesystems can be handled safely for container-based security.
 Status
 ---
 
-Full range of features including:
+Late alpha, with range of features including:
 
  - Incremental backups of Linux thin-provisioned LVM volumes
 to local or guest VM filesystems or SSH hosts
@@ -44,7 +44,7 @@ Data verification currently relies on SHA-256 manifests being safely stored on t
 source/admin system to maintain integrity checks. Integrated encryption and key-based
 verification are not yet implemented.
 
-Sparsebak is in beta-testing, is released under a GPL license and comes with no warranties expressed or implied.
+Sparsebak is in testing, is released under a GPL license and comes with no warranties expressed or implied.
 
 
 Setup & Requirements
