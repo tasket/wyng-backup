@@ -42,6 +42,7 @@ class ArchiveSet:
         cp["var"]        = {}
         cp["volumes"]    = {}
         if not os.path.exists(self.confpath):
+            self.uuid = str(uuid.uuid4())
             return
         cp.read(self.confpath)
         self.a_ints      = {"chunksize"}
@@ -331,7 +332,9 @@ def arch_init(aset):
         if dest.startswith(i):
             destsys, delim, mountpoint = dest.replace(i,"",1).partition("/")
             break
-    if not mountpoint and not delim:
+    if (not mountpoint and not delim) or \
+       (i != "internal:" and not destsys) or \
+       (i == "qubes-ssh://" and ("" in destsys.split("|") or len(destsys.split("|"))<2)):
         x_it(1,"Error: Malformed --dest specification.")
 
     aset.destsys        = i+destsys
@@ -375,17 +378,13 @@ def get_configs():
         os.rename(metadir+topdir+"/default.ini", metadir+topdir+"/default/archive.ini")
 
     aset = ArchiveSet("default", metadir+topdir)
-    if options.action == "arch-init" and not aset.destsys:
+    if options.action == "arch-init" and not aset.destmountpoint:
         aset = arch_init(aset)
         x_it(0, "Done.")
     elif options.action == "arch-init":
-        x_it(1, "Archive already initialized for "
-                +aset.name)
-    elif not aset.destsys:
-        x_it(1, "Archive configuration not found.")
+        x_it(1, "Archive already initialized for "+aset.name)
 
     dvs = []
-
     for vn,v in aset.vols.items():
         if v.enabled:
             dvs.append(v.name)
@@ -1933,7 +1932,7 @@ parser.add_argument("--session", help="YYYYMMDD-HHMMSS[,YYYYMMDD-HHMMSS]"
                                  " select session date(s), singular or range.")
 parser.add_argument("--save-to", dest="saveto", default="",
                     help="Path to store volume for receive")
-parser.add_argument("--from", dest="from", default="",
+parser.add_argument("--from", dest="from_arch", default="",
                     help="Address+Path of other non-configured archive (receive, verify)")
 parser.add_argument("--remap", action="store_true", default=False,
                     help="Remap volume during diff")
@@ -1966,6 +1965,11 @@ aset             = None
 destsys          = None
 desttype         = None
 aset, datavols   = get_configs()
+if not aset.destsys and options.action in ("receive","verify") and options.from_dest:
+    pass #### fill-this-in ####
+elif not aset.destsys:
+    x_it(1,"Local configuration not found.")
+
 if aset.vgname in volgroups.keys():
     l_vols       = volgroups[aset.vgname].lvs
 bkdir            = topdir+"/"+aset.name
