@@ -1699,11 +1699,12 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         if os.path.exists(save_path) \
         and stat.S_ISBLK(os.stat(save_path).st_mode):
             do_exec([["blkdiscard", save_path]])
+            savef = open(save_path, "w+b")
         else: # file
-            do_exec([["truncate", "-s", "0", save_path]])
-            do_exec([["truncate", "-s", str(volsize), save_path]])
+            savef = open(save_path, "w+b")
+            savef.truncate(0)          ; savef.flush()
+            savef.truncate(volsize)    ; savef.flush()
         print("Saving to", save_path)
-        savef = open(save_path, "w+b")
 
     elif diff:
         if not lv_exists(vgname, datavol):
@@ -1825,7 +1826,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         print("Received byte range:", addr+len(buf))
 
         if save_path:
-            savef.close()
+            savef.flush() ; savef.close()
             if returned_home:
                 if not lv_exists(vgname, snap1vol):
                     do_exec([["lvcreate", "-pr", "-kn",
