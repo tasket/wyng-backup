@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 
-###  sparsebak
+###  Wyng
 ###  Copyright Christopher Laprise 2018-2019 / tasket@github.com
 ###  Licensed under GNU General Public License v3. See file 'LICENSE'.
 
@@ -1871,7 +1871,7 @@ def x_it(code, text):
 # Constants / Globals
 prog_version          = "0.2.0betaZ"
 format_version        = 1
-prog_name             = "sparsebak"
+prog_name             = "wyng"
 topdir                = "/"+prog_name
 metadir               = "/var/lib"
 tmpdir                = "/tmp/"+prog_name

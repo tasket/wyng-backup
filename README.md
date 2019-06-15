@@ -1,4 +1,4 @@
-<h1 align="center">Sparsebak</h1>
+<h1 align="center">Wyng</h1>
 <p align="center">
 Fast incremental backups for logical volumes.
 </p>
@@ -6,7 +6,7 @@ Fast incremental backups for logical volumes.
 Introduction
 ---
 
-Sparsebak is able to deliver faster, more efficient incremental backups for logical volumes.
+Wyng is able to deliver faster, more efficient incremental backups for logical volumes.
 It accesses logical volume *metadata* (instead of re-scanning data) to instantly find which
 data has changed since the last backup. Combined with a Time Machine style storage format,
 it can also prune older backups from the
@@ -17,10 +17,10 @@ Having nearly instantaneous access to volume changes and fast archive operations
 enable backing up even terabyte-sized volumes multiple times per hour with little
 impact on system resources.
 
-And sparsebak's ingenious snapshot-rotation avoids "*aging snapshot*" space consumption
+And wyng's ingenious snapshot-rotation avoids "*aging snapshot*" space consumption
 pitfalls that most lvm backups suffer.
 
-Sparsebak sends data as *streams* whenever possible, which
+Wyng sends data as *streams* whenever possible, which
 avoids writing temporary caches of data to disk. It also doesn't require the
 source admin system to ever mount processed volumes, meaning untrusted data
 in guest filesystems can be handled safely for container-based security.
@@ -29,7 +29,7 @@ in guest filesystems can be handled safely for container-based security.
 Status
 ---
 
-Late alpha, with range of features including:
+Beta, with range of features including:
 
  - Incremental backups of Linux thin-provisioned LVM volumes
 to local or guest VM filesystems or SSH hosts
@@ -44,7 +44,7 @@ Data verification currently relies on SHA-256 manifests being safely stored on t
 source/admin system to maintain integrity checks. Integrated encryption and key-based
 verification are not yet implemented.
 
-Sparsebak is in testing, is released under a GPL license and comes with no warranties expressed or implied.
+Wyng is in testing, is released under a GPL license and comes with no warranties expressed or implied.
 
 
 Setup & Requirements
@@ -59,9 +59,9 @@ a basic Unix command set *and* Unix filesystem.
 
 * Configured volumes to be backed-up must reside in an LVM thin-provisioned pool.
 
-`sparsebak.py` is currently distributed as a single python executable with no complex
+`wyng` is currently distributed as a single python executable with no complex
 supporting modules or other program files; it can be placed in '/usr/local/bin'
-or another place of your choosing. It looks in '/sparsebak/default.ini'
+or another place of your choosing. It looks in '/wyng/default.ini'
 for settings that define what to back up and where the backup archive will
 be located as well as the archive's metadata.
 
@@ -69,13 +69,13 @@ Settings are initialized with `arch-init`. Please note that dashed arguments are
 always placed before the command:
 
 ```
-sparsebak.py --source=vg/pool --dest=ssh://me@exmaple.com/mnt/bkdrive arch-init
+wyng --source=vg/pool --dest=ssh://me@exmaple.com/mnt/bkdrive arch-init
 ```
 
 ...or...
 
 ```
-sparsebak.py --source=vg/poolname --dest=internal:/ --subdir=home/user arch-init
+wyng --source=vg/poolname --dest=internal:/ --subdir=home/user arch-init
 ```
 
 The `--dest` argument always ends in a _mountpoint_ (mounted volume) absolute path.
@@ -84,7 +84,7 @@ desired backup path, so `--dest` ends with the root '/' path and the `--subdir`
 argument is supplied to complete the archive path.
 
 The destination mountpoint is automatically checked to make sure its mounted
-before executing certain sparsebak commands
+before executing certain wyng commands
 including `send`, `receive`, `verify`, `delete` and `prune`.
 
 (See the `arch-init` summary below for more details.)
@@ -93,8 +93,8 @@ including `send`, `receive`, `verify`, `delete` and `prune`.
 Operation
 ---
 
-Run `sparsebak.py` in a Linux environment using the following commands and options
-in the form of `sparsebak.py [--options] command [volume_name]`.
+Run `wyng` in a Linux environment using the following commands and options
+in the form of `wyng [--options] command [volume_name]`.
 
 ### Command summary
 
@@ -135,14 +135,14 @@ Note that options currently are always specified before commands, not after.
 
 #### send
 
-   $ sudo sparsebak.py send
+   $ sudo wyng send
 
 The `send` command performs a backup by sending volume data to the archive
 as a *'session'* denoted by a date-time YYYYMMDD-HHMMSS. For example: 20190530-120000.
 Each session under an archival volume represents the entire contents of
 the source volume at that time.
 
-If sparsebak has no metadata on file about a
+If wyng has no metadata on file about a
 volume, its treated as a new addition to the backup set so an initial snapshot will
 be made and a full backup will be sent to the archive;
 otherwise it will automatically use snapshot delta information to send a much faster
@@ -157,7 +157,7 @@ if `--session` isn't specified) from the archive and saves it to the path specif
 with `--save-to`. If `--session` is used, only one date-time is accepted. The volume
 name and `--save-to` are required.
 
-   $ sudo sparsebak.py --save-to=myfile.img receive vm-work-private
+   $ sudo wyng --save-to=myfile.img receive vm-work-private
 
 ...restores a volume called 'vm-work-private' to 'myfile.img' in
 the current folder. Note that its possible to specify any path, including block
@@ -165,7 +165,7 @@ devices such as '/dev/vgname/vm-work-private'. In this case, the lv volume will
 be automatically created if the configured volume group matches the save path.
 
 Resizing is automatic if the path is a logical volume or regular file. For any
-`--save-to` type, sparsebak will try to discard old data before saving.
+`--save-to` type, wyng will try to discard old data before saving.
 
 
 #### verify
@@ -184,7 +184,7 @@ without re-writing data or compromising volume integrity.
 To use, supply a single exact date-time in YYYYMMDD-HHMMSS format to remove a
 specific session, or two date-times as a range:
 
-   $ sudo sparsebak.py --session=20180605-000000,20180701-140000 prune
+   $ sudo wyng --session=20180605-000000,20180701-140000 prune
 
 ...removes any backup sessions from midnight on June 5 through 2pm on July 1.
 Alternately, `--all-before` may be used with a single `--session` date-time
@@ -196,7 +196,7 @@ enabled volumes.
 
 #### monitor
 
-   $ sudo sparsebak.py monitor
+   $ sudo wyng monitor
 
 The `monitor` command frees disk space that is increasingly occupied by aging
 snapshots, thereby addressing a common resource usage issue with snapshot-based
@@ -208,12 +208,12 @@ if you have some volumes that are very active.
 This rule in /etc/cron.d runs `monitor` every 20 minutes:
 
 ```
-*/20 * * * * root su -l -c '/usr/local/bin/sparsebak.py monitor'
+*/20 * * * * root su -l -c '/usr/local/bin/wyng monitor'
 ```
 
 #### diff
 
-   $ sudo sparsebak.py diff vm-work-private
+   $ sudo wyng diff vm-work-private
 
 Compare a current configured volume with the archive copy and report any differences.
 This is useful for diagnostics and can also be useful after a verification
@@ -224,14 +224,14 @@ the next `send`.
 
 #### add
 
-   $ sudo sparsebak.py add vm-untrusted-private
+   $ sudo wyng add vm-untrusted-private
 
 Adds a new entry to the list of volumes configured for backup.
 
 
 #### delete
 
-   $ sudo sparsebak.py delete vm-untrusted-private
+   $ sudo wyng delete vm-untrusted-private
 
 Removes a volume's config, snapshots and metadata from the source system and
 all of its *data* from the destination archive. Use with caution!
@@ -294,7 +294,7 @@ sending backups. Larger pool chunk
 sizes can mean larger incremental backups for volumes with lots of random writes.
 To see the chunksize for your pool(s) run `sudo lvs -o name,chunksize`. Common sizes
 are 128-512kB but if the chunk size is larger and random writes are prevalent (i.e. for
-large databases or mail archives) then using sparsebak deduplication (which resolves
+large databases or mail archives) then using wyng deduplication (which resolves
 at 64kB) can reduce the size of your backup sessions.
 
 
@@ -311,7 +311,7 @@ to nail down the precisely desired range by observing the output of
 
 ### Encryption options
 
-Sparsebak is slated to integrate encryption in the future. In the meantime,
+Wyng is slated to integrate encryption in the future. In the meantime,
 here are some encryption approaches you can try:
 
 * __Regular Linux systems__ have many options for mounting an encrypted filesystem on a
@@ -319,12 +319,12 @@ backup drive. Some examples you'll find use `gnome-disks` to
 format a partition as Ext4 on LUKS, or they use encrypted filesystems like
 [Encfs](https://wiki.ubuntu.com/SecureEncryptedRemoteVolumeHowTo)
 or [Cryfs](https://www.cryfs.org). These usually
-create a local filesystem mountpoint, so configuring sparsebak with an
+create a local filesystem mountpoint, so configuring wyng with an
 'internal:/path' destination should suffice.
 
     For remote backups where the server is trusted (i.e. encrypted and secured) it
     is possible to forgo setup of archive encryption on your source computer and just
-    specify 'ssh://user@address/path' for your sparsebak destination. Of course, this
+    specify 'ssh://user@address/path' for your wyng destination. Of course, this
     requires that you have access to the server via SSH.
 
     What to avoid: Any 'mirroring' type of remote or cloud storage, such as the regular
@@ -335,14 +335,14 @@ create a local filesystem mountpoint, so configuring sparsebak with an
 * __Virtualized host systems__ using Xen or KVM hypervisors have a couple options:
 
 1. Setup a trusted guest VM instance to decrypt and mount an encrypted backup drive.
-Then from the admin/storage VM setup sparsebak with an 'ssh://' destination specifying
+Then from the admin/storage VM setup wyng with an 'ssh://' destination specifying
 the local network address of the guest VM. This method generally uses less bandwidth
 and completes faster.
 
 2. For hypervisors that support attachment of block devices to different VMs: An
 encrypted block dev can be attached to the admin/storage VM where it is then decrypted
 and mounted (this means a guest VM is not trusted with handling encryption).
-In this case use 'internal:/path' for the sparsebak destination.
+In this case use 'internal:/path' for the wyng destination.
 
 * __Qubes OS:__ Here is a brief description for dom0-encrypted remote storage from a Qubes laptop:
 
@@ -355,14 +355,14 @@ use `truncate -s <size> myfile.img` before using `losetup`).
 3. *Domain0* runs `cryptsetup` on /dev/xvdi to create/access the volume in its
 encrypted form. Finally, the resulting /dev/mapper device can be mounted for use.
 
-4. Setup sparsebak on *Domain0* for an `internal:/path` destination type
+4. Setup wyng on *Domain0* for an `internal:/path` destination type
 pointing to the mounted path.
 
 A local USB storage option similar to the above can be used by substituting *sys-usb*
 for *remotefs*.
 
 For Qubes OS where you have a trusted backup VM handling encryption, you can setup
-sparsebak in dom0 with a 'qubes://vm-name/path' destination. And for Qubes OS where
+wyng in dom0 with a 'qubes://vm-name/path' destination. And for Qubes OS where
 you have both a trusted backup VM *and* trusted server, you can backup to the server
 via the backup VM with a 'qubes-ssh://vm-name|user@address/path' destination (note
 these qubes options have much faster performance than the above `qvm-block attach` setup).
