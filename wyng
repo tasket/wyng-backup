@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 
 
-###  Wyng
+###  Wyng – Logical volume backup tool
 ###  Copyright Christopher Laprise 2018-2019 / tasket@github.com
 ###  Licensed under GNU General Public License v3. See file 'LICENSE'.
 
 
 import sys, os, stat, shutil, subprocess, time, datetime
-import re, mmap, zlib, gzip, tarfile, io, fcntl, tempfile
+import re, mmap, zlib, tarfile, io, fcntl, tempfile
 import xml.etree.ElementTree
 import argparse, configparser, hashlib, uuid
 # For deduplication tests:
@@ -18,7 +18,7 @@ from array import array
 # ArchiveSet manages configuration and configured volume info
 
 class ArchiveSet:
-    def __init__(self, name, top, init=False):
+    def __init__(self, name, top): ### , from_arch=None):
         self.name        = name
         self.path        = pjoin(top,name)
         self.confpath    = pjoin(self.path,"archive.ini")
@@ -53,11 +53,10 @@ class ArchiveSet:
         # Convert old path to new
         if os.path.exists(top+"/"+self.vgname+"%"+self.poolname):
             os.rename(top+"/"+self.vgname+"%"+self.poolname, top+"/"+self.name)
-        if not self.uuid: self.uuid = str(uuid.uuid4())
         if "destvm" in cp["var"].keys(): ##
             self.destsys = self.destvm   ##
             del cp["var"]["destvm"]
-        self.save_conf()
+            self.save_conf()
 
         dedup = options.dedup > 0
         for key in cp["volumes"]:
@@ -84,7 +83,7 @@ class ArchiveSet:
         c['destsys']     = self.destsys
         c['destdir']     = self.destdir
         c['destmountpoint'] = self.destmountpoint
-        c['uuid']        = self.uuid
+        c['uuid']        = self.uuid if self.uuid else str(uuid.uuid4())
         os.makedirs(os.path.dirname(self.confpath), exist_ok=True)
         with open(self.confpath, "w") as f:
             self.conf.write(f)
@@ -176,9 +175,11 @@ class ArchiveSet:
             # check for continuity between sessions
             for sname, s in self.sessions.items():
                 if s.previous == "none" and self.first != sname:
-                    print("**** PREVIOUS MISMATCH",sname, self.first)
+                    raise ValueError("PREVIOUS MISMATCH: %s, EXPECTED %s" 
+                                     % (sname, self.first))
                 elif s.previous not in sesnames+["none"]:
-                    print("**** PREVIOUS NOT FOUND",sname, s.previous)
+                    raise ValueError("PREVIOUS NOT FOUND IN %s: EXPECTED %s"
+                                     % (sname, s.previous))
 
             # use latest volsize
             self.volsize = self.sessions[self.last].volsize \
@@ -314,26 +315,28 @@ def get_lvm_vgs():
 # Initialize a new ArchiveSet:
 
 def arch_init(aset):
-    if not options.source or not options.dest:
-        x_it(1,"--source and --dest are required.")
+    if not options.from_arch:
+        if not options.local or not options.dest:
+            x_it(1,"--local and --dest are required.")
+    elif options.dest:
+        x_it(1,"--from and --dest cannot be used together.")
+    else:
+        vgname, poolname = options.local.split("/")
+        if not vg_exists(vgname):
+            print("Warning: Volume group '%s' does not exist." % vgname)
+        if not lv_exists(vgname, poolname):
+            print("Warning: LV pool '%s' does not exist." % poolname)
+        aset.vgname   = vgname
+        aset.poolname = poolname
 
-    vgname, poolname = options.source.split("/")
-    if not vg_exists(vgname):
-        print("Warning: Volume group '%s' does not exist." % vgname)
-    if not lv_exists(vgname, poolname):
-        print("Warning: LV pool '%s' does not exist." % poolname)
-    aset.vgname   = vgname
-    aset.poolname = poolname
-
-    dest    = options.dest
+    dest    = options.from_arch if options.from_arch else options.dest
     dtypes  = ["qubes://","ssh://","qubes-ssh://","internal:"]
     destsys = delim = mountpoint = ""
     for i in dtypes:
         if dest.startswith(i):
             destsys, delim, mountpoint = dest.replace(i,"",1).partition("/")
             break
-    if (not mountpoint and not delim) or \
-       (i != "internal:" and not destsys) or \
+    if (not mountpoint and not delim) or (i != "internal:" and not destsys) or \
        (i == "qubes-ssh://" and ("" in destsys.split("|") or len(destsys.split("|"))<2)):
         x_it(1,"Error: Malformed --dest specification.")
 
@@ -345,13 +348,16 @@ def arch_init(aset):
             x_it(1,"Subdir cannot be absolute path.")
         aset.destdir    = options.subdir.strip()
 
+    if options.from_arch:
+        return
+
     if options.compression:
         if ":" in options.compression:
             compression, compr_level = options.compression.strip().split(":")
             aset.compr_level = compr_level
         if compression not in {"zlib"}:
             x_it(1, "Invalid compression spec.")
-        aset.compression = compression
+        ## aset.compression = compression
 
     if options.chfactor:
         aset.chunksize = int(options.chfactor) * bkchunksize
@@ -366,53 +372,73 @@ def arch_init(aset):
 # Get global configuration settings:
 
 def get_configs():
+    global metadir
+    aname = "default"    ; bkdir = topdir + "/" + aname
 
-    # Convert old paths to new
-    if os.path.exists(topdir) and not os.path.exists(metadir+topdir):
-        if os.stat(topdir).st_dev == os.stat(metadir).st_dev:
-            os.rename(topdir, metadir+topdir)
-        else:
-            shutil.copytree(topdir, metadir+topdir)
-            os.rename(topdir, topdir+"-old")
-    if os.path.exists(metadir+topdir+"/default.ini"):
-        os.rename(metadir+topdir+"/default.ini", metadir+topdir+"/default/archive.ini")
-
-    aset = ArchiveSet("default", metadir+topdir)
+    # Prepare a temporary metadata dir and init aset with it
+    if options.from_arch:
+        metadir = tmpdir+"/var"
+        os.makedirs(metadir+bkdir)
+        aset = ArchiveSet(aname, metadir+topdir)
+        arch_init(aset)
+    else:
+        aset = ArchiveSet(aname, metadir+topdir)
     if options.action == "arch-init" and not aset.destmountpoint:
-        aset = arch_init(aset)
+        arch_init(aset)
         x_it(0, "Done.")
     elif options.action == "arch-init":
         x_it(1, "Archive already initialized for "+aset.name)
+    if not aset.destmountpoint:
+        x_it(1,"Configuration not found.")
 
-    dvs = []
-    for vn,v in aset.vols.items():
-        if v.enabled:
-            dvs.append(v.name)
+    return aset
 
-    return aset, dvs
+
+def get_configs_remote():
+    aname = aset.name
+    if not options.unattended:
+        print("\nMetadata will be imported from the archive;")
+        print("Please check that the archive is in a trusted, secure condition!")
+        ans = input("\nProceed? [y/N] ")
+        if ans.lower() not in ("y","yes"):
+            x_it(0,"Stopped.")
+
+    # fix: shorten with do_exec pipe
+    dest_run([destcd + bkdir
+              +"  && python3 "+tmpdir+"/rpc/dest_helper.py get-configs "
+              +(options.volumes[0] if len(options.volumes)>0 else "")
+             ], out=tmpdir+"/metadata.tgz")
+
+    do_exec([["/usr/bin/tar","-xzf",tmpdir+"/metadata.tgz"]], cwd=metadir+bkdir)
+    if not os.path.exists(metadir+bkdir+"/archive.ini"):
+        x_it(1,"Failed to retrieve remote configuration: No info.")
+
+    new_aset = ArchiveSet(aname, metadir+topdir)
+    if options.local:
+        vgname, poolname = options.local.split("/")
+        if not vg_exists(vgname):
+            print("Warning: Volume group '%s' does not exist." % vgname)
+        if not lv_exists(vgname, poolname):
+            print("Warning: LV pool '%s' does not exist." % poolname)
+        new_aset.vgname   = vgname    ; new_aset.poolname = poolname
+
+    return new_aset
 
 
 # Detect features of internal and destination environments:
 
 def detect_internal_state():
 
-    destsys = aset.destsys
-    if os.path.exists("/etc/qubes-release") and destsys[:8] == "qubes://":
-        desttype = "qubes" # Qubes OS guest VM
-        destsys = destsys[8:]
-    elif destsys[:6] == "ssh://":
-        desttype = "ssh"
-        destsys = destsys[6:]
-    elif destsys[:12] == "qubes-ssh://":
-        desttype = "qubes-ssh"
-        destsys = destsys[12:]
-    elif destsys[:11] == "internal:":
-        desttype = "internal" # local shell environment
-    else:
-        raise ValueError("'destsys' not an accepted type.")
+    destsys = aset.destsys    ; desttype = None
+    for dt in ("internal:","ssh://","qubes://","qubes-ssh://"):
+        if destsys.find(dt) == 0:
+            desttype = dt.rstrip(":/")    ; destsys = destsys[len(dt):]
+            break
+    if not desttype:
+        raise ValueError("'%s' not an accepted type." % destsys)
 
-    for prg in {"thin_delta","lvs","lvdisplay","lvcreate","blkdiscard",
-                "truncate","ssh" if desttype=="ssh" else "sh"}:
+    for prg in ("thin_delta","lvs","lvrename","lvcreate","blkdiscard",
+                "ssh" if desttype=="ssh" else "sh"):
         if not shutil.which(prg):
             raise RuntimeError("Required command not found: "+prg)
 
@@ -428,50 +454,63 @@ def detect_internal_state():
     #####>  Begin helper program  <#####
 
     dest_program = \
-    '''import os, sys, shutil
-cmd = sys.argv[1]
-with open("''' + tmpdir + '''/rpc/dest.lst", "r") as lstf:
-    if cmd == "receive":
-        for line in lstf:
-            fname = line.strip()
-            fsize = os.path.getsize(fname) if os.path.exists(fname) else 0
-            i = sys.stdout.buffer.write(fsize.to_bytes(4,"big"))
-            if fsize:
-                with open(fname,"rb") as dataf:
-                    i = sys.stdout.buffer.write(dataf.read(fsize))
-    elif cmd == "merge":
-        merge_target, target = lstf.readline().strip().split()
-        src_list = []
-        while True:
-            ln = lstf.readline().strip()
-            if ln == "###":
-                break
-            src_list.append(ln)
-        subdirs = set()
-        for src in src_list:
-            for i in os.scandir(src):
-                if i.is_dir():
-                    subdirs.add(i.name)
-        for sdir in subdirs:
-            os.makedirs(merge_target+"/"+sdir, exist_ok=True)
-        for line in lstf:
-            ln = line.strip().split()
-            if ln[0] == "rename" and os.path.exists(ln[1]):
-                os.replace(ln[1], ln[2])
-            elif ln[0] == "rm" and os.path.exists(ln[1]):
-                os.remove(ln[1])
-        for dir in src_list:
-            shutil.rmtree(dir)
-        os.replace(merge_target, target)
-    elif cmd == "dedup":
-        ddcount = 0
-        for line in lstf:
-            source, dest = line.strip().split()
-            if os.stat(source).st_ino != os.stat(dest).st_ino:
-                os.link(source, dest+"-lnk")
-                os.replace(dest+"-lnk", dest)
-                ddcount += 1
-        print(ddcount, "reduced.")
+    '''import os, sys, shutil, subprocess
+cmd = sys.argv[1] ;    tmpdir = "''' + tmpdir + '''"
+if os.path.exists(tmpdir + "/rpc/dest.lst"):
+    lstf = open(tmpdir + "/rpc/dest.lst", "r")
+if cmd == "receive":
+    for line in lstf:
+        fname = line.strip()
+        fsize = os.path.getsize(fname) if os.path.exists(fname) else 0
+        i = sys.stdout.buffer.write(fsize.to_bytes(4,"big"))
+        if fsize:
+            with open(fname,"rb") as dataf:
+                i = sys.stdout.buffer.write(dataf.read(fsize))
+elif cmd == "merge":
+    merge_target, target = lstf.readline().strip().split()
+    src_list = []
+    while True:
+        ln = lstf.readline().strip()
+        if ln == "###":
+            break
+        src_list.append(ln)
+    subdirs = set()
+    for src in src_list:
+        for i in os.scandir(src):
+            if i.is_dir():
+                subdirs.add(i.name)
+    for sdir in subdirs:
+        os.makedirs(merge_target+"/"+sdir, exist_ok=True)
+    for line in lstf:
+        ln = line.strip().split()
+        if ln[0] == "rename" and os.path.exists(ln[1]):
+            os.replace(ln[1], ln[2])
+        elif ln[0] == "rm" and os.path.exists(ln[1]):
+            os.remove(ln[1])
+    for dir in src_list:
+        shutil.rmtree(dir)
+    os.replace(merge_target, target)
+elif cmd == "dedup":
+    ddcount = 0
+    for line in lstf:
+        source, dest = line.strip().split()
+        if os.stat(source).st_ino != os.stat(dest).st_ino:
+            os.link(source, dest+"-lnk")
+            os.replace(dest+"-lnk", dest)
+            ddcount += 1
+    print(ddcount, "reduced.")
+elif cmd == "get-configs":
+    with open(tmpdir+"/tar.lst","w") as tarlstf:
+        vols = [sys.argv[2]] if len(sys.argv)>2 else \
+                [x.name for x in os.scandir() if x.is_dir()]
+        for volname in vols:
+            print(volname+"/volinfo", file=tarlstf)
+            for ses in os.scandir(volname):
+                if ses.is_dir() and ses.name.rfind("-tmp") == -1:
+                    print(volname+"/"+ses.name+"/info", file=tarlstf)
+                    print(volname+"/"+ses.name+"/manifest", file=tarlstf)
+    p = subprocess.check_call(["/usr/bin/tar","-czf","-","--verbatim-files-from",
+    "--files-from="+tmpdir+"/tar.lst","archive.ini"], stderr=subprocess.DEVNULL)
     '''
     with open(tmpdir +"/rpc/dest_helper.py", "wb") as progf:
         progf.write(bytes(dest_program, encoding="UTF=8"))
@@ -482,6 +521,12 @@ with open("''' + tmpdir + '''/rpc/dest.lst", "r") as lstf:
 
 
 def detect_dest_state(destsys):
+    global dest_run_map
+    dest_run_map     = {"internal": ["sh"],
+                        "ssh":      ["ssh",destsys],
+                        "qubes":    ["qvm-run", "-p", destsys],
+                        "qubes-ssh":["qvm-run", "-p", destsys.split("|")[0]]
+                        }
 
     if options.action not in {"index-test","monitor","list","version","add"} \
                             and destsys is not None:
@@ -491,13 +536,14 @@ def detect_dest_state(destsys):
 
             cmd = dargs + [shell_prefix \
                   +"rm -rf "+tmpdir+"-old"
-                  +" && { if [ -d "+tmpdir+" ]; then mv "+tmpdir
+                  +" && { if [ -e "+tmpdir+" ]; then mv "+tmpdir
                   +" "+tmpdir+"-old; fi }"
                   +"  && mkdir -p "+tmpdir+"/rpc"
                   ]
             do_exec([cmd])
 
         # Fix: get OSTYPE env variable
+        # Cleanup: remove 'if' section later
         try:
             cmd = ["mountpoint -q '"+aset.destmountpoint
                     +"' && mkdir -p '"+aset.destmountpoint+"/"+aset.destdir+topdir
@@ -521,6 +567,9 @@ def detect_dest_state(destsys):
         except subprocess.CalledProcessError:
             x_it(1, "Destination not ready to receive commands.")
 
+    return dest_run_map
+
+
 
 # Run system commands with pipes, without shell:
 # 'commands' is a list of lists, each element a command line.
@@ -529,11 +578,8 @@ def detect_dest_state(destsys):
 # selected by beginning 'out' path with '>>'.
 
 def do_exec(commands, cwd=None, check=True, out="", infile=""):
-    if out[:2] == ">>":
-        out = out[2:].strip()
-        outmode = "ab"
-    else:
-        outmode = "wb"
+    outmode = "ab" if out.find(">>") == 0 else "wb"
+    out = out.lstrip(">>")
     if cwd and out and out[0] != "/":
         out = pjoin(cwd,out)
     if cwd and infile and infile[0] != "/":
@@ -545,7 +591,7 @@ def do_exec(commands, cwd=None, check=True, out="", infile=""):
     for i, clist in enumerate(commands):
         p = subprocess.Popen(clist, stdin=inf if i==0 else procs[i-1].stdout,
                              stdout=outf if i==len(commands)-1 else subprocess.PIPE,
-                             stderr=subprocess.DEVNULL, cwd=cwd) #, env=env)
+                             stderr=subprocess.DEVNULL, cwd=cwd)
         procs.append(p)
 
     err = None
@@ -562,12 +608,12 @@ def do_exec(commands, cwd=None, check=True, out="", infile=""):
 
 # Run system commands on destination
 
-def dest_run(commands, dest_type=None, infile=""):
+def dest_run(commands, dest_type=None, infile="", out=""):
     if dest_type is None:
         dest_type = desttype
 
     cmd = dest_run_args(dest_type, commands)
-    do_exec([cmd], infile=infile)
+    do_exec([cmd], infile=infile, out=out)
 
     #else:
     #    p = subprocess.check_output(cmd, **kwargs)
@@ -611,7 +657,7 @@ def dest_run_args(dest_type, commands):
 def prepare_snapshots(datavols):
 
     ''' Normal precondition will have a snap1vol already in existence in addition
-    to the source datavol. Here we create a fresh snap2vol so we can compare
+    to the local datavol. Here we create a fresh snap2vol so we can compare
     it to the older snap1vol. Then, depending on monitor or backup mode, we'll
     accumulate delta info and possibly use snap2vol as source for a
     backup session.
@@ -742,7 +788,7 @@ def update_delta_digest(datavol):
     dfreedblocks = 0
 
     with open(vol.mapfile+"-tmp", "r+b") as bmapf:
-        os.ftruncate(bmapf.fileno(), vol.mapsize(snap2size))
+        bmapf.truncate(vol.mapsize(snap2size))    ; bmapf.flush()
         bmap_mm = mmap.mmap(bmapf.fileno(), 0)
 
         for delta in dtree.find("diff"):
@@ -757,7 +803,7 @@ def update_delta_digest(datavol):
 
             # blockpos iterates over disk blocks, with
             # thin LVM tools constant of 512 bytes/block.
-            # dblocksize (source) and chunksize (dest) may be
+            # dblocksize (local) and chunksize (dest) may be
             # somewhat independant of each other.
             for blockpos in range(blockbegin, blockbegin + blocklen):
                 volsegment = blockpos // (chunksize // bs)
@@ -1090,7 +1136,7 @@ def init_dedup_index3(listfile=""):
         chunk INTEGER, ses_id INTEGER
         )''')
     insert_phrase = 'INSERT INTO hashindex(id, chunk, ses_id) VALUES(?,?,?)'
-    cursor.execute('PRAGMA cache_size = 10000')
+    cursor.execute('PRAGMA cache_size = 15000')
     #cursor.execute('PRAGMA synchronous = OFF')
     #cursor.execute('PRAGMA journal_mode = OFF')
 
@@ -1369,7 +1415,7 @@ def init_deltamap(bmfile, bmsize):
     if os.path.exists(bmfile+"-tmp"):
         os.remove(bmfile+"-tmp")
     with open(bmfile, "wb") as bmapf:
-        os.ftruncate(bmapf.fileno(), bmsize)
+        bmapf.truncate(bmsize)    ; bmapf.flush()
 
 
 def rotate_snapshots(vol, rotate=True):
@@ -1589,9 +1635,9 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
     do_exec([["sync", "-f", "volinfo"]])
 
 # Receive volume from archive. If no save_path specified, then verify only.
-# If diff specified, compare with current source volume; with --remap option
+# If diff specified, compare with current local volume; with --remap option
 # can be used to resync volume with archive if the deltamap or snapshots
-# are lost or if the source volume reverted to an earlier state.
+# are lost or if the local volume reverted to an earlier state.
 
 def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
@@ -1686,7 +1732,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             lv = os.path.basename(save_path)
             vg = os.path.basename(os.path.dirname(save_path))
             # Does save path == original path?
-            returned_home = lv == datavol
+            returned_home = (lv == datavol) and not options.from_arch
             if not lv_exists(vg,lv):
                 if vg != vgname:
                     x_it(1, "Cannot auto-create volume:"
@@ -1717,7 +1763,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             if not os.path.exists(vol.mapfile):
                 init_deltamap(vol.mapfile, vol.mapsize())
             bmapf = open(vol.mapfile, "r+b")
-            os.ftruncate(bmapf.fileno(), vol.mapsize())
+            bmapf.truncate(vol.mapsize())    ; bmapf.flush()
             bmap_mm = mmap.mmap(bmapf.fileno(), 0)
         else:
             if not lv_exists(vgname, snap1vol):
@@ -1851,10 +1897,10 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
 def show_mem_stats():
     vsz, rss = map(int, os.popen("ps -up"+str(os.getpid())).readlines()[-1].split()[4:6])
-    print("\nMemory use: Max %dMB" %
+    print("\n  Memory use: Max %dMB" %
         (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * resource.getpagesize() // 1024//1024)
         )
-    print("Current: vsize %d, rsize %d" % (vsz/1000,rss/1000))
+    print("  Current: vsize %d, rsize %d" % (vsz/1000,rss/1000))
 
 
 # Exit with simple message
@@ -1869,7 +1915,7 @@ def x_it(code, text):
 ##  MAIN  #####################################################################
 
 # Constants / Globals
-prog_version          = "0.2.0betaZ"
+prog_version          = "0.2.0_beta1"
 format_version        = 1
 prog_name             = "wyng"
 topdir                = "/"+prog_name
@@ -1885,7 +1931,7 @@ lvm_block_factor      = 128
 bkchunksize           = 1 * lvm_block_factor * bs
 assert bkchunksize % (lvm_block_factor * bs) == 0
 max_address           = 0xffffffffffffffff # 64bits
-# for 64bits, a subdir split of 9+7 allows 2048 files per dir:
+# for 64bits, a subdir split of 9+7 allows =< 4096 files per dir:
 address_split         = [len(hex(max_address))-2-7, 7]
 pjoin                 = os.path.join
 shell_prefix          = "set -e && export LC_ALL=C\n"
@@ -1937,7 +1983,7 @@ parser.add_argument("--from", dest="from_arch", default="",
                     help="Address+Path of other non-configured archive (receive, verify)")
 parser.add_argument("--remap", action="store_true", default=False,
                     help="Remap volume during diff")
-parser.add_argument("--source", default="",
+parser.add_argument("--local", default="",
                     help="Init: LVM volgroup/pool containing source volumes")
 parser.add_argument("--dest", default="",
                     help="Init: type:location of archive")
@@ -1957,6 +2003,9 @@ options = parser.parse_args()
 
 # General Configuration:
 
+# Check --from usage (access other/unconfigured archive).
+if options.from_arch and options.action not in ("receive","verify","list"):
+    x_it(1,"--from option can be used only with: receive, verify, list")
 # Select dedup test algorithm.
 init_dedup_index = [None, None, None, init_dedup_index3,
                     init_dedup_index4, init_dedup_index5][options.dedup]
@@ -1965,26 +2014,19 @@ volgroups        = get_lvm_vgs()
 aset             = None
 destsys          = None
 desttype         = None
-aset, datavols   = get_configs()
-if not aset.destsys and options.action in ("receive","verify") and options.from_dest:
-    pass #### fill-this-in ####
-elif not aset.destsys:
-    x_it(1,"Local configuration not found.")
-
-if aset.vgname in volgroups.keys():
-    l_vols       = volgroups[aset.vgname].lvs
+aset             = get_configs()
+destsys, desttype= detect_internal_state()
+dest_run_map     = detect_dest_state(destsys)
 bkdir            = topdir+"/"+aset.name
-if not os.path.exists(metadir+bkdir):
-    os.makedirs(metadir+bkdir)
 destpath         = os.path.normpath(pjoin(aset.destmountpoint,aset.destdir))
 destcd           = " cd '"+destpath+"'"
-destsys, desttype= detect_internal_state()
-dest_run_map     = {"internal": ["sh"],
-                    "ssh":      ["ssh",destsys],
-                    "qubes":    ["qvm-run", "-p", destsys],
-                    "qubes-ssh":["qvm-run", "-p", destsys.split("|")[0]]
-                    }
-detect_dest_state(destsys)
+if options.from_arch:
+    aset         = get_configs_remote()
+datavols         = aset.vols.keys()
+if aset.vgname in volgroups.keys():
+    l_vols       = volgroups[aset.vgname].lvs
+if not os.path.exists(metadir+bkdir):
+    os.makedirs(metadir+bkdir)
 
 # Check volume args against config
 selected_vols = options.volumes[:]
