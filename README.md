@@ -135,7 +135,9 @@ Note that options currently are always specified before commands, not after.
 
 #### send
 
-   $ sudo sparsebak.py send
+```
+$ sudo sparsebak.py send
+```
 
 The `send` command performs a backup by sending volume data to the archive
 as a *'session'* denoted by a date-time YYYYMMDD-HHMMSS. For example: 20190530-120000.
@@ -157,7 +159,9 @@ if `--session` isn't specified) from the archive and saves it to the path specif
 with `--save-to`. If `--session` is used, only one date-time is accepted. The volume
 name and `--save-to` are required.
 
-   $ sudo sparsebak.py --save-to=myfile.img receive vm-work-private
+```
+$ sudo sparsebak.py --save-to=myfile.img receive vm-work-private
+```
 
 ...restores a volume called 'vm-work-private' to 'myfile.img' in
 the current folder. Note that its possible to specify any path, including block
@@ -184,7 +188,9 @@ without re-writing data or compromising volume integrity.
 To use, supply a single exact date-time in YYYYMMDD-HHMMSS format to remove a
 specific session, or two date-times as a range:
 
-   $ sudo sparsebak.py --session=20180605-000000,20180701-140000 prune
+```
+$ sudo sparsebak.py --session=20180605-000000,20180701-140000 prune
+```
 
 ...removes any backup sessions from midnight on June 5 through 2pm on July 1.
 Alternately, `--all-before` may be used with a single `--session` date-time
@@ -196,7 +202,9 @@ enabled volumes.
 
 #### monitor
 
-   $ sudo sparsebak.py monitor
+```
+$ sudo sparsebak.py monitor
+```
 
 The `monitor` command frees disk space that is increasingly occupied by aging
 snapshots, thereby addressing a common resource usage issue with snapshot-based
@@ -213,7 +221,9 @@ This rule in /etc/cron.d runs `monitor` every 20 minutes:
 
 #### diff
 
-   $ sudo sparsebak.py diff vm-work-private
+```
+$ sudo sparsebak.py diff vm-work-private
+```
 
 Compare a current configured volume with the archive copy and report any differences.
 This is useful for diagnostics and can also be useful after a verification
@@ -224,14 +234,18 @@ the next `send`.
 
 #### add
 
-   $ sudo sparsebak.py add vm-untrusted-private
+```
+$ sudo sparsebak.py add vm-untrusted-private
+```
 
 Adds a new entry to the list of volumes configured for backup.
 
 
 #### delete
 
-   $ sudo sparsebak.py delete vm-untrusted-private
+```
+$ sudo sparsebak.py delete vm-untrusted-private
+```
 
 Removes a volume's config, snapshots and metadata from the source system and
 all of its *data* from the destination archive. Use with caution!
