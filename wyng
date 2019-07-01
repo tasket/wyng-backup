@@ -8,8 +8,8 @@
 
 import sys, os, stat, shutil, subprocess, time, datetime
 import re, mmap, zlib, tarfile, io, fcntl, tempfile
-import xml.etree.ElementTree
 import argparse, configparser, hashlib, uuid
+import xml.etree.ElementTree
 # For deduplication tests:
 import ctypes, sqlite3, resource
 from array import array
@@ -69,7 +69,7 @@ class ArchiveSet:
                 self.allsessions += self.vols[key].sessions.values()
 
         # Create master session list sorted by date-time
-        self.allsessions.sort(key=lambda x: x.localtime)
+        self.allsessions.sort(key=lambda x: x.localtime, reverse=True)
 
 
     def save_conf(self):
@@ -113,7 +113,7 @@ class ArchiveSet:
 
         for ext in {".tick",".tock"}:
             if lv_exists(self.vgname, datavol+ext):
-                do_exec([[CP.lvm, "lvremove", "-f", self.vgname+"/"+datavol+ext]])
+                lv_remove(self.vgname, datavol+ext)
                 print("Removed snapshot", self.vgname+"/"+datavol+ext)
 
         if os.path.exists(pjoin(self.path,datavol)):
@@ -217,7 +217,7 @@ class ArchiveSet:
             self.last = sname
             self.sesnames.append(sname)
             self.sessions[sname] = ns
-            self.archive.allsessions.append(ns)
+            self.archive.allsessions.insert(0, ns)
             return ns
 
         def delete_session(self, sname):
@@ -321,6 +321,26 @@ def get_lvm_vgs():
             vgs[vgname].lvs[lvname] = Lvm_Volume(members)
 
     return vgs
+
+
+def lv_exists(vgname, lvname):
+    return vgname in volgroups.keys() \
+            and lvname in volgroups[vgname].lvs.keys()
+
+
+def vg_exists(vgname):
+    try:
+        do_exec([[CP.lvm, "vgdisplay", vgname]])
+    except subprocess.CalledProcessError:
+        return False
+    else:
+        return True
+
+
+def lv_remove(vgname, lvname):
+    do_exec([[CP.lvm,"lvchange", "-p", "rw", vgname+"/"+lvname]], check=False)
+    do_exec([[CP.blkdiscard, l_vols[lvname].lv_path]])
+    do_exec([[CP.lvm,"lvremove", "-f",vgname+"/"+lvname]])
 
 
 # Initialize a new ArchiveSet:
@@ -691,7 +711,7 @@ def prepare_snapshots(datavols):
 
         # Remove stale snap2vol
         if lv_exists(vgname, snap2vol):
-            do_exec([[CP.lvm,"lvremove", "-f",vgname+"/"+snap2vol]])
+            lv_remove(vgname, snap2vol)
 
         # Future: Expand recovery to start send-resume
         if os.path.exists(mapfile+"-tmp"):
@@ -722,20 +742,6 @@ def prepare_snapshots(datavols):
             dvs.append(datavol)
 
     return dvs, nvs
-
-
-def lv_exists(vgname, lvname):
-    return vgname in volgroups.keys() \
-            and lvname in volgroups[vgname].lvs.keys()
-
-
-def vg_exists(vgname):
-    try:
-        do_exec([[CP.lvm, "vgdisplay", vgname]])
-    except subprocess.CalledProcessError:
-        return False
-    else:
-        return True
 
 
 # Get raw lvm deltas between snapshots
@@ -845,7 +851,6 @@ def send_volume(datavol, localtime):
     vol         = aset.vols[datavol]
     snap2vol    = vol.name + ".tock"
     snap2size   = l_vols[snap2vol].lv_size
-    allsessions = aset.allsessions
     chunksize   = aset.chunksize
     bmap_size   = vol.mapsize(snap2size)
     chdigits    = max_address.bit_length() // 4
@@ -853,6 +858,12 @@ def send_volume(datavol, localtime):
     bksession   = "S_"+localtime
     sdir        = pjoin(datavol, bksession)
     send_all    = len(vol.sessions) == 0
+
+    ses = vol.new_session(bksession)
+    ses.localtime = localtime
+    ses.volsize   = snap2size
+    ses.format    = "tar" if options.tarfile else "folders"
+    ses.path      = vol.path+"/"+bksession+"-tmp"
 
     # testing four deduplication types:
     dedup_idx     = dedup_db = None
@@ -862,8 +873,9 @@ def send_volume(datavol, localtime):
         cursor    = dedup_db.cursor()
         c_uint64  = ctypes.c_uint64
         c_int64   = ctypes.c_int64
+        ddsessions= aset.allsessions
     elif dedup == 4: # array tree
-        hashtree, ht_ksize, hashdigits, hash_w, hash0len, \
+        ddsessions, hashtree, ht_ksize, hashdigits, hash_w, hash0len, \
         dataf, chtree, chdigits, ch_w, ses_w \
                   = aset.hashindex
         ht_ksize  = ht_ksize//2
@@ -871,19 +883,15 @@ def send_volume(datavol, localtime):
         chtree_max= 2**(chtree[0].itemsize*8)
         idxcount  = dataf.tell() // (ch_w+ses_w)
     elif dedup == 5: # bytearray tree
-        hashtree, ht_ksize, hashdigits, hash_w, \
+        ddsessions, hashtree, ht_ksize, hashdigits, hash_w, \
         dataf, chtree, chdigits, ch_w, ses_w \
                   = aset.hashindex
         chtree_max= 2**(chtree[0].itemsize*8)
         ht_ksize  = ht_ksize//2
         idxcount  = dataf.tell() // (ch_w+ses_w)
-
-    ses = vol.new_session(bksession)
-    ses.localtime = localtime
-    ses.volsize   = snap2size
-    ses.format    = "tar" if options.tarfile else "folders"
-    ses.path      = vol.path+"/"+bksession+"-tmp"
-    ses_index     = allsessions.index(ses)
+    if dedup:
+        ddsessions.append(ses)
+        ses_index = ddsessions.index(ses)
 
     # Set current dir and make new session folder
     os.chdir(metadir+bkdir)
@@ -936,6 +944,7 @@ def send_volume(datavol, localtime):
          open("/dev/zero" if send_all else vol.mapfile+"-tmp","r+b") as bmapf:
 
         bmap_mm = bytes(1) if send_all else mmap.mmap(bmapf.fileno(), 0)
+        # data_mm = mmap.mmap(vf.fileno(), snap2size, access=mmap.ACCESS_READ)
         vf_seek = vf.seek; vf_read = vf.read
         sha256 = hashlib.sha256; BytesIO = io.BytesIO
 
@@ -1000,7 +1009,7 @@ def send_volume(datavol, localtime):
                             "WHERE id = ?", (bhashb,)).fetchone()
                     if row:
                         ddch, ddses_i = row
-                        ddses = allsessions[ddses_i]
+                        ddses = ddsessions[ddses_i]
                         ddchx = chformat % (c_uint64(ddch).value)
                         tar_info.type = LNKTYPE
                     else:
@@ -1031,7 +1040,7 @@ def send_volume(datavol, localtime):
                             # First hash segment matched; test remaining segments.
                             data_i = ct[pos//hsegs]
                             dataf.seek(data_i*(ses_w+ch_w))
-                            ddses  = allsessions[int.from_bytes(
+                            ddses  = ddsessions[int.from_bytes(
                                      dataf.read(ses_w),"big")]
                             ddchx  = dataf.read(ch_w).hex().zfill(chdigits)
                             dataf.seek(0,2)
@@ -1049,7 +1058,7 @@ def send_volume(datavol, localtime):
                     if pos % hash_w == 0:
                         data_i = chtree[i][pos//hash_w]
                         dataf.seek(data_i*(ses_w+ch_w))
-                        ddses = allsessions[int.from_bytes(
+                        ddses = ddsessions[int.from_bytes(
                                 dataf.read(ses_w),"big")]
                         ddchx = dataf.read(ch_w).hex().zfill(chdigits)
                         dataf.seek(0,2)
@@ -1274,7 +1283,7 @@ def init_dedup_index4(listfile=""):
         dedupf.close()
         dataf.close()
 
-    aset.hashindex = (hashtree, ht_ksize, hashdigits, hash_w, hash0len,
+    aset.hashindex = (sessions, hashtree, ht_ksize, hashdigits, hash_w, hash0len,
                       dataf, chtree, chdigits, ch_w, ses_w)
 
     print("\n %d matches in %.1f seconds." % (match, int(time.time()-ctime)))
@@ -1341,7 +1350,7 @@ def init_dedup_index5(listfile=""):
         dedupf.close()
         dataf.close()
 
-    aset.hashindex = (hashtree, ht_ksize, hashdigits, hash_w,
+    aset.hashindex = (sessions, hashtree, ht_ksize, hashdigits, hash_w,
                       dataf, chtree, chdigits, ch_w, ses_w)
 
     print("\nIndexed in %.1f seconds." % int(time.time()-ctime))
@@ -1433,7 +1442,7 @@ def rotate_snapshots(vol, rotate=True):
     if rotate:
         #print("Rotating snapshots for", datavol)
         # Review: this should be atomic
-        do_exec([[CP.lvm,"lvremove","--force", aset.vgname+"/"+snap1vol]])
+        lv_remove(aset.vgname, snap1vol)
         do_exec([[CP.lvm,"lvrename",aset.vgname+"/"+snap2vol, snap1vol]])
         l_vols[snap2vol].lv_name = l_vols[snap1vol].lv_name
         l_vols[snap2vol].lv_path = l_vols[snap1vol].lv_path
@@ -1441,7 +1450,7 @@ def rotate_snapshots(vol, rotate=True):
         del l_vols[snap2vol]
 
     else:
-        do_exec([[CP.lvm,"lvremove","--force",aset.vgname+"/"+snap2vol]])
+        lv_remove(aset.vgname, snap2vol)
         del l_vols[snap2vol]
 
 
