@@ -296,9 +296,9 @@ in a mountpoint path:
 | _URL Form_ | _Destination Type_
 |----------|-----------------
 |__internal:__/path                           | Local filesystem
-|__ssh://__user@example.com/path              | SSH server
-|__qubes://__vm-name/path                     | Qubes virtual machine
-|__qubes-ssh://__vm-name:me@example.com/path  | SSH server via a Qubes VM
+|__ssh:__//user@example.com/path              | SSH server
+|__qubes:__//vm-name/path                     | Qubes virtual machine
+|__qubes-ssh:__//vm-name:me@example.com/path  | SSH server via a Qubes VM
 
 `--subdir` allows you to specify a subdirectory below the mountpoint.
 
