@@ -1,4 +1,4 @@
-<h1 align="center">Wyng</h1>
+_<h1 align="center">wyng</h1>_
 <p align="center">
 Fast incremental backups for logical volumes.
 </p>
@@ -14,14 +14,14 @@ backup once and can send incremental backups to the same archive indefinitely
 and frequently.
 
 Having nearly instantaneous access to volume changes and a nimble archival format
-enable backing up even terabyte-sized volumes multiple times per hour with little
+enables backing up even terabyte-sized volumes multiple times per hour with little
 impact on system resources.
 
-And Wyng's ingenious snapshot rotation avoids common _"aging snapshot"_ space
-consumption pitfalls.
+Wyng sends data as *streams* whenever possible, which avoids writing temporary
+caches of data to disk. And Wyng's ingenious snapshot rotation avoids common
+_aging snapshot_ space consumption pitfalls.
 
-Wyng sends data as *streams* whenever possible, which
-avoids writing temporary caches of data to disk. Wyng also doesn't require the
+Wyng also doesn't require the
 source admin system to ever mount processed volumes, so it safely handles
 untrusted data in guest filesystems to bolster container-based security.
 
@@ -31,11 +31,12 @@ untrusted data in guest filesystems to bolster container-based security.
 Beta, with a range of features including:
 
  - Incremental backups of Linux thin-provisioned LVM volumes
-to local filesystem, virtual machine or SSH host
 
- - Volume retrieval for restore and verify operations
+ - Supported destinations: Local filesystem, Virtual machine or SSH host
 
- - Fast pruning of past backup sessions
+ - Restore, verify and list contents
+
+ - Fast pruning of old backup sessions
 
  - Basic archive management such as add and delete volume
 
@@ -46,7 +47,8 @@ verification are not yet implemented.
 Wyng is released under a GPL license and comes with no warranties expressed or implied.
 
 
-### Requirements & Setup
+Requirements & Setup
+---
 
 Before starting:
 
@@ -88,8 +90,7 @@ including `send`, `receive`, `verify`, `delete` and `prune`.
 (See the `arch-init` summary below for more details.)
 
 
-Operation
----
+## Operation
 
 Run Wyng using the following commands and arguments in the form of:
 
@@ -176,9 +177,9 @@ be automatically created if the configured volume group matches the save-to path
 Resizing is automatic if the path is a logical volume or regular file. For any
 `--save-to` target, Wyng will try to discard old data before saving.
 
-The `--from` option may be used to retreive from any archive that is not currently
-configured in the users' current system, permitting restore operations in
-an emergency. It is specified just like the `--dest` option of `arch-init`:
+_Emergency and Recovery situations:_ The `--from` option may be used to
+retreive from any Wyng archive that is not currently configured in the current
+system. It is specified just like the `--dest` option of `arch-init`:
 
 ```
 
@@ -297,7 +298,7 @@ in a mountpoint path:
 |__internal:__/path                           | Local filesystem
 |__ssh://__user@example.com/path              | SSH server
 |__qubes://__vm-name/path                     | Qubes virtual machine
-|__qubes-ssh://__vm-name\|me@example.com/path  | SSH server via a Qubes VM
+|__qubes-ssh://__vm-name:me@example.com/path  | SSH server via a Qubes VM
 
 `--subdir` allows you to specify a subdirectory below the mountpoint.
 
@@ -307,11 +308,10 @@ compression level.
 
 `--chunk-factor=1` sets the pre-compression data chunk size used within the destination archive in
 units of 64kB. A chunk-factor of '4' equates to 256kB chunks. Minimum is '1' and
-maximum is '256'. The recommended range of sizes for general use is 1-4.
+maximum is '256'. The recommended range of chunk factors for general use is 1-4.
 
 
-Tips
-----
+### Tips
 
 * If the destination volume is not thoroughly trusted, its currently recommended
 to avoid backing up sensitive data to such a volume -- exercise caution
@@ -322,16 +322,16 @@ files, if they exist in your volume(s). Typically, the greatest cache space
 consumption comes from web browsers, so
 volumes holding paths like /home/user/.cache can impacted by this, depending
 on the amount and type of browser use associated with the volume. Three possible
-approaches are to clear caches on browser exit, delete /home/user/.cache dirs on system/container
-shutdown (this reasonably assumes cached data is expendable), or to mount .cache
-on a separate volume that is not configured for backup.
+approaches are to clear caches on browser exit, delete /home/user/.cache dirs on
+system/container shutdown (this reasonably assumes cached data is expendable),
+or to mount .cache on a separate volume that is not configured for backup.
 
 * Another factor in space/bandwidth use is how sparse your source volumes are in
 practice. Therefore it is best that the `discard` option is used when mounting
 your volumes for normal use.
 
-* The chunk size your LVM thin pool was initialized with can also affect disk space
-and I/O used when sending backups. Larger LVM chunk
+* The chunk size that your LVM thin pool was initialized with can also affect
+disk space and I/O used when sending backups. Larger LVM chunk
 sizes can mean larger incremental backups for volumes with lots of random writes.
 To see the chunksize for your pool(s) run `sudo lvs -o name,chunksize`. Common sizes
 are 128-512kB so if random writes are prevalent (i.e. for
@@ -347,22 +347,32 @@ volume name.
 
 
 
-Troubleshooting notes
----
+### Troubleshooting notes
 
-* Backup sessions in `list` output may be seemingly (but not actually) out of
+* If you are coming to Wyng from the `sparsebak` alpha version, your configuration
+will not be immediately recognized. To make your config and archive visible to Wyng,
+rename them like so:
+
+```
+# Local command:
+sudo mv /var/lib/sparsebak /var/lib/wyng.backup
+
+# Backup drive or remote destination:
+sudo mv /my-dest-path/sparsebak /my-dest-path/wyng.backup
+```
+
+* Backup sessions shown in `list` output may be seemingly (but not actually) out of
 order if the system's local time shifts
 substantially between backups, such as when moving between time zones (including DST).
-If this results in undesired selections with `--session` parameters, its possible
+If this results in undesired selections with `--session` ranges, its possible
 to nail down the precisely desired range by observing the output of
 `list volumename` and using exact date-times from the listing.
 
 
-Encryption options
----
+### Encryption options
 
 Wyng is slated to integrate encryption in the future. In the meantime,
-here are some encryption approaches you can use:
+here are some encryption approaches you can use to secure your backup archives:
 
 * __Regular Linux systems__:
 
@@ -370,22 +380,21 @@ here are some encryption approaches you can use:
     backup drive. Some examples you'll find use `gnome-disks` to
     format a partition as Ext4 on LUKS or VeraCrypt, or they use encrypted filesystems
     like [Encfs](https://wiki.ubuntu.com/SecureEncryptedRemoteVolumeHowTo)
-    or [Cryfs](https://www.cryfs.org). These usually
+    or [Cryfs](https://www.cryfs.org). These
     create a local filesystem mountpoint, so configuring Wyng with an
-    'internal:/path' destination should suffice.
+    'internal:/path' destination will suffice.
 
     For remote backups on untrusted servers, use one of the above encryption
     options on a shared folder (Encfs, Cryfs) or disk image file (LUKS, VeraCrypt).
 
     For remote backups where the server is trusted (i.e. encrypted and secured) it
-    is possible to forgo setup of archive encryption on your source computer and just
-    specify 'ssh://user@address/path' for your Wyng destination. Of course, this
-    requires that you have access to the server via SSH.
+    is possible to forgo setup of archive encryption on your local computer and just
+    specify 'ssh://user@address/path' for your Wyng destination.
 
-    What to avoid: Any 'mirroring' type of remote or cloud storage, such as the
-    regular Dropbox client — these would keep a local copy of *everything* in
-    the backup archive in addition to sending data to the cloud server. Use
-    these only if you prefer using lots of extra disk space on your system.
+    What to avoid: 'Mirroring' storage tools, such as the
+    regular Dropbox client, keep a local copy of *everything* that is sent.
+    Use only if you don't mind consuming lots of extra disk space
+    on your system.
 
 * __Virtualized host systems__ using Xen, KVM or other hypervisors:
 
@@ -395,9 +404,9 @@ here are some encryption approaches you can use:
 
     Option B)  For hypervisors that support attachment of block devices to
     different VMs: An encrypted block dev can be attached directly to the
-    admin/storage VM where it is then decrypted and mounted. This uses an
+    admin/storage VM where it is then decrypted and mounted. This requires only an
     'internal:/path' destination and means that a guest VM or destination server
-    is not trusted with handling encryption, but may be slower due to
+    is not trusted with handling encryption, but performance may be slower due to
     filesystem-network overhead.
 
 * __Qubes OS:__ A brief description for dom0-encrypted remote storage from a Qubes laptop:
@@ -421,7 +430,7 @@ here are some encryption approaches you can use:
     encryption, you can easily setup Wyng in dom0 with a 'qubes://vm-name/path'
     destination. Also, for Qubes OS where you have both a trusted backup VM *and*
     trusted server, you can backup to the server via the backup VM with a
-    'qubes-ssh://vm-name|user@address/path' destination. These qubes options can
+    'qubes-ssh://vm-name:user@address/path' destination. These qubes options can
     achieve faster performance than the above `qvm-block attach` setup, but they
     move archive encryption out of Domain 0.
 
@@ -447,3 +456,13 @@ Todo
 * Zstandard compression
 
 * Btrfs and ZFS support
+
+External Links
+---
+Some other tools that use LVM metadata:
+
+[lvmsync](https://github.com/mpalmer/lvmsync) (ruby). Synchronize logical volumes.
+
+[lvm-thin-sendrcv](https://github.com/davidbartonau/lvm-thin-sendrcv) (java). Synchronize logical volumes.
+
+[thinp-test-suite](https://github.com/jthornber/thinp-test-suite-deprecated) (ruby). POC backup program.

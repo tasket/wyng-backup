@@ -18,7 +18,7 @@ from array import array
 # ArchiveSet manages configuration and configured volume info
 
 class ArchiveSet:
-    def __init__(self, name, top): ### , from_arch=None):
+    def __init__(self, name, top):
         self.name        = name
         self.path        = pjoin(top,name)
         self.confpath    = pjoin(self.path,"archive.ini")
@@ -56,6 +56,9 @@ class ArchiveSet:
         if "destvm" in cp["var"].keys(): ##
             self.destsys = self.destvm   ##
             del cp["var"]["destvm"]
+            self.save_conf()
+        if self.destsys.startswith("qubes-ssh://") and self.destsys.find("|") > 0:
+            self.destsys = self.destsys.replace("|",":",1)
             self.save_conf()
 
         dedup = options.dedup > 0
@@ -175,11 +178,11 @@ class ArchiveSet:
             # check for continuity between sessions
             for sname, s in self.sessions.items():
                 if s.previous == "none" and self.first != sname:
-                    raise ValueError("PREVIOUS MISMATCH: %s, EXPECTED %s" 
-                                     % (sname, self.first))
+                    raise ValueError("PREVIOUS MISMATCH: %s/%s, EXPECTED %s" 
+                                     % (self.name, sname, self.first))
                 elif s.previous not in sesnames+["none"]:
-                    raise ValueError("PREVIOUS NOT FOUND IN %s: EXPECTED %s"
-                                     % (sname, s.previous))
+                    raise ValueError("PREVIOUS NOT FOUND IN %s/%s: EXPECTED %s"
+                                     % (self.name, sname, s.previous))
 
             # use latest volsize
             self.volsize = self.sessions[self.last].volsize \
@@ -274,6 +277,8 @@ class ArchiveSet:
                     print("previous =",  self.previous, file=f)
 
 
+# Define absolute paths of commands
+
 class CP:
     awk = "/usr/bin/awk"    ; sed   = "/bin/sed"      ; sort     = "/usr/bin/sort"
     cat = "/bin/cat"        ; mkdir = "/bin/mkdir"    ; python_3 = "/usr/bin/python3"
@@ -289,6 +294,7 @@ class Lvm_VolGroup:
     def __init__(self, name):
         self.name = name
         self.lvs  = {}
+
 
 class Lvm_Volume:
     colnames  = ["vg_name","lv_name","lv_attr","lv_size","lv_time",
@@ -339,7 +345,7 @@ def vg_exists(vgname):
 
 def lv_remove(vgname, lvname):
     do_exec([[CP.lvm,"lvchange", "-p", "rw", vgname+"/"+lvname]], check=False)
-    do_exec([[CP.blkdiscard, l_vols[lvname].lv_path]])
+    do_exec([[CP.blkdiscard, volgroups[vgname].lvs[lvname].lv_path]])
     do_exec([[CP.lvm,"lvremove", "-f",vgname+"/"+lvname]])
 
 
@@ -368,7 +374,7 @@ def arch_init(aset):
             destsys, delim, mountpoint = dest.replace(i,"",1).partition("/")
             break
     if (not mountpoint and not delim) or (i != "internal:" and not destsys) or \
-       (i == "qubes-ssh://" and ("" in destsys.split("|") or len(destsys.split("|"))<2)):
+       (i == "qubes-ssh://" and ("" in destsys.split(":") or len(destsys.split(":"))<2)):
         x_it(1,"Error: Malformed --dest specification.")
 
     aset.destsys        = i+destsys
@@ -556,14 +562,14 @@ def detect_dest_state(destsys):
     dest_run_map     = {"internal": ["sh"],
                         "ssh":      ["ssh",destsys],
                         "qubes":    ["qvm-run", "-p", destsys],
-                        "qubes-ssh":["qvm-run", "-p", destsys.split("|")[0]]
+                        "qubes-ssh":["qvm-run", "-p", destsys.split(":")[0]]
                         }
 
     if options.action not in {"index-test","monitor","list","version","add"} \
                             and destsys is not None:
 
         if desttype == "qubes-ssh":
-            dargs = dest_run_map["qubes"][:-1] + [destsys.split("|")[0]]
+            dargs = dest_run_map["qubes"][:-1] + [destsys.split(":")[0]]
 
             cmd = dargs + [shell_prefix \
                   +CP.rm+" -rf "+tmpdir+"-old"
@@ -660,14 +666,14 @@ def dest_run_args(dest_type, commands):
 
     if dest_type in {"qubes","qubes-ssh"}:
         do_exec([[CP.qvm_run, "-p",
-                  (destsys if dest_type == "qubes" else destsys.split("|")[0]),
+                  (destsys if dest_type == "qubes" else destsys.split(":")[0]),
                   CP.mkdir+" -p "+pjoin(tmpdir,"rpc")
                   +" && "+CP.cat+" >"+pjoin(tmpdir,"rpc",remotetmp)
                 ]], infile=pjoin(tmpdir,remotetmp))
         if dest_type == "qubes":
             add_cmd = [CP.sh+" "+pjoin(tmpdir,"rpc",remotetmp)]
         elif dest_type == "qubes-ssh":
-            add_cmd = [CP.ssh+" "+destsys.split("|")[1]
+            add_cmd = [CP.ssh+" "+destsys.split(":")[1]
                        +' "$('+CP.cat+' '+pjoin(tmpdir,"rpc",remotetmp)+')"']
 
     elif dest_type == "ssh":
@@ -1410,7 +1416,7 @@ def monitor_send(datavols, selected=[], monitor_only=True):
     if not monitor_only:
         print("\nSending backup session", localtime,
               "to", (desttype+"://"+destsys) if \
-                  destsys != "internal:" else aset.destmountpoint)
+                  desttype != "internal" else aset.destmountpoint)
 
     for datavol in datavols+newvols:
         print("\nVolume :", datavol)
@@ -1806,6 +1812,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     getvol = subprocess.Popen(cmd, stdout=subprocess.PIPE)
 
     # Open manifest then receive, check and save data
+    bcount = 0
     with open(tmpdir+"/manifest.verify", "r") as mf:
         for addr in range(0, volsize, chunksize):
             faddr = chformat % addr
@@ -1869,7 +1876,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                 raise BufferError("Decompressed to %d bytes." % len(untrusted_decomp))
 
             # Buffer is OK...
-            buf = untrusted_decomp
+            buf = untrusted_decomp    ; bcount += len(buf)
             if attended:
                 print("OK",end="\x0d")
 
@@ -1887,7 +1894,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             raise ValueError("Received range %d does not match volume size %d."
                              % (addr+len(buf), volsize))
         print("100%")
-        print("Received byte range:", addr+len(buf))
+        print("Received range:", addr+len(buf))
+        print("    data bytes:", bcount)
 
         if save_path:
             savef.flush() ; savef.close()
