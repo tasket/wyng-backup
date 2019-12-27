@@ -798,7 +798,7 @@ def update_delta_digest(datavol):
     if len(vol.sessions) == 0:
         return False
     snap2vol    = vol.name + ".tock"
-    snap2size   = l_vols[snap2vol].lv_size
+    snap2size   = max(l_vols[snap2vol].lv_size, vol.volsize)
     chunksize   = aset.chunksize
     os.rename(vol.mapfile, vol.mapfile+"-tmp")
     dtree       = xml.etree.ElementTree.parse(tmpdir+"/delta."+datavol).getroot()
