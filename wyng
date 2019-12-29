@@ -345,7 +345,7 @@ def vg_exists(vgname):
 
 def lv_remove(vgname, lvname):
     do_exec([[CP.lvm,"lvchange", "-p", "rw", vgname+"/"+lvname]], check=False)
-    do_exec([[CP.blkdiscard, volgroups[vgname].lvs[lvname].lv_path]])
+    do_exec([[CP.blkdiscard, volgroups[vgname].lvs[lvname].lv_path]], check=False)
     do_exec([[CP.lvm,"lvremove", "-f",vgname+"/"+lvname]])
 
 
@@ -513,9 +513,10 @@ elif cmd == "merge":
         src_list.append(ln)
     subdirs = set()
     for src in src_list:
-        for i in os.scandir(src):
-            if i.is_dir():
-                subdirs.add(i.name)
+        if os.path.exists(src):
+            for i in os.scandir(src):
+                if i.is_dir():
+                    subdirs.add(i.name)
     for sdir in subdirs:
         os.makedirs(merge_target+"/"+sdir, exist_ok=True)
     for line in lstf:
@@ -525,7 +526,7 @@ elif cmd == "merge":
         elif ln[0] == "rm" and os.path.exists(ln[1]):
             os.remove(ln[1])
     for dir in src_list:
-        shutil.rmtree(dir)
+        shutil.rmtree(dir, ignore_errors=True)
     os.replace(merge_target, target)
 elif cmd == "dedup":
     ddcount = 0
@@ -1236,6 +1237,7 @@ def init_dedup_index4(listfile=""):
     addrsplit  = -address_split[1]
 
     dataf = open(tmpdir+"/hashindex.dat","w+b")
+    dataf_write = dataf.write
     if listfile:
         dedupf = open(tmpdir+"/"+listfile, "w")
 
@@ -1260,8 +1262,8 @@ def init_dedup_index4(listfile=""):
                         if count < chtree_max:
                             hashtree[i].frombytes(bhashb)
                             chtree[i].append(count)
-                            dataf.write(sesnum.to_bytes(ses_w,"big"))
-                            dataf.write(bytes().fromhex(ln2[1:]))
+                            dataf_write(sesnum.to_bytes(ses_w,"big"))
+                            dataf_write(bytes().fromhex(ln2[1:]))
                             count += 1
                             break # while
 
@@ -1318,6 +1320,7 @@ def init_dedup_index5(listfile=""):
     addrsplit  = -address_split[1]
 
     dataf  = open(tmpdir+"/hashindex.dat","w+b")
+    dataf_write = dataf.write
     if listfile:
         dedupf = open(tmpdir+"/"+listfile, "w")
 
@@ -1348,8 +1351,8 @@ def init_dedup_index5(listfile=""):
                 elif count < chtree_max:
                     hashtree[i].extend(bhashb)
                     chtree[i].append(count)
-                    dataf.write(sesnum.to_bytes(ses_w,"big"))
-                    dataf.write(bytes().fromhex(ln2[1:]))
+                    dataf_write(sesnum.to_bytes(ses_w,"big"))
+                    dataf_write(bytes().fromhex(ln2[1:]))
                     count += 1
 
     if listfile:
@@ -1677,7 +1680,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             return 0
 
     verify_only = options.action == "verify"
-    assert not (verify_only and (diff or save_path))
+    #assert not (save_path and (diff or verify_only))
     attended    = not options.unattended
     remap       = options.remap
 
@@ -1759,15 +1762,13 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             returned_home = (lv == datavol) and not options.from_arch
             if not lv_exists(vg,lv):
                 if vg != vgname:
-                    x_it(1, "Cannot auto-create volume:"
-                         " Volume group does not match config.")
+                    x_it(1, "Cannot auto-create volume: Volume group does not match config.")
                 do_exec([[CP.lvm, "lvcreate", "-kn", "-ay", "-V", str(volsize)+"b",
                           "--thin", "-n", lv, vg+"/"+aset.poolname]])
             elif l_vols[lv].lv_size != volsize:
                 do_exec([[CP.lvm, "lvresize", "-L", str(volsize)+"b", "-f", save_path]])
 
-        if os.path.exists(save_path) \
-        and stat.S_ISBLK(os.stat(save_path).st_mode):
+        if os.path.exists(save_path) and stat.S_ISBLK(os.stat(save_path).st_mode):
             do_exec([[CP.blkdiscard, save_path]])
             savef = open(save_path, "w+b")
         else: # file
@@ -1782,7 +1783,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         if remap:
             if not lv_exists(vgname, snap1vol):
                 do_exec([[CP.lvm,"lvcreate", "-pr", "-kn", "-ay",
-                          "-s", vgname+"/"+datavol, "-n", snap1vol]])
+                        "-s", vgname+"/"+datavol, "-n", snap1vol]])
                 print("  Initial snapshot created for", datavol)
             if not os.path.exists(vol.mapfile):
                 init_deltamap(vol.mapfile, vol.mapsize())
@@ -1791,14 +1792,12 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             bmap_mm = mmap.mmap(bmapf.fileno(), 0)
         else:
             if not lv_exists(vgname, snap1vol):
-                print("Snapshot '.tick' not available; Comparing with"
-                      " source volume instead.")
+                print("Snapshot '.tick' not available; Comparing with source volume instead.")
                 snap1vol = datavol
 
             if volsize != l_vols[snap1vol].lv_size:
                 x_it(1, "Volume sizes differ:"
-                    "\n  Archive = %d"
-                    "\n  Local   = %d" % (volsize, l_vols[snap1vol].lv_size))
+                    "\n  Archive = %d \n  Local   = %d" % (volsize, l_vols[snap1vol].lv_size))
 
         cmpf  = open(pjoin("/dev",vgname,snap1vol), "rb")
         diff_count = 0
@@ -1821,7 +1820,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
             cksum, fname, ses = mf.readline().strip().split()
             if fname != faddr:
-                raise ValueError("Bad fname "+fname)
+                continue
+                #raise ValueError("Bad fname "+fname)
 
             # Read chunk size
             untrusted_size = int.from_bytes(getvol.stdout.read(4),"big")
@@ -1836,8 +1836,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
                 if save_path:
                     savef.seek(chunksize, 1)
-
-                if diff:
+                elif diff:
                     diff_count += diff_compare(zeros,True)
 
                 continue
@@ -2019,6 +2018,8 @@ parser.add_argument("--compression", default="",
                     help="Init: optional subdir for --dest")
 parser.add_argument("--chunk-factor", dest="chfactor", type=int,
                     help="Init: set chunk size to N*64kB")
+#parser.add_argument("--deltas", action="store_true", default=False,
+#                    help="Receive: differential mode")
 parser.add_argument("--testing-dedup", dest="dedup", type=int, default=0,
                     help="Test experimental deduplication (send)")
 parser.add_argument("volumes", nargs="*")
