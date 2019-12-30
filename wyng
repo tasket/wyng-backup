@@ -889,7 +889,7 @@ def send_volume(datavol, localtime):
     ses.format    = "tar" if options.tarfile else "folders"
     ses.path      = vol.path+"/"+bksession+"-tmp"
 
-    # testing four deduplication types:
+    # testing deduplication types:
     dedup_idx     = dedup_db = None
     dedup         = options.dedup
     if dedup == 3: # sql
@@ -1110,7 +1110,7 @@ def send_volume(datavol, localtime):
     # Send session info, end stream and cleanup
     if stream_started:
         print("  100%  ", ("%.1f" % (bcount/1000000)) +"MB",
-              ("  ( dd: %0.1fMB reduced. )" % (ddbytes/1000000)) 
+              ("  ( reduced %0.1fMB )" % (ddbytes/1000000)) 
               if ddbytes else "")
 
         # Save session info
@@ -1126,23 +1126,25 @@ def send_volume(datavol, localtime):
         #print("Ending tar process ", end="")
         tarf.close()
         untar.stdin.close()
-        for i in range(30):
-            if untar.poll() is not None:
-                break
-            time.sleep(1)
-        if untar.poll() is None:
-            time.sleep(5)
-            if untar.poll() is None:
-                untar.terminate()
-                print("terminated untar process!")
+        try:
+            untar.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            print("Warning: tar process timeout.")
+            retcode = 15
+            untar.terminate()
+        else:
+            retcode = untar.poll()
 
-        # Cleanup on VM/remote
+        if retcode < 0:
+            raise RuntimeError("tar transport failure code %d" % retcode)
+
+        # Finalize on VM/remote
         dest_run([ destcd + bkdir
             +" && touch .set"
             +" && mv "+sdir+"-tmp "+sdir
             +" && mv "+datavol+"/volinfo-tmp "+datavol+"/volinfo"
             +" && sync -f "+datavol+"/volinfo"])
-        # Local cleanup, remove -tmp suffixes
+        # Local finalize
         os.replace(ses.path, ses.path[:-4])
         ses.path = ses.path[:-4]
         os.replace(vol.path+"/volinfo-tmp", vol.path+"/volinfo")
