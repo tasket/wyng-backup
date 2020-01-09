@@ -505,12 +505,13 @@ def detect_internal_state():
     dest_program = \
     '''import os, sys, shutil, subprocess
 cmd = sys.argv[1] ;    tmpdir = "''' + tmpdir + '''"
-if os.path.exists(tmpdir + "/rpc/dest.lst"):
+exists = os.path.exists   ; replace = os.replace;   remove = os.remove
+if exists(tmpdir + "/rpc/dest.lst"):
     lstf = open(tmpdir + "/rpc/dest.lst", "r")
 if cmd == "receive":
     for line in lstf:
         fname = line.strip()
-        fsize = os.path.getsize(fname) if os.path.exists(fname) else 0
+        fsize = os.path.getsize(fname) if exists(fname) else 0
         i = sys.stdout.buffer.write(fsize.to_bytes(4,"big"))
         if fsize:
             with open(fname,"rb") as dataf:
@@ -525,7 +526,7 @@ elif cmd == "merge":
         src_list.append(ln)
     subdirs = set()
     for src in src_list:
-        if os.path.exists(src):
+        if exists(src):
             for i in os.scandir(src):
                 if i.is_dir():
                     subdirs.add(i.name)
@@ -533,20 +534,20 @@ elif cmd == "merge":
         os.makedirs(merge_target+"/"+sdir, exist_ok=True)
     for line in lstf:
         ln = line.strip().split()
-        if ln[0] == "rename" and os.path.exists(ln[1]):
-            os.replace(ln[1], ln[2])
-        elif ln[0] == "rm" and os.path.exists(ln[1]):
-            os.remove(ln[1])
+        if ln[0] == "rename" and exists(ln[1]):
+            replace(ln[1], ln[2])
+        elif ln[0] == "rm" and exists(ln[1]):
+            remove(ln[1])
     for dir in src_list:
         shutil.rmtree(dir, ignore_errors=True)
-    os.replace(merge_target, target)
+    replace(merge_target, target)
 elif cmd == "dedup":
     ddcount = 0
     for line in lstf:
         source, dest = line.strip().split()
         if os.stat(source).st_ino != os.stat(dest).st_ino:
             os.link(source, dest+"-lnk")
-            os.replace(dest+"-lnk", dest)
+            replace(dest+"-lnk", dest)
             ddcount += 1
     print(ddcount, "reduced.")
 elif cmd == "get-configs":
@@ -631,7 +632,7 @@ def detect_dest_state(destsys):
 def set_in_process(outer_list, clear=False):
 
     if clear:
-        dest_run([destcd + bkdir + " && rm -f in_process.tmp"])
+        dest_run([destcd + bkdir + " && rm -f in_process"])
         if os.path.exists(aset.path+"/in_process"):
             os.remove(aset.path+"/in_process")
         aset.in_process = None
@@ -639,7 +640,7 @@ def set_in_process(outer_list, clear=False):
 
     with open(aset.path+"/in_process.tmp", "w") as ipf:
         for ln in outer_list:
-            print("/".join(ln), file=ipf)
+            print(ln if type(ln) is str else "/".join(ln), file=ipf)
 
     dest_run([destcd + bkdir + " && cat >in_process.tmp && mv in_process.tmp in_process"],
                 infile=aset.path+"/in_process.tmp")
@@ -687,26 +688,28 @@ def do_exec(commands, cwd=None, check=True, out="", infile=""):
         procs.append(p)
 
     # Monitor and control processes
-    err = None
     while True:
+        err = None    ; finish = timeout = False
         for p1 in reversed(procs):
-            try:
-                p1.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                pass
-            retcode = p1.returncode
-            # If any process in the chain exits, terminate the rest
-            if retcode is not None:
-                for p2 in procs:
-                    p2.poll()
-                    if p2.returncode is None:
-                        p2.terminate()
-                    elif check and p2.returncode < 0:
-                        err = p2
-                break
-            print("..", end="", flush=True)
-        if retcode is not None:
+            retcode = p1.poll()
+            if not finish and retcode is None:
+                try:
+                    p1.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    print("..", end="", flush=True)
+                    timeout = True
+                    continue
+                retcode = p1.returncode   ; finish = True
+                if check and (retcode < 0):
+                    err = p1              ; finish = True
+            elif finish and retcode is None:
+                p1.terminate()   ; p1.wait()
+                continue
+
+        if err or not timeout:
             break
+        else:
+            print("##", end="", flush=True)
 
     for f in [inf, outf]:
         if type(f) is not int: f.close()
@@ -1484,7 +1487,7 @@ def monitor_send(datavols, selected=[], monitor_only=True):
                 = update_delta_digest(datavol)
 
         if not monitor_only:
-            if os.stat(vol.mapfile+"-tmp").st_blocks > 0:
+            if datavol in newvols or os.stat(vol.mapfile+"-tmp").st_blocks > 0:
                 sent \
                     = send_volume(datavol, localtime)
                 finalize_bk_session(vol, sent)
@@ -1613,6 +1616,35 @@ def prune_sessions(datavol, times):
 
     merge_sessions(datavol, to_prune, target_s,
                    clear_sources=True)
+
+
+
+def merge_manifests(datavol, sessions=None, addcol=False):
+# untested
+    volume   = aset.vols[datavol]
+    sessions = volume.sesnames if not sessions else sessions
+    outfile  = tmpdir+"/manifest.mrg"     ; slist  = []
+    for suffix in ("/manifest\x00", "\x00"):
+        with tempfile.NamedTemporaryFile(dir=tmpdir, delete=False) as tmpf:
+            tmpf.write(bytes(suffix.join(reversed(sessions)), encoding="UTF-8"))
+            tmpf.write(bytes(suffix, encoding="UTF-8"))
+            slist.append(tmpf.name)
+
+    if addcol:
+        # add a column containing the source session
+        cdir  = tmpdir+"/m"     ; slsort  = slist[1]
+        shutil.rmtree(cdir, ignore_errors=True);   os.makedirs(cdir)
+
+        # fix: extrapolate path with filename
+        do_exec([[CP.xargs, "-0", "-a", slist[0],
+                  CP.awk, '{sub("/manifest","",FILENAME); print $0, FILENAME > "'
+                            +tmpdir+'/m/"FILENAME}']], cwd=volume.path)
+    else:
+        cdir  = volume.path     ; slsort  = slist[0]
+
+    do_exec([[CP.sort, "-umd", "-k2,2", "--files0-from="+slsort]], out=outfile, cwd=cdir)
+
+    return outfile
 
 
 # Merge sessions together. Starting from first session results in a target
