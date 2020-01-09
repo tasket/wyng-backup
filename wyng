@@ -6,6 +6,8 @@
 ###  Licensed under GNU General Public License v3. See file 'LICENSE'.
 
 
+
+#  editor width: 96  --------------------------------------------------------------------------
 import sys, os, stat, shutil, subprocess, time, datetime
 import re, mmap, zlib, tarfile, io, fcntl, tempfile
 import argparse, configparser, hashlib, uuid
@@ -25,6 +27,7 @@ class ArchiveSet:
         self.hashindex   = {}
         self.vols        = {}
         self.allsessions = []
+        self.in_process  = None
         # persisted:
         self.chunksize   = bkchunksize
         self.compression = "zlib"
@@ -73,6 +76,9 @@ class ArchiveSet:
 
         # Create master session list sorted by date-time
         self.allsessions.sort(key=lambda x: x.localtime, reverse=True)
+
+        # Check for a prior operation in progress; load op params
+        self.in_process = get_in_process(self.path)
 
 
     def save_conf(self):
@@ -192,6 +198,10 @@ class ArchiveSet:
         def map_exists(self):
             return os.path.exists(self.mapfile)
 
+        #def map_used(self):
+            ## fix: account for -tmp filename
+            #return os.stat(self.mapfile).st_blocks
+
         # Based on last session size unless volume_size is specified.
         def mapsize(self, volume_size=None):
             if not volume_size:
@@ -280,12 +290,13 @@ class ArchiveSet:
 # Define absolute paths of commands
 
 class CP:
-    awk = "/usr/bin/awk"    ; sed   = "/bin/sed"      ; sort     = "/usr/bin/sort"
-    cat = "/bin/cat"        ; mkdir = "/bin/mkdir"    ; python_3 = "/usr/bin/python3"
-    mv  = "/bin/mv"         ; grep  = "/bin/grep"     ; ssh      = "/usr/bin/ssh"
-    sh  = "/bin/sh"         ; tar   = "/bin/tar"      ; touch    = "/usr/bin/touch"
-    rm  = "/bin/rm"         ; lvm   = "/sbin/lvm"     ; qvm_run  = "/usr/bin/qvm-run"
-    tee = "/usr/bin/tee"    ; sync  = "/bin/sync"     ; dmsetup  = "/sbin/dmsetup"
+    awk  = "/usr/bin/awk"    ; sed   = "/bin/sed"        ; sort     = "/usr/bin/sort"
+    cat  = "/bin/cat"        ; mkdir = "/bin/mkdir"      ; python   = "/usr/bin/python3"
+    mv   = "/bin/mv"         ; grep  = "/bin/grep"       ; ssh      = "/usr/bin/ssh"
+    sh   = "/bin/sh"         ; tar   = "/bin/tar"        ; touch    = "/usr/bin/touch"
+    rm   = "/bin/rm"         ; lvm   = "/sbin/lvm"       ; qvm_run  = "/usr/bin/qvm-run"
+    tee  = "/usr/bin/tee"    ; sync  = "/bin/sync"       ; dmsetup  = "/sbin/dmsetup"
+    find = "/usr/bin/find"   ; xargs = "/usr/bin/xargs"
     mountpoint = "/bin/mountpoint"    ; thin_delta = "/usr/sbin/thin_delta"
     blkdiscard = "/sbin/blkdiscard"
 
@@ -420,6 +431,7 @@ def get_configs():
         arch_init(aset)
     else:
         aset = ArchiveSet(aname, metadir+topdir)
+
     if options.action == "arch-init" and not aset.destmountpoint:
         arch_init(aset)
         x_it(0, "Done.")
@@ -442,7 +454,7 @@ def get_configs_remote():
 
     # fix: shorten with do_exec pipe
     dest_run([destcd + bkdir
-              +"  && "+CP.python_3+" "+tmpdir+"/rpc/dest_helper.py get-configs "
+              +"  && "+CP.python+" "+tmpdir+"/rpc/dest_helper.py get-configs "
               +(options.volumes[0] if len(options.volumes)>0 else "")
              ], out=tmpdir+"/metadata.tgz")
 
@@ -547,7 +559,7 @@ elif cmd == "get-configs":
                 if ses.is_dir() and ses.name.rfind("-tmp") == -1:
                     print(volname+"/"+ses.name+"/info", file=tarlstf)
                     print(volname+"/"+ses.name+"/manifest", file=tarlstf)
-    p = subprocess.check_call([CP.tar,"-czf","-","--verbatim-files-from",
+    p = subprocess.check_call(["tar","-czf","-","--verbatim-files-from",
     "--files-from="+tmpdir+"/tar.lst","archive.ini"], stderr=subprocess.DEVNULL)
     '''
     with open(tmpdir +"/rpc/dest_helper.py", "wb") as progf:
@@ -583,6 +595,7 @@ def detect_dest_state(destsys):
         # Fix: get OSTYPE env variable
         # Cleanup: remove 'if' section later
         try:
+            online = True
             cmd = ["mountpoint -q '"+aset.destmountpoint
                     +"' && mkdir -p '"+aset.destmountpoint+"/"+aset.destdir+topdir
                     +"' && cd '"+aset.destmountpoint+"/"+aset.destdir+topdir+"'"
@@ -603,10 +616,50 @@ def detect_dest_state(destsys):
                       ]
                 dest_run(cmd, infile=tmpdir+"/rpc/dest_helper.py")
         except subprocess.CalledProcessError:
-            x_it(1, "Destination not ready to receive commands.")
+            online = False
+            #x_it(1, "Destination not ready to receive commands.")
 
-    return dest_run_map
+    else:
+        online = False
 
+    return online
+
+
+# Set or clear state for the archive as 'in_process' in case of interruption during write.
+# Format is list containing strings or list of strings. For latter, '/' is the delimiter.
+
+def set_in_process(outer_list, clear=False):
+
+    if clear:
+        dest_run([destcd + bkdir + " && rm -f in_process.tmp"])
+        if os.path.exists(aset.path+"/in_process"):
+            os.remove(aset.path+"/in_process")
+        aset.in_process = None
+        return
+
+    with open(aset.path+"/in_process.tmp", "w") as ipf:
+        for ln in outer_list:
+            print("/".join(ln), file=ipf)
+
+    dest_run([destcd + bkdir + " && cat >in_process.tmp && mv in_process.tmp in_process"],
+                infile=aset.path+"/in_process.tmp")
+    os.rename(aset.path+"/in_process.tmp", aset.path+"/in_process")
+    aset.in_process = outer_list
+
+
+def get_in_process(archpath=""):
+    outer_list = []
+    if not archpath: archpath = aset.path
+    if os.path.exists(archpath+"/in_process"):
+        with open(archpath+"/in_process", "r") as ipf:
+            for ln in ipf:
+                if ln.find("/") >= 0:
+                    outer_list.append(ln.strip().split("/"))
+                else:
+                    outer_list.append(ln.strip())
+
+            #self.in_process = [x.strip() for x in ipf]
+    return outer_list if len(outer_list) else None
 
 
 # Run system commands with pipes, without shell:
@@ -771,8 +824,7 @@ def prepare_snapshots(datavols):
 # Get raw lvm deltas between snapshots
 
 def get_lvm_deltas(datavols):
-    vgname   = aset.vgname
-    poolname = aset.poolname
+    vgname   = aset.vgname    ; poolname = aset.poolname
     print("Acquiring deltas.")
 
     do_exec([[CP.dmsetup,"message", vgname+"-"+poolname+"-tpool",
@@ -781,23 +833,19 @@ def get_lvm_deltas(datavols):
               "0", "reserve_metadata_snap"]])
     err = False
     for datavol in datavols:
-        snap1vol = datavol + ".tick"
-        snap2vol = datavol + ".tock"
+        snap1vol = datavol + ".tick"    ; snap2vol = datavol + ".tock"
         try:
-            do_exec([[CP.thin_delta, "-m",
-                      "--thin1=" + l_vols[snap1vol].thin_id,
+            do_exec([[CP.thin_delta, "-m", "--thin1=" + l_vols[snap1vol].thin_id,
                       "--thin2=" + l_vols[snap2vol].thin_id,
                       "/dev/mapper/"+vgname+"-"+poolname+"_tmeta"],
                      [CP.grep, "-v", "<same .*\/>$"]
-                    ],  out=tmpdir+"/delta."+datavol
-                   )
+                    ],  out=tmpdir+"/delta."+datavol )
         except:
             err = True
             break
 
     do_exec([[CP.dmsetup,"message", vgname+"-"+poolname+"-tpool",
               "0", "release_metadata_snap"]], check=not err)
-
     if err:
         x_it(1, "ERROR running thin_delta process.")
 
@@ -809,22 +857,15 @@ def get_lvm_deltas(datavols):
 
 def update_delta_digest(datavol):
 
-    if monitor_only:
-        print("Updating block change map. ", end="")
-
+    if monitor_only:  print("Updating block change map. ", end="")
     vol         = aset.vols[datavol]
-    if len(vol.sessions) == 0:
-        return False
+    if len(vol.sessions) == 0:  return False
     snap2vol    = vol.name + ".tock"
-    snap2size   = max(l_vols[snap2vol].lv_size, vol.volsize)
-    chunksize   = aset.chunksize
+    snap2size   = max(l_vols[snap2vol].lv_size, vol.volsize);    chunksize   = aset.chunksize
     os.rename(vol.mapfile, vol.mapfile+"-tmp")
     dtree       = xml.etree.ElementTree.parse(tmpdir+"/delta."+datavol).getroot()
     dblocksize  = int(dtree.get("data_block_size"))
-    bmap_byte   = 0
-    lastindex   = 0
-    dnewblocks  = 0
-    dfreedblocks = 0
+    bmap_byte   = lastindex   = dnewblocks   = dfreedblocks = 0
 
     with open(vol.mapfile+"-tmp", "r+b") as bmapf:
         bmapf.truncate(vol.mapsize(snap2size))    ; bmapf.flush()
@@ -840,24 +881,19 @@ def update_delta_digest(datavol):
             else: # superfluous tag
                 continue
 
-            # blockpos iterates over disk blocks, with
-            # thin LVM tools constant of 512 bytes/block.
-            # dblocksize (local) and chunksize (dest) may be
-            # somewhat independant of each other.
+            # blockpos iterates over disk blocks, with thin LVM constant of 512 bytes/block.
+            # dblocksize (local) & chunksize (dest) may be somewhat independant of each other.
             for blockpos in range(blockbegin, blockbegin + blocklen):
                 volsegment = blockpos // (chunksize // bs)
                 bmap_pos = volsegment // 8
                 if bmap_pos != lastindex:
-                    bmap_mm[lastindex] |= bmap_byte
-                    bmap_byte = 0
-                bmap_byte |= 1 << (volsegment % 8)
-                lastindex = bmap_pos
+                    bmap_mm[lastindex] |= bmap_byte      ; bmap_byte = 0
+                bmap_byte |= 1 << (volsegment % 8)   ; lastindex = bmap_pos
 
-        bmap_mm[lastindex] |= bmap_byte
+        if bmap_byte:  bmap_mm[lastindex] |= bmap_byte
 
     if monitor_only and dnewblocks+dfreedblocks > 0:
-        print(dnewblocks * bs, "changed,",
-              dfreedblocks * bs, "discarded.")
+        print(dnewblocks * bs, "changed,", dfreedblocks * bs, "discarded.")
     elif monitor_only:
         print("No changes.")
 
@@ -1097,7 +1133,7 @@ def send_volume(datavol, localtime):
                 if tar_info.type == LNKTYPE:
                     tar_info.linkname = "%s/%s/%s/x%s" % \
                         (ddses.volume.name,
-                            ddses.name+"-tmp" if ddses==ses else ddses.name,
+                         ddses.name+"-tmp" if ddses is ses else ddses.name,
                             ddchx[:addrsplit],
                             ddchx)
                     ddbytes += len(buf)
@@ -1441,16 +1477,20 @@ def monitor_send(datavols, selected=[], monitor_only=True):
                   desttype != "internal" else aset.destmountpoint)
 
     for datavol in datavols+newvols:
-        print("\nVolume :", datavol)
+        print("\nVolume :", datavol, flush=True)
         vol = aset.vols[datavol]
 
         map_updated \
                 = update_delta_digest(datavol)
 
         if not monitor_only:
-            sent \
-                = send_volume(datavol, localtime)
-            finalize_bk_session(vol, sent)
+            if os.stat(vol.mapfile+"-tmp").st_blocks > 0:
+                sent \
+                    = send_volume(datavol, localtime)
+                finalize_bk_session(vol, sent)
+            else:
+                print("  No changes.", flush=True)
+                finalize_monitor_session(vol, False)
         else:
             finalize_monitor_session(vol, map_updated)
 
@@ -1468,7 +1508,7 @@ def rotate_snapshots(vol, rotate=True):
     snap1vol = vol.name+".tick"
     snap2vol = vol.name+".tock"
     if rotate:
-        #print("Rotating snapshots for", datavol)
+        #print("Rotating snapshots for", vol.name)
         # Review: this should be atomic
         lv_remove(aset.vgname, snap1vol)
         do_exec([[CP.lvm,"lvrename",aset.vgname+"/"+snap2vol, snap1vol]])
@@ -1523,9 +1563,6 @@ def prune_sessions(datavol, times):
     if len(sessions) < 2:
         print("  No extra sessions to prune.")
         return
-    if t1 >= sessions[-1] or t2 >= sessions[-1]:
-        print("  Cannot prune most recent session; Skipping.")
-        return
 
     # Find specific sessions to prune;
     # Use contiguous ranges.
@@ -1558,6 +1595,9 @@ def prune_sessions(datavol, times):
                     break
         to_prune = sessions[start:end]
 
+    if len(to_prune) and to_prune[-1] == sessions[-1]:
+        print("  Preserving latest session.")
+        del to_prune[-1]
     if len(to_prune) == 0:
         print("  No sessions in this date-time range.")
         return
@@ -1608,7 +1648,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
         print(merge_target, target, file=srcf)
 
         # Get manifests, append session name to eol, print session names to srcf.
-        print("  Reading manifests")
+        #print("  Reading manifests")
         manifests = []
         for ses in merge_sources:
             if clear_sources:
@@ -1620,17 +1660,18 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
         print("###", file=srcf)
 
     # Unique-merge filenames: one for rename, one for new full manifest.
-    do_exec([[CP.sort, "-umd", "-k2,2"] + manifests],
-             out="manifest.tmp", cwd=tmpdir)
+    do_exec([[CP.sort, "-umd", "-k2,2"] + manifests], out="manifest.tmp", cwd=tmpdir)
     do_exec([[CP.sort, "-umd", "-k2,2", "manifest.tmp",
               pjoin(metadir+bkdir,datavol,merge_target+"/manifest")
             ]], out="manifest.new", cwd=tmpdir)
 
+    # Set archive in_process state to "merge"
+    if not aset.in_process:
+        set_in_process(["merge", datavol, str(clear_sources), target, sources])
+
     # Output manifest filenames in the sftp-friendly form:
     # 'rename src_session/subdir/xaddress target/subdir/xaddress'
     # then pipe to destination and run dest_helper.py.
-    print("  Merging to", target)
-
     os.chdir(pjoin(metadir+bkdir,datavol))
     do_exec([
             [CP.awk, "$2<="+lc_filter, tmpdir+"/manifest.tmp"],
@@ -1669,16 +1710,21 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
 
     do_exec([[CP.tar, "-cf", "-", "volinfo", target],
              dest_run_args(desttype, [destcd + bkdir+"/"+datavol
-                    +"  && tar -xmf -",
+                    +"  && tar -xmf -  &&  rm -f ../in_process",
 
                     # Trim on dest.
                     ( " && cat "+target+"/delete  |  xargs -r rm -f"
                     + " && rm "+target+"/delete"
                     + " && find "+target+" -maxdepth 1 -type d -empty -delete"
-                    ) if vol_shrank else ""
+                    ) if vol_shrank else "",
+
+                      " && sync -f volinfo"
              ])])
 
+    # Note: set_in_process(clear) not used here
+    os.remove("../in_process")    ; aset.in_process = None
     do_exec([[CP.sync, "-f", "volinfo"]])
+
 
 # Receive volume from archive. If no save_path specified, then verify only.
 # If diff specified, compare with current local volume; with --remap option
@@ -1840,8 +1886,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
             cksum, fname, ses = mf.readline().strip().split()
             if fname != faddr:
-                continue
-                #raise ValueError("Bad fname "+fname)
+                raise ValueError("Address mismatch "+fname+" expected "+faddr)
 
             # Read chunk size
             untrusted_size = int.from_bytes(getvol.stdout.read(4),"big")
@@ -1940,6 +1985,34 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                 x_it(1, "%d bytes differ." % diff_count)
 
 
+# Remove a volume from the archive
+
+def delete_volume(dv):
+    if not options.unattended:
+        print("Warning! Delete will remove ALL metadata AND archived data",
+              "for volume", dv)
+
+        ans = input("Are you sure? [y/N]: ")
+        if ans.lower() not in {"y","yes"}:
+            x_it(0,"")
+
+    if not aset.in_process:
+        set_in_process(["delete", dv])
+
+    if dv in aset.vols:
+        aset.delete_volume(dv)
+
+    print("\nDeleting volume", dv, "from archive.")
+    cmd = [destcd + bkdir
+          +" && rm -rf " + dv
+          +" && sync -f ."
+          ]
+    dest_run(cmd)
+
+    set_in_process([], clear=True)
+    return
+
+
 def show_mem_stats():
     vsz, rss = map(int, os.popen("ps -up"+str(os.getpid())).readlines()[-1].split()[4:6])
     print("\n  Memory use: Max %dMB" %
@@ -1957,7 +2030,7 @@ def x_it(code, text):
 
 
 
-##  MAIN  #####################################################################
+##  MAIN  #####################################################################################
 
 # Constants / Globals
 prog_version          = "0.2.0_beta1"
@@ -2010,7 +2083,7 @@ parser = argparse.ArgumentParser(description="")
 parser.add_argument("action", choices=["send","monitor","add","delete",
                     "prune","receive","verify","diff","list","version",
                     "arch-init","arch-delete",
-                    "arch-deduplicate","index-test"],
+                    "arch-deduplicate","index-test","test"],
                     default="monitor", help="Action to take")
 parser.add_argument("-u", "--unattended", action="store_true", default=False,
                     help="Non-interactive, supress prompts")
@@ -2058,15 +2131,16 @@ init_dedup_index = [None, None, None, init_dedup_index3,
                     init_dedup_index4, init_dedup_index5][options.dedup]
 monitor_only     = options.action == "monitor" # gather metadata without backing up
 volgroups        = get_lvm_vgs()
-aset             = None
-destsys          = None
-desttype         = None
+destsys          = desttype         = dest_run_map  =  None
 aset             = get_configs()
 destsys, desttype= detect_internal_state()
-dest_run_map     = detect_dest_state(destsys)
+dest_online      = detect_dest_state(destsys)
 bkdir            = topdir+"/"+aset.name
 destpath         = os.path.normpath(pjoin(aset.destmountpoint,aset.destdir))
 destcd           = " cd '"+destpath+"'"
+if not dest_online and options.action not in {"index-test","monitor","list","version","add"} \
+        and destsys is not None:
+    x_it(1, "Destination not ready to receive commands.")
 if options.from_arch:
     aset         = get_configs_remote()
 datavols         = aset.vols.keys()
@@ -2074,6 +2148,23 @@ if aset.vgname in volgroups.keys():
     l_vols       = volgroups[aset.vgname].lvs
 if not os.path.exists(metadir+bkdir):
     os.makedirs(metadir+bkdir)
+
+
+# Handle unfinished in_process
+if aset.in_process and dest_online:
+    if aset.in_process[0] in ("delete","merge"):
+        print("Completing prior operation in progress:", aset.in_process[0:2])
+
+        if aset.in_process[0] == "delete":
+            delete_volume(aset.in_process[1])
+        elif aset.in_process[0] == "merge":
+            merge_sessions(aset.in_process[1], aset.in_process[4].split("/"),
+                           aset.in_process[3], clear_sources=bool(aset.in_process[2]))
+
+    else:
+        print("Unknown prior operation in progress:", aset.in_process[0:2])
+        x_it(1,"Exiting.")
+
 
 # Check volume args against config
 selected_vols = options.volumes[:]
@@ -2168,25 +2259,7 @@ elif options.action == "add":
 
 
 elif options.action == "delete":
-    dv = selected_vols[0]
-    if not options.unattended:
-        print("Warning! Delete will remove ALL metadata AND archived data",
-              "for volume", dv)
-
-        ans = input("Are you sure? [y/N]: ")
-        if ans.lower() not in {"y","yes"}:
-            x_it(0,"")
-
-    if dv in aset.vols:
-        aset.delete_volume(dv)
-
-    print("\nDeleting volume", dv, "from archive.")
-    cmd = [destcd + bkdir
-          +" && rm -rf " + dv
-          +" && sync -f ."
-          ]
-    dest_run(cmd)
-
+    delete_volume(selected_vols[0])
 
 elif options.action == "untar":
     raise NotImplementedError()
@@ -2220,7 +2293,10 @@ elif options.action == "arch-deduplicate":
 
 if options.action   == "index-test":
     init_dedup_index()
-
+elif options.action == "test":
+    pass
+    #merge_manifests("root", addcol=True)
+    #merge_sessions("root", aset.vols["root"].sesnames[:-1],  aset.vols["root"].sesnames[-1], clear_sources=True)
 
 
 print("\nDone.\n")\
