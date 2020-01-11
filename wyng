@@ -700,10 +700,10 @@ def do_exec(commands, cwd=None, check=True, out="", infile=""):
                     timeout = True
                     continue
                 retcode = p1.returncode   ; finish = True
-                if check and (retcode < 0):
+                if check and (retcode > 0):
                     err = p1              ; finish = True
             elif finish and retcode is None:
-                p1.terminate()   ; p1.wait()
+                p1.terminate()
                 continue
 
         if err or not timeout:
@@ -1581,6 +1581,7 @@ def prune_sessions(datavol, times):
             to_prune.append(t1)
 
     else:
+        start = len(sessions)   ; end = 0
         if t1 in sessions:
             start = sessions.index(t1)
         else:
@@ -1588,7 +1589,6 @@ def prune_sessions(datavol, times):
                 if ses > t1:
                     start = sessions.index(ses)
                     break
-        end = 0
         if t2 in sessions:
             end = sessions.index(t2)+1
         else:
