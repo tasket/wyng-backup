@@ -444,13 +444,17 @@ def get_configs():
 
 
 def get_configs_remote():
-    aname = aset.name
+    aname = aset.name    ; make_local = False
     if not options.unattended:
-        print("\nMetadata will be imported from the archive;")
+        print("\nMetadata will be read from the archive;")
         print("Please check that the archive is in a trusted, secure condition!")
         ans = input("\nProceed? [y/N] ")
         if ans.lower() not in ("y","yes"):
             x_it(0,"Stopped.")
+
+        print("\nDo you wish to store this metadata as the") ###-
+        ans = input("local configuration? [y/N] ")           ###-
+        make_local = ans.lower() in ("y","yes")              ###-
 
     # fix: shorten with do_exec pipe
     dest_run([destcd + bkdir
@@ -506,7 +510,7 @@ def detect_internal_state():
     '''import os, sys, shutil, subprocess
 cmd = sys.argv[1] ;    tmpdir = "''' + tmpdir + '''"
 exists = os.path.exists   ; replace = os.replace;   remove = os.remove
-if exists(tmpdir + "/rpc/dest.lst"):
+if cmd != "merge" and exists(tmpdir + "/rpc/dest.lst"):
     lstf = open(tmpdir + "/rpc/dest.lst", "r")
 if cmd == "receive":
     for line in lstf:
@@ -517,30 +521,38 @@ if cmd == "receive":
             with open(fname,"rb") as dataf:
                 i = sys.stdout.buffer.write(dataf.read(fsize))
 elif cmd == "merge":
+    lstf = open("dest.lst", "r")
+    resume = "--resume" in sys.argv;   src_list = []   ; subdirs = set()
     merge_target, target = lstf.readline().strip().split()
-    src_list = []
     while True:
         ln = lstf.readline().strip()
-        if ln == "###":
-            break
+        if ln == "###":  break
         src_list.append(ln)
-    subdirs = set()
+    if not resume:
+        for ex in ("","-init"):  shutil.rmtree("merge"+ex, ignore_errors=True)
+        os.makedirs("merge-init")   ; replace(merge_target, "merge-init/"+merge_target)
+        for src in src_list:   replace(src, "merge-init/"+src)
+        replace("merge-init", "merge")
+    elif not exists("merge/"+merge_target):
+        raise FileNotFoundError("merge/"+merge_target)
+    os.chdir("merge")
     for src in src_list:
         if exists(src):
             for i in os.scandir(src):
-                if i.is_dir():
-                    subdirs.add(i.name)
+                if i.is_dir():   subdirs.add(i.name)
     for sdir in subdirs:
         os.makedirs(merge_target+"/"+sdir, exist_ok=True)
     for line in lstf:
-        ln = line.strip().split()
+        ln = line.split() # default split() does strip()
         if ln[0] == "rename" and exists(ln[1]):
             replace(ln[1], ln[2])
         elif ln[0] == "rm" and exists(ln[1]):
             remove(ln[1])
-    for dir in src_list:
-        shutil.rmtree(dir, ignore_errors=True)
-    replace(merge_target, target)
+    if exists(target+"/info"):      replace(target+"/info", merge_target+"/info")
+    if exists(target+"/manifest"):  replace(target+"/manifest", merge_target+"/manifest")
+    os.chdir("..")   ; replace("merge/"+merge_target, target)
+    lstf.close()   ; remove(lstf.name)   ; remove("../in_process")
+    shutil.rmtree("merge", ignore_errors=True)
 elif cmd == "dedup":
     ddcount = 0
     for line in lstf:
@@ -573,10 +585,10 @@ elif cmd == "get-configs":
 
 def detect_dest_state(destsys):
     global dest_run_map
-    dest_run_map     = {"internal": ["sh"],
-                        "ssh":      ["ssh",destsys],
-                        "qubes":    ["qvm-run", "-p", destsys],
-                        "qubes-ssh":["qvm-run", "-p", destsys.split(":")[0]]
+    dest_run_map     = {"internal": [CP.sh],
+                        "ssh":      [CP.ssh, destsys],
+                        "qubes":    [CP.qvm_run, "-p", destsys],
+                        "qubes-ssh":[CP.qvm_run, "-p", destsys.split(":")[0]]
                         }
 
     if options.action not in {"index-test","monitor","list","version","add"} \
@@ -595,11 +607,14 @@ def detect_dest_state(destsys):
 
         # Fix: get OSTYPE env variable
         # Cleanup: remove 'if' section later
+        online = True
         try:
-            online = True
             cmd = ["mountpoint -q '"+aset.destmountpoint
                     +"' && mkdir -p '"+aset.destmountpoint+"/"+aset.destdir+topdir
                     +"' && cd '"+aset.destmountpoint+"/"+aset.destdir+topdir+"'"
+
+                    +"  && { if [ -e "+aset.name+"/in_process ]; then"
+                    +"  echo 'in_process yes'; fi }"
 
                     +"  && { if [ -d "+aset.vgname+"%"+aset.poolname+" ]; then"
                     +"  mv "+aset.vgname+"%"+aset.poolname+" "+aset.name+"; fi }"
@@ -607,7 +622,7 @@ def detect_dest_state(destsys):
                     +"  && touch archive.dat"
                     +(" && ln -f archive.dat .hardlink" if options.dedup else "")
                     ]
-            dest_run(cmd)
+            dest_run(cmd, out=tmpdir+"/dest-state-log")
 
             # send helper program to remote
             if desttype != "internal":
@@ -618,12 +633,20 @@ def detect_dest_state(destsys):
                 dest_run(cmd, infile=tmpdir+"/rpc/dest_helper.py")
         except subprocess.CalledProcessError:
             online = False
-            #x_it(1, "Destination not ready to receive commands.")
 
     else:
         online = False
 
-    return online
+    dest_in_process = False
+    if online:
+        try:
+            do_exec([[CP.grep, "in_process yes", tmpdir+"/dest-state-log"]])
+        except subprocess.CalledProcessError:
+            pass
+        else:
+            dest_in_process = True
+
+    return online, dest_in_process
 
 
 # Set or clear state for the archive as 'in_process' in case of interruption during write.
@@ -632,7 +655,7 @@ def detect_dest_state(destsys):
 def set_in_process(outer_list, clear=False):
 
     if clear:
-        dest_run([destcd + bkdir + " && rm -f in_process"])
+        dest_run([destcd + bkdir + " && rm -f in_process0000"])
         if os.path.exists(aset.path+"/in_process"):
             os.remove(aset.path+"/in_process")
         aset.in_process = None
@@ -696,7 +719,7 @@ def do_exec(commands, cwd=None, check=True, out="", infile=""):
                 try:
                     p1.wait(timeout=2)
                 except subprocess.TimeoutExpired:
-                    print("..", end="", flush=True)
+                    # print("..", end="", flush=True)
                     timeout = True
                     continue
                 retcode = p1.returncode   ; finish = True
@@ -708,8 +731,8 @@ def do_exec(commands, cwd=None, check=True, out="", infile=""):
 
         if err or not timeout:
             break
-        else:
-            print("##", end="", flush=True)
+        # else:
+        #     print("##", end="", flush=True)
 
     for f in [inf, outf]:
         if type(f) is not int: f.close()
@@ -1602,7 +1625,7 @@ def prune_sessions(datavol, times):
         print("  Preserving latest session.")
         del to_prune[-1]
     if len(to_prune) == 0:
-        print("  No sessions in this date-time range.")
+        print("  No selections in this date-time range.")
         return
 
     # Determine target session where data will be merged.
@@ -1655,7 +1678,7 @@ def merge_manifests(datavol, sessions=None, addcol=False):
 
 def merge_sessions(datavol, sources, target, clear_sources=False):
 
-    volume = aset.vols[datavol]
+    volume = aset.vols[datavol]    ; resume = aset.in_process is not None
     for ses in sources + [target]:
         if volume.sessions[ses].format == "tar":
             x_it(1, "Cannot merge range containing tarfile session.")
@@ -1673,88 +1696,73 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
     # the merge_target will be renamed to the specified target. This avoids
     # processing the full range of volume chunks in the likely case that
     # the oldest (full) session is being pruned.
-    merge_sources = ([target] + list(reversed(sources)))[:-1]
-    merge_target  = sources[0]
+    merge_target  = sources[0]    ; merge_sources = ([target] + list(reversed(sources)))[:-1]
+    os.chdir(volume.path)
 
-    with open(pjoin(tmpdir,"sources.lst"), "w") as srcf:
-        print(merge_target, target, file=srcf)
+    if not resume:
+        with open("dest.tmp", "w") as lstf:
+            print(merge_target, target, file=lstf)
 
-        # Get manifests, append session name to eol, print session names to srcf.
-        #print("  Reading manifests")
-        manifests = []
-        for ses in merge_sources:
-            if clear_sources:
-                print(ses, file=srcf)
-                manifests.append("man."+ses)
-            do_exec([[CP.sed, "-E", "s|$| "+ses+"|",
-                      pjoin(metadir+bkdir,datavol,ses+"/manifest")
-                    ]], cwd=tmpdir, out="man."+ses)
-        print("###", file=srcf)
+            # Get manifests, append session name to eol, print session names to list.
+            #print("  Reading manifests")
+            manifests = []
+            for ses in merge_sources:
+                if clear_sources:   print(ses, file=lstf)    ; manifests.append("man."+ses)
+                do_exec([[CP.sed, "-E", "s|$| "+ses+"|", ses+"/manifest"
+                        ]], out=tmpdir+"/man."+ses)
+            print("###", file=lstf)
 
-    # Unique-merge filenames: one for rename, one for new full manifest.
-    do_exec([[CP.sort, "-umd", "-k2,2"] + manifests], out="manifest.tmp", cwd=tmpdir)
-    do_exec([[CP.sort, "-umd", "-k2,2", "manifest.tmp",
-              pjoin(metadir+bkdir,datavol,merge_target+"/manifest")
-            ]], out="manifest.new", cwd=tmpdir)
+        # Unique-merge filenames: one for rename, one for new full manifest.
+        do_exec([[CP.sort, "-umd", "-k2,2"] + manifests], out="manifest.tmp", cwd=tmpdir)
+        do_exec([[CP.sort, "-umd", "-k2,2", "manifest.tmp",
+                pjoin(volume.path, merge_target, "manifest")]], out="manifest.new", cwd=tmpdir)
+        # Make final manifest without extra column.
+        do_exec([[CP.awk, "$2<="+lc_filter+" {print $1, $2}", tmpdir+"/manifest.new"]],
+                out=target+"/manifest")
 
-    # Set archive in_process state to "merge"
-    if not aset.in_process:
+        # Output manifest filenames in the sftp-friendly form:
+        # 'rename src_session/subdir/xaddress target/subdir/xaddress'
+        # then pipe to destination and run dest_helper.py.
+        do_exec([
+                [CP.awk, "$2<="+lc_filter, tmpdir+"/manifest.tmp"],
+                [CP.sed, "-E",
+
+                "s|^0 x(\S{" + str(address_split[0]) + "})(\S+)\s+(S_\S+)|"
+                "rm "+merge_target+"/\\1/x\\1\\2|; t; "
+
+                "s|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)\s+(S_\S+)|"
+                "rename \\3/\\1/x\\1\\2 "+merge_target+"/\\1/x\\1\\2|"
+                ]
+                ], out=">>dest.tmp")
+
+        if vol_shrank:
+            # If volume size shrank in this period then make trim list.
+            do_exec([[CP.awk, "$2>"+lc_filter, tmpdir+"/manifest.new"],
+                    [CP.sed, "-E", "s|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)|"
+                    "rm "+merge_target+"/\\1/x\\1\\2|"]
+                    ], out=">>dest.tmp")
+
+        # Update info records
+        if clear_sources:
+            for ses in sources:
+                affected = volume.delete_session(ses)
+            volume.sessions[target].save_info()    ; volume.save_volinfo()
+            print("  Removing %d:" % len(sources), " ".join(sources))
+
+        # Set archive in_process state to "merge"
         set_in_process(["merge", datavol, str(clear_sources), target, sources])
 
-    # Output manifest filenames in the sftp-friendly form:
-    # 'rename src_session/subdir/xaddress target/subdir/xaddress'
-    # then pipe to destination and run dest_helper.py.
-    os.chdir(pjoin(metadir+bkdir,datavol))
-    do_exec([
-            [CP.awk, "$2<="+lc_filter, tmpdir+"/manifest.tmp"],
-            [CP.sed, "-E",
-
-             "s|^0 x(\S{" + str(address_split[0]) + "})(\S+)\s+(S_\S+)|"
-             "rm "+merge_target+"/\\1/x\\1\\2|; t; "
-
-             "s|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)\s+(S_\S+)|"
-             "rename \\3/\\1/x\\1\\2 "+merge_target+"/\\1/x\\1\\2|"
-            ],
-            [CP.cat, tmpdir+"/sources.lst", "-"],
+    # Send new metadata and process lists to dest
+    do_exec([[CP.tar, "-cf", "-", "volinfo", "dest.tmp", target],
             dest_run_args(desttype, [destcd + bkdir+"/"+datavol
-                +" && cat >"+tmpdir+"/rpc/dest.lst"
-                +" && python3 "+tmpdir+"/rpc/dest_helper.py merge"
-                ])
+            +" && tar -xmf -"
+            +" && mv dest.tmp dest.lst"
+            +" && python3 "+tmpdir+"/rpc/dest_helper.py merge" +(" --resume" if resume else "")
             ])
+          ])
 
-    # Update info records and trim to target size
-    if clear_sources:
-        for ses in sources:
-            affected = volume.delete_session(ses)
-        volume.sessions[target].save_info()
-        volume.save_volinfo()
-        print("  Removed", " ".join(sources))
-
-    do_exec([[CP.awk, "$2<="+lc_filter+" {print $1, $2}", tmpdir+"/manifest.new"]],
-            out=target+"/manifest") 
-
-    if vol_shrank:
-        # If volume size shrank in this period then make trim list.
-        do_exec([[CP.awk, "$2>"+lc_filter, tmpdir+"/manifest.new"],
-                 [CP.sed, "-E", "s|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)|"
-                  +target+"/\\1/x\\1\\2|"],
-                ], out=target+"/delete")
-
-    do_exec([[CP.tar, "-cf", "-", "volinfo", target],
-             dest_run_args(desttype, [destcd + bkdir+"/"+datavol
-                    +"  && tar -xmf -  &&  rm -f ../in_process",
-
-                    # Trim on dest.
-                    ( " && cat "+target+"/delete  |  xargs -r rm -f"
-                    + " && rm "+target+"/delete"
-                    + " && find "+target+" -maxdepth 1 -type d -empty -delete"
-                    ) if vol_shrank else "",
-
-                      " && sync -f volinfo"
-             ])])
-
-    # Note: set_in_process(clear) not used here
-    os.remove("../in_process")    ; aset.in_process = None
+    # Local finalize. Note: set_in_process(clear) not used here
+    os.remove("dest.tmp")    ; os.remove("../in_process")    ; aset.in_process = None
     do_exec([[CP.sync, "-f", "volinfo"]])
 
 
@@ -2020,7 +2028,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 # Remove a volume from the archive
 
 def delete_volume(dv):
-    if not options.unattended:
+    if not options.unattended and not aset.in_process:
         print("Warning! Delete will remove ALL metadata AND archived data",
               "for volume", dv)
 
@@ -2065,7 +2073,7 @@ def x_it(code, text):
 ##  MAIN  #####################################################################################
 
 # Constants / Globals
-prog_version          = "0.2.0_beta1"
+prog_version          = "0.2.0_beta2"
 format_version        = 1
 prog_name             = "wyng"
 topdir                = "/"+prog_name+".backup"
@@ -2156,17 +2164,17 @@ options = parser.parse_args()
 # General Configuration:
 
 # Check --from usage (access other/unconfigured archive).
-if options.from_arch and options.action not in ("receive","verify","list"):
-    x_it(1,"--from option can be used only with: receive, verify, list")
+if options.from_arch and options.action not in ("receive","verify","list","arch-init"):
+    x_it(1,"--from option can be used only with: receive, verify, list, arch-init")
 # Select dedup test algorithm.
 init_dedup_index = [None, None, None, init_dedup_index3,
                     init_dedup_index4, init_dedup_index5][options.dedup]
 monitor_only     = options.action == "monitor" # gather metadata without backing up
 volgroups        = get_lvm_vgs()
-destsys          = desttype         = dest_run_map  =  None
+destsys          = desttype  = dest_run_map  = dest_online  = dest_in_process  = None
 aset             = get_configs()
 destsys, desttype= detect_internal_state()
-dest_online      = detect_dest_state(destsys)
+dest_online, dest_in_process  = detect_dest_state(destsys)
 bkdir            = topdir+"/"+aset.name
 destpath         = os.path.normpath(pjoin(aset.destmountpoint,aset.destdir))
 destcd           = " cd '"+destpath+"'"
@@ -2185,17 +2193,20 @@ if not os.path.exists(metadir+bkdir):
 # Handle unfinished in_process
 if aset.in_process and dest_online:
     if aset.in_process[0] in ("delete","merge"):
-        print("Completing prior operation in progress:", aset.in_process[0:2])
+        print("Completing prior operation in progress:", " ".join(aset.in_process[0:2]))
 
         if aset.in_process[0] == "delete":
             delete_volume(aset.in_process[1])
         elif aset.in_process[0] == "merge":
-            merge_sessions(aset.in_process[1], aset.in_process[4].split("/"),
+            # fix: handle case when "delete" is used on in-process volume......
+            merge_sessions(aset.in_process[1], aset.in_process[4],
                            aset.in_process[3], clear_sources=bool(aset.in_process[2]))
 
     else:
         print("Unknown prior operation in progress:", aset.in_process[0:2])
         x_it(1,"Exiting.")
+elif dest_in_process:
+    x_it("Archive locked in_process without local indicator. Exiting.")
 
 
 # Check volume args against config
