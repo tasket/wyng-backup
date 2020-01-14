@@ -521,7 +521,7 @@ if cmd == "receive":
             with open(fname,"rb") as dataf:
                 i = sys.stdout.buffer.write(dataf.read(fsize))
 elif cmd == "merge":
-    lstf = open("dest.lst", "r")
+    lstf = open("merge.lst", "r")
     resume = "--resume" in sys.argv;   src_list = []   ; subdirs = set()
     merge_target, target = lstf.readline().strip().split()
     while True:
@@ -1700,7 +1700,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
     os.chdir(volume.path)
 
     if not resume:
-        with open("dest.tmp", "w") as lstf:
+        with open("merge.tmp", "w") as lstf:
             print(merge_target, target, file=lstf)
 
             # Get manifests, append session name to eol, print session names to list.
@@ -1733,14 +1733,14 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
                 "s|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)\s+(S_\S+)|"
                 "rename \\3/\\1/x\\1\\2 "+merge_target+"/\\1/x\\1\\2|"
                 ]
-                ], out=">>dest.tmp")
+                ], out=">>merge.tmp")
 
         if vol_shrank:
             # If volume size shrank in this period then make trim list.
             do_exec([[CP.awk, "$2>"+lc_filter, tmpdir+"/manifest.new"],
                     [CP.sed, "-E", "s|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)|"
                     "rm "+merge_target+"/\\1/x\\1\\2|"]
-                    ], out=">>dest.tmp")
+                    ], out=">>merge.tmp")
 
         # Update info records
         if clear_sources:
@@ -1753,16 +1753,16 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
         set_in_process(["merge", datavol, str(clear_sources), target, sources])
 
     # Send new metadata and process lists to dest
-    do_exec([[CP.tar, "-cf", "-", "volinfo", "dest.tmp", target],
+    do_exec([[CP.tar, "-cf", "-", "volinfo", "merge.tmp", target],
             dest_run_args(desttype, [destcd + bkdir+"/"+datavol
             +" && tar -xmf -"
-            +" && mv dest.tmp dest.lst"
+            +" && mv merge.tmp merge.lst"
             +" && python3 "+tmpdir+"/rpc/dest_helper.py merge" +(" --resume" if resume else "")
             ])
           ])
 
     # Local finalize. Note: set_in_process(clear) not used here
-    os.remove("dest.tmp")    ; os.remove("../in_process")    ; aset.in_process = None
+    os.remove("merge.tmp")    ; os.remove("../in_process")    ; aset.in_process = None
     do_exec([[CP.sync, "-f", "volinfo"]])
 
 
