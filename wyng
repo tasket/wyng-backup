@@ -654,7 +654,7 @@ def detect_dest_state(destsys):
 def set_in_process(outer_list, clear=False):
 
     if clear:
-        dest_run([destcd + bkdir + " && rm -f in_process0000"])
+        dest_run([destcd + bkdir + " && rm -f in_process"])
         if os.path.exists(aset.path+"/in_process"):
             os.remove(aset.path+"/in_process")
         aset.in_process = None
