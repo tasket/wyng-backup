@@ -550,9 +550,8 @@ elif cmd == "merge":
             remove(ln[1])
     if exists(target+"/info"):      replace(target+"/info", merge_target+"/info")
     if exists(target+"/manifest"):  replace(target+"/manifest", merge_target+"/manifest")
-    os.chdir("..")   ; replace("merge/"+merge_target, target)
-    lstf.close()   ; remove(lstf.name)   ; remove("../in_process")
-    shutil.rmtree("merge", ignore_errors=True)
+    os.chdir("..")   ; replace("merge/"+merge_target, target)   ; remove("../in_process")
+    lstf.close()   ; remove(lstf.name)   ; shutil.rmtree("merge", ignore_errors=True)
 elif cmd == "dedup":
     ddcount = 0
     for line in lstf:
@@ -1679,17 +1678,8 @@ def merge_manifests(datavol, sessions=None, addcol=False):
 def merge_sessions(datavol, sources, target, clear_sources=False):
 
     volume = aset.vols[datavol]    ; resume = aset.in_process is not None
-    for ses in sources + [target]:
-        if volume.sessions[ses].format == "tar":
-            x_it(1, "Cannot merge range containing tarfile session.")
-
-    # Get volume size
     chdigits   = max_address.bit_length() // 4 # 4bits per digit
     chformat   = "x%0"+str(chdigits)+"x"
-    volsize    = volume.sessions[target].volsize
-    vol_shrank = volsize < volume.sessions[sources[0]].volsize
-    last_chunk = chformat % last_chunk_addr(volsize, aset.chunksize)
-    lc_filter  = '"'+last_chunk+'"'
 
     # Prepare manifests for efficient merge using fs mv/replace. The target is
     # included as a source, and oldest source is our target for mv. At the end
@@ -1700,6 +1690,14 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
     os.chdir(volume.path)
 
     if not resume:
+        for ses in sources + [target]:
+            if volume.sessions[ses].format == "tar":
+                x_it(1, "Cannot merge range containing tarfile session.")
+        volsize    = volume.sessions[target].volsize
+        vol_shrank = volsize < volume.sessions[sources[0]].volsize
+        last_chunk = chformat % last_chunk_addr(volsize, aset.chunksize)
+        lc_filter  = '"'+last_chunk+'"'
+
         with open("merge.tmp", "w") as lstf:
             print(merge_target, target, file=lstf)
 
@@ -1753,7 +1751,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
         set_in_process(["merge", datavol, str(clear_sources), target, sources])
 
     # Send new metadata and process lists to dest
-    do_exec([[CP.tar, "-cf", "-", "volinfo", "merge.tmp", target],
+    do_exec([[CP.tar, "-cf", "-", "volinfo", "merge.tmp", "" if resume else target],
             dest_run_args(desttype, [destcd + bkdir+"/"+datavol
             +" && tar -xmf -"
             +" && mv merge.tmp merge.lst"
@@ -2206,7 +2204,7 @@ if aset.in_process and dest_online:
         print("Unknown prior operation in progress:", aset.in_process[0:2])
         x_it(1,"Exiting.")
 elif dest_in_process:
-    x_it("Archive locked in_process without local indicator. Exiting.")
+    x_it(1, "Archive locked in_process without local indicator. Exiting.")
 
 
 # Check volume args against config
