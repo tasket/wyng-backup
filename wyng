@@ -211,8 +211,7 @@ class ArchiveSet:
         def save_volinfo(self, fname="volinfo"):
             with open(pjoin(self.path,fname), "w") as f:
                 print("format_ver =", format_version, file=f)
-                print("uuid =", self.uuid if self.uuid else str(uuid.uuid4()),
-                      file=f)
+                print("uuid =", self.uuid if self.uuid else str(uuid.uuid4()), file=f)
                 print("first =", self.first, file=f)
                 print("last =", self.last, file=f)
                 print("que_meta_update =", self.que_meta_update, file=f)
@@ -231,6 +230,7 @@ class ArchiveSet:
             self.sesnames.append(sname)
             self.sessions[sname] = ns
             self.archive.allsessions.insert(0, ns)
+            #os.makedirs(pjoin(self.path, sname))
             return ns
 
         def delete_session(self, sname):
@@ -247,7 +247,8 @@ class ArchiveSet:
             index = self.archive.allsessions.index(ses)
             del self.archive.allsessions[index]
 
-            shutil.rmtree(pjoin(self.path, sname))
+            if os.path.exists(pjoin(self.path, sname)):
+                shutil.rmtree(pjoin(self.path, sname))
             return affected
 
 
@@ -420,17 +421,16 @@ def arch_init(aset):
 # Get global configuration settings:
 
 def get_configs():
-    global metadir
     aname = "default"    ; bkdir = topdir + "/" + aname
 
     # Prepare a temporary metadata dir and init aset with it
     if options.from_arch:
-        metadir = tmpdir+"/var"
-        os.makedirs(metadir+bkdir)
-        aset = ArchiveSet(aname, metadir+topdir)
+        tmpmeta = tmpdir+"/var"    ; os.makedirs(tmpmeta+bkdir)
+        aset    = ArchiveSet(aname, tmpmeta+topdir)
         arch_init(aset)
+        return aset
     else:
-        aset = ArchiveSet(aname, metadir+topdir)
+        aset    = ArchiveSet(aname, metadir+topdir)
 
     if options.action == "arch-init" and not aset.destmountpoint:
         arch_init(aset)
@@ -444,29 +444,37 @@ def get_configs():
 
 
 def get_configs_remote():
-    aname = aset.name    ; make_local = False
+    make_local = False
     if not options.unattended:
-        print("\nMetadata will be read from the archive;")
-        print("Please check that the archive is in a trusted, secure condition!")
+        print("\nMetadata will be read from the archive;"
+              "\nPlease check that the archive is in a trusted, secure condition!")
         ans = input("\nProceed? [y/N] ")
         if ans.lower() not in ("y","yes"):
             x_it(0,"Stopped.")
 
-        print("\nDo you wish to store this metadata as the") ###-
-        ans = input("local configuration? [y/N] ")           ###-
-        make_local = ans.lower() in ("y","yes")              ###-
+        ans = input("\nDo you wish to permanently store this metadata as the"
+                    "\nlocal configuration? [y/N] ")
+        make_local = ans.lower() in ("y","yes")
 
-    # fix: shorten with do_exec pipe
-    dest_run([destcd + bkdir
-              +"  && "+CP.python+" "+tmpdir+"/rpc/dest_helper.py get-configs "
+    dest_run([destcd + bkdir +"  && "+CP.python+" "+tmpdir+"/rpc/dest_helper.py get-configs "
               +(options.volumes[0] if len(options.volumes)>0 else "")
              ], out=tmpdir+"/metadata.tgz")
 
-    do_exec([[CP.tar,"-xzf",tmpdir+"/metadata.tgz"]], cwd=metadir+bkdir)
-    if not os.path.exists(metadir+bkdir+"/archive.ini"):
+    do_exec([[CP.tar,"-xzf",tmpdir+"/metadata.tgz"]], cwd=aset.path)
+    if not os.path.exists(aset.path+"/archive.ini"):
         x_it(1,"Failed to retrieve remote configuration: No info.")
 
-    new_aset = ArchiveSet(aname, metadir+topdir)
+    if make_local:
+        if os.path.exists(metadir+bkdir):
+            os.replace(metadir+bkdir, metadir+bkdir+"-old-"+time.strftime("%m%d-%H%M%S"))
+        shutil.copytree(aset.path, metadir+bkdir)
+        new_path = metadir+topdir
+    else:
+        new_path = os.path.dirname(aset.path)
+
+    # Create final ArchiveSet object with imported config & current dest+local
+    new_aset = ArchiveSet(aset.name, new_path)   ; new_aset.destsys = aset.destsys
+    new_aset.destdir = aset.destdir              ; new_aset.destmountpoint= aset.destmountpoint
     if options.local:
         vgname, poolname = options.local.split("/")
         if not vg_exists(vgname):
@@ -475,6 +483,7 @@ def get_configs_remote():
             print("Warning: LV pool '%s' does not exist." % poolname)
         new_aset.vgname   = vgname    ; new_aset.poolname = poolname
 
+    new_aset.save_conf()
     return new_aset
 
 
@@ -1206,12 +1215,12 @@ def send_volume(datavol, localtime):
             +" && mv "+datavol+"/volinfo-tmp "+datavol+"/volinfo"
             +" && sync -f "+datavol+"/volinfo"])
         # Local finalize
-        os.replace(ses.path, ses.path[:-4])
-        ses.path = ses.path[:-4]
+        os.replace(ses.path, ses.path[:-4])    ; ses.path = ses.path[:-4]
         os.replace(vol.path+"/volinfo-tmp", vol.path+"/volinfo")
 
     else:
-        shutil.rmtree(metadir+bkdir+"/"+sdir+"-tmp")
+        vol.delete_session(bksession)
+        shutil.rmtree(aset.path+"/"+sdir+"-tmp")
 
     if bcount == 0:
         print("  No changes.")
@@ -1838,7 +1847,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
         # add session column to end of each line:
         do_exec([[CP.sed, "-E", "s|$| "+ses+"|", pjoin(ses,"manifest")]],
-                cwd=pjoin(metadir+bkdir,datavol), out=">>"+tmpdir+"/manifests.cat")
+                cwd=vol.path, out=">>"+tmpdir+"/manifests.cat")
 
     # Merge manifests and send to archive system:
     # sed is used to expand chunk info into a path and filter out any entries
@@ -1852,7 +1861,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             ],
             dest_run_args(desttype, ["cat >"+tmpdir+"/rpc/dest.lst"])
            ]
-    do_exec(cmds, cwd=pjoin(metadir+bkdir,datavol))
+    do_exec(cmds)
 
     # Prepare save volume
     if save_path:
@@ -2189,7 +2198,7 @@ if not os.path.exists(metadir+bkdir):
 
 
 # Handle unfinished in_process
-if aset.in_process and dest_online:
+if aset.in_process and dest_online and options.action != "arch-init":
     if aset.in_process[0] in ("delete","merge"):
         print("Completing prior operation in progress:", " ".join(aset.in_process[0:2]))
 
@@ -2302,8 +2311,14 @@ elif options.action == "add":
 elif options.action == "delete":
     delete_volume(selected_vols[0])
 
+
 elif options.action == "untar":
     raise NotImplementedError()
+
+
+elif options.action == "arch-init":
+    # handled by get_configs, get_configs_remote
+    pass
 
 
 elif options.action == "arch-delete":

@@ -123,8 +123,7 @@ Please note that dashed parameters are always placed before the command.
 --session=_date-time[,date-time]_ | Select a session or session range by date-time (receive, verify, prune).
 --all-before           | Select all sessions before the specified _--session date-time_ (prune).
 --save-to=_path_       | Required for `receive`: Specify a save path.
---from=_type:location_ | Retrieve from a specific unconfigured archive (receive, verify, list).
---tarfile              | Store backups as tar files (experimental).
+--from=_type:location_ | Retrieve from a specific unconfigured archive (receive, verify, list, arch-init).
 --remap                | Remap volume during `diff`.
 --local=_vg/pool_      | (arch-init) Specify pool containing local volumes.
 --dest=_type:location_ | (arch-init) Specify destination of backup archive.
@@ -179,7 +178,8 @@ Resizing is automatic if the path is a logical volume or regular file. For any
 
 _Emergency and Recovery situations:_ The `--from` option may be used to
 retreive from any Wyng archive that is not currently configured in the current
-system. It is specified just like the `--dest` option of `arch-init`:
+system. It is specified just like the `--dest` option of `arch-init`, and the
+`--local` option may also be added to override the LVM settings:
 
 ```
 
@@ -274,10 +274,18 @@ all of its *data* from the destination archive. Use with caution!
 
 #### arch-init
 
-Initializes a backup archive.
+Initialize a new backup archive configuration...
 ```
 
-wyng --source=myvg/mypool --dest=internal:/mountpoint arch-init
+wyng --local=myvg/mypool --dest=internal:/mountpoint arch-init
+
+
+```
+
+Import a configuration from an existing archive...
+```
+
+wyng --dest=internal:/mountpoint arch-init
 
 
 ```
@@ -285,13 +293,19 @@ wyng --source=myvg/mypool --dest=internal:/mountpoint arch-init
 
 Parameters:
 
-`--local` is required and takes the source volume group and pool as `vgname/poolname`.
+`--local` takes the source volume group and pool as `vgname/poolname`.
 These LVM objects don't have to exist before using `arch-init` but they will
 have to be there before using `send`.
 
-`--dest` is required and describes the location where backups will be sent.
-It accepts one of the following forms, always ending
-in a mountpoint path:
+`--dest` describes the location where backups will be sent.
+It accepts one of the following forms, always ending in a mountpoint path:
+
+Note: --local and --dest are required if not using --from.
+
+`--from` accepts a URL like `--dest`, but retrieves the configuration from an existing archive.
+This imports the archive's configuration and can permanently save it as the
+local configuration. Note: You can override the archive's LVM settings by specifying
+`--local`.
 
 | _URL Form_ | _Destination Type_
 |----------|-----------------
@@ -437,9 +451,9 @@ here are some encryption approaches you can use to secure your backup archives:
 
 Donations
 ---
-<a href="https://liberapay.com/tasket/donate"><img alt="Donate using Liberapay" src="images/lp_donate.svg" height=54></a>
+<a href="https://liberapay.com/tasket/donate"><img alt="Donate using Liberapay" src="media/lp_donate.svg" height=54></a>
 
-<a href="https://www.patreon.com/tasket"><img alt="Donate with Patreon" src="images/become_a_patron_button.png" height=50></a>
+<a href="https://www.patreon.com/tasket"><img alt="Donate with Patreon" src="media/become_a_patron_button.png" height=50></a>
 
 If you like Wyng or my other efforts, monetary contributions are welcome and can
 be made through [Liberapay](https://liberapay.com/tasket/donate)
