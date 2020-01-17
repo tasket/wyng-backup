@@ -2,7 +2,7 @@
 
 
 ###  Wyng – Logical volume backup tool
-###  Copyright Christopher Laprise 2018-2019 / tasket@github.com
+###  Copyright Christopher Laprise 2018-2020 / tasket@protonmail.com
 ###  Licensed under GNU General Public License v3. See file 'LICENSE'.
 
 
@@ -53,13 +53,13 @@ class ArchiveSet:
             setattr(self, name, int(cp["var"][name]) \
                                 if name in self.a_ints else cp["var"][name])
 
-        # Convert old path to new
-        if os.path.exists(top+"/"+self.vgname+"%"+self.poolname):
-            os.rename(top+"/"+self.vgname+"%"+self.poolname, top+"/"+self.name)
-        if "destvm" in cp["var"].keys(): ##
-            self.destsys = self.destvm   ##
-            del cp["var"]["destvm"]
-            self.save_conf()
+        # Convert old path to new - deprecated
+        #if os.path.exists(top+"/"+self.vgname+"%"+self.poolname):
+            #os.rename(top+"/"+self.vgname+"%"+self.poolname, top+"/"+self.name)
+        #if "destvm" in cp["var"].keys():
+            #self.destsys = self.destvm
+            #del cp["var"]["destvm"]
+            #self.save_conf()
         if self.destsys.startswith("qubes-ssh://") and self.destsys.find("|") > 0:
             self.destsys = self.destsys.replace("|",":",1)
             self.save_conf()
@@ -366,10 +366,10 @@ def lv_remove(vgname, lvname):
 def arch_init(aset):
     if not options.from_arch:
         if not options.local or not options.dest:
-            x_it(1,"--local and --dest are required.")
+            x_it(1,"--local and --dest are required together.")
     elif options.dest:
         x_it(1,"--from and --dest cannot be used together.")
-    else:
+    if options.local:
         vgname, poolname = options.local.split("/")
         if not vg_exists(vgname):
             print("Warning: Volume group '%s' does not exist." % vgname)
@@ -448,7 +448,7 @@ def get_configs_remote():
     if not options.unattended:
         print("\nMetadata will be read from the archive;"
               "\nPlease check that the archive is in a trusted, secure condition!")
-        ans = input("\nProceed? [y/N] ")
+        ans = input("Proceed? [y/N] ")
         if ans.lower() not in ("y","yes"):
             x_it(0,"Stopped.")
 
@@ -599,8 +599,8 @@ def detect_dest_state(destsys):
                         "qubes-ssh":[CP.qvm_run, "-p", destsys.split(":")[0]]
                         }
 
-    if options.action not in {"index-test","monitor","list","version","add"} \
-                            and destsys is not None:
+    if (options.action not in {"index-test","monitor","list","version","add"} \
+        and destsys is not None) or options.from_arch:
 
         if desttype == "qubes-ssh":
             dargs = dest_run_map["qubes"][:-1] + [destsys.split(":")[0]]
@@ -621,24 +621,25 @@ def detect_dest_state(destsys):
                     +"' && mkdir -p '"+aset.destmountpoint+"/"+aset.destdir+topdir
                     +"' && cd '"+aset.destmountpoint+"/"+aset.destdir+topdir+"'"
 
+                    # send helper program to remote dest
+                    +((" && rm -rf "+tmpdir+"  &&  mkdir -p "+tmpdir+"/rpc"
+                      +" && cat >"+tmpdir+"/rpc/dest_helper.py"
+                     ) if desttype != "internal" else "")
+
+                    # check in_process status on remote
                     +"  && { if [ -e "+aset.name+"/in_process ]; then"
                     +"  echo 'in_process yes'; fi }"
 
-                    +"  && { if [ -d "+aset.vgname+"%"+aset.poolname+" ]; then"
-                    +"  mv "+aset.vgname+"%"+aset.poolname+" "+aset.name+"; fi }"
+                    # deprecated
+                    #+"  && { if [ -d "+aset.vgname+"%"+aset.poolname+" ]; then"
+                    #+"  mv "+aset.vgname+"%"+aset.poolname+" "+aset.name+"; fi }"
 
                     +"  && touch archive.dat"
                     +(" && ln -f archive.dat .hardlink" if options.dedup else "")
                     ]
-            dest_run(cmd, out=tmpdir+"/dest-state-log")
+            dest_run(cmd, out=tmpdir+"/dest-state-log",
+                     infile=tmpdir+"/rpc/dest_helper.py" if desttype != "internal" else "")
 
-            # send helper program to remote
-            if desttype != "internal":
-                cmd = ["rm -rf "+tmpdir
-                      +" && mkdir -p "+tmpdir+"/rpc"
-                      +" && cat >"+tmpdir+"/rpc/dest_helper.py"
-                      ]
-                dest_run(cmd, infile=tmpdir+"/rpc/dest_helper.py")
         except subprocess.CalledProcessError:
             online = False
 
@@ -709,13 +710,14 @@ def do_exec(commands, cwd=None, check=True, out="", infile=""):
         infile = pjoin(cwd,infile)
     outf = open(out, outmode) if out else subprocess.DEVNULL
     inf  = open(infile, "rb") if infile else subprocess.DEVNULL
+    errf = open(tmpdir+"/err.log", "a")  ; print("--+--", file=errf)
 
     # Start each command, linking them via pipes
     procs = []
     for i, clist in enumerate(commands):
         p = subprocess.Popen(clist, stdin=inf if i==0 else procs[i-1].stdout,
                              stdout=outf if i==len(commands)-1 else subprocess.PIPE,
-                             stderr=subprocess.DEVNULL, cwd=cwd)
+                             stderr=errf, cwd=cwd)
         procs.append(p)
 
     # Monitor and control processes
@@ -742,10 +744,12 @@ def do_exec(commands, cwd=None, check=True, out="", infile=""):
         # else:
         #     print("##", end="", flush=True)
 
-    for f in [inf, outf]:
+    for f in [inf, outf, errf]:
         if type(f) is not int: f.close()
     if err and check:
         raise subprocess.CalledProcessError(err.returncode, err.args)
+
+    return procs[-1].returncode
 
 
 # Run system commands on destination
@@ -2278,9 +2282,9 @@ elif options.action == "diff":
 
 elif options.action == "list":
     if not selected_vols:
-        print("Configured Volumes:\n")
+        print("\nConfigured Volumes [%s/%s]\n" % (aset.vgname, aset.poolname))
         for vol in datavols:
-            print(" ", vol)
+            print("%7.1fGB" % (aset.vols[vol].volsize / 1024**3), vol)
 
     for dv in selected_vols:
         print("Sessions for volume",dv,":")
@@ -2354,5 +2358,3 @@ elif options.action == "test":
     #merge_manifests("root", addcol=True)
     #merge_sessions("root", aset.vols["root"].sesnames[:-1],  aset.vols["root"].sesnames[-1], clear_sources=True)
 
-
-print("\nDone.\n")\
