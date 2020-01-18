@@ -297,7 +297,8 @@ class CP:
     sh   = "/bin/sh"         ; tar   = "/bin/tar"        ; touch    = "/usr/bin/touch"
     rm   = "/bin/rm"         ; lvm   = "/sbin/lvm"       ; qvm_run  = "/usr/bin/qvm-run"
     tee  = "/usr/bin/tee"    ; sync  = "/bin/sync"       ; dmsetup  = "/sbin/dmsetup"
-    find = "/usr/bin/find"   ; xargs = "/usr/bin/xargs"
+    find = "/usr/bin/find"   ; xargs = "/usr/bin/xargs"  ; sha256sum= "/usr/bin/sha256sum"
+    cmp  = "/usr/bin/cmp"
     mountpoint = "/bin/mountpoint"    ; thin_delta = "/usr/sbin/thin_delta"
     blkdiscard = "/sbin/blkdiscard"
 
@@ -452,8 +453,8 @@ def get_configs_remote():
         if ans.lower() not in ("y","yes"):
             x_it(0,"Stopped.")
 
-        ans = input("\nDo you wish to permanently store this metadata as the"
-                    "\nlocal configuration? [y/N] ")
+        ans = input("\nOptional: Permanently import this metadata,"
+                    "\nreplacing the local configuration? [y/N] ")
         make_local = ans.lower() in ("y","yes")
 
     dest_run([destcd + bkdir +"  && "+CP.python+" "+tmpdir+"/rpc/dest_helper.py get-configs "
@@ -516,7 +517,7 @@ def detect_internal_state():
     #####>  Begin helper program  <#####
 
     dest_program = \
-    '''import os, sys, shutil, subprocess
+    '''import os, sys, shutil, subprocess, hashlib
 cmd = sys.argv[1] ;    tmpdir = "''' + tmpdir + '''"
 exists = os.path.exists   ; replace = os.replace;   remove = os.remove
 if cmd != "merge" and exists(tmpdir + "/rpc/dest.lst"):
@@ -1830,12 +1831,16 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         if ans.lower() not in {"y","yes"}:
             x_it(0,"")
 
-    print("\nReading manifests")
+    print("\nReading manifests..")
     chdigits    = max_address.bit_length() // 4 # 4bits per digit
     chformat    = "x%0"+str(chdigits)+"x"
     lchunk_addr = last_chunk_addr(volsize, chunksize)
     last_chunkx = chformat % lchunk_addr
+
+    # begin metadata hashes
     open(tmpdir+"/manifests.cat", "wb").close()
+    hashf       = open(tmpdir+"/file-hashes.lst", "w")
+    print(pjoin(datavol, "volinfo"), file=hashf)
 
     # Collect session manifests
     include = False
@@ -1849,9 +1854,24 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             raise NotImplementedError(
                 "Receive from tarfile not yet implemented: "+ses)
 
+        # metadata hashes
+        print(pjoin(datavol, ses, "manifest"), file=hashf)
         # add session column to end of each line:
         do_exec([[CP.sed, "-E", "s|$| "+ses+"|", pjoin(ses,"manifest")]],
                 cwd=vol.path, out=">>"+tmpdir+"/manifests.cat")
+
+    # compare metadata hashes
+    hashf.close()
+    if not options.from_arch:
+        print("Checking metadata..")
+        do_exec([[CP.xargs, CP.sha256sum]], cwd=aset.path,
+                 infile=tmpdir+"/file-hashes.lst", out=tmpdir+"/file-hashes.local")
+        dest_run([destcd + bkdir +" && xargs sha256sum"],
+                 infile=tmpdir+"/file-hashes.lst", out=tmpdir+"/file-hashes.dest")
+        # maybe switch cmp to diff/sha256sum if they are safe enough to read untrusted input
+        if do_exec([[CP.cmp, tmpdir+"/file-hashes.local", tmpdir+"/file-hashes.dest"]],
+                   check=False) > 0:
+            x_it(1, "Local and archive metadata differ.")
 
     # Merge manifests and send to archive system:
     # sed is used to expand chunk info into a path and filter out any entries
@@ -2284,7 +2304,7 @@ elif options.action == "list":
     if not selected_vols:
         print("\nConfigured Volumes [%s/%s]\n" % (aset.vgname, aset.poolname))
         for vol in datavols:
-            print("%7.1fGB" % (aset.vols[vol].volsize / 1024**3), vol)
+            print("%7.1f GB  %s" % ((aset.vols[vol].volsize / 1024**3), vol))
 
     for dv in selected_vols:
         print("Sessions for volume",dv,":")
