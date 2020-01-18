@@ -1965,13 +1965,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             untrusted_size = int.from_bytes(getvol.stdout.read(4),"big")
 
             if cksum.strip() == "0":
-                if untrusted_size != 0:
-                    raise ValueError("Expected size 0, got %d at %s %s." 
-                                     % (untrusted_size, ses, fname))
-
-                if attended:
-                    print("OK",end="\x0d")
-
+                if attended:  print("OK",end="\x0d")
                 if save_path:
                     savef.seek(chunksize, 1)
                 elif diff:
