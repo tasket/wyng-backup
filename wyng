@@ -424,8 +424,8 @@ def arch_init(aset):
 def get_configs():
     aname = "default"    ; bkdir = topdir + "/" + aname
 
-    # Prepare a temporary metadata dir and init aset with it
     if options.from_arch:
+        # Prepare a temporary metadata dir and init aset with it
         tmpmeta = tmpdir+"/var"    ; os.makedirs(tmpmeta+bkdir)
         aset    = ArchiveSet(aname, tmpmeta+topdir)
         arch_init(aset)
@@ -445,7 +445,7 @@ def get_configs():
 
 
 def get_configs_remote():
-    make_local = False
+    make_local = options.action == "arch-init"
     if not options.unattended:
         print("\nMetadata will be read from the archive;"
               "\nPlease check that the archive is in a trusted, secure condition!")
@@ -453,9 +453,10 @@ def get_configs_remote():
         if ans.lower() not in ("y","yes"):
             x_it(0,"Stopped.")
 
-        ans = input("\nOptional: Permanently import this metadata,"
-                    "\nreplacing the local configuration? [y/N] ")
-        make_local = ans.lower() in ("y","yes")
+        if options.action != "arch-init":
+            ans = input("\nOptional: Permanently import this metadata,"
+                        "\nreplacing the local configuration? [y/N] ")
+            make_local = ans.lower() in ("y","yes")
 
     dest_run([destcd + bkdir +"  && "+CP.python+" "+tmpdir+"/rpc/dest_helper.py get-configs "
               +(options.volumes[0] if len(options.volumes)>0 else "")
@@ -467,7 +468,8 @@ def get_configs_remote():
 
     if make_local:
         if os.path.exists(metadir+bkdir):
-            os.replace(metadir+bkdir, metadir+bkdir+"-old-"+time.strftime("%m%d-%H%M%S"))
+            os.replace(metadir+bkdir,
+                       metadir+"/wyng.old"+bkdir+"--"+time.strftime("%m%d-%H%M%S"))
         shutil.copytree(aset.path, metadir+bkdir)
         new_path = metadir+topdir
     else:
@@ -2142,12 +2144,12 @@ try:
 except IOError:
     x_it(1, "ERROR: "+prog_name+" is already running.")
 
-# Create our tmp dir
+# Create our tmp and meta dirs
 shutil.rmtree(tmpdir+"-old", ignore_errors=True)
 if os.path.exists(tmpdir):
     os.rename(tmpdir, tmpdir+"-old")
 os.makedirs(tmpdir+"/rpc")
-
+os.makedirs(metadir+"/wyng.old", exist_ok=True)
 
 # Parse Arguments:
 parser = argparse.ArgumentParser(description="")
@@ -2214,11 +2216,12 @@ if not dest_online and options.action not in {"index-test","monitor","list","ver
     x_it(1, "Destination not ready to receive commands.")
 if options.from_arch:
     aset         = get_configs_remote()
+
 datavols         = aset.vols.keys()
+os.makedirs(metadir+bkdir, exist_ok=True)
+
 if aset.vgname in volgroups.keys():
     l_vols       = volgroups[aset.vgname].lvs
-if not os.path.exists(metadir+bkdir):
-    os.makedirs(metadir+bkdir)
 
 
 # Handle unfinished in_process
