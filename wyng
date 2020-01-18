@@ -469,7 +469,7 @@ def get_configs_remote():
     if make_local:
         if os.path.exists(metadir+bkdir):
             os.replace(metadir+bkdir,
-                       metadir+"/wyng.old"+bkdir+"--"+time.strftime("%m%d-%H%M%S"))
+                       metadir+topdir+"/wyng.old/"+aset.name+"--"+time.strftime("%m%d-%H%M%S"))
         shutil.copytree(aset.path, metadir+bkdir)
         new_path = metadir+topdir
     else:
@@ -2149,7 +2149,7 @@ shutil.rmtree(tmpdir+"-old", ignore_errors=True)
 if os.path.exists(tmpdir):
     os.rename(tmpdir, tmpdir+"-old")
 os.makedirs(tmpdir+"/rpc")
-os.makedirs(metadir+"/wyng.old", exist_ok=True)
+os.makedirs(metadir+topdir+"/wyng.old", exist_ok=True)
 
 # Parse Arguments:
 parser = argparse.ArgumentParser(description="")
