@@ -53,13 +53,7 @@ class ArchiveSet:
             setattr(self, name, int(cp["var"][name]) \
                                 if name in self.a_ints else cp["var"][name])
 
-        # Convert old path to new - deprecated
-        #if os.path.exists(top+"/"+self.vgname+"%"+self.poolname):
-            #os.rename(top+"/"+self.vgname+"%"+self.poolname, top+"/"+self.name)
-        #if "destvm" in cp["var"].keys():
-            #self.destsys = self.destvm
-            #del cp["var"]["destvm"]
-            #self.save_conf()
+        # convert old delimiter to colon
         if self.destsys.startswith("qubes-ssh://") and self.destsys.find("|") > 0:
             self.destsys = self.destsys.replace("|",":",1)
             self.save_conf()
@@ -617,7 +611,6 @@ def detect_dest_state(destsys):
             do_exec([cmd])
 
         # Fix: get OSTYPE env variable
-        # Cleanup: remove 'if' section later
         online = True
         try:
             cmd = ["mountpoint -q '"+aset.destmountpoint
@@ -633,10 +626,6 @@ def detect_dest_state(destsys):
                     +"  && { if [ -e "+aset.name+"/in_process ]; then"
                     +"  echo 'in_process yes'; fi }"
 
-                    # deprecated
-                    #+"  && { if [ -d "+aset.vgname+"%"+aset.poolname+" ]; then"
-                    #+"  mv "+aset.vgname+"%"+aset.poolname+" "+aset.name+"; fi }"
-
                     +"  && touch archive.dat"
                     +(" && ln -f archive.dat .hardlink" if options.dedup else "")
                     ]
@@ -649,16 +638,9 @@ def detect_dest_state(destsys):
     else:
         online = False
 
-    dest_in_process = False
-    if online:
-        try:
-            do_exec([[CP.grep, "in_process yes", tmpdir+"/dest-state-log"]])
-        except subprocess.CalledProcessError:
-            pass
-        else:
-            dest_in_process = True
-
-    return online, dest_in_process
+    dest_in_proc = online and do_exec([[CP.grep, "in_process yes", tmpdir+"/dest-state-log"]],
+                                      check=False) == 0
+    return online, dest_in_proc
 
 
 # Set or clear state for the archive as 'in_process' in case of interruption during write.
@@ -854,7 +836,6 @@ def prepare_snapshots(datavols):
         # Make current snapshot
         do_exec([[CP.lvm, "lvcreate", "-pr", "-kn", "-ay",
             "-s", vgname+"/"+datavol, "-n",snap2vol]])
-        #print("  Current snapshot created:", snap2vol)
 
         if datavol not in nvs:
             dvs.append(datavol)
@@ -1591,9 +1572,9 @@ def prune_sessions(datavol, times):
     # t1 and t2 together are a date-time range.
     t1 = "S_"+times[0].strip()
     if len(times) > 1:
+        if options.allbefore:  x_it(1, "Error: --all-before cannot be used with range.")
         t2 = "S_"+times[1].strip()
-        if t2 <= t1:
-            x_it(1, "Error: second date-time must be later than first.")
+        if t2 <= t1:  x_it(1, "Error: Second date-time must be later than first.")
     else:
         t2 = ""
 
@@ -2219,7 +2200,8 @@ if aset.vgname in volgroups.keys():
 
 
 # Handle unfinished in_process
-if aset.in_process and dest_online and options.action != "arch-init":
+if aset.in_process and dest_online and not aset.path.startswith(tmpdir) \
+    and options.action != "arch-init":
     if aset.in_process[0] in ("delete","merge"):
         print("Completing prior operation in progress:", " ".join(aset.in_process[0:2]))
 
