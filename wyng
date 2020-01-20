@@ -10,7 +10,7 @@
 #  editor width: 96  --------------------------------------------------------------------------
 import sys, os, stat, shutil, subprocess, time, datetime
 import re, mmap, zlib, tarfile, io, fcntl, tempfile
-import argparse, configparser, hashlib, uuid
+import argparse, configparser, hashlib, functools, uuid
 import xml.etree.ElementTree
 # For deduplication tests:
 import ctypes, sqlite3, resource
@@ -395,13 +395,20 @@ def arch_init(aset):
     if options.from_arch:
         return
 
+    if options.hashtype:
+        if options.hashtype not in ("sha256","blake2b"):
+            x_it(1, "Invalid hash function spec.")
+        aset.hashtype = options.hashtype
+
     if options.compression:
         if ":" in options.compression:
             compression, compr_level = options.compression.strip().split(":")
-            aset.compr_level = compr_level
-        if compression not in {"zlib"}:
+            aset.compr_level = compr_level.strip()
+        else:
+            compression = options.compression.strip()
+        if compression not in {"zlib"} or not compr_level.isdecimal():
             x_it(1, "Invalid compression spec.")
-        ## aset.compression = compression
+        aset.compression = compression
 
     if options.chfactor:
         aset.chunksize = int(options.chfactor) * bkchunksize
@@ -944,7 +951,7 @@ def send_volume(datavol, localtime):
     ses = vol.new_session(bksession)
     ses.localtime = localtime
     ses.volsize   = snap2size
-    ses.format    = "tar" if options.tarfile else "folders"
+    ses.format    = "folders" #"tar" if options.tarfile else "folders"
     ses.path      = vol.path+"/"+bksession+"-tmp"
 
     # testing deduplication types:
@@ -1012,7 +1019,7 @@ def send_volume(datavol, localtime):
                 +" && mkdir -p ."+bkdir+"/"+sdir+"-tmp" \
                 +" && "+destcd + bkdir                  \
                 +" && rm -f .set"
-    if options.tarfile:
+    if False and options.tarfile: # deprecated
         # don't untar at destination
         untar_cmd = [ untar_cmd
                     +" && cat >"+pjoin(sdir+"-tmp",bksession+".tar")]
@@ -1028,7 +1035,7 @@ def send_volume(datavol, localtime):
         bmap_mm = bytes(1) if send_all else mmap.mmap(bmapf.fileno(), 0)
         # data_mm = mmap.mmap(vf.fileno(), snap2size, access=mmap.ACCESS_READ)
         vf_seek = vf.seek; vf_read = vf.read
-        sha256 = hashlib.sha256; BytesIO = io.BytesIO
+        gethash = hash_funcs[aset.hashtype]   ; BytesIO = io.BytesIO
 
         # Show progress in increments determined by 1000/checkpt_pct
         # where '200' results in five updates i.e. in unattended mode.
@@ -1075,7 +1082,7 @@ def send_volume(datavol, localtime):
 
                 # Performance fix: move compression into separate processes
                 buf      = compress(buf, compresslevel)
-                bhash    = sha256(buf)
+                bhash    = gethash(buf)
                 # Add buffer to stream
                 tar_info = TarInfo("%s-tmp/%s/%s" % 
                                 (sdir, destfile[1:addrsplit], destfile))
@@ -1384,7 +1391,7 @@ def init_dedup_index5(listfile=""):
 
     ctime = time.time()
     # Define arrays and element widths
-    hashdigits = 256 // 4  # sha256 @4bits per hex digit
+    hashdigits = 256 // 4  # 256 @4bits per hex digit
     hash_w     = hashdigits // 2
     ht_ksize   = 4 # hex digits for tree key
     hashtree   = [bytearray() for x in range(2**(ht_ksize*4))]
@@ -1496,7 +1503,7 @@ def monitor_send(datavols, selected=[], monitor_only=True):
     if not monitor_only:
         print("\nSending backup session", localtime,
               "to", (desttype+"://"+destsys) if \
-                  desttype != "internal" else aset.destmountpoint)
+                  desttype != "internal" else destpath)
 
     for datavol in datavols+newvols:
         print("\nVolume :", datavol, flush=True)
@@ -1783,6 +1790,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     #assert not (save_path and (diff or verify_only))
     attended    = not options.unattended
     remap       = options.remap
+    gethash     = hash_funcs[aset.hashtype] 
 
     vgname    = aset.vgname
     vol       = aset.vols[datavol]
@@ -1973,11 +1981,10 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                     dump.write(untrusted_buf)
                 raise BufferError("Got %d bytes, expected %d"
                                   % (len(untrusted_buf), size))
-            if cksum != hashlib.sha256(untrusted_buf).hexdigest():
+            if cksum != gethash(untrusted_buf).hexdigest():
                 with open(tmpdir+"/bufdump", "wb") as dump:
                     dump.write(untrusted_buf)
-                raise ValueError("Bad hash "+fname
-                    +" :: "+hashlib.sha256(untrusted_buf).hexdigest())
+                raise ValueError("Bad hash "+fname+" :: "+gethash(untrusted_buf).hexdigest())
 
             # Proceed with decompress.
             # fix for zstd support
@@ -2007,7 +2014,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                              % (addr+len(buf), volsize))
         print("100%")
         print("Received range:", addr+len(buf))
-        print("    data bytes:", bcount)
+        print("    Data bytes:", bcount)
 
         if save_path:
             savef.flush() ; savef.close()
@@ -2128,9 +2135,8 @@ os.makedirs(metadir+topdir+"/wyng.old", exist_ok=True)
 
 # Parse Arguments:
 parser = argparse.ArgumentParser(description="")
-parser.add_argument("action", choices=["send","monitor","add","delete",
-                    "prune","receive","verify","diff","list","version",
-                    "arch-init","arch-delete",
+parser.add_argument("action", choices=["send","monitor","add","delete","prune","receive",
+                    "verify","diff","list","version","arch-init","arch-delete",
                     "arch-deduplicate","index-test","test"],
                     default="monitor", help="Action to take")
 parser.add_argument("-u", "--unattended", action="store_true", default=False,
@@ -2139,8 +2145,8 @@ parser.add_argument("-a", "--all", action="store_true", default=False,
                     help="Apply action to all volumes")
 parser.add_argument("--all-before", dest="allbefore", action="store_true", default=False,
                     help="Select all sessions before --session date-time.")
-parser.add_argument("--tarfile", action="store_true", dest="tarfile", default=False,
-                    help="Store backup session as a tarfile")
+#parser.add_argument("--tarfile", action="store_true", dest="tarfile", default=False,
+#                    help="Store backup session as a tarfile")
 parser.add_argument("--session", help="YYYYMMDD-HHMMSS[,YYYYMMDD-HHMMSS]"
                                  " select session date(s), singular or range.")
 parser.add_argument("--save-to", dest="saveto", default="",
@@ -2156,7 +2162,9 @@ parser.add_argument("--dest", default="",
 parser.add_argument("--subdir", default="",
                     help="Init: optional subdir for --dest")
 parser.add_argument("--compression", default="",
-                    help="Init: optional subdir for --dest")
+                    help="Init: compression type:level")
+parser.add_argument("--hashtype", default="",
+                    help="Init: hash function type")
 parser.add_argument("--chunk-factor", dest="chfactor", type=int,
                     help="Init: set chunk size to N*64kB")
 #parser.add_argument("--deltas", action="store_true", default=False,
@@ -2170,6 +2178,11 @@ options = parser.parse_args()
 
 
 # General Configuration:
+
+
+hash_funcs       = {"sha256": hashlib.sha256}
+if sys.hexversion >= 0x3060000:
+    hash_funcs["blake2b"] = functools.partial(hashlib.blake2b, digest_size=32)
 
 # Check --from usage (access other/unconfigured archive).
 if options.from_arch and options.action not in ("receive","verify","list","arch-init"):
@@ -2286,7 +2299,7 @@ elif options.action == "list":
             print("%7.1f GB  %s" % ((aset.vols[vol].volsize / 1024**3), vol))
 
     for dv in selected_vols:
-        print("Sessions for volume",dv,":")
+        print("\nSessions for volume",dv,":")
         vol = aset.vols[dv]
         lmonth = ""; count = 0; ending = "."
         for ses in vol.sesnames:
