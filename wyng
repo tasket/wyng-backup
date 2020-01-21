@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python36
 
 
 ###  Wyng – Logical volume backup tool
@@ -32,7 +32,7 @@ class ArchiveSet:
         self.chunksize   = bkchunksize
         self.compression = "zlib"
         self.compr_level = "4"
-        self.hashtype    = "sha256"
+        self.hashtype    = "blake2b" if "blake2b" in hash_funcs else "sha256"
         self.vgname      = None
         self.poolname    = None
         self.destsys     = None
@@ -270,11 +270,11 @@ class ArchiveSet:
                     if self.localtime is None or self.localtime == "None":
                         self.localtime = self.name[2:]
 
-            def save_info(self):
+            def save_info(self, fname="info"):
                 if not self.path:
                     raise ValueError("Path not set for save_info")
                 self.volume.volsize = self.volsize
-                with open(pjoin(self.path,"info"), "w") as f:
+                with open(pjoin(self.path,fname), "w") as f:
                     print("localtime =", self.localtime, file=f)
                     print("volsize =",   self.volsize, file=f)
                     print("format =",    self.format, file=f)
@@ -356,6 +356,14 @@ def lv_remove(vgname, lvname):
     do_exec([[CP.lvm,"lvremove", "-f",vgname+"/"+lvname]])
 
 
+# Reserve or release lvm thinpool metadata snapshot.
+# arch must be a configured ArchiveSet; action must be "reserve" or "release".
+def lvm_meta_snapshot(arch, action):
+    checkerr = action == "reserve"
+    do_exec([[CP.dmsetup,"message", arch.vgname+"-"+arch.poolname+"-tpool",
+              "0", action+"_metadata_snap"]], check=checkerr)
+
+
 # Initialize a new ArchiveSet:
 
 def arch_init(aset):
@@ -430,9 +438,12 @@ def get_configs():
         tmpmeta = tmpdir+"/var"    ; os.makedirs(tmpmeta+bkdir)
         aset    = ArchiveSet(aname, tmpmeta+topdir)
         arch_init(aset)
-        return aset
     else:
         aset    = ArchiveSet(aname, metadir+topdir)
+
+    lvm_meta_snapshot(aset, "release")
+    if options.from_arch:
+        return aset
 
     if options.action == "arch-init" and not aset.destmountpoint:
         arch_init(aset)
@@ -487,6 +498,7 @@ def get_configs_remote():
             print("Warning: LV pool '%s' does not exist." % poolname)
         new_aset.vgname   = vgname    ; new_aset.poolname = poolname
 
+    lvm_meta_snapshot(new_aset, "release")
     new_aset.save_conf()
     return new_aset
 
@@ -856,10 +868,8 @@ def get_lvm_deltas(datavols):
     vgname   = aset.vgname    ; poolname = aset.poolname
     print("Acquiring deltas.")
 
-    do_exec([[CP.dmsetup,"message", vgname+"-"+poolname+"-tpool",
-              "0", "release_metadata_snap"]], check=False)
-    do_exec([[CP.dmsetup,"message", vgname+"-"+poolname+"-tpool",
-              "0", "reserve_metadata_snap"]])
+    lvm_meta_snapshot(aset, "reserve")
+
     err = False
     for datavol in datavols:
         snap1vol = datavol + ".tick"    ; snap2vol = datavol + ".tock"
@@ -871,10 +881,11 @@ def get_lvm_deltas(datavols):
                     ],  out=tmpdir+"/delta."+datavol )
         except:
             err = True
-            break
+        finally:
+            lvm_meta_snapshot(aset, "release")
 
-    do_exec([[CP.dmsetup,"message", vgname+"-"+poolname+"-tpool",
-              "0", "release_metadata_snap"]], check=not err)
+        if err:  break
+
     if err:
         x_it(1, "ERROR running thin_delta process.")
 
