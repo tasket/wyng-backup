@@ -1,4 +1,4 @@
-#!/usr/bin/env python36
+#!/usr/bin/env python3
 
 
 ###  Wyng – Logical volume backup tool
@@ -227,21 +227,20 @@ class ArchiveSet:
             #os.makedirs(pjoin(self.path, sname))
             return ns
 
-        def delete_session(self, sname):
+        def delete_session(self, sname, remove=True):
             ses = self.sessions[sname]
             if sname == self.last:
                 raise NotImplementedError("Cannot delete last session")
             index = self.sesnames.index(sname)
             affected = self.sesnames[index+1]
             self.sessions[affected].previous = ses.previous
-            if index == 0:
-                self.first = self.sesnames[1]
+            if index == 0:  self.first = self.sesnames[1]
             del self.sesnames[index]
             del self.sessions[sname]
             index = self.archive.allsessions.index(ses)
             del self.archive.allsessions[index]
 
-            if os.path.exists(pjoin(self.path, sname)):
+            if remove and os.path.exists(pjoin(self.path, sname)):
                 shutil.rmtree(pjoin(self.path, sname))
             return affected
 
@@ -546,8 +545,9 @@ if cmd == "receive":
             with open(fname,"rb") as dataf:
                 i = sys.stdout.buffer.write(dataf.read(fsize))
 elif cmd == "merge":
-    if not exists("volinfo") or not exists("../archive.ini"):
-        print("Error: Not in a volume dir.")   ; sys.exit(1)
+    if not exists("../archive.ini") or not exists("volinfo"):
+        print("Error: Not in volume dir.")   ; sys.exit(40)
+    if not exists("merge.lst"):  print("Error: No merge.lst file.")   ; sys.exit(41)
     resume = "--resume" in sys.argv   ; src_list = []   ; subdirs = set()
     lstf = open("merge.lst", "r")
     merge_target, target = lstf.readline().strip().split()
@@ -589,13 +589,16 @@ elif cmd == "merge":
         elif ln[0] == "rm" and exists(ln[1]):
             remove(ln[1])
     open("CHECK-END-mv-rm","w").close()
+    open("CHECK-"+target,"w").close() ####
     print("Merge: Finalize tmp.")   ; open("CHECK-finalize-tmp","w").close()   ; lstf.close()
-    if exists(target+"/info.tmp"):      replace(target+"/info.tmp", merge_target+"/info")
-    if exists(target+"/manifest.tmp"):  replace(target+"/manifest.tmp", merge_target+"/manifest")
+    for f in ("/info", "/manifest"):
+        if exists(target+f+".tmp"):  replace(target+f+".tmp", merge_target+f)
+    if exists("../volinfo.tmp"):     replace("../volinfo.tmp", "../volinfo")
     print("Merge: Finalize target dir.")   ; open("CHECK-finalize-target","w").close()
     # CD
     os.chdir("..")   ; replace("merge/"+merge_target, target)   ; remove("../in_process")
     shutil.rmtree("merge", ignore_errors=True)   ; remove(lstf.name)
+
 elif cmd == "dedup":
     ddcount = 0
     for line in lstf:
@@ -684,12 +687,12 @@ def detect_dest_state(destsys):
 # Set or clear state for the archive as 'in_process' in case of interruption during write.
 # Format is list containing strings or list of strings. For latter, '/' is the delimiter.
 
-def set_in_process(outer_list, tmp=False, dest=True, clear=False):
+def set_in_process(outer_list, tmp=False, dest=True):
 
-    if clear:
-        dest_run([destcd + bkdir + " && rm -f in_process"])
-        if os.path.exists(aset.path+"/in_process"):
-            os.remove(aset.path+"/in_process")
+    if outer_list is None:
+        if dest:  dest_run([destcd + bkdir + " && rm -f in_process"])
+        for ext in ("", ".tmp", "_retry"):
+            if os.path.exists(aset.path+"/in_process"+ext):  os.remove(aset.path+"/in_process"+ext)
         aset.in_process = None
         return
 
@@ -741,9 +744,9 @@ def do_exec(commands, cwd=None, check=True, out="", infile=""):
     # Start each command, linking them via pipes
     procs = []
     for i, clist in enumerate(commands):
-        p = subprocess.Popen(clist, stdin=inf if i==0 else procs[i-1].stdout,
+        p = subprocess.Popen(clist, cwd=cwd, stdin=inf if i==0 else procs[i-1].stdout,
                              stdout=outf if i==len(commands)-1 else subprocess.PIPE,
-                             stderr=errf, cwd=cwd)
+                             stderr=errf)
         procs.append(p)
 
     # Monitor and control processes
@@ -1781,7 +1784,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
         # Update info records
         if clear_sources:
             for ses in sources:
-                affected = volume.delete_session(ses)
+                affected = volume.delete_session(ses, remove=False)
             volume.sessions[target].save_info("info.tmp")  ; volume.save_volinfo("volinfo.tmp")
             print("  Removing %d:" % len(sources), " ".join(sources))
 
@@ -1799,22 +1802,26 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
             ])
         os.replace("../in_process.tmp", "../in_process")
 
-    retcode = dest_run([destcd + bkdir +" && python3 "
+    retcode = dest_run([destcd + bkdir+"/"+datavol +" && python3 "
                         +tmpdir+"/rpc/dest_helper.py merge"+(" --resume" if resume else "")],
                         check=False)
+    if retcode > 0:  print("Merge failed code", retcode)
 
     # Local finalize. Note: set_in_process(clear) not used here
-    if retcode == 50:
-        print("Merge init failed code 50; Aborting.")
-        # FIX: remote cleanup
+    if retcode in (41,50):
+        print("Aborting merge initialization.")
         for f in ("../in_process","merge.tmp","volinfo.tmp",target+"/info.tmp"):
             if os.path.exists(f):  os.remove(f)
+        dest_run([destcd + bkdir+"/"+datavol
+                  +" && rm -f ../in_process merge.tmp merge.lst volinfo.tmp"], check=False)
     elif retcode >0:
-        x_it(retcode, "Merge process failed code "+str(retcode))
+        x_it(retcode, "Exiting.")
     else:
         if os.path.exists("volinfo.tmp"):  os.replace("volinfo.tmp", "volinfo")
-        if os.path.exists(target+"/info.tmp"):  os.replace(target+"/info.tmp", target+"/info")
-        os.remove("merge.tmp")    ; os.remove("../in_process")    ; aset.in_process = None
+        for f in ("/info","/manifest"):
+            if os.path.exists(target+f+".tmp"):  os.replace(target+f+".tmp", target+f)
+        set_in_process(None, dest=False)   ; os.remove("merge.tmp")
+        for ses in sources:  shutil.rmtree(volume.path+"/"+ses, ignore_errors=True)
     do_exec([[CP.sync, "-f", "volinfo"]])
 
 
@@ -2114,7 +2121,7 @@ def delete_volume(dv):
           ]
     dest_run(cmd)
 
-    set_in_process([], clear=True)
+    set_in_process(None)
     return
 
 
@@ -2265,6 +2272,9 @@ if aset.vgname in volgroups.keys():
 # Handle unfinished in_process
 if aset.in_process and dest_online and not aset.path.startswith(tmpdir) \
     and options.action != "arch-init":
+    if os.path.exists(aset.path+"/in_process_retry"):
+        x_it(1, "Interrupted process already retried; Exiting.")
+    open(aset.path+"/in_process_retry","w").close()
     if aset.in_process[0] in ("delete","merge"):
         print("Completing prior operation in progress:", " ".join(aset.in_process[0:2]))
 
