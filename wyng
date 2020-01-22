@@ -897,20 +897,18 @@ def get_lvm_deltas(datavols):
     lvm_meta_snapshot(aset, "reserve")
 
     err = False
-    for datavol in datavols:
-        snap1vol = datavol + ".tick"    ; snap2vol = datavol + ".tock"
-        try:
+    try:
+        for datavol in datavols:
+            snap1vol = datavol + ".tick"    ; snap2vol = datavol + ".tock"
             do_exec([[CP.thin_delta, "-m", "--thin1=" + l_vols[snap1vol].thin_id,
-                      "--thin2=" + l_vols[snap2vol].thin_id,
-                      "/dev/mapper/"+vgname+"-"+poolname+"_tmeta"],
-                     [CP.grep, "-v", "<same .*\/>$"]
+                        "--thin2=" + l_vols[snap2vol].thin_id,
+                        "/dev/mapper/"+vgname+"-"+poolname+"_tmeta"],
+                        [CP.grep, "-v", "<same .*\/>$"]
                     ],  out=tmpdir+"/delta."+datavol )
-        except:
-            err = True
-        finally:
-            lvm_meta_snapshot(aset, "release")
-
-        if err:  break
+    except:
+        err = True
+    finally:
+        lvm_meta_snapshot(aset, "release")
 
     if err:
         x_it(1, "ERROR running thin_delta process.")
