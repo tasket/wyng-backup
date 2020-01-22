@@ -540,6 +540,7 @@ if cmd != "merge" and exists(tmpdir + "/rpc/dest.lst"):
 if cmd == "receive":
     for line in lstf:
         fname = line.strip()
+        if not fname:  continue
         fsize = os.path.getsize(fname) if exists(fname) else 0
         i = sys.stdout.buffer.write(fsize.to_bytes(4,"big"))
         if fsize:
@@ -1927,8 +1928,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     cmds = [[CP.sort, "-u", "-d", "-k2,2", tmpdir+"/manifests.cat"],
             [CP.sed, "-E", "/"+last_chunkx+"/q"],
             [CP.tee, tmpdir+"/manifest.verify"],
-            [CP.sed, "-E", "s|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)\s+"
-            +"(S_\S+)|\\3/\\1/x\\1\\2|;"
+            [CP.sed, "-E", "s|^0\s.*||; t; s|^\S+\s+x(\S{" + str(address_split[0])
+                            + "})(\S+)\s+(S_\S+)|\\3/\\1/x\\1\\2|;"
             ],
             dest_run_args(desttype, ["cat >"+tmpdir+"/rpc/dest.lst"])
            ]
@@ -2006,9 +2007,6 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             if fname != faddr:
                 raise ValueError("Address mismatch "+fname+" expected "+faddr)
 
-            # Read chunk size
-            untrusted_size = int.from_bytes(getvol.stdout.read(4),"big")
-
             if cksum.strip() == "0":
                 if attended:  print("OK",end="\x0d")
                 if save_path:
@@ -2017,6 +2015,9 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                     diff_count += diff_compare(zeros,True)
 
                 continue
+
+            # Read chunk size
+            untrusted_size = int.from_bytes(getvol.stdout.read(4),"big")
 
             # allow for slight expansion from compression algo
             if untrusted_size > chunksize + (chunksize // 1024) \
