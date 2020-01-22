@@ -440,7 +440,8 @@ def get_configs():
     else:
         aset    = ArchiveSet(aname, metadir+topdir)
 
-    lvm_meta_snapshot(aset, "release")
+    if aset.vgname:   lvm_meta_snapshot(aset, "release")
+
     if options.from_arch:
         return aset
 
@@ -589,7 +590,6 @@ elif cmd == "merge":
         elif ln[0] == "rm" and exists(ln[1]):
             remove(ln[1])
     open("CHECK-END-mv-rm","w").close()
-    open("CHECK-"+target,"w").close() ####
     print("Merge: Finalize tmp.")   ; open("CHECK-finalize-tmp","w").close()   ; lstf.close()
     for f in ("/info", "/manifest"):
         if exists(target+f+".tmp"):  replace(target+f+".tmp", merge_target+f)
@@ -632,7 +632,7 @@ elif cmd == "get-configs":
 def detect_dest_state(destsys):
     global dest_run_map
     dest_run_map     = {"internal": [CP.sh],
-                        "ssh":      [CP.ssh, destsys],
+                        "ssh":      [CP.ssh] + ssh_opts + [destsys],
                         "qubes":    [CP.qvm_run, "-p", destsys],
                         "qubes-ssh":[CP.qvm_run, "-p", destsys.split(":")[0]]
                         }
@@ -641,6 +641,7 @@ def detect_dest_state(destsys):
         and destsys is not None) or options.from_arch:
 
         if desttype == "qubes-ssh":
+            # fix: possibly remove dargs and use dest_run()
             dargs = dest_run_map["qubes"][:-1] + [destsys.split(":")[0]]
 
             cmd = dargs + [shell_prefix \
@@ -812,7 +813,7 @@ def dest_run_args(dest_type, commands):
         if dest_type == "qubes":
             add_cmd = [CP.sh+" "+pjoin(tmpdir,"rpc",remotetmp)]
         elif dest_type == "qubes-ssh":
-            add_cmd = [CP.ssh+" "+destsys.split(":")[1]
+            add_cmd = [CP.ssh+" "+" ".join(ssh_opts)+" "+destsys.split(":")[1]
                        +' "$('+CP.cat+' '+pjoin(tmpdir,"rpc",remotetmp)+')"']
 
     elif dest_type == "ssh":
@@ -2162,9 +2163,10 @@ max_address           = 0xffffffffffffffff # 64bits
 # for 64bits, a subdir split of 9+7 allows =< 4096 files per dir:
 address_split         = [len(hex(max_address))-2-7, 7]
 pjoin                 = os.path.join
-shell_prefix          = "set -e && export LC_ALL=C\n"
 os.environ["LC_ALL"]  = "C"
-
+shell_prefix          = "set -e && export LC_ALL=C\n"
+ssh_opts              = ["-x", "-o", "ControlPath=~/.ssh/controlsocket-%r@%h-%p",
+                         "-o", "ControlMaster=auto", "-o", "ControlPersist=60"]
 
 if sys.hexversion < 0x3050000:
     x_it(1, "Python ver. 3.5 or greater required.")
@@ -2254,6 +2256,7 @@ dest_online, dest_in_process  = detect_dest_state(destsys)
 bkdir            = topdir+"/"+aset.name
 destpath         = os.path.normpath(pjoin(aset.destmountpoint,aset.destdir))
 destcd           = " cd '"+destpath+"'"
+
 if not dest_online and options.action not in {"index-test","monitor","list","version","add"} \
         and destsys is not None:
     x_it(1, "Destination not ready to receive commands.")
