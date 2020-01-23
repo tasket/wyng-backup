@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python36
 
 
 ###  Wyng – Logical volume backup tool
@@ -134,8 +134,11 @@ class ArchiveSet:
             self.error   = False
             self.volsize = None
             self.mapfile = path+"/deltamap"
+            self.mapped  = os.path.exists(self.mapfile)
+            self.sessions= {}
+            self.sesnames= []
             # persisted:
-            self.format_ver = "0"
+            self.format_ver = "0" #### Fix
             self.uuid    = None
             self.first   = None
             self.last    = None
@@ -148,41 +151,21 @@ class ArchiveSet:
                         vname, value = ln.strip().split(" = ")
                         setattr(self, vname, value)
 
-            # load sessions
-            self.sessions ={e.name: self.Ses(self,e.name,pjoin(path,e.name)) \
-                for e in os.scandir(path) if e.name[:2]=="S_" \
-                    and e.name[-3:]!="tmp"} ##if self.present else {}
+            # load sessions in dict and ordered list of session names
+            sprev = self.last
+            while sprev != "none":
+                s = self.sessions[sprev] = self.Ses(self, sprev, path+"/"+sprev)
+                sprev = s.previous    ; self.sesnames.insert(0, s.name)
+                if sprev == "none" and self.first != s.name:
+                    raise ValueError("PREVIOUS MISMATCH: %s/%s, EXPECTED %s" 
+                                     % (self.name, s.name, self.first))
+                if not s.present:
+                    raise FileNotFoundError("ERROR: Manifest does not exist for "+name)
 
-            no_manifest = [ses.name for ses in self.sessions.values()
-                           if not ses.present]
-            if len(no_manifest):
-                x_it(1, "ERROR: Some manifests do not exist for "+name
-                        +".\n(Alpha format?)")
-            mapfile = pjoin(path, "deltamap")
-            self.mapped = os.path.exists(mapfile)
-
+            #### Fix
             if int(self.format_ver) > format_version:
                 raise ValueError("Archive format ver = "+self.format_ver+
                                  ". Expected = "+format_version)
-
-            # build ordered, linked list of names
-            sesnames = []
-            sname = self.last
-            for i in range(len(self.sessions)):
-                sesnames.insert(0, sname)
-                if sname == "none":
-                    break
-                sname = self.sessions[sname].previous
-            self.sesnames = sesnames
-
-            # check for continuity between sessions
-            for sname, s in self.sessions.items():
-                if s.previous == "none" and self.first != sname:
-                    raise ValueError("PREVIOUS MISMATCH: %s/%s, EXPECTED %s" 
-                                     % (self.name, sname, self.first))
-                elif s.previous not in sesnames+["none"]:
-                    raise ValueError("PREVIOUS NOT FOUND IN %s/%s: EXPECTED %s"
-                                     % (self.name, sname, s.previous))
 
             # use latest volsize
             self.volsize = self.sessions[self.last].volsize \
@@ -574,6 +557,7 @@ elif cmd == "merge":
                 for i in os.scandir("merge-init"):
                     if i.is_dir() and i.name.startswith("S_"):  os.replace(i.path, i.name)
             sys.exit(50) # FIX: do metadata check in merge_sessions()
+        # elaborate..............
         if not exists("merge/"+merge_target):  raise FileNotFoundError("merge/"+merge_target)
     # CD
     os.chdir("merge")
