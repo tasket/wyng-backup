@@ -285,13 +285,13 @@ wyng --local=myvg/mypool --dest=internal:/mountpoint arch-init
 Import a configuration from an existing archive...
 ```
 
-wyng --dest=internal:/mountpoint arch-init
+wyng --from=internal:/mountpoint arch-init
 
 
 ```
 
 
-Parameters:
+### Parameters:
 
 `--local` takes the source volume group and pool as `vgname/poolname`.
 These LVM objects don't have to exist before using `arch-init` but they will

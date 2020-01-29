@@ -532,58 +532,67 @@ if cmd == "receive":
 elif cmd == "merge":
     if not exists("../archive.ini") or not exists("volinfo"):
         print("Error: Not in volume dir.")   ; sys.exit(40)
-    if not exists("merge.lst"):  print("Error: No merge.lst file.")   ; sys.exit(41)
-    resume = "--resume" in sys.argv   ; src_list = []   ; subdirs = set()
-    lstf = open("merge.lst", "r")
-    merge_target, target = lstf.readline().strip().split()
-    while True:
-        ln = lstf.readline().strip()
-        if ln == "###":  break
-        src_list.append(ln)
-    if not resume:
-        print("Merge: Initialization.")
-        try:
+    try:
+        resume = "--resume" in sys.argv   ; src_list = []   ; subdirs = set()
+        lstf = open("merge.lst", "r")
+        merge_target, target = lstf.readline().strip().split()
+        while True:
+            ln = lstf.readline().strip()
+            if ln == "###":  break
+            src_list.append(ln)
+        if not resume:
+            print("Merge: Initialization.")
             for ex in ("","-init"):  shutil.rmtree("merge"+ex, ignore_errors=True)
             os.makedirs("merge-init")   ; replace(merge_target, "merge-init/"+merge_target)
             for src in src_list:   replace(src, "merge-init/"+src)
             replace("merge-init", "merge")
-        except:
-            print("Merge init error!")
-            sys.exit(50)
-    else:
-        if exists("merge-init") or not exists("merge"):
-            print("Merge: Init could not complete; Aborting merge.")   ; lstf.close
-            if exists("merge-init"):
-                for i in os.scandir("merge-init"):
-                    if i.is_dir() and i.name.startswith("S_"):  os.replace(i.path, i.name)
-            sys.exit(50) # FIX: do metadata check in merge_sessions()
-        # elaborate..............
-        if not exists("merge/"+merge_target):  raise FileNotFoundError("merge/"+merge_target)
+        else:
+            if exists("merge-init") or not exists("merge"):
+                print("Merge: Init could not complete; Aborting merge.")   ; lstf.close
+                if exists("merge-init"):
+                    for i in os.scandir("merge-init"):
+                        if i.is_dir() and i.name.startswith("S_"):  os.replace(i.path, i.name)
+                raise FileNotFoundError("merge")
+            if not exists("merge/CHECK-finalize-tmp"):
+                for f in src_list+[merge_target]:
+                    if not exists("merge/"+f):  raise FileNotFoundError(f)
+        for f in ("/merge/"+target+"/info", "/merge/"+target+"/manifest", "volinfo"):
+            if not exists(f+".tmp"):  raise FileNotFoundError(f)
+    except:
+        print("Merge init error!")
+        sys.exit(50)
     # CD
     os.chdir("merge")
-    for src in src_list:
-        if exists(src):
-            for i in os.scandir(src):
-                if i.is_dir():   subdirs.add(i.name)
+    for src in src_list:  # Enh: replace os.scandir w manifest method
+        for i in os.scandir(src):
+            if i.is_dir():   subdirs.add(i.name)
     for sdir in subdirs:
         os.makedirs(merge_target+"/"+sdir, exist_ok=True)
+    try:
         print("Merge: remove/replace files.")   ; open("CHECK-mv-rm","w").close()
-    for line in lstf:
-        ln = line.split() # default split() does strip()
-        if ln[0] == "rename" and exists(ln[1]):
-            replace(ln[1], ln[2])
-        elif ln[0] == "rm" and exists(ln[1]):
-            remove(ln[1])
-    open("CHECK-END-mv-rm","w").close()
-    print("Merge: Finalize tmp.")   ; open("CHECK-finalize-tmp","w").close()   ; lstf.close()
-    for f in ("/info", "/manifest"):
-        if exists(target+f+".tmp"):  replace(target+f+".tmp", merge_target+f)
-    if exists("../volinfo.tmp"):     replace("../volinfo.tmp", "../volinfo")
-    print("Merge: Finalize target dir.")   ; open("CHECK-finalize-target","w").close()
-    # CD
-    os.chdir("..")   ; replace("merge/"+merge_target, target)   ; remove("../in_process")
-    shutil.rmtree("merge", ignore_errors=True)   ; remove(lstf.name)
-
+        for line in lstf:
+            ln = line.split() # default split() does strip()
+            if not resume or exists(ln[1]):
+                if ln[0] == "rename":
+                    replace(ln[1], ln[2])
+                elif ln[0] == "rm":
+                    remove(ln[1])
+        open("CHECK-END-mv-rm","w").close()   ; lstf.close()
+    except:
+        sys.exit(60)
+    try:
+        print("Merge: Finalize tmp.")   ; open("CHECK-finalize-tmp","w").close()
+        for f in ("/info", "/manifest"):  replace(target+f+".tmp", merge_target+f)
+        replace("../volinfo.tmp", "../volinfo")
+    except:
+        sys.exit(70)
+    try:
+        print("Merge: Finalize target dir.")   ; open("CHECK-finalize-target","w").close()
+        # CD
+        os.chdir("..")   ; replace("merge/"+merge_target, target)   ; remove("../in_process")
+    except:
+        sys.exit(80)
+    open("merge/CHECK-cleanup","w").close()   ; shutil.rmtree("merge")   ; remove(lstf.name)
 elif cmd == "dedup":
     ddcount = 0
     for line in lstf:
@@ -1793,11 +1802,11 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
 
     # Local finalize. Note: set_in_process(clear) not used here
     if retcode in (41,50):
-        print("Aborting merge initialization.")
-        for f in ("../in_process","merge.tmp","volinfo.tmp",target+"/info.tmp"):
+        print("Aborting merge initialization.")   ; set_in_process(None)
+        for f in ("merge.tmp","volinfo.tmp",target+"/info.tmp"):
             if os.path.exists(f):  os.remove(f)
         dest_run([destcd + bkdir+"/"+datavol
-                  +" && rm -f ../in_process merge.tmp merge.lst volinfo.tmp"], check=False)
+                  +" && rm -f merge.tmp merge.lst volinfo.tmp"], check=False)
     elif retcode >0:
         x_it(retcode, "Exiting.")
     else:
@@ -2178,7 +2187,7 @@ os.makedirs(metadir+topdir+"/wyng.old", exist_ok=True)
 # Parse Arguments:
 parser = argparse.ArgumentParser(description="")
 parser.add_argument("action", choices=["send","monitor","add","delete","prune","receive",
-                    "verify","diff","list","version","arch-init","arch-delete",
+                    "verify","diff","list","version","rename","arch-init","arch-delete",
                     "arch-deduplicate","index-test","test"],
                     default="monitor", help="Action to take")
 parser.add_argument("-u", "--unattended", action="store_true", default=False,
