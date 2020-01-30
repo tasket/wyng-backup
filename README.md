@@ -34,13 +34,15 @@ Beta, with a range of features including:
 
  - Supported destinations: Local filesystem, Virtual machine or SSH host
 
- - Restore, verify and list contents
+ - Send, receive, verify and list contents
 
  - Fast pruning of old backup sessions
 
  - Basic archive management such as add and delete volume
 
-Data verification currently relies on SHA-256 manifests being safely stored on the
+ - Data deduplication (experimental)
+
+Data verification currently relies on hash tables being safely stored on the
 source admin system or encrypted volume. Integrated encryption and key-based
 verification are not yet implemented.
 
@@ -111,6 +113,7 @@ Please note that dashed parameters are always placed before the command.
 | **diff** _volume_name_      | Compare local volume with archived volume.
 | **add** _volume_name_       | Add a volume to the configuration.
 | **delete** _volume_name_    | Remove entire volume from config and archive.
+| **rename** _vol_name_ _new_name_  | Renames a volume in the archive.
 | **arch-init**               | Initialize archive configuration.
 | **arch-delete**             | Remove data and metadata for all volumes.
 | **arch-deduplicate**        | Deduplicate existing data in archive (experimental).
@@ -122,13 +125,14 @@ Please note that dashed parameters are always placed before the command.
 -u, --unattended       | Don't prompt for interactive input.
 --session=_date-time[,date-time]_ | Select a session or session range by date-time (receive, verify, prune).
 --all-before           | Select all sessions before the specified _--session date-time_ (prune).
---save-to=_path_       | Required for `receive`: Specify a save path.
---from=_type:location_ | Retrieve from a specific unconfigured archive (receive, verify, list, arch-init).
+--save-to=_path_       | Required for `receive`: Specify a local save path.
 --remap                | Remap volume during `diff`.
+--from=_type:location_ | Retrieve from a specific unconfigured archive (receive, verify, list, arch-init).
 --local=_vg/pool_      | (arch-init) Specify pool containing local volumes.
 --dest=_type:location_ | (arch-init) Specify destination of backup archive.
---subdir=_dirname_     | (arch-init) Optional subdirectory below mountpoint.
+--subdir=_dirname_     | Optional subdirectory below mountpoint (--from, --dest)
 --compression          | (arch-init) Set compression type:level.
+--hashtype             | (arch-init) Set hash algorithm: _sha256_ or _blake2b_.
 --chunk-factor         | (arch-init) Set archive chunk size.
 --testing-dedup=_N_    | Select deduplication algorithm for send (see Testing notes).
 
@@ -177,7 +181,7 @@ Resizing is automatic if the path is a logical volume or regular file. For any
 `--save-to` target, Wyng will try to discard old data before saving.
 
 _Emergency and Recovery situations:_ The `--from` option may be used to
-retreive from any Wyng archive that is not currently configured in the current
+receive from any Wyng archive that is not currently configured in the current
 system. It is specified just like the `--dest` option of `arch-init`, and the
 `--local` option may also be added to override the LVM settings:
 
@@ -199,10 +203,10 @@ code if the received data does not pass integrity checks.
 
 Quickly reclaims space on a backup drive by removing
 any prior backup session you specify; it does this
-without re-writing data or compromising volume integrity.
+without re-writing data blocks or compromising volume integrity.
 
 To use, supply a single exact date-time in _YYYYMMDD-HHMMSS_ format to remove a
-specific session, or two date-times as a range:
+specific session, or two date-times representing a range:
 
 ```
 
@@ -221,7 +225,7 @@ enabled volumes.
 
 #### monitor
 
-Frees disk space that is cumulatively occupied by aging
+Frees disk space that is cumulatively occupied by aging LVM
 snapshots, thereby addressing a common resource usage issue with snapshot-based
 backups. After harvesting their change metadata, the older snapshots are replaced with
 new ones. Running `monitor` isn't strictly necessary, but it only takes a few seconds
@@ -291,21 +295,21 @@ wyng --from=internal:/mountpoint arch-init
 ```
 
 
-### Parameters:
+#### Parameters for arch-init
 
-`--local` takes the source volume group and pool as `vgname/poolname`.
+`--local` takes the source volume group and pool as 'vgname/poolname' for the `arch-init` command.
 These LVM objects don't have to exist before using `arch-init` but they will
 have to be there before using `send`.
 
-`--dest` describes the location where backups will be sent.
+`--dest` when using `arch-init`, describes the location where backups will be sent.
 It accepts one of the following forms, always ending in a mountpoint path:
 
 Note: --local and --dest are required if not using --from.
 
 `--from` accepts a URL like `--dest`, but retrieves the configuration from an existing archive.
 This imports the archive's configuration and can permanently save it as the
-local configuration. Note: You can override the archive's LVM settings by specifying
-`--local`.
+local configuration. This option can also be used with: list, receive and verify commands.
+Note: You can override the archive's LVM settings by specifying `--local`.
 
 | _URL Form_ | _Destination Type_
 |----------|-----------------
@@ -314,11 +318,15 @@ local configuration. Note: You can override the archive's LVM settings by specif
 |__qubes:__//vm-name/path                     | Qubes virtual machine
 |__qubes-ssh:__//vm-name:me@example.com/path  | SSH server via a Qubes VM
 
-`--subdir` allows you to specify a subdirectory below the mountpoint.
+`--subdir` In conjunction with `--dest` or `--from`, allows you to specify a subdirectory
+below the mountpoint.
 
 `--compression=zlib:4` accepts the form `type:level`. However, only zlib compression
 is supported at this time so this option is currently only useful to set the
 compression level.
+
+`--hashtype` accepts a value of either _'sha256'_ (the default) or _'blake2b'_.
+The digest size used for _'blake2b'_ is 256 bits.
 
 `--chunk-factor=1` sets the pre-compression data chunk size used within the destination archive in
 units of 64kB. A chunk-factor of '4' equates to 256kB chunks. Minimum is '1' and
@@ -375,6 +383,11 @@ sudo mv /var/lib/sparsebak /var/lib/wyng.backup
 sudo mv /my-dest-path/sparsebak /my-dest-path/wyng.backup
 ```
 
+* If your are recovering sparsebak volumes on a rebuilt or reinstalled system that doesn't
+have a local copy of the sparsebak configuration, you can skip the local step above, do the
+rename on the destination, then use `wyng --from=URL [--subdir=dirname] arch-init` to import
+the configuration.
+
 * Backup sessions shown in `list` output may be seemingly (but not actually) out of
 order if the system's local time shifts
 substantially between backups, such as when moving between time zones (including DST).
@@ -402,13 +415,8 @@ here are some encryption approaches you can use to secure your backup archives:
     options on a shared folder (Encfs, Cryfs) or disk image file (LUKS, VeraCrypt).
 
     For remote backups where the server is trusted (i.e. encrypted and secured) it
-    is possible to forgo setup of archive encryption on your local computer and just
+    is possible to forgo setup of encrypted storage on your local computer and just
     specify 'ssh://user@address/path' for your Wyng destination.
-
-    What to avoid: 'Mirroring' storage tools, such as the
-    regular Dropbox client, keep a local copy of *everything* that is sent.
-    Use only if you don't mind consuming lots of extra disk space
-    on your system.
 
 * __Virtualized host systems__ using Xen, KVM or other hypervisors:
 
@@ -419,8 +427,8 @@ here are some encryption approaches you can use to secure your backup archives:
     Option B)  For hypervisors that support attachment of block devices to
     different VMs: An encrypted block dev can be attached directly to the
     admin/storage VM where it is then decrypted and mounted. This requires only an
-    'internal:/path' destination and means that a guest VM or destination server
-    is not trusted with handling encryption, but performance may be slower due to
+    'internal:/path' destination and benefits from not trusting a guest VM or remote
+    server with handling encryption, but performance may be slower due to
     filesystem-network overhead.
 
 * __Qubes OS:__ A brief description for dom0-encrypted remote storage from a Qubes laptop:
@@ -438,7 +446,7 @@ here are some encryption approaches you can use to secure your backup archives:
     pointing to the mounted path.
 
     A local USB storage option similar to the above can be used by substituting *sys-usb*
-    for *remotefs* and (if no disk image file) skipping `truncate` and `losetup`.
+    for *remotefs*.
 
     As an alternative to the above, if you have a trusted backup qube handling
     encryption, you can easily setup Wyng in dom0 with a 'qubes://vm-name/path'
@@ -449,7 +457,7 @@ here are some encryption approaches you can use to secure your backup archives:
     move archive encryption out of Domain 0.
 
 
-Donations
+    Donations
 ---
 <a href="https://liberapay.com/tasket/donate"><img alt="Donate using Liberapay" src="media/lp_donate.svg" height=54></a>
 
