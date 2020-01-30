@@ -20,7 +20,7 @@ from array import array
 # ArchiveSet manages configuration and configured volume info
 
 class ArchiveSet:
-    def __init__(self, name, top):
+    def __init__(self, name, top, allvols=False):
         self.name        = name
         self.path        = pjoin(top,name)
         self.confpath    = pjoin(self.path,"archive.ini")
@@ -44,7 +44,7 @@ class ArchiveSet:
         cp.optionxform   = lambda option: option
         cp["var"]        = {}
         cp["volumes"]    = {}
-        if not os.path.exists(self.confpath):
+        if not exists(self.confpath):
             self.uuid = str(uuid.uuid4())
             return
         cp.read(self.confpath)
@@ -60,7 +60,7 @@ class ArchiveSet:
 
         dedup = options.dedup > 0
         for key in cp["volumes"]:
-            if cp["volumes"][key] != "disable" and \
+            if allvols or cp["volumes"][key] != "disable" and \
             (len(options.volumes)==0 or key in options.volumes or dedup):
                 os.makedirs(pjoin(self.path,key), exist_ok=True)
                 self.vols[key] = self.Volume(self, key, pjoin(self.path,key),
@@ -75,7 +75,7 @@ class ArchiveSet:
         self.in_process = get_in_process(self.path)
 
 
-    def save_conf(self):
+    def save_conf(self, fname=""):
         c = self.conf['var']
         c['chunksize']   = str(self.chunksize)
         c['compression'] = self.compression
@@ -87,18 +87,17 @@ class ArchiveSet:
         c['destdir']     = self.destdir
         c['destmountpoint'] = self.destmountpoint
         c['uuid']        = self.uuid if self.uuid else str(uuid.uuid4())
-        os.makedirs(os.path.dirname(self.confpath), exist_ok=True)
-        with open(self.confpath, "w") as f:
+        confdir  = os.path.dirname(self.confpath)   ; os.makedirs(confdir, exist_ok=True)
+        confname = fname if fname else os.path.basename(self.confpath)
+        with open(confdir+"/"+confname, "w") as f:
             self.conf.write(f)
 
     def add_volume(self, datavol):
         if datavol in self.conf["volumes"].keys():
             x_it(1, datavol+" is already configured.")
 
-        volname_check = re.compile("^[a-zA-Z0-9\+\._-]+$")
-        if volname_check.match(datavol) is None:
-            x_it(1, "Only characters A-Z 0-9 . + _ - are allowed"
-                " in volume names.")
+        if not self.Volume.volname_check(datavol):
+            x_it(1, "Only characters A-Z 0-9 . + _ - are allowed in volume names.")
 
         if len(datavol) > 112:
             x_it(1, "Volume name must be 112 characters or less.")
@@ -119,7 +118,7 @@ class ArchiveSet:
                 lv_remove(self.vgname, datavol+ext)
                 print("Removed snapshot", self.vgname+"/"+datavol+ext)
 
-        if os.path.exists(pjoin(self.path,datavol)):
+        if exists(pjoin(self.path,datavol)):
             shutil.rmtree(pjoin(self.path,datavol))
 
 
@@ -134,7 +133,7 @@ class ArchiveSet:
             self.error   = False
             self.volsize = None
             self.mapfile = path+"/deltamap"
-            self.mapped  = os.path.exists(self.mapfile)
+            self.mapped  = exists(self.mapfile)
             self.sessions= {}
             self.sesnames= []
             # persisted:
@@ -145,14 +144,14 @@ class ArchiveSet:
             self.que_meta_update = "false"
 
             # load volume info
-            if os.path.exists(pjoin(path,"volinfo")):
+            if exists(pjoin(path,"volinfo")):
                 with open(pjoin(path,"volinfo"), "r") as f:
                     for ln in f:
                         vname, value = ln.strip().split(" = ")
                         setattr(self, vname, value)
 
             # load sessions in dict and ordered list of session names
-            sprev = self.last
+            sprev = self.last if self.last else "none"
             while sprev != "none":
                 s = self.sessions[sprev] = self.Ses(self, sprev, path+"/"+sprev)
                 sprev = s.previous    ; self.sesnames.insert(0, s.name)
@@ -172,8 +171,12 @@ class ArchiveSet:
                             if self.sessions else 0
 
 
+        def volname_check(vname):
+            check = re.compile("^[a-zA-Z0-9\+\._-]+$")
+            return check.match(vname) is not None
+
         def map_exists(self):
-            return os.path.exists(self.mapfile)
+            return exists(self.mapfile)
 
         #def map_used(self):
             ## fix: account for -tmp filename
@@ -223,7 +226,7 @@ class ArchiveSet:
             index = self.archive.allsessions.index(ses)
             del self.archive.allsessions[index]
 
-            if remove and os.path.exists(pjoin(self.path, sname)):
+            if remove and exists(pjoin(self.path, sname)):
                 shutil.rmtree(pjoin(self.path, sname))
             return affected
 
@@ -232,7 +235,7 @@ class ArchiveSet:
             def __init__(self, volume, name, path=""):
                 self.name     = name
                 self.path     = path
-                self.present  = os.path.exists(pjoin(path,"manifest"))
+                self.present  = exists(pjoin(path,"manifest"))
                 self.volume   = volume
                 # persisted:
                 self.localtime = None
@@ -458,11 +461,11 @@ def get_configs_remote():
              ], out=tmpdir+"/metadata.tgz")
 
     do_exec([[CP.tar,"-xzf",tmpdir+"/metadata.tgz"]], cwd=aset.path)
-    if not os.path.exists(aset.path+"/archive.ini"):
+    if not exists(aset.path+"/archive.ini"):
         x_it(1,"Failed to retrieve remote configuration: No info.")
 
     if make_local:
-        if os.path.exists(metadir+bkdir):
+        if exists(metadir+bkdir):
             os.replace(metadir+bkdir,
                        metadir+topdir+"/wyng.old/"+aset.name+"--"+time.strftime("%m%d-%H%M%S"))
         shutil.copytree(aset.path, metadir+bkdir)
@@ -631,8 +634,7 @@ def detect_dest_state(destsys):
                         "qubes-ssh":[CP.qvm_run, "-p", destsys.split(":")[0]]
                         }
 
-    if (options.action not in {"index-test","monitor","list","version","add"} \
-        and destsys is not None) or options.from_arch:
+    if (options.action not in local_actions and destsys is not None) or options.from_arch:
 
         if desttype == "qubes-ssh":
             # fix: possibly remove dargs and use dest_run()
@@ -687,7 +689,7 @@ def set_in_process(outer_list, tmp=False, dest=True):
     if outer_list is None:
         if dest:  dest_run([destcd + bkdir + " && rm -f in_process"])
         for ext in ("", ".tmp", "_retry"):
-            if os.path.exists(aset.path+"/in_process"+ext):  os.remove(aset.path+"/in_process"+ext)
+            if exists(aset.path+"/in_process"+ext):  os.remove(aset.path+"/in_process"+ext)
         aset.in_process = None
         return
 
@@ -707,7 +709,7 @@ def set_in_process(outer_list, tmp=False, dest=True):
 def get_in_process(archpath=""):
     outer_list = []
     if not archpath: archpath = aset.path
-    if os.path.exists(archpath+"/in_process"):
+    if exists(archpath+"/in_process"):
         with open(archpath+"/in_process", "r") as ipf:
             for ln in ipf:
                 if ln.find("/") >= 0:
@@ -854,12 +856,12 @@ def prepare_snapshots(datavols):
             lv_remove(vgname, snap2vol)
 
         # Future: Expand recovery to start send-resume
-        if os.path.exists(mapfile+"-tmp"):
+        if exists(mapfile+"-tmp"):
             #print("  Delta map not finalized for", datavol, "...recovering.")
             os.rename(mapfile+"-tmp", mapfile)
 
         # Make initial snapshot if necessary:
-        if not os.path.exists(mapfile):
+        if not exists(mapfile):
             if len(sessions) > 0:
                 raise RuntimeError("ERROR: Sessions exist but no map for "+datavol)
             if not monitor_only and not lv_exists(vgname, snap1vol):
@@ -869,7 +871,7 @@ def prepare_snapshots(datavols):
                 print("  Initial snapshot created for", datavol)
             nvs.append(datavol)
 
-        if os.path.exists(mapfile) and not lv_exists(vgname, snap1vol):
+        if exists(mapfile) and not lv_exists(vgname, snap1vol):
             raise RuntimeError("ERROR: Map and snapshots in inconsistent state, "
                             +snap1vol+" is missing!")
 
@@ -1555,9 +1557,9 @@ def monitor_send(datavols, selected=[], monitor_only=True):
 
 
 def init_deltamap(bmfile, bmsize):
-    if os.path.exists(bmfile):
+    if exists(bmfile):
         os.remove(bmfile)
-    if os.path.exists(bmfile+"-tmp"):
+    if exists(bmfile+"-tmp"):
         os.remove(bmfile+"-tmp")
     with open(bmfile, "wb") as bmapf:
         bmapf.truncate(bmsize)    ; bmapf.flush()
@@ -1804,18 +1806,41 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
     if retcode in (41,50):
         print("Aborting merge initialization.")   ; set_in_process(None)
         for f in ("merge.tmp","volinfo.tmp",target+"/info.tmp"):
-            if os.path.exists(f):  os.remove(f)
+            if exists(f):  os.remove(f)
         dest_run([destcd + bkdir+"/"+datavol
                   +" && rm -f merge.tmp merge.lst volinfo.tmp"], check=False)
     elif retcode >0:
         x_it(retcode, "Exiting.")
     else:
-        if os.path.exists("volinfo.tmp"):  os.replace("volinfo.tmp", "volinfo")
+        if exists("volinfo.tmp"):  os.replace("volinfo.tmp", "volinfo")
         for f in ("/info","/manifest"):
-            if os.path.exists(target+f+".tmp"):  os.replace(target+f+".tmp", target+f)
+            if exists(target+f+".tmp"):  os.replace(target+f+".tmp", target+f)
         set_in_process(None, dest=False)   ; os.remove("merge.tmp")
         for ses in sources:  shutil.rmtree(volume.path+"/"+ses, ignore_errors=True)
     do_exec([[CP.sync, "-f", "volinfo"]])
+
+
+# Compare files between local and dest archive, using hashes.
+# The file tmpdir/compare-files.lst can be pre-populated with file paths if clear=False;
+# otherwise will build metadata file list from Volume & Ses objects.
+# Returns False if local and dest hashes match.
+
+def compare_files(volumes=None, sessions=None, clear=True):
+    if clear and exists(tmpdir+"/compare-files.lst"):  os.remove(tmpdir+"/compare-files.lst")
+    flist = open(tmpdir+"/compare-files.lst", "a") if volumes or sessions else None
+    if volumes:
+        for v in volumes:   print(v.name+"/volinfo", file=flist)
+    if sessions:
+        for s in sessions:
+            for sf in ("info","manifest"): print(pjoin(s.volume.name,s.name,sf), file=flist)
+    if flist:  flist.close()
+    do_exec([[CP.xargs, CP.sha256sum]], cwd=aset.path,
+            infile=tmpdir+"/compare-files.lst", out=tmpdir+"/compare-hashes.local")
+    dest_run([destcd + bkdir +" && xargs sha256sum"],
+            infile=tmpdir+"/compare-files.lst", out=tmpdir+"/compare-hashes.dest")
+    # maybe switch cmp to diff/sha256sum if they are safe enough to read untrusted input
+    return do_exec([[CP.cmp, tmpdir+"/compare-hashes.local",tmpdir+"/compare-hashes.dest"]],
+                check=False) > 0
 
 
 # Receive volume from archive. If no save_path specified, then verify only.
@@ -1866,7 +1891,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         decomp_bits = 32 + zlib.MAX_WBITS
     # add zstd here.
 
-    if save_path and os.path.exists(save_path) and attended:
+    if save_path and exists(save_path) and attended:
         print("\n!! This will erase all existing data in",save_path,"!!")
         ans = input("   Are you sure? [y/N]: ")
         if ans.lower() not in {"y","yes"}:
@@ -1878,13 +1903,9 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     lchunk_addr = last_chunk_addr(volsize, chunksize)
     last_chunkx = chformat % lchunk_addr
 
-    # begin metadata hashes
-    open(tmpdir+"/manifests.cat", "wb").close()
-    hashf       = open(tmpdir+"/file-hashes.lst", "w")
-    print(pjoin(datavol, "volinfo"), file=hashf)
-
     # Collect session manifests
-    include = False
+    open(tmpdir+"/manifests.cat", "wb").close()
+    include = False   ; incl_ses = []
     for ses in reversed(sessions):
         if ses == select_ses:
             include = True
@@ -1895,23 +1916,15 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             raise NotImplementedError(
                 "Receive from tarfile not yet implemented: "+ses)
 
-        # metadata hashes
-        print(pjoin(datavol, ses, "manifest"), file=hashf)
+        incl_ses.append(vol.sessions[ses])
         # add session column to end of each line:
         do_exec([[CP.sed, "-E", "s|$| "+ses+"|", pjoin(ses,"manifest")]],
                 cwd=vol.path, out=">>"+tmpdir+"/manifests.cat")
 
     # compare metadata hashes
-    hashf.close()
     if not options.from_arch:
         print("Checking metadata..")
-        do_exec([[CP.xargs, CP.sha256sum]], cwd=aset.path,
-                 infile=tmpdir+"/file-hashes.lst", out=tmpdir+"/file-hashes.local")
-        dest_run([destcd + bkdir +" && xargs sha256sum"],
-                 infile=tmpdir+"/file-hashes.lst", out=tmpdir+"/file-hashes.dest")
-        # maybe switch cmp to diff/sha256sum if they are safe enough to read untrusted input
-        if do_exec([[CP.cmp, tmpdir+"/file-hashes.local", tmpdir+"/file-hashes.dest"]],
-                   check=False) > 0:
+        if compare_files(volumes=[vol], sessions=incl_ses):
             x_it(1, "Local and archive metadata differ.")
 
     # Merge manifests and send to archive system:
@@ -1946,7 +1959,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             elif l_vols[lv].lv_size != volsize:
                 do_exec([[CP.lvm, "lvresize", "-L", str(volsize)+"b", "-f", save_path]])
 
-        if os.path.exists(save_path) and stat.S_ISBLK(os.stat(save_path).st_mode):
+        if exists(save_path) and stat.S_ISBLK(os.stat(save_path).st_mode):
             do_exec([[CP.blkdiscard, save_path]])
             savef = open(save_path, "w+b")
         else: # file
@@ -1963,7 +1976,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                 do_exec([[CP.lvm,"lvcreate", "-pr", "-kn", "-ay",
                         "-s", vgname+"/"+datavol, "-n", snap1vol]])
                 print("  Initial snapshot created for", datavol)
-            if not os.path.exists(vol.mapfile):
+            if not exists(vol.mapfile):
                 init_deltamap(vol.mapfile, vol.mapsize())
             bmapf = open(vol.mapfile, "r+b")
             bmapf.truncate(vol.mapsize())    ; bmapf.flush()
@@ -2073,7 +2086,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                     do_exec([[CP.lvm, "lvcreate", "-pr", "-kn",
                         "-ay", "-s", vgname+"/"+datavol, "-n", snap1vol]])
                     print("  Initial snapshot created for", datavol)
-                if not os.path.exists(vol.mapfile):
+                if not exists(vol.mapfile):
                     init_deltamap(vol.mapfile, vol.mapsize())
                 if select_ses != sessions[-1]:
                     print("Restored from older session: Volume may be out of"
@@ -2090,6 +2103,42 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                 x_it(1, "%d bytes differ." % diff_count)
 
 
+# Rename a volume in the archive
+
+def rename_volume(archive, oldname, newname):
+    raise NotImplementedError()
+
+    aset = ArchiveSet(archive.name, metadir+topdir, allvols=True)
+    if oldname not in aset.vols:  x_it(1,"No '%s' found." % oldname)
+    v = aset.vols[oldname]   ; meta_only = not exists(aset.path+"/"+oldname)
+    if not meta_only and compare_files(volumes=[v]):
+        x_it(1, "Local and archive metadata differ.")
+
+    if not aset.in_process:
+        set_in_process(["rename", oldname, newname], dest=not meta_only)
+    if exists(v.path):
+        os.replace(v.path, aset.path+"/"+newname)
+
+    aset.add_volume(newname)   ; aset.conf["volumes"][newname] = aset.conf["volumes"][oldname]
+    confname = os.path.basename(aset.confpath)
+    del aset.conf["volumes"][oldname]   ; aset.save_conf(confname+".tmp")
+    if not meta_only:
+        dest_run([destcd + bkdir
+                +"  && cat >"+confname
+                +"  && { if [ -e "+oldname+" ] }; then  rm -rf "+newname
+                +(" && mv -T '%s' '%s'" % (oldname, newname)) + "; fi }"
+                +"  && sync -f ."],  infile=aset.path+"/"+confname+".tmp")
+    os.replace(aset.path+"/"+confname+".tmp", aset.confpath)
+    set_in_process(None)
+
+    # cleanup
+    if lv_exists(aset.vgname, oldname+".tock"):  lv_remove(aset.vgname, oldname+".tock")
+    if lv_exists(aset.vgname, oldname+".tick"):
+        do_exec([[CP.lvm,"lvrename",aset.vgname+"/"+oldname+".tick", newname+".tick"]])
+
+    return ArchiveSet(archive.name, metadir+topdir)
+
+
 # Remove a volume from the archive
 
 def delete_volume(dv):
@@ -2101,19 +2150,16 @@ def delete_volume(dv):
         if ans.lower() not in {"y","yes"}:
             x_it(0,"")
 
-    if not aset.in_process:
-        set_in_process(["delete", dv])
-
-    if dv in aset.vols:
-        aset.delete_volume(dv)
-
     print("\nDeleting volume", dv, "from archive.")
+    if not aset.in_process:       set_in_process(["delete", dv])
+    if dv in aset.vols:           aset.delete_volume(dv)
+    if exists(aset.path+"/"+dv):  shutil.rmtree(aset.path+"/"+dv)
+
     cmd = [destcd + bkdir
-          +" && rm -rf " + dv
+          +(" && rm -rf '%s'" % dv)
           +" && sync -f ."
           ]
     dest_run(cmd)
-
     set_in_process(None)
     return
 
@@ -2138,7 +2184,7 @@ def x_it(code, text):
 ##  MAIN  #####################################################################################
 
 # Constants / Globals
-prog_version          = "0.2.0_beta2"
+prog_version          = "0.2.0_beta3"
 format_version        = 1
 prog_name             = "wyng"
 topdir                = "/"+prog_name+".backup"
@@ -2156,11 +2202,12 @@ assert bkchunksize % (lvm_block_factor * bs) == 0
 max_address           = 0xffffffffffffffff # 64bits
 # for 64bits, a subdir split of 9+7 allows =< 4096 files per dir:
 address_split         = [len(hex(max_address))-2-7, 7]
-pjoin                 = os.path.join
+pjoin                 = os.path.join      ; exists =  os.path.exists
 os.environ["LC_ALL"]  = "C"
 shell_prefix          = "set -e && export LC_ALL=C\n"
 ssh_opts              = ["-x", "-o", "ControlPath=~/.ssh/controlsocket-%r@%h-%p",
                          "-o", "ControlMaster=auto", "-o", "ControlPersist=60"]
+local_actions         = ("index-test","monitor","list","version","add")
 
 if sys.hexversion < 0x3050000:
     x_it(1, "Python ver. 3.5 or greater required.")
@@ -2179,7 +2226,7 @@ except IOError:
 
 # Create our tmp and meta dirs
 shutil.rmtree(tmpdir+"-old", ignore_errors=True)
-if os.path.exists(tmpdir):
+if exists(tmpdir):
     os.rename(tmpdir, tmpdir+"-old")
 os.makedirs(tmpdir+"/rpc")
 os.makedirs(metadir+topdir+"/wyng.old", exist_ok=True)
@@ -2251,8 +2298,7 @@ bkdir            = topdir+"/"+aset.name
 destpath         = os.path.normpath(pjoin(aset.destmountpoint,aset.destdir))
 destcd           = " cd '"+destpath+"'"
 
-if not dest_online and options.action not in {"index-test","monitor","list","version","add"} \
-        and destsys is not None:
+if not dest_online and options.action not in local_actions and destsys is not None:
     x_it(1, "Destination not ready to receive commands.")
 if options.from_arch:
     aset         = get_configs_remote()
@@ -2267,14 +2313,16 @@ if aset.vgname in volgroups.keys():
 # Handle unfinished in_process
 if aset.in_process and dest_online and not aset.path.startswith(tmpdir) \
     and options.action != "arch-init":
-    if os.path.exists(aset.path+"/in_process_retry"):
+    if exists(aset.path+"/in_process_retry"):
         x_it(1, "Interrupted process already retried; Exiting.")
     open(aset.path+"/in_process_retry","w").close()
-    if aset.in_process[0] in ("delete","merge"):
+    if aset.in_process[0] in ("delete","merge","rename"):
         print("Completing prior operation in progress:", " ".join(aset.in_process[0:2]))
 
         if aset.in_process[0] == "delete":
             delete_volume(aset.in_process[1])
+        elif aset.in_process[0] == "rename":
+            aset = rename_volume(aset, aset.in_process[1], aset.in_process[2])
         elif aset.in_process[0] == "merge":
             # fix: handle case when "delete" is used on in-process volume......
             merge_sessions(aset.in_process[1], aset.in_process[4],
@@ -2290,7 +2338,7 @@ elif dest_in_process:
 # Check volume args against config
 selected_vols = options.volumes[:]
 for vol in options.volumes:
-    if vol not in datavols and options.action not in {"add","delete"}:
+    if vol not in datavols and options.action not in {"add","delete","rename"}:
         print("Volume "+vol+" not configured; Skipping.")
         del(selected_vols[selected_vols.index(vol)])
 
@@ -2377,6 +2425,11 @@ elif options.action == "add":
 
     aset.add_volume(options.volumes[0])
     print("Volume", options.volumes[0], "added to archive config.")
+
+
+elif options.action == "rename":
+    if len(options.volumes) != 2:  x_it(1,"Rename requires two volume names.")
+    rename_volume(aset, options.volumes[0], options.volumes[1])
 
 
 elif options.action == "delete":
