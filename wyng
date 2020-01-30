@@ -615,6 +615,7 @@ elif cmd == "get-configs":
                 if ses.is_dir() and ses.name.rfind("-tmp") == -1:
                     print(volname+"/"+ses.name+"/info", file=tarlstf)
                     print(volname+"/"+ses.name+"/manifest", file=tarlstf)
+        if exists("in_process"):  print("in_process", file=tarlstf)
     p = subprocess.check_call(["tar","-czf","-","--verbatim-files-from",
     "--files-from="+tmpdir+"/tar.lst","archive.ini"], stderr=subprocess.DEVNULL)
     '''
