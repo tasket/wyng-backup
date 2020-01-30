@@ -518,7 +518,9 @@ def detect_internal_state():
     #####>  Begin helper program  <#####
 
     dest_program = \
-    '''import os, sys, shutil, subprocess, hashlib
+    '''#  Copyright Christopher Laprise 2018-2020
+#  Licensed under GNU General Public License v3. See github.com/tasket/wyng-backup
+import os, sys, shutil, subprocess, hashlib
 cmd = sys.argv[1] ;    tmpdir = "''' + tmpdir + '''"
 exists = os.path.exists   ; replace = os.replace;   remove = os.remove
 if cmd != "merge" and exists(tmpdir + "/rpc/dest.lst"):
@@ -559,11 +561,10 @@ elif cmd == "merge":
             if not exists("merge/CHECK-finalize-tmp"):
                 for f in src_list+[merge_target]:
                     if not exists("merge/"+f):  raise FileNotFoundError(f)
-        for f in ("/merge/"+target+"/info", "/merge/"+target+"/manifest", "volinfo"):
+        for f in ("merge/"+target+"/info", "merge/"+target+"/manifest", "volinfo"):
             if not exists(f+".tmp"):  raise FileNotFoundError(f)
-    except:
-        print("Merge init error!")
-        sys.exit(50)
+    except Exception as err:
+        print(err)    ; sys.exit(50)
     # CD
     os.chdir("merge")
     for src in src_list:  # Enh: replace os.scandir w manifest method
@@ -575,26 +576,25 @@ elif cmd == "merge":
         print("Merge: remove/replace files.")   ; open("CHECK-mv-rm","w").close()
         for line in lstf:
             ln = line.split() # default split() does strip()
-            if not resume or exists(ln[1]):
-                if ln[0] == "rename":
-                    replace(ln[1], ln[2])
-                elif ln[0] == "rm":
-                    remove(ln[1])
+            if ln[0] == "rename" and (not resume or exists(ln[1])):
+                replace(ln[1], ln[2])
+            elif ln[0] == "rm" and exists(ln[1]):
+                remove(ln[1])
         open("CHECK-END-mv-rm","w").close()   ; lstf.close()
-    except:
-        sys.exit(60)
+    except Exception as err:
+        print(err)    ; sys.exit(60)
     try:
         print("Merge: Finalize tmp.")   ; open("CHECK-finalize-tmp","w").close()
         for f in ("/info", "/manifest"):  replace(target+f+".tmp", merge_target+f)
         replace("../volinfo.tmp", "../volinfo")
-    except:
-        sys.exit(70)
+    except Exception as err:
+        print(err)    ; sys.exit(70)
     try:
         print("Merge: Finalize target dir.")   ; open("CHECK-finalize-target","w").close()
         # CD
         os.chdir("..")   ; replace("merge/"+merge_target, target)   ; remove("../in_process")
-    except:
-        sys.exit(80)
+    except Exception as err:
+        print(err)    ; sys.exit(80)
     open("merge/CHECK-cleanup","w").close()   ; shutil.rmtree("merge")   ; remove(lstf.name)
 elif cmd == "dedup":
     ddcount = 0
