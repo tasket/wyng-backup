@@ -27,7 +27,7 @@ class ArchiveSet:
         self.hashindex   = {}
         self.vols        = {}
         self.allsessions = []
-        self.in_process  = None
+        self.in_process  = get_in_process(self.path)
         # persisted:
         self.chunksize   = bkchunksize
         self.compression = "zlib"
@@ -63,16 +63,12 @@ class ArchiveSet:
             if allvols or cp["volumes"][key] != "disable" and \
             (len(options.volumes)==0 or key in options.volumes or dedup):
                 os.makedirs(pjoin(self.path,key), exist_ok=True)
-                self.vols[key] = self.Volume(self, key, pjoin(self.path,key),
-                                             self.vgname)
-                self.vols[key].enabled = True
+                self.vols[key] = self.Volume(self, key, pjoin(self.path,key), self.vgname)
+                self.vols[key].enabled = cp["volumes"][key] != "disable"
                 self.allsessions += self.vols[key].sessions.values()
 
         # Create master session list sorted by date-time
         self.allsessions.sort(key=lambda x: x.localtime, reverse=True)
-
-        # Check for a prior operation in progress; load op params
-        self.in_process = get_in_process(self.path)
 
 
     def save_conf(self, fname=""):
@@ -112,11 +108,9 @@ class ArchiveSet:
         if datavol in self.conf["volumes"].keys():
             del(self.conf["volumes"][datavol])
             self.save_conf()
-
         for ext in {".tick",".tock"}:
-            if lv_exists(self.vgname, datavol+ext):
-                lv_remove(self.vgname, datavol+ext)
-                print("Removed snapshot", self.vgname+"/"+datavol+ext)
+            if lv_exists(self.vgname, datavol+ext):  lv_remove(self.vgname, datavol+ext)
+        get_lvm_vgs(self.vgname)
 
         if exists(pjoin(self.path,datavol)):
             shutil.rmtree(pjoin(self.path,datavol))
@@ -151,8 +145,10 @@ class ArchiveSet:
                         setattr(self, vname, value)
 
             # load sessions in dict and ordered list of session names
+            #print("VOLUME",self.name, self.first, self.last) ####
             sprev = self.last if self.last else "none"
             while sprev != "none":
+                #print(sprev) ####
                 s = self.sessions[sprev] = self.Ses(self, sprev, path+"/"+sprev)
                 sprev = s.previous    ; self.sesnames.insert(0, s.name)
                 if sprev == "none" and self.first != s.name:
@@ -302,23 +298,23 @@ class Lvm_Volume:
 
 # Retrieves survey of all LVs as vgs[].lvs[] dicts
 
-def get_lvm_vgs():
+def get_lvm_vgs(vgname):
+    global volgroups, l_vols
 
     do_exec([[CP.lvm, "lvs", "--units=b", "--noheadings", "--separator=::",
                 "--options=" + ",".join(Lvm_Volume.colnames)]],
             out=tmpdir+"/volumes.lst")
 
-    vgs = {}
     with open(tmpdir+"/volumes.lst", "r") as vlistf:
         for ln in vlistf:
             members = ln.strip().split("::")
             vgname = members[0] # Fix: use colname index
             lvname = members[1]
-            if vgname not in vgs.keys():
-                vgs[vgname] = Lvm_VolGroup(vgname)
-            vgs[vgname].lvs[lvname] = Lvm_Volume(members)
+            if vgname not in volgroups.keys():
+                volgroups[vgname] = Lvm_VolGroup(vgname)
+            volgroups[vgname].lvs[lvname] = Lvm_Volume(members)
 
-    return vgs
+    if vgname:  l_vols = volgroups[vgname].lvs
 
 
 def lv_exists(vgname, lvname):
@@ -367,9 +363,8 @@ def arch_init(aset):
         aset.poolname = poolname
 
     dest    = options.from_arch if options.from_arch else options.dest
-    dtypes  = ["qubes://","ssh://","qubes-ssh://","internal:"]
     destsys = delim = mountpoint = ""
-    for i in dtypes:
+    for i in url_types:
         if dest.startswith(i):
             destsys, delim, mountpoint = dest.replace(i,"",1).partition("/")
             break
@@ -494,7 +489,7 @@ def get_configs_remote():
 def detect_internal_state():
 
     destsys = aset.destsys    ; desttype = None
-    for dt in ("internal:","ssh://","qubes://","qubes-ssh://"):
+    for dt in url_types:
         if destsys.find(dt) == 0:
             desttype = dt.rstrip(":/")    ; destsys = destsys[len(dt):]
             break
@@ -1508,17 +1503,14 @@ def dedup_existing():
 
 def monitor_send(datavols, selected=[], monitor_only=True):
 
-    global volgroups, l_vols
-
     localtime = time.strftime("%Y%m%d-%H%M%S")
 
     datavols, newvols \
         = prepare_snapshots(selected if len(selected) >0 else datavols)
 
-    volgroups = get_lvm_vgs()
+    get_lvm_vgs(aset.vgname)
     if aset.vgname not in volgroups.keys():
         raise ValueError("Volume group "+aset.vgname+" not present.")
-    l_vols = volgroups[aset.vgname].lvs
 
     if monitor_only:
         newvols = []
@@ -2107,35 +2099,37 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 # Rename a volume in the archive
 
 def rename_volume(archive, oldname, newname):
-    raise NotImplementedError()
+    #raise NotImplementedError()
 
     aset = ArchiveSet(archive.name, metadir+topdir, allvols=True)
     if oldname not in aset.vols:  x_it(1,"No '%s' found." % oldname)
-    v = aset.vols[oldname]   ; meta_only = not exists(aset.path+"/"+oldname)
+    v = aset.vols[oldname]     ; meta_only = not exists(v.path) or not len(v.sessions)
     if not meta_only and compare_files(volumes=[v]):
         x_it(1, "Local and archive metadata differ.")
+
+    aset.add_volume(newname)   ; aset.conf["volumes"][newname] = aset.conf["volumes"][oldname]
+    confname = os.path.basename(aset.confpath)
+    del aset.conf["volumes"][oldname]   ; aset.save_conf(confname+".tmp")
 
     if not aset.in_process:
         set_in_process(["rename", oldname, newname], dest=not meta_only)
     if exists(v.path):
         os.replace(v.path, aset.path+"/"+newname)
-
-    aset.add_volume(newname)   ; aset.conf["volumes"][newname] = aset.conf["volumes"][oldname]
-    confname = os.path.basename(aset.confpath)
-    del aset.conf["volumes"][oldname]   ; aset.save_conf(confname+".tmp")
     if not meta_only:
         dest_run([destcd + bkdir
                 +"  && cat >"+confname
-                +"  && { if [ -e "+oldname+" ] }; then  rm -rf "+newname
+                +(" && { if [ -e '%s' ]; then  rm -rf '%s'" % (oldname, newname))
                 +(" && mv -T '%s' '%s'" % (oldname, newname)) + "; fi }"
                 +"  && sync -f ."],  infile=aset.path+"/"+confname+".tmp")
     os.replace(aset.path+"/"+confname+".tmp", aset.confpath)
     set_in_process(None)
 
     # cleanup
-    if lv_exists(aset.vgname, oldname+".tock"):  lv_remove(aset.vgname, oldname+".tock")
     if lv_exists(aset.vgname, oldname+".tick"):
         do_exec([[CP.lvm,"lvrename",aset.vgname+"/"+oldname+".tick", newname+".tick"]])
+    if lv_exists(aset.vgname, oldname+".tock"):  lv_remove(aset.vgname, oldname+".tock")
+    get_lvm_vgs(aset.vgname)
+    # Enh: que automatic remap
 
     return ArchiveSet(archive.name, metadir+topdir)
 
@@ -2156,11 +2150,13 @@ def delete_volume(dv):
     if dv in aset.vols:           aset.delete_volume(dv)
     if exists(aset.path+"/"+dv):  shutil.rmtree(aset.path+"/"+dv)
 
+    confname = os.path.basename(aset.confpath)
     cmd = [destcd + bkdir
+          +"  && cat >"+confname
           +(" && rm -rf '%s'" % dv)
-          +" && sync -f ."
+          +"  && sync -f ."
           ]
-    dest_run(cmd)
+    dest_run(cmd, infile=aset.confpath)
     set_in_process(None)
     return
 
@@ -2185,14 +2181,12 @@ def x_it(code, text):
 ##  MAIN  #####################################################################################
 
 # Constants / Globals
+prog_name             = "wyng"
 prog_version          = "0.2.0_beta3"
 format_version        = 1
-prog_name             = "wyng"
 topdir                = "/"+prog_name+".backup"
 metadir               = "/var/lib"
 tmpdir                = "/tmp/"+prog_name
-volgroups             = {}
-l_vols                = {}
 # Disk block size:
 bs                    = 512
 # LVM min blocks = 128 = 64kBytes:
@@ -2206,6 +2200,7 @@ address_split         = [len(hex(max_address))-2-7, 7]
 pjoin                 = os.path.join      ; exists =  os.path.exists
 os.environ["LC_ALL"]  = "C"
 shell_prefix          = "set -e && export LC_ALL=C\n"
+url_types             = ("ssh://", "qubes-ssh://", "qubes://", "internal:")
 ssh_opts              = ["-x", "-o", "ControlPath=~/.ssh/controlsocket-%r@%h-%p",
                          "-o", "ControlMaster=auto", "-o", "ControlPersist=60"]
 local_actions         = ("index-test","monitor","list","version","add")
@@ -2290,7 +2285,7 @@ if options.from_arch and options.action not in ("receive","verify","list","arch-
 init_dedup_index = [None, None, None, init_dedup_index3,
                     init_dedup_index4, init_dedup_index5][options.dedup]
 monitor_only     = options.action == "monitor" # gather metadata without backing up
-volgroups        = get_lvm_vgs()
+volgroups, l_vols= {}, {}    ; get_lvm_vgs(None)
 destsys          = desttype  = dest_run_map  = dest_online  = dest_in_process  = None
 aset             = get_configs()
 destsys, desttype= detect_internal_state()
@@ -2303,21 +2298,26 @@ if not dest_online and options.action not in local_actions and destsys is not No
     x_it(1, "Destination not ready to receive commands.")
 if options.from_arch:
     aset         = get_configs_remote()
-
-datavols         = aset.vols.keys()
 os.makedirs(metadir+bkdir, exist_ok=True)
 
 if aset.vgname in volgroups.keys():
     l_vols       = volgroups[aset.vgname].lvs
 
 
-# Handle unfinished in_process
+# Handle unfinished in_process:
+# Functions supported here must not internally use global variable inputs that are unique to
+# a runtime invocation (i.e. the 'options' objects), or they must test such variables
+# in conjunction with aset.in_process.
 if aset.in_process and dest_online and not aset.path.startswith(tmpdir) \
     and options.action != "arch-init":
     if exists(aset.path+"/in_process_retry"):
         x_it(1, "Interrupted process already retried; Exiting.")
     open(aset.path+"/in_process_retry","w").close()
-    if aset.in_process[0] in ("delete","merge","rename"):
+
+    if options.action == "delete" and aset.in_process[1] == options.volumes[0]:
+        # user is currently deleting the in_process volume
+        set_in_process(None)
+    elif aset.in_process[0] in ("delete","merge","rename"):
         print("Completing prior operation in progress:", " ".join(aset.in_process[0:2]))
 
         if aset.in_process[0] == "delete":
@@ -2325,9 +2325,8 @@ if aset.in_process and dest_online and not aset.path.startswith(tmpdir) \
         elif aset.in_process[0] == "rename":
             aset = rename_volume(aset, aset.in_process[1], aset.in_process[2])
         elif aset.in_process[0] == "merge":
-            # fix: handle case when "delete" is used on in-process volume......
             merge_sessions(aset.in_process[1], aset.in_process[4],
-                           aset.in_process[3], clear_sources=bool(aset.in_process[2]))
+                        aset.in_process[3], clear_sources=bool(aset.in_process[2]))
 
     else:
         print("Unknown prior operation in progress:", aset.in_process[0:2])
@@ -2337,6 +2336,7 @@ elif dest_in_process:
 
 
 # Check volume args against config
+datavols      = aset.vols.keys()
 selected_vols = options.volumes[:]
 for vol in options.volumes:
     if vol not in datavols and options.action not in {"add","delete","rename"}:

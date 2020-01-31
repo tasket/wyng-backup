@@ -276,6 +276,17 @@ Removes a volume's config, snapshots and metadata from the source system and
 all of its *data* from the destination archive. Use with caution!
 
 
+#### rename
+```
+
+wyng rename oldname newname
+
+```
+
+Renames a volume _'oldname'_ in the archive to _'newname'_. Note: This will rename only the
+archive volume, _not_ your source volume.
+
+
 #### arch-init
 
 Initialize a new backup archive configuration...
