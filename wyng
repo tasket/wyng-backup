@@ -58,10 +58,9 @@ class ArchiveSet:
             self.destsys = self.destsys.replace("|",":",1)
             self.save_conf()
 
-        dedup = options.dedup > 0
         for key in cp["volumes"]:
-            if allvols or cp["volumes"][key] != "disable" and \
-            (len(options.volumes)==0 or key in options.volumes or dedup):
+            if allvols or self.in_process or (cp["volumes"][key] != "disable" and \
+                (len(options.volumes)==0 or key in options.volumes or options.dedup)):
                 os.makedirs(pjoin(self.path,key), exist_ok=True)
                 self.vols[key] = self.Volume(self, key, pjoin(self.path,key), self.vgname)
                 self.vols[key].enabled = cp["volumes"][key] != "disable"
@@ -118,6 +117,7 @@ class ArchiveSet:
 
     class Volume:
         def __init__(self, archive, name, path, vgname):
+            debug        = options.debug
             self.name    = name
             self.archive = archive
             self.path    = path
@@ -145,10 +145,10 @@ class ArchiveSet:
                         setattr(self, vname, value)
 
             # load sessions in dict and ordered list of session names
-            #print("VOLUME",self.name, self.first, self.last) ####
+            if debug:  print("VOLUME",self.name, self.first, self.last)
             sprev = self.last if self.last else "none"
             while sprev != "none":
-                #print(sprev) ####
+                if debug:  print(sprev)
                 s = self.sessions[sprev] = self.Ses(self, sprev, path+"/"+sprev)
                 sprev = s.previous    ; self.sesnames.insert(0, s.name)
                 if sprev == "none" and self.first != s.name:
@@ -451,7 +451,7 @@ def get_configs_remote():
                         "\nreplacing the local configuration? [y/N] ")
             make_local = ans.lower() in ("y","yes")
 
-    dest_run([destcd + bkdir +"  && "+CP.python+" "+tmpdir+"/rpc/dest_helper.py get-configs "
+    dest_run([destcd + bkdir +"  && "+CP.python+" "+tmpdir+"-rpc/dest_helper.py get-configs "
               +(options.volumes[0] if len(options.volumes)>0 else "")
              ], out=tmpdir+"/metadata.tgz")
 
@@ -516,10 +516,10 @@ def detect_internal_state():
     '''#  Copyright Christopher Laprise 2018-2020
 #  Licensed under GNU General Public License v3. See github.com/tasket/wyng-backup
 import os, sys, shutil, subprocess, hashlib
-cmd = sys.argv[1] ;    tmpdir = "''' + tmpdir + '''"
+cmd = sys.argv[1] ;    tmpdir = "''' + tmpdir + '''-rpc"
 exists = os.path.exists   ; replace = os.replace;   remove = os.remove
-if cmd != "merge" and exists(tmpdir + "/rpc/dest.lst"):
-    lstf = open(tmpdir + "/rpc/dest.lst", "r")
+if cmd != "merge" and exists(tmpdir+"/dest.lst"):
+    lstf = open(tmpdir+"/dest.lst", "r")
 if cmd == "receive":
     for line in lstf:
         fname = line.strip()
@@ -535,7 +535,7 @@ elif cmd == "merge":
     try:
         resume = "--resume" in sys.argv   ; src_list = []   ; subdirs = set()
         lstf = open("merge.lst", "r")
-        merge_target, target = lstf.readline().strip().split()
+        merge_target, target = lstf.readline().split()
         while True:
             ln = lstf.readline().strip()
             if ln == "###":  break
@@ -594,7 +594,7 @@ elif cmd == "merge":
 elif cmd == "dedup":
     ddcount = 0
     for line in lstf:
-        source, dest = line.strip().split()
+        source, dest = line.split()
         if os.stat(source).st_ino != os.stat(dest).st_ino:
             os.link(source, dest+"-lnk")
             replace(dest+"-lnk", dest)
@@ -637,10 +637,7 @@ def detect_dest_state(destsys):
             dargs = dest_run_map["qubes"][:-1] + [destsys.split(":")[0]]
 
             cmd = dargs + [shell_prefix \
-                  +CP.rm+" -rf "+tmpdir+"-old"
-                  +" && { if [ -e "+tmpdir+" ]; then "+CP.mv+" "+tmpdir
-                  +" "+tmpdir+"-old; fi }"
-                  +"  && "+CP.mkdir+" -p "+tmpdir+"/rpc"
+                  +CP.rm+" -rf "+tmpdir+"-rpc  &&  mkdir -p "+tmpdir+"-rpc"
                   ]
             do_exec([cmd])
 
@@ -652,9 +649,8 @@ def detect_dest_state(destsys):
                     +"' && cd '"+aset.destmountpoint+"/"+aset.destdir+topdir+"'"
 
                     # send helper program to remote dest
-                    +((" && rm -rf "+tmpdir+"  &&  mkdir -p "+tmpdir+"/rpc"
-                      +" && cat >"+tmpdir+"/rpc/dest_helper.py"
-                     ) if desttype != "internal" else "")
+                    +((" && rm -rf "+tmpdir+"-rpc  &&  mkdir -p "+tmpdir+"-rpc"
+                      +" && cat >"+tmpdir+"-rpc/dest_helper.py"))
 
                     # check in_process status on remote
                     +"  && { if [ -e "+aset.name+"/in_process ]; then"
@@ -664,7 +660,7 @@ def detect_dest_state(destsys):
                     +(" && ln -f archive.dat .hardlink" if options.dedup else "")
                     ]
             dest_run(cmd, out=tmpdir+"/dest-state-log",
-                     infile=tmpdir+"/rpc/dest_helper.py" if desttype != "internal" else "")
+                     infile=tmpdir+"/rpc/dest_helper.py")
 
         except subprocess.CalledProcessError:
             online = False
@@ -799,14 +795,14 @@ def dest_run_args(dest_type, commands):
     if dest_type in {"qubes","qubes-ssh"}:
         do_exec([[CP.qvm_run, "-p",
                   (destsys if dest_type == "qubes" else destsys.split(":")[0]),
-                  CP.mkdir+" -p "+pjoin(tmpdir,"rpc")
-                  +" && "+CP.cat+" >"+pjoin(tmpdir,"rpc",remotetmp)
+                  CP.mkdir+" -p "+tmpdir+"-rpc"
+                  +" && "+CP.cat+" >"+pjoin(tmpdir+"-rpc",remotetmp)
                 ]], infile=pjoin(tmpdir,remotetmp))
         if dest_type == "qubes":
-            add_cmd = [CP.sh+" "+pjoin(tmpdir,"rpc",remotetmp)]
+            add_cmd = [CP.sh+" "+pjoin(tmpdir+"-rpc",remotetmp)]
         elif dest_type == "qubes-ssh":
             add_cmd = [CP.ssh+" "+" ".join(ssh_opts)+" "+destsys.split(":")[1]
-                       +' "$('+CP.cat+' '+pjoin(tmpdir,"rpc",remotetmp)+')"']
+                       +' "$('+CP.cat+' '+pjoin(tmpdir+"-rpc",remotetmp)+')"']
 
     elif dest_type == "ssh":
         #add_cmd = [' "$(cat '+pjoin(tmpdir,remotetmp)+')"']
@@ -1248,7 +1244,7 @@ def send_volume(datavol, localtime):
     if bcount == 0:
         print("  No changes.")
 
-    if dedup:
+    if dedup and options.debug:
         show_mem_stats() ####
 
     return stream_started
@@ -1285,7 +1281,7 @@ def init_dedup_index3(listfile=""):
         volname = ses.volume.name; sesname = ses.name
         with open(pjoin(ses.path,"manifest"),"r") as manf:
             for ln in manf:
-                line = ln.strip().split()
+                line = ln.split()
                 if line[0] == "0":
                     continue
                 bhash = bytes().fromhex(line[0])
@@ -1321,6 +1317,7 @@ def init_dedup_index3(listfile=""):
         dedupf.close()
 
     ####
+    if not options.debug:  return
     print("\nIndexed in %.1f seconds." % int(time.time()-ctime))
     vsz, rss = map(int, os.popen("ps -up"+str(os.getpid())).readlines()[-1].split()[4:6])
     print("\nMemory use: Max %dMB, index count: %d" %
@@ -1358,7 +1355,7 @@ def init_dedup_index4(listfile=""):
         volname = ses.volume.name; sesname = ses.name
         with open(pjoin(ses.path,"manifest"),"r") as manf:
             for ln in manf:
-                ln1, ln2 = ln.strip().split()
+                ln1, ln2 = ln.split()
                 if ln1 == "0":
                     continue
                 bhashb = bytes().fromhex(ln1)
@@ -1406,6 +1403,8 @@ def init_dedup_index4(listfile=""):
     aset.hashindex = (sessions, hashtree, ht_ksize, hashdigits, hash_w, hash0len,
                       dataf, chtree, chdigits, ch_w, ses_w)
 
+
+    if not options.debug:  return
     print("\n %d matches in %.1f seconds." % (match, int(time.time()-ctime)))
     vsz, rss = map(int, os.popen("ps -up"+str(os.getpid())).readlines()[-1].split()[4:6])
     print("\nMemory use: Max %dMB, index count: %d" %
@@ -1441,7 +1440,7 @@ def init_dedup_index5(listfile=""):
         volname = ses.volume.name; sesname = ses.name
         with open(pjoin(ses.path,"manifest"),"r") as manf:
             for ln in manf:
-                ln1, ln2 = ln.strip().split()
+                ln1, ln2 = ln.split()
                 if ln1 == "0":
                     continue
                 bhashb = bytes().fromhex(ln1)
@@ -1474,6 +1473,8 @@ def init_dedup_index5(listfile=""):
     aset.hashindex = (sessions, hashtree, ht_ksize, hashdigits, hash_w,
                       dataf, chtree, chdigits, ch_w, ses_w)
 
+
+    if not options.debug:  return
     print("\nIndexed in %.1f seconds." % int(time.time()-ctime))
     vsz, rss = map(int, os.popen("ps -up"+str(os.getpid())).readlines()[-1].split()[4:6])
     print("\nMemory use: Max %dMB, index count: %d, matches: %d" %
@@ -1493,8 +1494,8 @@ def dedup_existing():
 
     print("Linking...")
     do_exec([dest_run_args(desttype, [destcd + bkdir
-               +" && /bin/cat >"+tmpdir+"/rpc/dest.lst"
-               +" && /usr/bin/python3 "+tmpdir+"/rpc/dest_helper.py dedup"
+               +" && /bin/cat >"+tmpdir+"-rpc/dest.lst"
+               +" && /usr/bin/python3 "+tmpdir+"-rpc/dest_helper.py dedup"
                ])
             ], infile=tmpdir+"/dedup.lst")
 
@@ -1791,7 +1792,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
         os.replace("../in_process.tmp", "../in_process")
 
     retcode = dest_run([destcd + bkdir+"/"+datavol +" && python3 "
-                        +tmpdir+"/rpc/dest_helper.py merge"+(" --resume" if resume else "")],
+                        +tmpdir+"-rpc/dest_helper.py merge"+(" --resume" if resume else "")],
                         check=False)
     if retcode > 0:  print("Merge failed code", retcode)
 
@@ -1811,6 +1812,8 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
         set_in_process(None, dest=False)   ; os.remove("merge.tmp")
         for ses in sources:  shutil.rmtree(volume.path+"/"+ses, ignore_errors=True)
     do_exec([[CP.sync, "-f", "volinfo"]])
+    if resume and compare_files(volumes=[volume], sessions=[volume.sessions[target]]):
+        x_it(1, "Local and dest metadata differ; Exiting.")
 
 
 # Compare files between local and dest archive, using hashes.
@@ -1818,14 +1821,16 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
 # otherwise will build metadata file list from Volume & Ses objects.
 # Returns False if local and dest hashes match.
 
-def compare_files(volumes=None, sessions=None, clear=True):
+def compare_files(pathlist=[], volumes=None, sessions=None, clear=True):
     if clear and exists(tmpdir+"/compare-files.lst"):  os.remove(tmpdir+"/compare-files.lst")
-    flist = open(tmpdir+"/compare-files.lst", "a") if volumes or sessions else None
+    flist = open(tmpdir+"/compare-files.lst", "a") \
+        if volumes or sessions or len(pathlist) else None
     if volumes:
         for v in volumes:   print(v.name+"/volinfo", file=flist)
     if sessions:
         for s in sessions:
             for sf in ("info","manifest"): print(pjoin(s.volume.name,s.name,sf), file=flist)
+    for pth in pathlist:  print(pth, file=flist)
     if flist:  flist.close()
     do_exec([[CP.xargs, CP.sha256sum]], cwd=aset.path,
             infile=tmpdir+"/compare-files.lst", out=tmpdir+"/compare-hashes.local")
@@ -1930,7 +1935,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             [CP.sed, "-E", "s|^0\s.*||; t; s|^\S+\s+x(\S{" + str(address_split[0])
                             + "})(\S+)\s+(S_\S+)|\\3/\\1/x\\1\\2|;"
             ],
-            dest_run_args(desttype, ["cat >"+tmpdir+"/rpc/dest.lst"])
+            dest_run_args(desttype, ["cat >"+tmpdir+"-rpc/dest.lst"])
            ]
     do_exec(cmds)
 
@@ -1990,7 +1995,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     # Create retriever process using py program
     cmd = dest_run_args(desttype,
             [destcd + bkdir+"/"+datavol
-            +"  && python3 "+tmpdir+"/rpc/dest_helper.py receive"
+            +"  && python3 "+tmpdir+"-rpc/dest_helper.py receive"
             ])
     getvol = subprocess.Popen(cmd, stdout=subprocess.PIPE)
 
@@ -2002,7 +2007,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             if attended:
                 print(int(addr/volsize*100),"%  ",faddr,end="  ")
 
-            cksum, fname, ses = mf.readline().strip().split()
+            cksum, fname, ses = mf.readline().split()
             if fname != faddr:
                 raise ValueError("Address mismatch "+fname+" expected "+faddr)
 
@@ -2122,6 +2127,7 @@ def rename_volume(archive, oldname, newname):
                 +(" && mv -T '%s' '%s'" % (oldname, newname)) + "; fi }"
                 +"  && sync -f ."],  infile=aset.path+"/"+confname+".tmp")
     os.replace(aset.path+"/"+confname+".tmp", aset.confpath)
+    was_in_process = aset.in_process is not None
     set_in_process(None)
 
     # cleanup
@@ -2129,7 +2135,10 @@ def rename_volume(archive, oldname, newname):
         do_exec([[CP.lvm,"lvrename",aset.vgname+"/"+oldname+".tick", newname+".tick"]])
     if lv_exists(aset.vgname, oldname+".tock"):  lv_remove(aset.vgname, oldname+".tock")
     get_lvm_vgs(aset.vgname)
-    # Enh: que automatic remap
+    if was_in_process and not meta_only and \
+        compare_files(pathlist=["archive.ini"], volumes=[aset.vols[newname]]):
+            x_it(1, "Local and archive metadata differ.")
+        # Enh: que automatic remap
 
     return ArchiveSet(archive.name, metadir+topdir)
 
@@ -2173,7 +2182,15 @@ def show_mem_stats():
 
 def x_it(code, text):
     sys.stderr.write(text+"\n")
+    cleanup()
     sys.exit(code)
+
+
+def cleanup():
+    return ####
+    if not options.debug:
+        for f in (tmpdir, tmpdir+"-rpc"):
+            shutil.rmtree(f, ignore_errors=True)
 
 
 
@@ -2184,9 +2201,11 @@ def x_it(code, text):
 prog_name             = "wyng"
 prog_version          = "0.2.0_beta3"
 format_version        = 1
+
 topdir                = "/"+prog_name+".backup"
 metadir               = "/var/lib"
 tmpdir                = "/tmp/"+prog_name
+
 # Disk block size:
 bs                    = 512
 # LVM min blocks = 128 = 64kBytes:
@@ -2197,13 +2216,19 @@ assert bkchunksize % (lvm_block_factor * bs) == 0
 max_address           = 0xffffffffffffffff # 64bits
 # for 64bits, a subdir split of 9+7 allows =< 4096 files per dir:
 address_split         = [len(hex(max_address))-2-7, 7]
+
 pjoin                 = os.path.join      ; exists =  os.path.exists
+
 os.environ["LC_ALL"]  = "C"
 shell_prefix          = "set -e && export LC_ALL=C\n"
+
 url_types             = ("ssh://", "qubes-ssh://", "qubes://", "internal:")
+
 ssh_opts              = ["-x", "-o", "ControlPath=~/.ssh/controlsocket-%r@%h-%p",
                          "-o", "ControlMaster=auto", "-o", "ControlPersist=60"]
+
 local_actions         = ("index-test","monitor","list","version","add")
+
 
 if sys.hexversion < 0x3050000:
     x_it(1, "Python ver. 3.5 or greater required.")
@@ -2243,26 +2268,20 @@ parser.add_argument("--all-before", dest="allbefore", action="store_true", defau
 #                    help="Store backup session as a tarfile")
 parser.add_argument("--session", help="YYYYMMDD-HHMMSS[,YYYYMMDD-HHMMSS]"
                                  " select session date(s), singular or range.")
-parser.add_argument("--save-to", dest="saveto", default="",
-                    help="Path to store volume for receive")
 parser.add_argument("--from", dest="from_arch", default="",
                     help="Address+Path of other non-configured archive (receive, verify)")
-parser.add_argument("--remap", action="store_true", default=False,
-                    help="Remap volume during diff")
-parser.add_argument("--local", default="",
-                    help="Init: LVM volgroup/pool containing source volumes")
-parser.add_argument("--dest", default="",
-                    help="Init: type:location of archive")
-parser.add_argument("--subdir", default="",
-                    help="Init: optional subdir for --dest")
-parser.add_argument("--compression", default="",
-                    help="Init: compression type:level")
-parser.add_argument("--hashtype", default="",
-                    help="Init: hash function type")
+parser.add_argument("--save-to", dest="saveto", default="",help="Path to store volume for receive")
+parser.add_argument("--remap", action="store_true", default=False, help="Remap volume during diff")
+parser.add_argument("--local", default="",    help="Init: LVM vg/pool containing source volumes")
+parser.add_argument("--dest", default="",     help="Init: type:location of archive")
+parser.add_argument("--subdir", default="",   help="Init: optional subdir for --dest")
+parser.add_argument("--compression", default="", help="Init: compression type:level")
+parser.add_argument("--hashtype", default="", help="Init: hash function type")
 parser.add_argument("--chunk-factor", dest="chfactor", type=int,
                     help="Init: set chunk size to N*64kB")
 #parser.add_argument("--deltas", action="store_true", default=False,
 #                    help="Receive: differential mode")
+parser.add_argument("--debug", action="store_true", default=False, help="Debug mode")
 parser.add_argument("--testing-dedup", dest="dedup", type=int, default=0,
                     help="Test experimental deduplication (send)")
 parser.add_argument("volumes", nargs="*")
@@ -2308,7 +2327,7 @@ if aset.vgname in volgroups.keys():
 # Functions supported here must not internally use global variable inputs that are unique to
 # a runtime invocation (i.e. the 'options' objects), or they must test such variables
 # in conjunction with aset.in_process.
-if aset.in_process and dest_online and not aset.path.startswith(tmpdir) \
+if aset.in_process and dest_online and not options.from_arch \
     and options.action != "arch-init":
     if exists(aset.path+"/in_process_retry"):
         x_it(1, "Interrupted process already retried; Exiting.")
@@ -2479,3 +2498,5 @@ elif options.action == "test":
     #merge_manifests("root", addcol=True)
     #merge_sessions("root", aset.vols["root"].sesnames[:-1],  aset.vols["root"].sesnames[-1], clear_sources=True)
 
+
+cleanup()
