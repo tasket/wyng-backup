@@ -1002,6 +1002,10 @@ def send_volume(datavol, localtime):
     if dedup:
         ddsessions.append(ses)
         ses_index = ddsessions.index(ses)
+        # for level 1:
+        if not send_all:
+            fullmanf  = open(merge_manifests(datavol, sessions=vol.sesnames[:-1]), "r")
+        fman_hash = "XYZ"    ; fman_fname = ""    ; dd1_count = 0
 
     # Set current dir and make new session folder
     os.chdir(metadir+bkdir)
@@ -1066,6 +1070,12 @@ def send_volume(datavol, localtime):
         # Cycle over range of addresses in volume.
         for addr in range(0, snap2size, chunksize):
 
+            destfile = "x"+chformat % addr
+            if dedup and not send_all: # level 1
+                fman_hash, fman_fname = fullmanf.readline().split()
+                if fman_fname != destfile:
+                    raise ValueError("destfile expected %s, got %s" (destfile,fman_fname))
+
             # Calculate corresponding position in bitmap.
             chunk = addr // chunksize
             bmap_pos = chunk // 8
@@ -1096,18 +1106,26 @@ def send_volume(datavol, localtime):
                           end="\x0d", flush=True)
                     checkpt += checkpt_pct
 
+
+                ### level 1 dedup: add stuff here ###
+
                 # Compress & write only non-empty and last chunks
                 if buf == zeros and addr < lchunk_addr:
-                    print("0", destfile, file=hashf)
+                    if fman_hash != "0":  print("0", destfile, file=hashf)
                     continue
 
                 # Performance fix: move compression into separate processes
                 buf      = compress(buf, compresslevel)
-                bhash    = gethash(buf)
+                bhash    = gethash(buf)   ; hexhash = bhash.hexdigest()
+
+                if fman_hash == hexhash:
+                    dd1_count += len(buf)
+                    continue # level 1
+
                 # Add buffer to stream
                 tar_info = TarInfo("%s-tmp/%s/%s" % 
                                 (sdir, destfile[1:addrsplit], destfile))
-                print(bhash.hexdigest(), destfile, file=hashf)
+                print(hexhash, destfile, file=hashf)
 
                 # If chunk already in archive, link to it
                 if not dedup:
@@ -1242,12 +1260,17 @@ def send_volume(datavol, localtime):
         print("  No changes.")
 
     if dedup and options.debug:
-        show_mem_stats() ####
+        show_mem_stats()
+        print("Dedup1 bytes =", dd1_count) ####
 
     return stream_started
 
 
 # Build deduplication hash index and list
+
+def init_dedup_index1(listfile=""):
+    return
+
 
 def init_dedup_index3(listfile=""):
 
@@ -1667,9 +1690,10 @@ def prune_sessions(datavol, times):
                    clear_sources=True)
 
 
+# Accepts a list of session names in ascending order (or else uses all sessions in the volume)
+# and merges the manifests. Setting 'addcol' will add a colunm showing the session dir name.
 
 def merge_manifests(datavol, sessions=None, addcol=False):
-# untested
     volume   = aset.vols[datavol]
     sessions = volume.sesnames if not sessions else sessions
     outfile  = tmpdir+"/manifest.mrg"     ; slist  = []
@@ -2278,7 +2302,7 @@ parser.add_argument("--chunk-factor", dest="chfactor", type=int,
 #parser.add_argument("--deltas", action="store_true", default=False,
 #                    help="Receive: differential mode")
 parser.add_argument("--debug", action="store_true", default=False, help="Debug mode")
-parser.add_argument("--testing-dedup", dest="dedup", type=int, default=0,
+parser.add_argument("--testing-dedup", dest="dedup", type=int, default=1,
                     help="Test experimental deduplication (send)")
 parser.add_argument("volumes", nargs="*")
 options = parser.parse_args()
@@ -2296,7 +2320,7 @@ if sys.hexversion >= 0x3060000:
 if options.from_arch and options.action not in ("receive","verify","list","arch-init"):
     x_it(1,"--from option can be used only with: receive, verify, list, arch-init")
 # Select dedup test algorithm.
-init_dedup_index = [None, None, None, init_dedup_index3,
+init_dedup_index = [None, init_dedup_index1, None, init_dedup_index3,
                     init_dedup_index4, init_dedup_index5][options.dedup]
 monitor_only     = options.action == "monitor" # gather metadata without backing up
 volgroups, l_vols= {}, {}    ; get_lvm_vgs(None)
@@ -2480,10 +2504,10 @@ elif options.action == "arch-delete":
 
 
 elif options.action == "arch-deduplicate":
-    if options.dedup:
+    if options.dedup > 1:
         dedup_existing()
     else:
-        x_it(1,"Requires '--testing-dedup=N' option.")
+        x_it(1,"Requires '--testing-dedup value greater than 1.")
 
 
 if options.action   == "index-test":

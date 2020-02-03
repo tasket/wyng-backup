@@ -336,12 +336,13 @@ below the mountpoint.
 is supported at this time so this option is currently only useful to set the
 compression level.
 
-`--hashtype` accepts a value of either _'sha256'_ (the default) or _'blake2b'_.
+`--hashtype=sha256` accepts a value of either _'sha256'_ (the default) or _'blake2b'_.
 The digest size used for _'blake2b'_ is 256 bits.
 
-`--chunk-factor=1` sets the pre-compression data chunk size used within the destination archive in
-units of 64kB. A chunk-factor of '4' equates to 256kB chunks. Minimum is '1' and
-maximum is '256'. The recommended range of chunk factors for general use is 1-4.
+`--chunk-factor=1` sets the pre-compression data chunk size used within the destination archive.
+Accepted range is an integer exponent from '1' to '6', resulting in a chunk size of 64kB for
+factor '1', 128kB for factor '2', 256kB for factor '3' and so on.
+The recommended range of chunk factors for general use is 1-3.
 
 
 ### Tips
