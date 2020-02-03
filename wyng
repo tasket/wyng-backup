@@ -978,6 +978,9 @@ def send_volume(datavol, localtime):
     # testing deduplication types:
     dedup_idx     = dedup_db = None
     dedup         = options.dedup
+    fman_hash = "XYZ"    ; fman_fname = ""    ; dd1_count = 0
+    if dedup and not send_all:
+        fullmanf  = open(merge_manifests(datavol, sessions=vol.sesnames[:-1]), "r")
     if dedup == 3: # sql
         dedup_db  = aset.hashindex
         cursor    = dedup_db.cursor()
@@ -1001,11 +1004,6 @@ def send_volume(datavol, localtime):
         idxcount  = dataf.tell() // (ch_w+ses_w)
     if dedup > 1:
         ddsessions.append(ses)    ; ses_index = ddsessions.index(ses)
-    if dedup:
-        # for level 1:
-        if not send_all:
-            fullmanf  = open(merge_manifests(datavol, sessions=vol.sesnames[:-1]), "r")
-        fman_hash = "XYZ"    ; fman_fname = ""    ; dd1_count = 0
 
     # Set current dir and make new session folder
     os.chdir(metadir+bkdir)
