@@ -61,7 +61,7 @@ class ArchiveSet:
         for key in cp["volumes"]:
             if allvols or self.in_process or options.from_arch or \
             (cp["volumes"][key] != "disable" and \
-            (len(options.volumes)==0 or key in options.volumes or options.dedup)):
+            (len(options.volumes)==0 or key in options.volumes or options.dedup>1)):
                 os.makedirs(pjoin(self.path,key), exist_ok=True)
                 self.vols[key] = self.Volume(self, key, pjoin(self.path,key), self.vgname)
                 self.vols[key].enabled = cp["volumes"][key] != "disable"
@@ -999,9 +999,9 @@ def send_volume(datavol, localtime):
         chtree_max= 2**(chtree[0].itemsize*8)
         ht_ksize  = ht_ksize//2
         idxcount  = dataf.tell() // (ch_w+ses_w)
+    if dedup > 1:
+        ddsessions.append(ses)    ; ses_index = ddsessions.index(ses)
     if dedup:
-        ddsessions.append(ses)
-        ses_index = ddsessions.index(ses)
         # for level 1:
         if not send_all:
             fullmanf  = open(merge_manifests(datavol, sessions=vol.sesnames[:-1]), "r")
@@ -1071,6 +1071,7 @@ def send_volume(datavol, localtime):
         for addr in range(0, snap2size, chunksize):
 
             destfile = "x"+chformat % addr
+
             if dedup and not send_all: # level 1
                 fman_hash, fman_fname = fullmanf.readline().split()
                 if fman_fname != destfile:
@@ -1089,25 +1090,12 @@ def send_volume(datavol, localtime):
                 buf = vf_read(chunksize)
                 destfile = "x"+chformat % addr
 
-                # Start tar stream
-                if not stream_started:
-                    untar = subprocess.Popen(dest_run_args(desttype, untar_cmd),
-                            stdin =subprocess.PIPE,    stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL)
-                    tarf = tarfile.open(mode="w|", fileobj=untar.stdin)
-                    tarf_addfile = tarf.addfile; TarInfo = tarfile.TarInfo
-                    LNKTYPE = tarfile.LNKTYPE
-                    stream_started = True
-
                 # Show progress.
                 percent = int(bmap_pos/bmap_size*1000)
                 if percent >= checkpt:
                     print("  %.1f%%   %dMB " % (percent/10, bcount//1000000),
                           end="\x0d", flush=True)
                     checkpt += checkpt_pct
-
-
-                ### level 1 dedup: add stuff here ###
 
                 # Compress & write only non-empty and last chunks
                 if buf == zeros and addr < lchunk_addr:
@@ -1118,9 +1106,20 @@ def send_volume(datavol, localtime):
                 buf      = compress(buf, compresslevel)
                 bhash    = gethash(buf)   ; hexhash = bhash.hexdigest()
 
+                # level 1 dedup
                 if fman_hash == hexhash:
                     dd1_count += len(buf)
-                    continue # level 1
+                    continue
+
+                # Start tar stream
+                if not stream_started:
+                    untar = subprocess.Popen(dest_run_args(desttype, untar_cmd),
+                            stdin =subprocess.PIPE,    stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+                    tarf = tarfile.open(mode="w|", fileobj=untar.stdin)
+                    tarf_addfile = tarf.addfile; TarInfo = tarfile.TarInfo
+                    LNKTYPE = tarfile.LNKTYPE
+                    stream_started = True
 
                 # Add buffer to stream
                 tar_info = TarInfo("%s-tmp/%s/%s" % 
