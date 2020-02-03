@@ -59,8 +59,9 @@ class ArchiveSet:
             self.save_conf()
 
         for key in cp["volumes"]:
-            if allvols or self.in_process or (cp["volumes"][key] != "disable" and \
-                (len(options.volumes)==0 or key in options.volumes or options.dedup)):
+            if allvols or self.in_process or options.from_arch or \
+            (cp["volumes"][key] != "disable" and \
+            (len(options.volumes)==0 or key in options.volumes or options.dedup)):
                 os.makedirs(pjoin(self.path,key), exist_ok=True)
                 self.vols[key] = self.Volume(self, key, pjoin(self.path,key), self.vgname)
                 self.vols[key].enabled = cp["volumes"][key] != "disable"
@@ -384,8 +385,8 @@ def arch_init(aset):
         return
 
     if options.hashtype:
-        if options.hashtype not in ("sha256","blake2b"):
-            x_it(1, "Invalid hash function spec.")
+        if options.hashtype not in hash_funcs:
+            x_it(1, "Hash function '"+options.hashtype+"' is not available on this system.")
         aset.hashtype = options.hashtype
 
     if options.compression:
@@ -399,9 +400,10 @@ def arch_init(aset):
         aset.compression = compression
 
     if options.chfactor:
-        aset.chunksize = int(options.chfactor) * bkchunksize
-        if aset.chunksize > 16 * 1024 * 1024:
+        # accepts an exponent from 1 to 6
+        if not ( 0 < options.chfactor < 7 ):
             x_it(1, "Requested chunk size not supported.")
+        aset.chunksize = (bkchunksize//2) * (2** options.chfactor)
         if aset.chunksize > 256 * 1024:
             print("Large chunk size set:", aset.chunksize)
 
@@ -1326,8 +1328,8 @@ def init_dedup_index4(listfile=""):
 
     ctime     = time.time()
     # Define arrays and element widths
-    hashdigits = 256 // 4 # 4bits per hex digit
-    hash_w     = hashdigits // 2
+    hashdigits = hash_bits // 4 # 4bits per hex digit
+    hash_w     = hash_bits // 8
     hash0len   = 8        # "Q" ulonglong = 8bytes
     hsegs      = hash_w//hash0len
     ht_ksize   = 4 # hex digits for tree key
@@ -1413,8 +1415,8 @@ def init_dedup_index5(listfile=""):
 
     ctime = time.time()
     # Define arrays and element widths
-    hashdigits = 256 // 4  # 256 @4bits per hex digit
-    hash_w     = hashdigits // 2
+    hashdigits = hash_bits // 4  # 256 @4bits per hex digit
+    hash_w     = hash_bits // 8
     ht_ksize   = 4 # hex digits for tree key
     hashtree   = [bytearray() for x in range(2**(ht_ksize*4))]
     chtree     = [array("I") for x in range(2**(ht_ksize*4))]
@@ -2099,8 +2101,6 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 # Rename a volume in the archive
 
 def rename_volume(archive, oldname, newname):
-    #raise NotImplementedError()
-
     aset = ArchiveSet(archive.name, metadir+topdir, allvols=True)
     if oldname not in aset.vols:  x_it(1,"No '%s' found." % oldname)
     v = aset.vols[oldname]     ; meta_only = not exists(v.path) or not len(v.sessions)
@@ -2211,6 +2211,7 @@ assert bkchunksize % (lvm_block_factor * bs) == 0
 max_address           = 0xffffffffffffffff # 64bits
 # for 64bits, a subdir split of 9+7 allows =< 4096 files per dir:
 address_split         = [len(hex(max_address))-2-7, 7]
+hash_bits             = 256
 
 pjoin                 = os.path.join      ; exists =  os.path.exists
 
@@ -2287,10 +2288,9 @@ options = parser.parse_args()
 
 # General Configuration:
 
-
 hash_funcs       = {"sha256": hashlib.sha256}
 if sys.hexversion >= 0x3060000:
-    hash_funcs["blake2b"] = functools.partial(hashlib.blake2b, digest_size=32)
+    hash_funcs["blake2b"] = functools.partial(hashlib.blake2b, digest_size=hash_bits//8)
 
 # Check --from usage (access other/unconfigured archive).
 if options.from_arch and options.action not in ("receive","verify","list","arch-init"):
