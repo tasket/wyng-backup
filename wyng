@@ -93,7 +93,7 @@ class ArchiveSet:
             x_it(1, datavol+" is already configured.")
 
         if not self.Volume.volname_check(datavol):
-            x_it(1, "Only characters A-Z 0-9 . + _ - are allowed in volume names.")
+            x_it(1, "Exiting.")
 
         if len(datavol) > 112:
             x_it(1, "Volume name must be 112 characters or less.")
@@ -167,10 +167,15 @@ class ArchiveSet:
             self.volsize = self.sessions[self.last].volsize \
                             if self.sessions else 0
 
-
         def volname_check(vname):
             check = re.compile("^[a-zA-Z0-9\+\._-]+$")
-            return check.match(vname) is not None
+            if check.match(vname) is None:
+                print("Only characters A-Z 0-9 . + _ - are allowed in volume names.")
+                return False
+            if vname in (".",".."):
+                print("Bad volume name.")
+                return False
+            return True
 
         def map_exists(self):
             return exists(self.mapfile)
@@ -976,11 +981,10 @@ def send_volume(datavol, localtime):
     ses.path      = vol.path+"/"+bksession+"-tmp"
 
     # testing deduplication types:
-    dedup_idx     = dedup_db = None
-    dedup         = options.dedup
-    fman_hash = "XYZ"    ; fman_fname = ""    ; dd1_count = 0
-    if dedup and not send_all:
-        fullmanf  = open(merge_manifests(datavol, sessions=vol.sesnames[:-1]), "r")
+    dedup_idx     = dedup_db = None   ; dedup   = options.dedup
+    fman_hash     = fman_fname = ""
+    fullmanf  = open(merge_manifests(datavol, sessions=vol.sesnames[:-1]), "r") \
+        if dedup and not send_all else None
     if dedup == 3: # sql
         dedup_db  = aset.hashindex
         cursor    = dedup_db.cursor()
@@ -1070,10 +1074,12 @@ def send_volume(datavol, localtime):
 
             destfile = "x"+chformat % addr
 
-            if dedup and not send_all: # level 1
+            if dedup and addr < sendall_addr: # level 1
                 fman_hash, fman_fname = fullmanf.readline().split()
                 if fman_fname != destfile:
-                    raise ValueError("destfile expected %s, got %s" (destfile,fman_fname))
+                    raise ValueError("expected manifest addr %s, got %s" (destfile,fman_fname))
+            else:
+                fman_hash = ""
 
             # Calculate corresponding position in bitmap.
             chunk = addr // chunksize
@@ -1105,9 +1111,7 @@ def send_volume(datavol, localtime):
                 bhash    = gethash(buf)   ; hexhash = bhash.hexdigest()
 
                 # level 1 dedup
-                if fman_hash == hexhash:
-                    dd1_count += len(buf)
-                    continue
+                if fman_hash == hexhash:  continue
 
                 # Start tar stream
                 if not stream_started:
@@ -1125,7 +1129,7 @@ def send_volume(datavol, localtime):
                 print(hexhash, destfile, file=hashf)
 
                 # If chunk already in archive, link to it
-                if not dedup:
+                if dedup < 2:
                     pass
 
                 elif dedup == 3:
@@ -1258,7 +1262,6 @@ def send_volume(datavol, localtime):
 
     if dedup and options.debug:
         show_mem_stats()
-        print("Dedup1 bytes =", dd1_count) ####
 
     return stream_started
 
