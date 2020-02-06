@@ -659,7 +659,7 @@ def detect_dest_state(destsys):
                     +"  echo 'in_process yes'; fi }"
 
                     +"  && touch archive.dat"
-                    +(" && ln -f archive.dat .hardlink" if options.dedup else "")
+                    +(" && ln -f archive.dat .hardlink" if options.dedup > 1 else "")
                     ]
             dest_run(cmd, out=tmpdir+"/dest-state-log",
                      infile=tmpdir+"/rpc/dest_helper.py")
