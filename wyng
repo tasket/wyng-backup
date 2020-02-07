@@ -1893,6 +1893,11 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     snap1vol  = datavol+".tick"
     sessions  = vol.sesnames
 
+    if diff or verify_only:
+        save_path = ""
+    elif not save_path:
+        save_path = pjoin("/dev",vgname,datavol)
+
     # Set the session to retrieve
     if select_ses:
         datetime.datetime.strptime(select_ses, "%Y%m%d-%H%M%S")
@@ -2408,23 +2413,19 @@ elif options.action == "prune":
 
 
 elif options.action == "receive":
-    if not options.saveto:
-        x_it(1, "Must specify --save-to for receive.")
     if len(selected_vols) != 1:
-        x_it(1, "Specify one volume for receive")
+        x_it(1, "Specify one volume for receive.")
     if options.session and len(options.session.split(",")) > 1:
-        x_it(1, "Specify one session for receive")
-    receive_volume(selected_vols[0],
-                   select_ses="" if not options.session \
-                   else options.session.split(",")[0],
-                   save_path=options.saveto)
+        x_it(1, "Specify only one session for receive.")
+    receive_volume(selected_vols[0], select_ses="" if not options.session else options.session,
+                   save_path=options.saveto if options.saveto else "")
 
 
 elif options.action == "verify":
     if len(selected_vols) != 1:
-        x_it(1, "Specify one volume for verify")
+        x_it(1, "Specify one volume for verify.")
     if options.session and len(options.session.split(",")) > 1:
-        x_it(1, "Specify one session for verify")
+        x_it(1, "Specify one session for verify.")
     receive_volume(selected_vols[0],
                    select_ses="" if not options.session \
                    else options.session.split(",")[0],

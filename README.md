@@ -125,16 +125,16 @@ Please note that dashed parameters are always placed before the command.
 -u, --unattended       | Don't prompt for interactive input.
 --session=_date-time[,date-time]_ | Select a session or session range by date-time (receive, verify, prune).
 --all-before           | Select all sessions before the specified _--session date-time_ (prune).
---save-to=_path_       | Required for `receive`: Specify a local save path.
+--save-to=_path_       | Save volume to _path_ (receive).
 --remap                | Remap volume during `diff`.
 --from=_type:location_ | Retrieve from a specific unconfigured archive (receive, verify, list, arch-init).
---local=_vg/pool_      | (arch-init) Specify pool containing local volumes.
---dest=_type:location_ | (arch-init) Specify destination of backup archive.
+--local=_vg/pool_      | (arch-init) Pool containing local volumes.
+--dest=_type:location_ | (arch-init) Destination of backup archive.
 --subdir=_dirname_     | Optional subdirectory below mountpoint (--from, --dest)
 --compression          | (arch-init) Set compression type:level.
 --hashtype             | (arch-init) Set hash algorithm: _sha256_ or _blake2b_.
 --chunk-factor         | (arch-init) Set archive chunk size.
---testing-dedup=_N_    | Select deduplication algorithm for send (see Testing notes).
+--testing-dedup=_N_    | Use deduplication algorithm for send (see Testing notes).
 
 
 #### send
@@ -161,9 +161,10 @@ renewed just as with the `monitor` command.
 #### receive
 
 Retrieves a volume instance (using the latest session ID
-if `--session` isn't specified) from the archive and saves it to the path specified
+if `--session` isn't specified) from the archive and saves it to either the volume's
+original path or the path specified
 with `--save-to`. If `--session` is used, only one date-time is accepted. The volume
-name and `--save-to` are required.
+name is required.
 
 ```
 
@@ -175,10 +176,10 @@ wyng --save-to=myfile.img receive vm-work-private
 ...restores a volume called 'vm-work-private' to 'myfile.img' in
 the current folder. Its possible to specify any valid file path or block
 device such as '/dev/vgname/vm-work-private'. In the latter case, the LVM volume will
-be automatically created if the configured volume group matches the save-to path.
+be automatically created if the configured volume group matches the save path.
 
 Resizing is automatic if the path is a logical volume or regular file. For any
-`--save-to` target, Wyng will try to discard old data before saving.
+save target, Wyng will try to discard old data before saving.
 
 _Emergency and Recovery situations:_ The `--from` option may be used to
 receive from any Wyng archive that is not currently configured in the current
@@ -187,15 +188,15 @@ system. It is specified just like the `--dest` option of `arch-init`, and the
 
 ```
 
-wyng --from=ssh://user@192.168.1.2/mountpoint --save-to=vol.img receive my-volume
+wyng --from=ssh://user@192.168.1.2/mountpoint receive my-volume
 
 
 ```
 
 #### verify
 
-The `verify` command is similar to `receive` without `--save-to`. For both
-`receive` and `verify` modes, an exception error will be raised with a non-zero exit
+The `verify` command is similar to `receive` without saving the data. For both
+`receive` and `verify` modes, an error will be reported with a non-zero exit
 code if the received data does not pass integrity checks.
 
 
