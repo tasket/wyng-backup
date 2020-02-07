@@ -1086,8 +1086,8 @@ def send_volume(datavol, localtime):
             bmap_pos = chunk // 8
             b = chunk % 8
 
-            # Skip chunk if its its bit is off in the deltamap and below send-all range.
-            if not bmap_mm[bmap_pos] & (1 << b) and addr < sendall_addr:  continue
+            # Skip chunk if its deltamap bit is off and address below send-all range.
+            if addr < sendall_addr and not bmap_mm[bmap_pos] & (1 << b):  continue
 
             vf_seek(addr)
             buf = vf_read(chunksize)
