@@ -720,6 +720,7 @@ def get_in_process(archpath=""):
 # If multiple command lines, then they are piped together.
 # 'out' redirects the last command output to a file; append mode can be
 # selected by beginning 'out' path with '>>'.
+# List of commands may include 'None' instead of a child list; these will be ignored.
 
 def do_exec(commands, cwd=None, check=True, out="", infile=""):
     outmode = "ab" if out.find(">>") == 0 else "wb"
@@ -731,6 +732,7 @@ def do_exec(commands, cwd=None, check=True, out="", infile=""):
     outf = open(out, outmode) if out else subprocess.DEVNULL
     inf  = open(infile, "rb") if infile else subprocess.DEVNULL
     errf = open(tmpdir+"/err.log", "a")  ; print("--+--", file=errf)
+    commands = [x for x in commands if x is not None]
 
     # Start each command, linking them via pipes
     procs = []
@@ -1715,7 +1717,8 @@ def merge_manifests(datavol, msessions=None, mtarget=None, addcol=False):
     else:
         cdir  = volume.path     ; slsort  = slist[0]
 
-    do_exec([[CP.sort, "-umd", "-k2,2", "--files0-from="+slsort]], out=outfile, cwd=cdir)
+    do_exec([[CP.sort, "-umd", "-k2,2", "--batch-size=64", "--files0-from="+slsort]],
+            out=outfile, cwd=cdir)
     if addcol:  shutil.rmtree(tmp+"/m")
 
     return outfile
@@ -1764,7 +1767,8 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
             print("###", file=lstf)
 
         # Unique-merge filenames: one for rename, one for new full manifest.
-        do_exec([[CP.sort, "-umd", "-k2,2"] + manifests], out="manifest.one", cwd=m_tmp)
+        do_exec([[CP.sort, "-umd", "-k2,2", "--batch-size=64"] + manifests],
+                out="manifest.one", cwd=m_tmp)
         do_exec([[CP.sort, "-umd", "-k2,2", "manifest.one",
                 pjoin(volume.path, merge_target, "manifest")]], out="manifest.two", cwd=m_tmp)
         # Make final manifest without extra column.
@@ -1775,7 +1779,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
         # 'rename src_session/subdir/xaddress target/subdir/xaddress'
         # then pipe to destination and run dest_helper.py.
         do_exec([
-                [CP.awk, "$2<="+lc_filter, m_tmp+"/manifest.one"],
+                [CP.awk, "$2<="+lc_filter] if vol_shrank else None,
                 [CP.sed, "-E",
 
                 "s|^0 x(\S{" + str(address_split[0]) + "})(\S+)\s+(S_\S+)|"
@@ -1784,7 +1788,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
                 "s|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)\s+(S_\S+)|"
                 "rename \\3/\\1/x\\1\\2 "+merge_target+"/\\1/x\\1\\2|"
                 ]
-                ], out=">>merge.tmp")
+                ], infile=m_tmp+"/manifest.one", out=">>merge.tmp")
 
         if vol_shrank:
             # If volume size shrank in this period then make trim list.
@@ -1844,15 +1848,13 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
 # otherwise will build metadata file list from Volume & Ses objects.
 # Returns False if local and dest hashes match.
 
-def compare_files(pathlist=[], volumes=None, sessions=None, clear=True):
+def compare_files(pathlist=[], volumes=[], sessions=[], clear=True):
     if clear and exists(tmpdir+"/compare-files.lst"):  os.remove(tmpdir+"/compare-files.lst")
     flist = open(tmpdir+"/compare-files.lst", "a") \
-        if volumes or sessions or len(pathlist) else None
-    if volumes:
-        for v in volumes:   print(v.name+"/volinfo", file=flist)
-    if sessions:
-        for s in sessions:
-            for sf in ("info","manifest"): print(pjoin(s.volume.name,s.name,sf), file=flist)
+            if len(volumes) or len(sessions) or len(pathlist) else None
+    for v in volumes:   print(v.name+"/volinfo", file=flist)
+    for s in sessions:
+        for sf in ("info","manifest"): print(pjoin(s.volume.name,s.name,sf), file=flist)
     for pth in pathlist:  print(pth, file=flist)
     if flist:  flist.close()
     do_exec([[CP.xargs, CP.sha256sum]], cwd=aset.path,
@@ -2226,7 +2228,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.2.0_beta3"
+prog_version          = "0.2.0_beta4wip"
 format_version        = 1
 
 topdir                = "/"+prog_name+".backup"
