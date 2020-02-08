@@ -972,7 +972,8 @@ def send_volume(datavol, localtime):
     chformat    = "%0"+str(chdigits)+"x"
     bksession   = "S_"+localtime
     sdir        = pjoin(datavol, bksession)
-    send_all    = len(vol.sessions) == 0
+    send_all    = len(vol.sessions) == 0    ; dedup   = options.dedup
+    fullmanifest= open(merge_manifests(datavol), "r") if dedup and not send_all else None
 
     ses = vol.new_session(bksession)
     ses.localtime = localtime
@@ -981,10 +982,8 @@ def send_volume(datavol, localtime):
     ses.path      = vol.path+"/"+bksession+"-tmp"
 
     # testing deduplication types:
-    dedup_idx     = dedup_db = None   ; dedup   = options.dedup
+    dedup_idx     = dedup_db = None
     fman_hash     = fman_fname = ""
-    fullmanf  = open(merge_manifests(datavol, sessions=vol.sesnames[:-1]), "r") \
-        if dedup and not send_all else None
     if dedup == 3: # sql
         dedup_db  = aset.hashindex
         cursor    = dedup_db.cursor()
@@ -1075,7 +1074,7 @@ def send_volume(datavol, localtime):
             destfile = "x"+chformat % addr
 
             if dedup and addr < sendall_addr: # level 1
-                fman_hash, fman_fname = fullmanf.readline().split()
+                fman_hash, fman_fname = fullmanifest.readline().split()
                 if fman_fname != destfile:
                     raise ValueError("expected manifest addr %s, got %s" (destfile,fman_fname))
             else:
@@ -1692,29 +1691,32 @@ def prune_sessions(datavol, times):
 # Accepts a list of session names in ascending order (or else uses all sessions in the volume)
 # and merges the manifests. Setting 'addcol' will add a colunm showing the session dir name.
 
-def merge_manifests(datavol, sessions=None, addcol=False):
-    volume   = aset.vols[datavol]
-    sessions = volume.sesnames if not sessions else sessions
-    outfile  = tmpdir+"/manifest.mrg"     ; slist  = []
+def merge_manifests(datavol, msessions=None, mtarget=None, addcol=False):
+    # Enh: implement mtarget to support merge_sessions()
+    volume    = aset.vols[datavol]
+    msessions = volume.sesnames if not msessions else msessions
+    tmp = v_tmpdir if volume.volsize > 128000000000 else tmpdir
+    outfile   = tmp+"/manifest.mrg"     ; slist  = []
     for suffix in ("/manifest\x00", "\x00"):
-        with tempfile.NamedTemporaryFile(dir=tmpdir, delete=False) as tmpf:
-            tmpf.write(bytes(suffix.join(reversed(sessions)), encoding="UTF-8"))
+        with tempfile.NamedTemporaryFile(dir=tmp, delete=False) as tmpf:
+            tmpf.write(bytes(suffix.join(reversed(msessions)), encoding="UTF-8"))
             tmpf.write(bytes(suffix, encoding="UTF-8"))
             slist.append(tmpf.name)
 
     if addcol:
         # add a column containing the source session
-        cdir  = tmpdir+"/m"     ; slsort  = slist[1]
+        cdir  = tmp+"/m"     ; slsort  = slist[1]
         shutil.rmtree(cdir, ignore_errors=True);   os.makedirs(cdir)
 
         # fix: extrapolate path with filename
         do_exec([[CP.xargs, "-0", "-a", slist[0],
                   CP.awk, '{sub("/manifest","",FILENAME); print $0, FILENAME > "'
-                            +tmpdir+'/m/"FILENAME}']], cwd=volume.path)
+                            +tmp+'/m/"FILENAME}']], cwd=volume.path)
     else:
         cdir  = volume.path     ; slsort  = slist[0]
 
     do_exec([[CP.sort, "-umd", "-k2,2", "--files0-from="+slsort]], out=outfile, cwd=cdir)
+    if addcol:  shutil.rmtree(tmp+"/m")
 
     return outfile
 
@@ -1727,9 +1729,10 @@ def merge_manifests(datavol, sessions=None, addcol=False):
 
 def merge_sessions(datavol, sources, target, clear_sources=False):
 
-    volume = aset.vols[datavol]    ; resume = aset.in_process is not None
+    volume     = aset.vols[datavol]    ; resume = aset.in_process is not None
     chdigits   = max_address.bit_length() // 4 # 4bits per digit
     chformat   = "x%0"+str(chdigits)+"x"
+    m_tmp      = tmpdir if volume.volsize < 128000000000 else v_tmpdir
 
     # Prepare manifests for efficient merge using fs mv/replace. The target is
     # included as a source, and oldest source is our target for mv. At the end
@@ -1744,7 +1747,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
             if volume.sessions[ses].format == "tar":
                 x_it(1, "Cannot merge range containing tarfile session.")
         volsize    = volume.sessions[target].volsize
-        vol_shrank = volsize < volume.sessions[sources[0]].volsize
+        vol_shrank = volsize < volume.sessions[sources[0]].volsize #### Fix w max()
         last_chunk = chformat % last_chunk_addr(volsize, aset.chunksize)
         lc_filter  = '"'+last_chunk+'"'
 
@@ -1757,22 +1760,22 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
             for ses in merge_sources:
                 if clear_sources:   print(ses, file=lstf)    ; manifests.append("man."+ses)
                 do_exec([[CP.sed, "-E", "s|$| "+ses+"|", ses+"/manifest"
-                        ]], out=tmpdir+"/man."+ses)
+                        ]], out=m_tmp+"/man."+ses)
             print("###", file=lstf)
 
         # Unique-merge filenames: one for rename, one for new full manifest.
-        do_exec([[CP.sort, "-umd", "-k2,2"] + manifests], out="manifest.one", cwd=tmpdir)
+        do_exec([[CP.sort, "-umd", "-k2,2"] + manifests], out="manifest.one", cwd=m_tmp)
         do_exec([[CP.sort, "-umd", "-k2,2", "manifest.one",
-                pjoin(volume.path, merge_target, "manifest")]], out="manifest.two", cwd=tmpdir)
+                pjoin(volume.path, merge_target, "manifest")]], out="manifest.two", cwd=m_tmp)
         # Make final manifest without extra column.
-        do_exec([[CP.awk, "$2<="+lc_filter+" {print $1, $2}", tmpdir+"/manifest.two"]],
+        do_exec([[CP.awk, "$2<="+lc_filter+" {print $1, $2}", m_tmp+"/manifest.two"]],
                 out=target+"/manifest.tmp")
 
         # Output manifest filenames in the sftp-friendly form:
         # 'rename src_session/subdir/xaddress target/subdir/xaddress'
         # then pipe to destination and run dest_helper.py.
         do_exec([
-                [CP.awk, "$2<="+lc_filter, tmpdir+"/manifest.one"],
+                [CP.awk, "$2<="+lc_filter, m_tmp+"/manifest.one"],
                 [CP.sed, "-E",
 
                 "s|^0 x(\S{" + str(address_split[0]) + "})(\S+)\s+(S_\S+)|"
@@ -1785,7 +1788,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
 
         if vol_shrank:
             # If volume size shrank in this period then make trim list.
-            do_exec([[CP.awk, "$2>"+lc_filter, tmpdir+"/manifest.two"],
+            do_exec([[CP.awk, "$2>"+lc_filter, m_tmp+"/manifest.two"],
                     [CP.sed, "-E", "s|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)|"
                     "rm "+merge_target+"/\\1/x\\1\\2|"]
                     ], out=">>merge.tmp")
@@ -1920,29 +1923,26 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         if ans.lower() not in {"y","yes"}:
             x_it(0,"")
 
-    print("\nReading manifests..")
     chdigits    = max_address.bit_length() // 4 # 4bits per digit
     chformat    = "x%0"+str(chdigits)+"x"
     lchunk_addr = last_chunk_addr(volsize, chunksize)
     last_chunkx = chformat % lchunk_addr
 
     # Collect session manifests
-    open(tmpdir+"/manifests.cat", "wb").close()
+    ##open(tmpdir+"/manifests.cat", "wb").close()
     include = False   ; incl_ses = []
-    for ses in reversed(sessions):
-        if ses == select_ses:
-            include = True
-        elif not include:
-            continue
+    for ses in sessions:
+        incl_ses.append(vol.sessions[ses])
 
         if vol.sessions[ses].format == "tar":
             raise NotImplementedError(
                 "Receive from tarfile not yet implemented: "+ses)
 
-        incl_ses.append(vol.sessions[ses])
+        if ses == select_ses:  break
+
         # add session column to end of each line:
-        do_exec([[CP.sed, "-E", "s|$| "+ses+"|", pjoin(ses,"manifest")]],
-                cwd=vol.path, out=">>"+tmpdir+"/manifests.cat")
+        ##do_exec([[CP.sed, "-E", "s|$| "+ses+"|", pjoin(ses,"manifest")]],
+        ##        cwd=vol.path, out=">>"+tmpdir+"/manifests.cat")
 
     # compare metadata hashes
     if not options.from_arch:
@@ -1950,13 +1950,14 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         if compare_files(volumes=[vol], sessions=incl_ses):
             x_it(1, "Local and archive metadata differ.")
 
+
     # Merge manifests and send to archive system:
     # sed is used to expand chunk info into a path and filter out any entries
     # beyond the current last chunk, then piped to cat on destination.
     # Note address_split is used to bisect filename to construct the subdir.
-    cmds = [[CP.sort, "-u", "-d", "-k2,2", tmpdir+"/manifests.cat"],
-            [CP.sed, "-E", "/"+last_chunkx+"/q"],
-            [CP.tee, tmpdir+"/manifest.verify"],
+    manifest = merge_manifests(datavol, msessions=[x.name for x in incl_ses], addcol=True)
+
+    cmds = [[CP.sed, "-E", "/"+last_chunkx+"/q", manifest],
             [CP.sed, "-E", "s|^0\s.*||; t; s|^\S+\s+x(\S{" + str(address_split[0])
                             + "})(\S+)\s+(S_\S+)|\\3/\\1/x\\1\\2|;"
             ],
@@ -2026,7 +2027,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
     # Open manifest then receive, check and save data
     bcount = 0
-    with open(tmpdir+"/manifest.verify", "r") as mf:
+    with open(manifest, "r") as mf:
         for addr in range(0, volsize, chunksize):
             faddr = chformat % addr
             if attended:
@@ -2213,9 +2214,9 @@ def x_it(code, text):
 
 
 def cleanup():
-    return ####
+    shutil.rmtree(v_tmpdir, ignore_errors=True)   ; return ####
     if not options.debug:
-        for f in (tmpdir, tmpdir+"-rpc"):
+        for f in (v_tmpdir, tmpdir, tmpdir+"-rpc"):
             shutil.rmtree(f, ignore_errors=True)
 
 
@@ -2231,6 +2232,7 @@ format_version        = 1
 topdir                = "/"+prog_name+".backup"
 metadir               = "/var/lib"
 tmpdir                = "/tmp/"+prog_name
+v_tmpdir              = metadir+topdir+"/.tmp"
 
 # Disk block size:
 bs                    = 512
@@ -2274,10 +2276,12 @@ except IOError:
 
 # Create our tmp and meta dirs
 shutil.rmtree(tmpdir+"-old", ignore_errors=True)
+shutil.rmtree(v_tmpdir, ignore_errors=True)
 if exists(tmpdir):
     os.rename(tmpdir, tmpdir+"-old")
 os.makedirs(tmpdir+"/rpc")
 os.makedirs(metadir+topdir+"/wyng.old", exist_ok=True)
+os.makedirs(v_tmpdir, exist_ok=True)
 
 # Parse Arguments:
 parser = argparse.ArgumentParser(description="")
