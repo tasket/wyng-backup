@@ -9,7 +9,7 @@
 
 #  editor width: 96  --------------------------------------------------------------------------
 import sys, os, stat, shutil, subprocess, time, datetime
-import re, mmap, zlib, tarfile, io, fcntl, tempfile
+import re, mmap, zlib, gzip, tarfile, io, fcntl, tempfile
 import argparse, configparser, hashlib, functools, uuid
 import xml.etree.ElementTree
 # For deduplication tests:
@@ -279,7 +279,7 @@ class CP:
     rm   = "/bin/rm"         ; lvm   = "/sbin/lvm"       ; qvm_run  = "/usr/bin/qvm-run"
     tee  = "/usr/bin/tee"    ; sync  = "/bin/sync"       ; dmsetup  = "/sbin/dmsetup"
     find = "/usr/bin/find"   ; xargs = "/usr/bin/xargs"  ; sha256sum= "/usr/bin/sha256sum"
-    cmp  = "/usr/bin/cmp"
+    cmp  = "/usr/bin/cmp"    ; gzip  = "/bin/gzip"
     mountpoint = "/bin/mountpoint"    ; thin_delta = "/usr/sbin/thin_delta"
     blkdiscard = "/sbin/blkdiscard"
 
@@ -517,11 +517,11 @@ def detect_internal_state():
     dest_program = \
     '''#  Copyright Christopher Laprise 2018-2020
 #  Licensed under GNU General Public License v3. See github.com/tasket/wyng-backup
-import os, sys, shutil, subprocess, hashlib
+import os, sys, shutil, subprocess, hashlib, gzip
 cmd = sys.argv[1] ;    tmpdir = "''' + tmpdir + '''-rpc"
 exists = os.path.exists   ; replace = os.replace;   remove = os.remove
-if cmd != "merge" and exists(tmpdir+"/dest.lst"):
-    lstf = open(tmpdir+"/dest.lst", "r")
+if cmd != "merge" and exists(tmpdir+"/dest.lst.gz"):
+    lstf = gzip.open(tmpdir+"/dest.lst.gz", "r")
 if cmd == "receive":
     for line in lstf:
         fname = line.strip()
@@ -536,7 +536,7 @@ elif cmd == "merge":
         print("Error: Not in volume dir.")   ; sys.exit(40)
     try:
         resume = "--resume" in sys.argv   ; src_list = []   ; subdirs = set()
-        lstf = open("merge.lst", "r")
+        lstf = gzip.open("merge.lst.gz", "r")
         merge_target, target = lstf.readline().split()
         while True:
             ln = lstf.readline().strip()
@@ -722,15 +722,18 @@ def get_in_process(archpath=""):
 # selected by beginning 'out' path with '>>'.
 # List of commands may include 'None' instead of a child list; these will be ignored.
 
-def do_exec(commands, cwd=None, check=True, out="", infile=""):
-    outmode = "ab" if out.find(">>") == 0 else "wb"
+def do_exec(commands, cwd=None, check=True, out="", infile="", text=False):
+    ftype   = "t" if text else "b"
+    outmode = "a"+ftype if out.find(">>") == 0 else "w"+ftype
     out = out.lstrip(">>")
     if cwd and out and out[0] != "/":
         out = pjoin(cwd,out)
     if cwd and infile and infile[0] != "/":
         infile = pjoin(cwd,infile)
-    outf = open(out, outmode) if out else subprocess.DEVNULL
-    inf  = open(infile, "rb") if infile else subprocess.DEVNULL
+    outfunc = gzip.open if out.endswith(".gz") else open
+    infunc  = gzip.open if infile.endswith(".gz") else open
+    outf = outfunc(out, outmode) if out else subprocess.DEVNULL
+    inf  = infunc(infile, "r"+ftype) if infile else subprocess.DEVNULL
     errf = open(tmpdir+"/err.log", "a")  ; print("--+--", file=errf)
     commands = [x for x in commands if x is not None]
 
@@ -1697,7 +1700,7 @@ def merge_manifests(datavol, msessions=None, mtarget=None, addcol=False):
     # Enh: implement mtarget to support merge_sessions()
     volume    = aset.vols[datavol]
     msessions = volume.sesnames if not msessions else msessions
-    tmp = v_tmpdir if volume.volsize > 128000000000 else tmpdir
+    tmp = big_tmpdir if volume.volsize > 128000000000 else tmpdir
     outfile   = tmp+"/manifest.mrg"     ; slist  = []
     for suffix in ("/manifest\x00", "\x00"):
         with tempfile.NamedTemporaryFile(dir=tmp, delete=False) as tmpf:
@@ -1735,7 +1738,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
     volume     = aset.vols[datavol]    ; resume = aset.in_process is not None
     chdigits   = max_address.bit_length() // 4 # 4bits per digit
     chformat   = "x%0"+str(chdigits)+"x"
-    m_tmp      = tmpdir if volume.volsize < 128000000000 else v_tmpdir
+    m_tmp      = tmpdir if volume.volsize < 128000000000 else big_tmpdir
 
     # Prepare manifests for efficient merge using fs mv/replace. The target is
     # included as a source, and oldest source is our target for mv. At the end
@@ -1754,7 +1757,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
         last_chunk = chformat % last_chunk_addr(volsize, aset.chunksize)
         lc_filter  = '"'+last_chunk+'"'
 
-        with open("merge.tmp", "w") as lstf:
+        with gzip.open("merge.tmp.gz", "wt") as lstf:
             print(merge_target, target, file=lstf)
 
             # Get manifests, append session name to eol, print session names to list.
@@ -1788,14 +1791,14 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
                 "s|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)\s+(S_\S+)|"
                 "rename \\3/\\1/x\\1\\2 "+merge_target+"/\\1/x\\1\\2|"
                 ]
-                ], infile=m_tmp+"/manifest.one", out=">>merge.tmp")
+                ], infile=m_tmp+"/manifest.one", out=">>merge.tmp.gz", text=True)
 
         if vol_shrank:
             # If volume size shrank in this period then make trim list.
             do_exec([[CP.awk, "$2>"+lc_filter, m_tmp+"/manifest.two"],
                     [CP.sed, "-E", "s|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)|"
                     "rm "+merge_target+"/\\1/x\\1\\2|"]
-                    ], out=">>merge.tmp")
+                    ], out=">>merge.tmp.gz", text=True)
 
         # Update info records
         if clear_sources:
@@ -1809,10 +1812,10 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
                        tmp=True, dest=False)
 
         # Send new metadata and process lists to dest
-        do_exec([[CP.tar, "-cf", "-", "../in_process.tmp", "volinfo.tmp", "merge.tmp", target],
+        do_exec([[CP.tar, "-cf", "-", "../in_process.tmp", "volinfo.tmp", "merge.tmp.gz", target],
                 dest_run_args(desttype, [destcd + bkdir+"/"+datavol
                 +" && tar -xmf -"
-                +" && mv merge.tmp merge.lst"
+                +" && mv merge.tmp.gz merge.lst.gz"
                 +" && mv in_process.tmp ../in_process"
                 ])
             ])
@@ -1826,17 +1829,17 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
     # Local finalize. Note: set_in_process(clear) not used here
     if retcode in (41,50):
         print("Aborting merge initialization.")   ; set_in_process(None)
-        for f in ("merge.tmp","volinfo.tmp",target+"/info.tmp"):
+        for f in ("merge.tmp.gz","volinfo.tmp",target+"/info.tmp"):
             if exists(f):  os.remove(f)
         dest_run([destcd + bkdir+"/"+datavol
-                  +" && rm -f merge.tmp merge.lst volinfo.tmp"], check=False)
+                  +" && rm -f merge.tmp.gz merge.lst.gz volinfo.tmp"], check=False)
     elif retcode >0:
         x_it(retcode, "Exiting.")
     else:
         if exists("volinfo.tmp"):  os.replace("volinfo.tmp", "volinfo")
         for f in ("/info","/manifest"):
             if exists(target+f+".tmp"):  os.replace(target+f+".tmp", target+f)
-        set_in_process(None, dest=False)   ; os.remove("merge.tmp")
+        set_in_process(None, dest=False)   ; os.remove("merge.tmp.gz")
         for ses in sources:  shutil.rmtree(volume.path+"/"+ses, ignore_errors=True)
     do_exec([[CP.sync, "-f", "volinfo"]])
     if resume and compare_files(volumes=[volume], sessions=[volume.sessions[target]]):
@@ -1942,16 +1945,11 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
         if ses == select_ses:  break
 
-        # add session column to end of each line:
-        ##do_exec([[CP.sed, "-E", "s|$| "+ses+"|", pjoin(ses,"manifest")]],
-        ##        cwd=vol.path, out=">>"+tmpdir+"/manifests.cat")
-
     # compare metadata hashes
     if not options.from_arch:
         print("Checking metadata..")
         if compare_files(volumes=[vol], sessions=incl_ses):
             x_it(1, "Local and archive metadata differ.")
-
 
     # Merge manifests and send to archive system:
     # sed is used to expand chunk info into a path and filter out any entries
@@ -1959,11 +1957,12 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     # Note address_split is used to bisect filename to construct the subdir.
     manifest = merge_manifests(datavol, msessions=[x.name for x in incl_ses], addcol=True)
 
-    cmds = [[CP.sed, "-E", "/"+last_chunkx+"/q", manifest],
+    cmds = [[CP.sed, "-E", "/"+last_chunkx+"/q", manifest],  #### Enh: detect vol_shrank
             [CP.sed, "-E", "s|^0\s.*||; t; s|^\S+\s+x(\S{" + str(address_split[0])
-                            + "})(\S+)\s+(S_\S+)|\\3/\\1/x\\1\\2|;"
+                            + "})(\S+)\s+(S_\S+)|\\3/\\1/x\\1\\2|;"],
+            [CP.gzip, "-c", "-4"
             ],
-            dest_run_args(desttype, ["cat >"+tmpdir+"-rpc/dest.lst"])
+            dest_run_args(desttype, ["cat >"+tmpdir+"-rpc/dest.lst.gz"]),
            ]
     do_exec(cmds)
 
@@ -2216,9 +2215,9 @@ def x_it(code, text):
 
 
 def cleanup():
-    shutil.rmtree(v_tmpdir, ignore_errors=True)   ; return ####
+    shutil.rmtree(big_tmpdir, ignore_errors=True)   ; return ####
     if not options.debug:
-        for f in (v_tmpdir, tmpdir, tmpdir+"-rpc"):
+        for f in (big_tmpdir, tmpdir, tmpdir+"-rpc"):
             shutil.rmtree(f, ignore_errors=True)
 
 
@@ -2234,7 +2233,7 @@ format_version        = 1
 topdir                = "/"+prog_name+".backup"
 metadir               = "/var/lib"
 tmpdir                = "/tmp/"+prog_name
-v_tmpdir              = metadir+topdir+"/.tmp"
+big_tmpdir            = metadir+topdir+"/.tmp"
 
 # Disk block size:
 bs                    = 512
@@ -2278,12 +2277,12 @@ except IOError:
 
 # Create our tmp and meta dirs
 shutil.rmtree(tmpdir+"-old", ignore_errors=True)
-shutil.rmtree(v_tmpdir, ignore_errors=True)
+shutil.rmtree(big_tmpdir, ignore_errors=True)
 if exists(tmpdir):
     os.rename(tmpdir, tmpdir+"-old")
 os.makedirs(tmpdir+"/rpc")
 os.makedirs(metadir+topdir+"/wyng.old", exist_ok=True)
-os.makedirs(v_tmpdir, exist_ok=True)
+os.makedirs(big_tmpdir, exist_ok=True)
 
 # Parse Arguments:
 parser = argparse.ArgumentParser(description="")
