@@ -11,7 +11,7 @@
 import sys, os, stat, shutil, subprocess, time, datetime
 import re, mmap, zlib, gzip, tarfile, io, fcntl, tempfile
 import argparse, configparser, hashlib, functools, uuid
-import xml.etree.ElementTree
+import xml.etree.ElementTree    ; from itertools import islice
 # For deduplication tests:
 import ctypes, sqlite3, resource
 from array import array
@@ -1046,174 +1046,184 @@ def send_volume(datavol, localtime):
 
     # Use tar to stream files to destination
     stream_started = False
-    untar_cmd = destcd \
-                +" && mkdir -p ."+bkdir+"/"+sdir+"-tmp" \
-                +" && "+destcd + bkdir                  \
-                +" && rm -f .set"
-    if False and options.tarfile: # deprecated
-        # don't untar at destination
-        untar_cmd = [ untar_cmd
-                    +" && cat >"+pjoin(sdir+"-tmp",bksession+".tar")]
-    else:
-        untar_cmd = [ untar_cmd
-                    +" && tar -xmf - && sync -f "+datavol]
+    untar_cmd = [destcd + " && mkdir -p ."+bkdir+"/"+sdir+"-tmp"
+                        + " && "+destcd + bkdir
+                        + " && rm -f .set  &&  tar -xmf - && sync -f "+datavol]
 
     # Open source volume and its delta bitmap as r, session manifest as w.
     with open(pjoin("/dev",aset.vgname,snap2vol),"rb") as vf, \
          open(sdir+"-tmp/manifest", "w") as hashf,             \
-         open("/dev/zero" if send_all else vol.mapfile+"-tmp","r+b") as bmapf:
+         open("/dev/zero" if send_all else vol.mapfile+"-tmp","rb") as bmapf:
 
-        bmap_mm = bytes(1) if send_all else mmap.mmap(bmapf.fileno(), 0)
-        # data_mm = mmap.mmap(vf.fileno(), snap2size, access=mmap.ACCESS_READ)
         vf_seek = vf.seek; vf_read = vf.read
         gethash = hash_funcs[aset.hashtype]   ; BytesIO = io.BytesIO
 
         # Show progress in increments determined by 1000/checkpt_pct
         # where '200' results in five updates i.e. in unattended mode.
         checkpt = checkpt_pct = 335 if options.unattended else 1
-        percent = 0
+        addr = percent = 0
 
-        # Cycle over range of addresses in volume.
-        for addr in range(0, snap2size, chunksize):
+        # Feed delta bmap to inner loop in pieces segmented by large zero delimeter.
+        # This allows skipping most areas when changes are few.
+        zdelim = bytes(64)    ; bmsegsize = 16*1024
+        bmap_list = bmapf.read(bmsegsize).split(zdelim);    bmap_list.reverse()
+        #bmap_list = deque(bmapf.read(bmsegsize).split(zdelim))
+        while len(bmap_list):
+            minibmap = bmap_list.pop()
 
-            destfile = "x"+chformat % addr
+            # Cycle over range of addresses in volume.
+            for chunk, addr in enumerate(range(
+                addr, min(snap2size, addr+len(minibmap)*8*chunksize), chunksize)):
 
-            if dedup and addr < sendall_addr: # level 1
-                fman_hash, fman_fname = fullmanifest.readline().split()
-                if fman_fname != destfile:
-                    raise ValueError("expected manifest addr %s, got %s" (destfile,fman_fname))
-            else:
-                fman_hash = ""
+                destfile = "x"+chformat % addr
 
-            # Calculate corresponding position in bitmap.
-            chunk = addr // chunksize
-            bmap_pos = chunk // 8
-            b = chunk % 8
-
-            # Skip chunk if its deltamap bit is off and address below send-all range.
-            if addr < sendall_addr and not bmap_mm[bmap_pos] & (1 << b):  continue
-
-            vf_seek(addr)
-            buf = vf_read(chunksize)
-            destfile = "x"+chformat % addr
-
-            # Show progress.
-            percent = int(bmap_pos/bmap_size*1000)
-            if percent >= checkpt:
-                print("  %.1f%%   %dMB " % (percent/10, bcount//1000000),
-                        end="\x0d", flush=True)
-                checkpt += checkpt_pct
-
-            # Compress & write only non-empty and last chunks
-            if buf == zeros and addr < lchunk_addr:
-                if fman_hash != "0":  print("0", destfile, file=hashf)
-                continue
-
-            # Performance fix: move compression into separate processes
-            buf      = compress(buf, compresslevel)
-            bhash    = gethash(buf)   ; hexhash = bhash.hexdigest()
-
-            # level 1 dedup
-            if fman_hash == hexhash:  continue
-
-            # Start tar stream
-            if not stream_started:
-                untar = subprocess.Popen(dest_run_args(desttype, untar_cmd),
-                        stdin =subprocess.PIPE,    stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL)
-                tarf = tarfile.open(mode="w|", fileobj=untar.stdin)
-                tarf_addfile = tarf.addfile; TarInfo = tarfile.TarInfo
-                LNKTYPE = tarfile.LNKTYPE
-                stream_started = True
-
-            # Add buffer to stream
-            tar_info = TarInfo("%s-tmp/%s/%s" % 
-                            (sdir, destfile[1:addrsplit], destfile))
-            print(hexhash, destfile, file=hashf)
-
-            # If chunk already in archive, link to it
-            if dedup < 2:
-                pass
-
-            elif dedup == 3:
-                bhashb = bhash.digest()
-                row    = cursor.execute("SELECT chunk,ses_id FROM hashindex "
-                        "WHERE id = ?", (bhashb,)).fetchone()
-                if row:
-                    ddch, ddses_i = row
-                    ddses = ddsessions[ddses_i]
-                    ddchx = chformat % (c_uint64(ddch).value)
-                    tar_info.type = LNKTYPE
+                if dedup and addr < sendall_addr: # level 1
+                    fman_hash, fman_fname = fullmanifest.readline().split()
+                    if fman_fname != destfile:
+                        raise ValueError("expected manifest addr %s, got %s"
+                                         % (destfile, fman_fname))
                 else:
-                    # perf fix: use execute_many + index of waiting inserts
-                    cursor.execute("INSERT INTO hashindex(id,chunk,ses_id)"
-                        " VALUES(?,?,?)", 
-                        (bhashb, c_int64(addr).value, ses_index))
+                    fman_hash = ""
 
-            elif dedup == 4:
-                bhashb = bhash.digest()
-                i      = int.from_bytes(bhashb[:ht_ksize], "big")
-                ht     = hashtree[i]; ct = chtree[i]
-                while True:
-                    try:
-                        pos = ht.index(int.from_bytes(bhashb[:hash0len],
-                                                    "little"))
-                    except ValueError:
-                        if idxcount < chtree_max:
-                            hashtree[i].frombytes(bhashb)
-                            chtree[i].append(idxcount)
-                            dataf.write(ses_index.to_bytes(ses_w,"big"))
-                            dataf.write(addr.to_bytes(ch_w,"big"))
-                            idxcount += 1
+                # Calculate corresponding position in bitmap.
+                bmap_pos = chunk // 8    ; b = chunk % 8
+
+                # Skip chunk if its deltamap bit is off and address below send-all range.
+                if addr < sendall_addr and not (minibmap[bmap_pos] & (1 << b)):  continue
+
+                vf_seek(addr)
+                buf = vf_read(chunksize)
+                destfile = "x"+chformat % addr
+
+                # Show progress.
+                percent = int(addr/snap2size*1000)
+                if percent >= checkpt:
+                    print("  %.1f%%   %dMB " % (percent/10, bcount//1000000),
+                            end="\x0d", flush=True)
+                    checkpt += checkpt_pct
+
+                # Compress & write only non-empty and last chunks
+                if buf == zeros and addr < lchunk_addr:
+                    if fman_hash != "0":  print("0", destfile, file=hashf)
+                    continue
+
+                # Performance fix: move compression into separate processes
+                buf      = compress(buf, compresslevel)
+                bhash    = gethash(buf)   ; hexhash = bhash.hexdigest()
+
+                # level 1 dedup
+                if fman_hash == hexhash:  continue
+
+                # Start tar stream
+                if not stream_started:
+                    untar = subprocess.Popen(dest_run_args(desttype, untar_cmd),
+                            stdin =subprocess.PIPE,    stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+                    tarf = tarfile.open(mode="w|", fileobj=untar.stdin)
+                    tarf_addfile = tarf.addfile; TarInfo = tarfile.TarInfo
+                    LNKTYPE = tarfile.LNKTYPE
+                    stream_started = True
+
+                # Add buffer to stream
+                tar_info = TarInfo("%s-tmp/%s/%s" % 
+                                (sdir, destfile[1:addrsplit], destfile))
+                print(hexhash, destfile, file=hashf)
+
+                # If chunk already in archive, link to it
+                if dedup < 2:
+                    pass
+
+                elif dedup == 3:
+                    bhashb = bhash.digest()
+                    row    = cursor.execute("SELECT chunk,ses_id FROM hashindex "
+                            "WHERE id = ?", (bhashb,)).fetchone()
+                    if row:
+                        ddch, ddses_i = row
+                        ddses = ddsessions[ddses_i]
+                        ddchx = chformat % (c_uint64(ddch).value)
+                        tar_info.type = LNKTYPE
+                    else:
+                        # perf fix: use execute_many + index of waiting inserts
+                        cursor.execute("INSERT INTO hashindex(id,chunk,ses_id)"
+                            " VALUES(?,?,?)", 
+                            (bhashb, c_int64(addr).value, ses_index))
+
+                elif dedup == 4:
+                    bhashb = bhash.digest()
+                    i      = int.from_bytes(bhashb[:ht_ksize], "big")
+                    ht     = hashtree[i]; ct = chtree[i]
+                    while True:
+                        try:
+                            pos = ht.index(int.from_bytes(bhashb[:hash0len],
+                                                        "little"))
+                        except ValueError:
+                            if idxcount < chtree_max:
+                                hashtree[i].frombytes(bhashb)
+                                chtree[i].append(idxcount)
+                                dataf.write(ses_index.to_bytes(ses_w,"big"))
+                                dataf.write(addr.to_bytes(ch_w,"big"))
+                                idxcount += 1
+                                break # while
+
+                        if pos % hsegs == 0 and \
+                            ht[pos+1:pos+hsegs].tobytes() == bhashb[hash0len:]:
+                            # First hash segment matched; test remaining segments.
+                            data_i = ct[pos//hsegs]
+                            dataf.seek(data_i*(ses_w+ch_w))
+                            ddses  = ddsessions[int.from_bytes(
+                                        dataf.read(ses_w),"big")]
+                            ddchx  = dataf.read(ch_w).hex().zfill(chdigits)
+                            dataf.seek(0,2)
+                            tar_info.type = LNKTYPE
                             break # while
 
-                    if pos % hsegs == 0 and \
-                        ht[pos+1:pos+hsegs].tobytes() == bhashb[hash0len:]:
-                        # First hash segment matched; test remaining segments.
-                        data_i = ct[pos//hsegs]
+                        pos += hsegs - (pos % hsegs)
+                        ht = ht[pos:]; ct = ct[pos//hsegs:]
+
+                elif dedup == 5:
+                    bhashb = bhash.digest()
+                    i      = int.from_bytes(bhashb[:ht_ksize], "big")
+
+                    pos = hashtree[i].find(bhashb)
+                    if pos % hash_w == 0:
+                        data_i = chtree[i][pos//hash_w]
                         dataf.seek(data_i*(ses_w+ch_w))
-                        ddses  = ddsessions[int.from_bytes(
-                                    dataf.read(ses_w),"big")]
-                        ddchx  = dataf.read(ch_w).hex().zfill(chdigits)
+                        ddses = ddsessions[int.from_bytes(
+                                dataf.read(ses_w),"big")]
+                        ddchx = dataf.read(ch_w).hex().zfill(chdigits)
                         dataf.seek(0,2)
                         tar_info.type = LNKTYPE
-                        break # while
+                    elif idxcount < chtree_max:
+                        hashtree[i].extend(bhashb)
+                        chtree[i].append(idxcount)
+                        dataf.write(ses_index.to_bytes(ses_w,"big"))
+                        dataf.write(addr.to_bytes(ch_w,"big"))
+                        idxcount += 1
 
-                    pos += hsegs - (pos % hsegs)
-                    ht = ht[pos:]; ct = ct[pos//hsegs:]
+                if tar_info.type == LNKTYPE:
+                    tar_info.linkname = "%s/%s/%s/x%s" % \
+                        (ddses.volume.name,
+                            ddses.name+"-tmp" if ddses is ses else ddses.name,
+                            ddchx[:addrsplit],
+                            ddchx)
+                    ddbytes += len(buf)
+                    tarf_addfile(tarinfo=tar_info)
+                else:
+                    tar_info.size = len(buf)
+                    tarf_addfile(tarinfo=tar_info, fileobj=BytesIO(buf))
+                    bcount += len(buf)
 
-            elif dedup == 5:
-                bhashb = bhash.digest()
-                i      = int.from_bytes(bhashb[:ht_ksize], "big")
+            if minibmap:  addr += chunksize
 
-                pos = hashtree[i].find(bhashb)
-                if pos % hash_w == 0:
-                    data_i = chtree[i][pos//hash_w]
-                    dataf.seek(data_i*(ses_w+ch_w))
-                    ddses = ddsessions[int.from_bytes(
-                            dataf.read(ses_w),"big")]
-                    ddchx = dataf.read(ch_w).hex().zfill(chdigits)
-                    dataf.seek(0,2)
-                    tar_info.type = LNKTYPE
-                elif idxcount < chtree_max:
-                    hashtree[i].extend(bhashb)
-                    chtree[i].append(idxcount)
-                    dataf.write(ses_index.to_bytes(ses_w,"big"))
-                    dataf.write(addr.to_bytes(ch_w,"big"))
-                    idxcount += 1
-
-            if tar_info.type == LNKTYPE:
-                tar_info.linkname = "%s/%s/%s/x%s" % \
-                    (ddses.volume.name,
-                        ddses.name+"-tmp" if ddses is ses else ddses.name,
-                        ddchx[:addrsplit],
-                        ddchx)
-                ddbytes += len(buf)
-                tarf_addfile(tarinfo=tar_info)
+            if len(bmap_list):
+                # Reached boundary inside bmseg; Jump ahead here.
+                list(islice(fullmanifest, len(zdelim)*8))
+                addr += chunksize*len(zdelim)*8
             else:
-                tar_info.size = len(buf)
-                tarf_addfile(tarinfo=tar_info, fileobj=BytesIO(buf))
-                bcount += len(buf)
+                # End of bmseg; Get more.
+                bmseg = bmapf.read(bmsegsize)
+                if bmseg:
+                    bmap_list.extend(bmseg.split(zdelim))    ; bmap_list.reverse()
 
     # Send session info, end stream and cleanup
     if stream_started:
