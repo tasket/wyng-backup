@@ -240,13 +240,14 @@ class ArchiveSet:
                 self.present  = exists(pjoin(path,"manifest"))
                 self.volume   = volume
                 # persisted:
-                self.localtime = None
+                self.uuid     = ""
+                self.localtime= None
                 self.volsize  = None
                 self.format   = None
                 self.sequence = None
                 self.previous = "none"
-                attr_str      = {"localtime","format","previous"}
-                attr_int      = {"volsize","sequence"}
+                attr_str      = ("localtime","format","previous","uuid")
+                attr_int      = ("volsize","sequence")
 
                 if path:
                     with open(pjoin(path,"info"), "r") as sf:
@@ -262,6 +263,7 @@ class ArchiveSet:
                     raise ValueError("Path not set for save_info")
                 self.volume.volsize = self.volsize
                 with open(pjoin(self.path,fname), "w") as f:
+                    print("uuid =",      self.uuid, file=f)
                     print("localtime =", self.localtime, file=f)
                     print("volsize =",   self.volsize, file=f)
                     print("format =",    self.format, file=f)
@@ -291,7 +293,7 @@ class Lvm_VolGroup:
 
 
 class Lvm_Volume:
-    colnames  = ["vg_name","lv_name","lv_attr","lv_size","lv_time",
+    colnames  = ["vg_name","lv_name","lv_attr","lv_size","lv_time","lv_uuid",
                  "pool_lv","thin_id","lv_path"]
     attr_ints = ["lv_size"]
 
@@ -917,19 +919,24 @@ def get_lvm_deltas(datavols):
 
 def update_delta_digest(datavol):
 
-    if monitor_only:  print("Updating block change map. ", end="")
-    vol         = aset.vols[datavol]
+    if monitor_only:  print("Scanning for changes.")
+    vol         = aset.vols[datavol]      ; chunksize   = aset.chunksize
     if len(vol.sessions) == 0:  return False
-    snap2vol    = vol.name + ".tock"
-    snap2size   = max(l_vols[snap2vol].lv_size, vol.volsize);    chunksize   = aset.chunksize
+    snap2vol    = vol.name + ".tock"      ; snap2size   = l_vols[snap2vol].lv_size
     os.rename(vol.mapfile, vol.mapfile+"-tmp")
     dtree       = xml.etree.ElementTree.parse(tmpdir+"/delta."+datavol).getroot()
     dblocksize  = int(dtree.get("data_block_size"))
     bmap_byte   = lastindex   = dnewblocks   = dfreedblocks = 0
 
+    # Check for volume size increase
+    next_chunk_addr  = last_chunk_addr(vol.volsize, chunksize) + chunksize
+    markall_pos = (next_chunk_addr//chunksize//8) if snap2size-1 >= next_chunk_addr else None
+
+
     with open(vol.mapfile+"-tmp", "r+b") as bmapf:
-        bmapf.truncate(vol.mapsize(snap2size))    ; bmapf.flush()
-        bmap_mm = mmap.mmap(bmapf.fileno(), 0)
+        bmap_size = vol.mapsize(max(snap2size, vol.volsize))
+        bmapf.truncate(bmap_size)    ; bmapf.flush()
+        bmap_mm   = mmap.mmap(bmapf.fileno(), 0)
 
         for delta in dtree.find("diff"):
             blockbegin = int(delta.get("begin")) * dblocksize
@@ -952,10 +959,12 @@ def update_delta_digest(datavol):
 
         if bmap_byte:  bmap_mm[lastindex] |= bmap_byte
 
+        if markall_pos is not None:
+            if monitor_only:  print("  Volume size has increased.")
+            for pos in range(markall_pos, bmap_size):  bmap_mm[pos] = 0xff
+
     if monitor_only and dnewblocks+dfreedblocks > 0:
-        print(dnewblocks * bs, "changed,", dfreedblocks * bs, "discarded.")
-    elif monitor_only:
-        print("No changes.")
+        print(" ", dnewblocks * bs, "changed,", dfreedblocks * bs, "discarded.")
 
     return dnewblocks+dfreedblocks > 0
 
@@ -968,20 +977,17 @@ def last_chunk_addr(volsize, chunksize):
 
 def send_volume(datavol, localtime):
 
-    vol         = aset.vols[datavol]
-    snap2vol    = vol.name + ".tock"
-    snap2size   = l_vols[snap2vol].lv_size
-    chunksize   = aset.chunksize
-    bmap_size   = vol.mapsize(snap2size)
-    chdigits    = max_address.bit_length() // 4
-    chformat    = "%0"+str(chdigits)+"x"
-    bksession   = "S_"+localtime
-    sdir        = pjoin(datavol, bksession)
-    send_all    = len(vol.sessions) == 0    ; dedup   = options.dedup
+    vol         = aset.vols[datavol]            ; prior_size  = vol.volsize 
+    snap2vol    = vol.name + ".tock"            ; snap2size   = l_vols[snap2vol].lv_size
+    bmap_size   = vol.mapsize(snap2size)        ; chunksize   = aset.chunksize
+    chdigits    = max_address.bit_length()//4   ; chformat    = "%0"+str(chdigits)+"x"
+    bksession   = "S_"+localtime                ; sdir        = pjoin(datavol, bksession)
+    send_all    = len(vol.sessions) == 0        ; dedup       = options.dedup
     fullmanifest= open(merge_manifests(datavol), "r") if dedup and not send_all else None
 
     ses = vol.new_session(bksession)
     ses.localtime = localtime
+    ses.uuid      = l_vols[snap2vol].lv_uuid
     ses.volsize   = snap2size
     ses.format    = "folders" #"tar" if options.tarfile else "folders"
     ses.path      = vol.path+"/"+bksession+"-tmp"
@@ -1026,12 +1032,8 @@ def send_volume(datavol, localtime):
         # sends all from this address forward
         sendall_addr = 0
     else:
-        # beyond range; send all is off
-        sendall_addr = snap2size + 1
-
     # Check volume size vs prior backup session
-    if not send_all:
-        prior_size       = vol.volsize
+        sendall_addr = snap2size + 1
         next_chunk_addr  = last_chunk_addr(prior_size, chunksize) + chunksize
         if prior_size > snap2size:
             print("  Volume size has shrunk.")
@@ -1061,19 +1063,31 @@ def send_volume(datavol, localtime):
         # Show progress in increments determined by 1000/checkpt_pct
         # where '200' results in five updates i.e. in unattended mode.
         checkpt = checkpt_pct = 335 if options.unattended else 1
-        addr = percent = 0
+        addr    = percent = 0
 
         # Feed delta bmap to inner loop in pieces segmented by large zero delimeter.
         # This allows skipping most areas when changes are few.
-        zdelim = bytes(64)    ; bmsegsize = 16*1024
-        bmap_list = bmapf.read(bmsegsize).split(zdelim);    bmap_list.reverse()
-        #bmap_list = deque(bmapf.read(bmsegsize).split(zdelim))
-        while len(bmap_list):
-            minibmap = bmap_list.pop()
+        zdelim  = bytes(64)    ; bmsegsize = 24*1024    ; bmseg = None
+        minibmap= None         ; bmap_list = []
+
+        while addr < snap2size:
+            if len(bmap_list):
+                # At boundary inside bmseg, so jump ahead here.
+                if fullmanifest:  list(islice(fullmanifest, len(zdelim)*8))
+                addr += chunksize*len(zdelim)*8
+                minibmap = bmap_list.pop()
+            elif not send_all:
+                # Empty; Get more.
+                bmseg = bmapf.read(bmsegsize)
+                if bmseg:
+                    bmap_list.extend(bmseg.split(zdelim))    ; bmap_list.reverse()
+                else:
+                    break
+                minibmap = bmap_list.pop()
 
             # Cycle over range of addresses in volume.
-            for chunk, addr in enumerate(range(
-                addr, min(snap2size, addr+len(minibmap)*8*chunksize), chunksize)):
+            for chunk, addr in enumerate(range( addr, snap2size if send_all
+                        else min(snap2size, addr+len(minibmap)*8*chunksize), chunksize)):
 
                 destfile = "x"+chformat % addr
 
@@ -1089,7 +1103,7 @@ def send_volume(datavol, localtime):
                 bmap_pos = chunk // 8    ; b = chunk % 8
 
                 # Skip chunk if its deltamap bit is off and address below send-all range.
-                if addr < sendall_addr and not (minibmap[bmap_pos] & (1 << b)):  continue
+                if not send_all and not (minibmap[bmap_pos] & (1 << b)):  continue
 
                 vf_seek(addr)
                 buf = vf_read(chunksize)
@@ -1213,17 +1227,7 @@ def send_volume(datavol, localtime):
                     tarf_addfile(tarinfo=tar_info, fileobj=BytesIO(buf))
                     bcount += len(buf)
 
-            if minibmap:  addr += chunksize
-
-            if len(bmap_list):
-                # Reached boundary inside bmseg; Jump ahead here.
-                list(islice(fullmanifest, len(zdelim)*8))
-                addr += chunksize*len(zdelim)*8
-            else:
-                # End of bmseg; Get more.
-                bmseg = bmapf.read(bmsegsize)
-                if bmseg:
-                    bmap_list.extend(bmseg.split(zdelim))    ; bmap_list.reverse()
+            if minibmap or send_all:  addr += chunksize
 
     # Send session info, end stream and cleanup
     if stream_started:
