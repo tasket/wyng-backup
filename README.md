@@ -298,6 +298,14 @@ wyng --local=myvg/mypool --dest=internal:/mountpoint arch-init
 
 ```
 
+Initialize a new backup archive with storage parameters...
+```
+
+wyng --local=myvg/mypool --dest=internal:/mpoint --chunk-factor=3 --hashtype=blake2b arch-init
+
+
+```
+
 Import a configuration from an existing archive...
 ```
 
@@ -470,7 +478,7 @@ here are some encryption approaches you can use to secure your backup archives:
     move archive encryption out of Domain 0.
 
 
-    Donations
+Donations
 ---
 <a href="https://liberapay.com/tasket/donate"><img alt="Donate using Liberapay" src="media/lp_donate.svg" height=54></a>
 

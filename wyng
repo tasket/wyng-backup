@@ -932,7 +932,6 @@ def update_delta_digest(datavol):
     next_chunk_addr  = last_chunk_addr(vol.volsize, chunksize) + chunksize
     markall_pos = (next_chunk_addr//chunksize//8) if snap2size-1 >= next_chunk_addr else None
 
-
     with open(vol.mapfile+"-tmp", "r+b") as bmapf:
         bmap_size = vol.mapsize(max(snap2size, vol.volsize))
         bmapf.truncate(bmap_size)    ; bmapf.flush()
@@ -960,8 +959,10 @@ def update_delta_digest(datavol):
         if bmap_byte:  bmap_mm[lastindex] |= bmap_byte
 
         if markall_pos is not None:
+            # If volsize increased, flag the corresponding bmap area as changed.
             if monitor_only:  print("  Volume size has increased.")
             for pos in range(markall_pos, bmap_size):  bmap_mm[pos] = 0xff
+            dnewblocks += (bmap_size - markall_pos) * 8 * dblocksize
 
     if monitor_only and dnewblocks+dfreedblocks > 0:
         print(" ", dnewblocks * bs, "changed,", dfreedblocks * bs, "discarded.")
@@ -1767,7 +1768,8 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
             if volume.sessions[ses].format == "tar":
                 x_it(1, "Cannot merge range containing tarfile session.")
         volsize    = volume.sessions[target].volsize
-        vol_shrank = volsize < volume.sessions[sources[0]].volsize #### Fix w max()
+        vol_shrank = volsize < max([x.volsize for x in volume.sessions.values()
+                                    if x.name in sources])
         last_chunk = chformat % last_chunk_addr(volsize, aset.chunksize)
         lc_filter  = '"'+last_chunk+'"'
 
