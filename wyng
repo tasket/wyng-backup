@@ -339,6 +339,18 @@ def vg_exists(vgname):
         return True
 
 
+# Converts a non-cannonical LV path to LV name plus pool and vg names.
+def get_lv_path_pool(path):
+    try:
+        p = subprocess.run([CP.lvm, "lvs", "--separator=::", "--noheadings",
+                            "--options=lv_name,pool_lv,vg_name", path], check=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except subprocess.CalledProcessError:
+        return "", "", ""
+    else:
+        return p.stdout.decode("utf-8").strip().split("::")
+
+
 def lv_remove(vgname, lvname):
     do_exec([[CP.lvm,"lvchange", "-p", "rw", vgname+"/"+lvname]], check=False)
     do_exec([[CP.blkdiscard, volgroups[vgname].lvs[lvname].lv_path]], check=False)
@@ -1913,7 +1925,6 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
     vgname    = aset.vgname
     vol       = aset.vols[datavol]
-    volsize   = vol.volsize
     chunksize = aset.chunksize
     zeros     = bytes(chunksize)
     snap1vol  = datavol+".tick"
@@ -1934,6 +1945,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         select_ses = sessions[-1]
     else:
         x_it(1, "No sessions available.")
+
+    volsize   = vol.sessions[select_ses].volsize
 
     if aset.compression in {"zlib","gzip"}:
         decompress  = zlib.decompress
@@ -1986,30 +1999,40 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
     # Prepare save volume
     if save_path:
-        # Discard all data in destination if this is a block device
-        # then open for writing
-        returned_home = False
-        if vg_exists(os.path.dirname(save_path)):
+        # Decode dev path semantics and match to vg/lv if possible. Otherwise, open
+        # simple block dev or file.
+        save_type = "block device"
+        returned_home = False    ; lv, pool, vg = get_lv_path_pool(save_path)
+        if not lv and vg_exists(os.path.dirname(save_path)):
+            # Got vg path, lv does not exist
             lv = os.path.basename(save_path)
             vg = os.path.basename(os.path.dirname(save_path))
+        if vg:
             # Does save path == original path?
-            returned_home = (lv == datavol) and not options.from_arch
+            returned_home = (lv== datavol) and (vg== aset.vgname) and not options.from_arch
+            save_type = "logical volume"
             if not lv_exists(vg,lv):
                 if vg != vgname:
                     x_it(1, "Cannot auto-create volume: Volume group does not match config.")
+                print("Creating '%s' in thin pool [%s/%s]." % (lv, vg, aset.poolname))
                 do_exec([[CP.lvm, "lvcreate", "-kn", "-ay", "-V", str(volsize)+"b",
                           "--thin", "-n", lv, vg+"/"+aset.poolname]])
             elif l_vols[lv].lv_size != volsize:
+                print("Re-sizing LV to %d bytes." % volsize)
                 do_exec([[CP.lvm, "lvresize", "-L", str(volsize)+"b", "-f", save_path]])
 
         if exists(save_path) and stat.S_ISBLK(os.stat(save_path).st_mode):
             do_exec([[CP.blkdiscard, save_path]])
             savef = open(save_path, "w+b")
+        elif save_path.startswith("/dev/"):
+            x_it(1,"Cannot create new volume from ambiguous /dev path."
+                 " Please create the volume before using 'receive', or specify"
+                 " --save-to=/dev/volgroup/lv in case of a thin LV.")
         else: # file
+            save_type = "file"
             savef = open(save_path, "w+b")
             savef.truncate(0)          ; savef.flush()
             savef.truncate(volsize)    ; savef.flush()
-        print("Saving to", save_path)
 
     elif diff:
         if not lv_exists(vgname, datavol):
@@ -2036,7 +2059,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         cmpf  = open(pjoin("/dev",vgname,snap1vol), "rb")
         diff_count = 0
 
-    print("\nReceiving volume", datavol, select_ses)
+    print("\nReceiving volume :", datavol, select_ses)
+    if save_path:    print("Saving to %s '%s'" % (save_type, save_path))
     # Create retriever process using py program
     cmd = dest_run_args(desttype,
             [destcd + bkdir+"/"+datavol

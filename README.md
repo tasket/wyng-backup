@@ -174,12 +174,13 @@ wyng --save-to=myfile.img receive vm-work-private
 ```
 
 ...restores a volume called 'vm-work-private' to 'myfile.img' in
-the current folder. Its possible to specify any valid file path or block
-device such as '/dev/vgname/vm-work-private'. In the latter case, the LVM volume will
-be automatically created if the configured volume group matches the save path.
+the current folder.
 
-Resizing is automatic if the path is a logical volume or regular file. For any
-save target, Wyng will try to discard old data before saving.
+Its possible to specify any valid file path or block
+device. However, note that '/dev/_vgname_/_lvname_' is a special form
+that indicates you are saving to an LVM volume; Wyng will only auto-create LVs for you
+if the save-to path is specified this way.
+For any save path, Wyng will try to discard old data before receiving.
 
 _Emergency and Recovery situations:_ The `--from` option may be used to
 receive from any Wyng archive that is not currently configured in the current
