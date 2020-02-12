@@ -523,7 +523,7 @@ import os, sys, shutil, subprocess, hashlib, gzip
 cmd = sys.argv[1] ;    tmpdir = "''' + tmpdir + '''-rpc"
 exists = os.path.exists   ; replace = os.replace;   remove = os.remove
 if cmd != "merge" and exists(tmpdir+"/dest.lst.gz"):
-    lstf = gzip.open(tmpdir+"/dest.lst.gz", "r")
+    lstf = gzip.open(tmpdir+"/dest.lst.gz", "rt")
 if cmd == "receive":
     for line in lstf:
         fname = line.strip()
@@ -538,7 +538,7 @@ elif cmd == "merge":
         print("Error: Not in volume dir.")   ; sys.exit(40)
     try:
         resume = "--resume" in sys.argv   ; src_list = []   ; subdirs = set()
-        lstf = gzip.open("merge.lst.gz", "r")
+        lstf = gzip.open("merge.lst.gz", "rt")
         merge_target, target = lstf.readline().split()
         while True:
             ln = lstf.readline().strip()
@@ -726,7 +726,7 @@ def get_in_process(archpath=""):
 
 def do_exec(commands, cwd=None, check=True, out="", infile="", text=False):
     ftype   = "t" if text else "b"
-    outmode = "a"+ftype if out.find(">>") == 0 else "w"+ftype
+    outmode = "a" if out.startswith(">>") else "w"
     out = out.lstrip(">>")
     if cwd and out and out[0] != "/":
         out = pjoin(cwd,out)
@@ -734,7 +734,7 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", text=False):
         infile = pjoin(cwd,infile)
     outfunc = gzip.open if out.endswith(".gz") else open
     infunc  = gzip.open if infile.endswith(".gz") else open
-    outf = outfunc(out, outmode) if out else subprocess.DEVNULL
+    outf = outfunc(out, outmode+ftype) if out else subprocess.DEVNULL
     inf  = infunc(infile, "r"+ftype) if infile else subprocess.DEVNULL
     errf = open(tmpdir+"/err.log", "a")  ; print("--+--", file=errf)
     commands = [x for x in commands if x is not None]
@@ -1770,10 +1770,11 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
         volsize    = volume.sessions[target].volsize
         vol_shrank = volsize < max([x.volsize for x in volume.sessions.values()
                                     if x.name in sources])
+        if vol_shrank: print("Volume has shrunk.") ####
         last_chunk = chformat % last_chunk_addr(volsize, aset.chunksize)
         lc_filter  = '"'+last_chunk+'"'
 
-        with gzip.open("merge.tmp.gz", "wt") as lstf:
+        with open("merge.tmp", "wt") as lstf:
             print(merge_target, target, file=lstf)
 
             # Get manifests, append session name to eol, print session names to list.
@@ -1807,14 +1808,14 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
                 "s|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)\s+(S_\S+)|"
                 "rename \\3/\\1/x\\1\\2 "+merge_target+"/\\1/x\\1\\2|"
                 ]
-                ], infile=m_tmp+"/manifest.one", out=">>merge.tmp.gz", text=True)
+                ], infile=m_tmp+"/manifest.one", out=">>merge.tmp")
 
         if vol_shrank:
             # If volume size shrank in this period then make trim list.
             do_exec([[CP.awk, "$2>"+lc_filter, m_tmp+"/manifest.two"],
                     [CP.sed, "-E", "s|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)|"
                     "rm "+merge_target+"/\\1/x\\1\\2|"]
-                    ], out=">>merge.tmp.gz", text=True)
+                    ], out=">>merge.tmp")
 
         # Update info records
         if clear_sources:
@@ -1828,6 +1829,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
                        tmp=True, dest=False)
 
         # Send new metadata and process lists to dest
+        do_exec([[CP.gzip, "-f", "merge.tmp"]])
         do_exec([[CP.tar, "-cf", "-", "../in_process.tmp", "volinfo.tmp", "merge.tmp.gz", target],
                 dest_run_args(desttype, [destcd + bkdir+"/"+datavol
                 +" && tar -xmf -"
