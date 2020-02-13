@@ -934,6 +934,7 @@ def update_delta_digest(datavol):
     if monitor_only:  print("Scanning for changes.")
     vol         = aset.vols[datavol]      ; chunksize   = aset.chunksize
     if len(vol.sessions) == 0:  return False
+    snap1vol    = vol.name + ".tick"      ; snap1size   = l_vols[snap1vol].lv_size
     snap2vol    = vol.name + ".tock"      ; snap2size   = l_vols[snap2vol].lv_size
     os.rename(vol.mapfile, vol.mapfile+"-tmp")
     dtree       = xml.etree.ElementTree.parse(tmpdir+"/delta."+datavol).getroot()
@@ -945,14 +946,15 @@ def update_delta_digest(datavol):
     markall_pos = (next_chunk_addr//chunksize//8) if snap2size-1 >= next_chunk_addr else None
 
     with open(vol.mapfile+"-tmp", "r+b") as bmapf:
-        bmap_size = vol.mapsize(max(snap2size, vol.volsize))
+        snap_ceiling = max(snap1size, snap2size) // bs
+        bmap_size    = vol.mapsize(max(snap1size, snap2size))
         bmapf.truncate(bmap_size)    ; bmapf.flush()
-        bmap_mm   = mmap.mmap(bmapf.fileno(), 0)
+        bmap_mm      = mmap.mmap(bmapf.fileno(), 0)
 
         for delta in dtree.find("diff"):
             blockbegin = int(delta.get("begin")) * dblocksize
             blocklen   = int(delta.get("length")) * dblocksize
-            if delta.tag in {"different", "right_only"}:
+            if delta.tag in ("different", "right_only"):
                 dnewblocks += blocklen
             elif delta.tag == "left_only":
                 dfreedblocks += blocklen
@@ -961,7 +963,7 @@ def update_delta_digest(datavol):
 
             # blockpos iterates over disk blocks, with thin LVM constant of 512 bytes/block.
             # dblocksize (local) & chunksize (dest) may be somewhat independant of each other.
-            for blockpos in range(blockbegin, blockbegin + blocklen):
+            for blockpos in range(blockbegin, min(blockbegin+blocklen, snap_ceiling)):
                 volsegment = blockpos // (chunksize // bs)
                 bmap_pos = volsegment // 8
                 if bmap_pos != lastindex:
@@ -1576,10 +1578,12 @@ def monitor_send(datavols, selected=[], monitor_only=True):
     if options.dedup:
         init_dedup_index()
 
+    if compare_files(volumes=[x for x in aset.vols.values() if x.name in datavols]):
+        x_it(1, "Error: Local and archive metadata differ.")
+
     if not monitor_only:
         print("\nSending backup session", localtime,
-              "to", (desttype+"://"+destsys) if \
-                  desttype != "internal" else destpath)
+              "to", (desttype+"://"+destsys) if desttype != "internal" else destpath)
 
     for datavol in datavols+newvols:
         print("\nVolume :", datavol, flush=True)
@@ -1873,7 +1877,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
         for ses in sources:  shutil.rmtree(volume.path+"/"+ses, ignore_errors=True)
     do_exec([[CP.sync, "-f", "volinfo"]])
     if resume and compare_files(volumes=[volume], sessions=[volume.sessions[target]]):
-        x_it(1, "Local and dest metadata differ; Exiting.")
+        x_it(1, "Error: Local and dest metadata differ.")
 
 
 # Compare files between local and dest archive, using hashes.
@@ -1980,7 +1984,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     if not options.from_arch:
         print("Checking metadata..")
         if compare_files(volumes=[vol], sessions=incl_ses):
-            x_it(1, "Local and archive metadata differ.")
+            x_it(1, "Error: Local and archive metadata differ.")
 
     # Merge manifests and send to archive system:
     # sed is used to expand chunk info into a path and filter out any entries
@@ -2180,7 +2184,7 @@ def rename_volume(archive, oldname, newname):
     if oldname not in aset.vols:  x_it(1,"No '%s' found." % oldname)
     v = aset.vols[oldname]     ; meta_only = not exists(v.path) or not len(v.sessions)
     if not meta_only and compare_files(volumes=[v]):
-        x_it(1, "Local and archive metadata differ.")
+        x_it(1, "Error: Local and archive metadata differ.")
 
     aset.add_volume(newname)   ; aset.conf["volumes"][newname] = aset.conf["volumes"][oldname]
     confname = os.path.basename(aset.confpath)
@@ -2207,7 +2211,7 @@ def rename_volume(archive, oldname, newname):
     get_lvm_vgs(aset.vgname)
     if was_in_process and not meta_only and \
         compare_files(pathlist=["archive.ini"], volumes=[aset.vols[newname]]):
-            x_it(1, "Local and archive metadata differ.")
+            x_it(1, "Error: Local and archive metadata differ.")
         # Enh: que automatic remap
 
     return ArchiveSet(archive.name, metadir+topdir)
@@ -2487,8 +2491,11 @@ elif options.action == "diff":
 elif options.action == "list":
     if not selected_vols:
         print("\nConfigured Volumes [%s/%s]\n" % (aset.vgname, aset.poolname))
-        for vol in datavols:
-            print("%7.1f GB  %s" % ((aset.vols[vol].volsize / 1024**3), vol))
+        nwidth = max([len(x.name) for x in aset.vols.values()])
+        fmt    = "%7.1f GB  %-" + str(nwidth+5) + "s  %s"
+        for name in sorted([x.name for x in aset.vols.values()]):
+            vol = aset.vols[name]   ; ses = vol.sesnames[-1][2:] if len(vol.sesnames) else " "
+            print(fmt % ((aset.vols[name].volsize / 1024**3), name, ses))
 
     for dv in selected_vols:
         print("\nSessions for volume",dv,":")
