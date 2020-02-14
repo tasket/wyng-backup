@@ -957,9 +957,9 @@ def update_delta_digest(datavol):
             blocklen   = int(delta.get("length")) * dblocksize
             blockend   = min(blockbegin+blocklen, snap_ceiling)
             if delta.tag in ("different", "right_only"):
-                dnewblocks += snap_ceiling - blockend
+                dnewblocks += blockend - blockbegin
             elif delta.tag == "left_only":
-                dfreedblocks += snap_ceiling - blockend
+                dfreedblocks += blockend - blockbegin
             else: # superfluous tag
                 continue
 
@@ -981,7 +981,7 @@ def update_delta_digest(datavol):
             dnewblocks += (bmap_size - markall_pos) * 8 * dblocksize
 
     if monitor_only and dnewblocks+dfreedblocks > 0:
-        print(" ", dnewblocks * bs, "changed,", dfreedblocks * bs, "discarded.")
+        print(" ", dnewblocks, "changes,", dfreedblocks, "discards.")
 
     return dnewblocks+dfreedblocks > 0
 
