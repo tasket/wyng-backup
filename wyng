@@ -240,7 +240,7 @@ class ArchiveSet:
                 self.present  = exists(pjoin(path,"manifest"))
                 self.volume   = volume
                 # persisted:
-                self.uuid     = ""
+                self.uuid     = "none"
                 self.localtime= None
                 self.volsize  = None
                 self.format   = None
@@ -252,6 +252,7 @@ class ArchiveSet:
                 if path:
                     with open(pjoin(path,"info"), "r") as sf:
                         for ln in sf:
+                            if ln.strip() == "uuid =":  continue
                             vname, value = ln.strip().split(" = ")
                             setattr(self, vname, 
                                 int(value) if vname in attr_int else value)
