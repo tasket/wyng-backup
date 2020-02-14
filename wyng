@@ -132,7 +132,7 @@ class ArchiveSet:
             self.sessions= {}
             self.sesnames= []
             # persisted:
-            self.format_ver = "0" #### Fix
+            self.format_ver = "0"
             self.uuid    = None
             self.first   = None
             self.last    = None
@@ -146,10 +146,10 @@ class ArchiveSet:
                         setattr(self, vname, value)
 
             # load sessions in dict and ordered list of session names
-            if debug:  print("VOLUME",self.name, self.first, self.last)
+            if debug:  print("\nVOLUME",self.name, self.first, self.last)
             sprev = self.last if self.last else "none"
             while sprev != "none":
-                if debug:  print(sprev)
+                if debug:  print(sprev, end="  ")
                 s = self.sessions[sprev] = self.Ses(self, sprev, path+"/"+sprev)
                 sprev = s.previous    ; self.sesnames.insert(0, s.name)
                 if sprev == "none" and self.first != s.name:
@@ -158,14 +158,14 @@ class ArchiveSet:
                 if not s.present:
                     raise FileNotFoundError("ERROR: Manifest does not exist for "+name)
 
-            #### Fix
             if int(self.format_ver) > format_version:
                 raise ValueError("Archive format ver = "+self.format_ver+
                                  ". Expected = "+format_version)
+            elif self.format_ver == "0":
+                raise ValueError("No format_version; Alpha archive?")
 
             # use latest volsize
-            self.volsize = self.sessions[self.last].volsize \
-                            if self.sessions else 0
+            self.volsize = self.sessions[self.last].volsize if self.sessions else 0
 
         def volname_check(vname):
             check = re.compile("^[a-zA-Z0-9\+\._-]+$")
@@ -176,6 +176,10 @@ class ArchiveSet:
                 print("Bad volume name.")
                 return False
             return True
+
+        def last_chunk_addr(self, vsize=None):
+            if vsize is None:  vsize = self.volsize
+            return (vsize-1) - ((vsize-1) % self.archive.chunksize)
 
         def map_exists(self):
             return exists(self.mapfile)
@@ -217,16 +221,20 @@ class ArchiveSet:
 
         def delete_session(self, sname, remove=True):
             ses = self.sessions[sname]
-            if sname == self.last:
-                raise NotImplementedError("Cannot delete last session")
             index = self.sesnames.index(sname)
-            affected = self.sesnames[index+1]
-            self.sessions[affected].previous = ses.previous
-            if index == 0:  self.first = self.sesnames[1]
+            indexall = self.archive.allsessions.index(ses)
+            if len(self.sessions)==1 and not ses.saved:
+                affected = "none"
+                self.first = self.last = None
+            elif sname == self.last:
+                raise NotImplementedError("Cannot delete last session")
+            else:
+                affected = self.sesnames[index+1]
+                self.sessions[affected].previous = ses.previous
+                if index == 0:  self.first = self.sesnames[1]
             del self.sesnames[index]
             del self.sessions[sname]
-            index = self.archive.allsessions.index(ses)
-            del self.archive.allsessions[index]
+            del self.archive.allsessions[indexall]
 
             if remove and exists(pjoin(self.path, sname)):
                 shutil.rmtree(pjoin(self.path, sname))
@@ -238,6 +246,7 @@ class ArchiveSet:
                 self.name     = name
                 self.path     = path
                 self.present  = exists(pjoin(path,"manifest"))
+                self.saved    = False
                 self.volume   = volume
                 # persisted:
                 self.uuid     = "none"
@@ -263,6 +272,7 @@ class ArchiveSet:
                 if not self.path:
                     raise ValueError("Path not set for save_info")
                 self.volume.volsize = self.volsize
+                self.saved = True
                 with open(pjoin(self.path,fname), "w") as f:
                     print("uuid =",      self.uuid, file=f)
                     print("localtime =", self.localtime, file=f)
@@ -307,7 +317,7 @@ class Lvm_Volume:
 
 # Retrieves survey of all LVs as vgs[].lvs[] dicts
 
-def get_lvm_vgs(vgname):
+def get_lvm_vgs(vg_to_lvols=None):
     global volgroups, l_vols
 
     do_exec([[CP.lvm, "lvs", "--units=b", "--noheadings", "--separator=::",
@@ -323,7 +333,7 @@ def get_lvm_vgs(vgname):
                 volgroups[vgname] = Lvm_VolGroup(vgname)
             volgroups[vgname].lvs[lvname] = Lvm_Volume(members)
 
-    if vgname:  l_vols = volgroups[vgname].lvs
+    if vg_to_lvols:  l_vols = volgroups[vg_to_lvols].lvs
 
 
 def lv_exists(vgname, lvname):
@@ -851,50 +861,52 @@ def prepare_snapshots(datavols):
     '''
 
     print("Preparing snapshots...")
-    dvs    = []
-    nvs    = []
-    vgname = aset.vgname
+    dvs, nvs = [], []                   ; vgname = aset.vgname
     for datavol in datavols:
-        vol      = aset.vols[datavol]
-        sessions = vol.sesnames
-        snap1vol = datavol + ".tick"
-        snap2vol = datavol + ".tock"
-        mapfile  = vol.mapfile
+        vol      = aset.vols[datavol]   ; mapfile  = vol.mapfile
+        snap1vol = datavol + ".tick"    ; snap2vol = datavol + ".tock"
+
 
         if not lv_exists(vgname, datavol):
             print("Warning:", datavol, "does not exist!")
             continue
 
         # Remove stale snap2vol
-        if lv_exists(vgname, snap2vol):
-            lv_remove(vgname, snap2vol)
+        if lv_exists(vgname, snap2vol):  lv_remove(vgname, snap2vol)
 
         # Future: Expand recovery to start send-resume
-        if exists(mapfile+"-tmp"):
-            #print("  Delta map not finalized for", datavol, "...recovering.")
-            os.rename(mapfile+"-tmp", mapfile)
+        if exists(mapfile+"-tmp"):  os.rename(mapfile+"-tmp", mapfile)
 
-        # Make initial snapshot if necessary:
+        # Make deltamap or initial snapshot if necessary:
         if not exists(mapfile):
-            if len(sessions) > 0:
-                raise RuntimeError("ERROR: Sessions exist but no map for "+datavol)
-            if not monitor_only and not lv_exists(vgname, snap1vol):
-                do_exec([[CP.lvm, "lvcreate", "-pr", "-kn",
-                    "-ay", "-s", vgname+"/"+datavol, "-n", snap1vol]])
-                volgroups[vgname].lvs[snap1vol] = "placeholder"
-                print("  Initial snapshot created for", datavol)
-            nvs.append(datavol)
+            if len(vol.sessions) > 0:
+                if lv_exists(vgname, snap1vol) \
+                        and vol.sessions[vol.sesnames[-1]].uuid == l_vols[snap1vol].lv_uuid:
+                    # Latest session matches current snapshot; OK to make blank map.
+                    init_deltamap(mapfile, vol.mapsize())
+            elif not monitor_only:
+                if not lv_exists(vgname, snap1vol):
+                    do_exec([[CP.lvm, "lvcreate", "-pr", "-kn",
+                        "-ay", "-s", vgname+"/"+datavol, "-n", snap1vol]])
+                    volgroups[vgname].lvs[snap1vol] = "placeholder"
+                    print("  Initial snapshot created for", datavol)
+                nvs.append(datavol)
 
-        if exists(mapfile) and not lv_exists(vgname, snap1vol):
-            raise RuntimeError("ERROR: Map and snapshots in inconsistent state, "
-                            +snap1vol+" is missing!")
+        if not exists(mapfile) or not lv_exists(vgname, snap1vol):
+            # Handle unusual circumstance where remapping is needed.
+            if options.remap:
+                print("Snapshot and deltamap not paired for "+datavol
+                      +"; Remapping.")
+                receive_volume(datavol, save_path="", diff=True)
+            else:
+                x_it(1,"Error: Sessions exist but deltamap not paired to "+datavol
+                     +" snapshot. To resolve, run wyng with the '--remap' option.")
 
         # Make current snapshot
         do_exec([[CP.lvm, "lvcreate", "-pr", "-kn", "-ay",
             "-s", vgname+"/"+datavol, "-n",snap2vol]])
 
-        if datavol not in nvs:
-            dvs.append(datavol)
+        if datavol not in nvs:  dvs.append(datavol)
 
     return dvs, nvs
 
@@ -943,7 +955,7 @@ def update_delta_digest(datavol):
     bmap_byte   = lastindex   = dnewblocks   = dfreedblocks = 0
 
     # Check for volume size increase
-    next_chunk_addr  = last_chunk_addr(vol.volsize, chunksize) + chunksize
+    next_chunk_addr  = vol.last_chunk_addr() + chunksize
     markall_pos = (next_chunk_addr//chunksize//8) if snap2size-1 >= next_chunk_addr else None
 
     with open(vol.mapfile+"-tmp", "r+b") as bmapf:
@@ -985,10 +997,6 @@ def update_delta_digest(datavol):
         print(" ", dnewblocks, "changes,", dfreedblocks, "discards.")
 
     return dnewblocks+dfreedblocks > 0
-
-
-def last_chunk_addr(volsize, chunksize):
-    return (volsize-1) - ((volsize-1) % chunksize)
 
 
 # Send volume to destination:
@@ -1044,7 +1052,7 @@ def send_volume(datavol, localtime):
     zeros     = bytes(chunksize)
     bcount    = ddbytes = 0
     addrsplit = -address_split[1]
-    lchunk_addr = last_chunk_addr(snap2size, chunksize)
+    lchunk_addr = vol.last_chunk_addr(snap2size)
 
     if send_all:
         # sends all from this address forward
@@ -1052,7 +1060,7 @@ def send_volume(datavol, localtime):
     else:
     # Check volume size vs prior backup session
         sendall_addr = snap2size + 1
-        next_chunk_addr  = last_chunk_addr(prior_size, chunksize) + chunksize
+        next_chunk_addr  = vol.last_chunk_addr(prior_size) + chunksize
         if prior_size > snap2size:
             print("  Volume size has shrunk.")
         elif snap2size-1 >= next_chunk_addr:
@@ -1488,7 +1496,7 @@ def init_dedup_index5(listfile=""):
     dataf  = open(tmpdir+"/hashindex.dat","w+b")
     dataf_write = dataf.write
     if listfile:
-        dedupf = open(tmpdir+"/"+listfile, "w")
+        dedupf = gzip.open(tmpdir+"/"+listfile, "wt")
 
     count = match = 0
     for sesnum, ses in enumerate(sessions):
@@ -1545,14 +1553,14 @@ def init_dedup_index5(listfile=""):
 def dedup_existing():
 
     print("Building deduplication index...")
-    init_dedup_index("dedup.lst")
+    init_dedup_index("dedup.lst.gz")
 
     print("Linking...")
     do_exec([dest_run_args(desttype, [destcd + bkdir
-               +" && /bin/cat >"+tmpdir+"-rpc/dest.lst"
+               +" && /bin/cat >"+tmpdir+"-rpc/dest.lst.gz"
                +" && /usr/bin/python3 "+tmpdir+"-rpc/dest_helper.py dedup"
                ])
-            ], infile=tmpdir+"/dedup.lst")
+            ], infile=tmpdir+"/dedup.lst.gz")
 
 
 # Controls flow of monitor and send_volume procedures:
@@ -1790,7 +1798,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
         vol_shrank = volsize < max([x.volsize for x in volume.sessions.values()
                                     if x.name in sources])
         if vol_shrank: print("Volume has shrunk.") ####
-        last_chunk = chformat % last_chunk_addr(volsize, aset.chunksize)
+        last_chunk = chformat % volume.last_chunk_addr(volsize)
         lc_filter  = '"'+last_chunk+'"'
 
         with open("merge.tmp", "wt") as lstf:
@@ -1924,10 +1932,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         else:
             return 0
 
-    verify_only = options.action == "verify"
-    #assert not (save_path and (diff or verify_only))
-    attended    = not options.unattended
-    remap       = options.remap
+    verify_only = options.action == "verify"    ; remap  = options.remap
+    attended    = not options.unattended        ; debug  = options.debug
     gethash     = hash_funcs[aset.hashtype] 
 
     vgname    = aset.vgname
@@ -1968,7 +1974,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
     chdigits    = max_address.bit_length() // 4 # 4bits per digit
     chformat    = "x%0"+str(chdigits)+"x"
-    lchunk_addr = last_chunk_addr(volsize, chunksize)
+    lchunk_addr = vol.last_chunk_addr(volsize)
     last_chunkx = chformat % lchunk_addr
 
     # Collect session manifests
@@ -1985,7 +1991,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
     # compare metadata hashes
     if not options.from_arch:
-        print("Checking metadata..")
+        #print("Checking metadata..")
         if compare_files(volumes=[vol], sessions=incl_ses):
             x_it(1, "Error: Local and archive metadata differ.")
 
@@ -2049,6 +2055,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                 do_exec([[CP.lvm,"lvcreate", "-pr", "-kn", "-ay",
                         "-s", vgname+"/"+datavol, "-n", snap1vol]])
                 print("  Initial snapshot created for", datavol)
+                get_lvm_vgs(aset.vgname)
             if not exists(vol.mapfile):
                 init_deltamap(vol.mapfile, vol.mapsize())
             bmapf = open(vol.mapfile, "r+b")
@@ -2066,7 +2073,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         cmpf  = open(pjoin("/dev",vgname,snap1vol), "rb")
         diff_count = 0
 
-    print("\nReceiving volume :", datavol, select_ses)
+    print("Receiving" if save_path else "Scanning", "volume :", datavol, select_ses)
     if save_path:    print("Saving to %s '%s'" % (save_type, save_path))
     # Create retriever process using py program
     cmd = dest_run_args(desttype,
@@ -2153,8 +2160,9 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             raise ValueError("Received range %d does not match volume size %d."
                              % (addr+len(buf), volsize))
         print("100%")
-        print("Received range:", addr+len(buf))
-        print("    Data bytes:", bcount)
+        if debug:
+            print("Received range:", addr+len(buf),
+                "\n    Data bytes:", bcount)
 
         if save_path:
             savef.flush() ; savef.close()
@@ -2174,7 +2182,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             if remap:
                 bmapf.close()
                 print("Delta bytes re-mapped:", diff_count)
-                if diff_count > 0:
+                if diff_count > 0 and options.action != "send":
                     print("\nNext 'send' will bring this volume into sync.")
             elif diff_count:
                 x_it(1, "%d bytes differ." % diff_count)
@@ -2384,7 +2392,7 @@ if options.from_arch and options.action not in ("receive","verify","list","arch-
 init_dedup_index = [None, init_dedup_index1, None, init_dedup_index3,
                     init_dedup_index4, init_dedup_index5][options.dedup]
 monitor_only     = options.action == "monitor" # gather metadata without backing up
-volgroups, l_vols= {}, {}    ; get_lvm_vgs(None)
+volgroups, l_vols= {}, {}    ; get_lvm_vgs()
 destsys          = desttype  = dest_run_map  = dest_online  = dest_in_process  = None
 aset             = get_configs()
 destsys, desttype= detect_internal_state()
