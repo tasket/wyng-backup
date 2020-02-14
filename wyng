@@ -878,21 +878,20 @@ def prepare_snapshots(datavols):
         if exists(mapfile+"-tmp"):  os.rename(mapfile+"-tmp", mapfile)
 
         # Make deltamap or initial snapshot if necessary:
-        if not exists(mapfile):
-            if len(vol.sessions):
-                if lv_exists(vgname, snap1vol) \
-                        and vol.sessions[vol.sesnames[-1]].uuid == l_vols[snap1vol].lv_uuid:
-                    # Latest session matches current snapshot; OK to make blank map.
-                    init_deltamap(mapfile, vol.mapsize())
-            elif not monitor_only:
-                if not lv_exists(vgname, snap1vol):
-                    do_exec([[CP.lvm, "lvcreate", "-pr", "-kn",
-                        "-ay", "-s", vgname+"/"+datavol, "-n", snap1vol]])
-                    volgroups[vgname].lvs[snap1vol] = "placeholder"
-                    print("  Initial snapshot created for", datavol)
-                nvs.append(datavol)
+        if len(vol.sessions):
+            if lv_exists(vgname, snap1vol) and not exists(mapfile) \
+                    and vol.sessions[vol.sesnames[-1]].uuid == l_vols[snap1vol].lv_uuid:
+                # Latest session matches current snapshot; OK to make blank map.
+                init_deltamap(mapfile, vol.mapsize())
+        elif not monitor_only:
+            if not lv_exists(vgname, snap1vol):
+                do_exec([[CP.lvm, "lvcreate", "-pr", "-kn",
+                    "-ay", "-s", vgname+"/"+datavol, "-n", snap1vol]])
+                volgroups[vgname].lvs[snap1vol] = "placeholder"
+                print("  Initial snapshot created for", datavol)
+            nvs.append(datavol)
 
-        if len(vol.sessions) and not exists(mapfile) or not lv_exists(vgname, snap1vol):
+        if len(vol.sessions) and (not exists(mapfile) or not lv_exists(vgname, snap1vol)):
             # Handle unusual circumstance where remapping is needed.
             if options.remap:
                 print("Snapshot and deltamap not paired for "+datavol
