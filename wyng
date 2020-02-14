@@ -946,25 +946,27 @@ def update_delta_digest(datavol):
     markall_pos = (next_chunk_addr//chunksize//8) if snap2size-1 >= next_chunk_addr else None
 
     with open(vol.mapfile+"-tmp", "r+b") as bmapf:
-        snap_ceiling = max(snap1size, snap2size) // bs
+        snap_ceiling = max(snap1size, snap2size) // bs    ; chunkblocks = chunksize // bs
         bmap_size    = vol.mapsize(max(snap1size, snap2size))
         bmapf.truncate(bmap_size)    ; bmapf.flush()
         bmap_mm      = mmap.mmap(bmapf.fileno(), 0)
 
         for delta in dtree.find("diff"):
             blockbegin = int(delta.get("begin")) * dblocksize
+            if blockbegin >= snap_ceiling:  continue
             blocklen   = int(delta.get("length")) * dblocksize
+            blockend   = min(blockbegin+blocklen, snap_ceiling)
             if delta.tag in ("different", "right_only"):
-                dnewblocks += blocklen
+                dnewblocks += snap_ceiling - blockend
             elif delta.tag == "left_only":
-                dfreedblocks += blocklen
+                dfreedblocks += snap_ceiling - blockend
             else: # superfluous tag
                 continue
 
             # blockpos iterates over disk blocks, with thin LVM constant of 512 bytes/block.
             # dblocksize (local) & chunksize (dest) may be somewhat independant of each other.
-            for blockpos in range(blockbegin, min(blockbegin+blocklen, snap_ceiling)):
-                volsegment = blockpos // (chunksize // bs)
+            for blockpos in range(blockbegin, blockend):
+                volsegment = blockpos // chunkblocks
                 bmap_pos = volsegment // 8
                 if bmap_pos != lastindex:
                     bmap_mm[lastindex] |= bmap_byte      ; bmap_byte = 0
