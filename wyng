@@ -879,7 +879,7 @@ def prepare_snapshots(datavols):
 
         # Make deltamap or initial snapshot if necessary:
         if not exists(mapfile):
-            if len(vol.sessions) > 0:
+            if len(vol.sessions):
                 if lv_exists(vgname, snap1vol) \
                         and vol.sessions[vol.sesnames[-1]].uuid == l_vols[snap1vol].lv_uuid:
                     # Latest session matches current snapshot; OK to make blank map.
@@ -892,7 +892,7 @@ def prepare_snapshots(datavols):
                     print("  Initial snapshot created for", datavol)
                 nvs.append(datavol)
 
-        if not exists(mapfile) or not lv_exists(vgname, snap1vol):
+        if len(vol.sessions) and not exists(mapfile) or not lv_exists(vgname, snap1vol):
             # Handle unusual circumstance where remapping is needed.
             if options.remap:
                 print("Snapshot and deltamap not paired for "+datavol
@@ -1923,7 +1923,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
     def diff_compare(dbuf,z):
         if dbuf != cmpf.read(chunksize):
-            print("* delta", faddr, "Z   " if z else "    ")
+            if attended:  print(" delta", faddr, "Z   " if z else "    ", end="\x0d")
             if remap:
                 volsegment = addr // chunksize 
                 bmap_pos = volsegment // 8
@@ -2360,7 +2360,7 @@ parser.add_argument("--session", help="YYYYMMDD-HHMMSS[,YYYYMMDD-HHMMSS]"
 parser.add_argument("--from", dest="from_arch", default="",
                     help="Address+Path of other non-configured archive (receive, verify)")
 parser.add_argument("--save-to", dest="saveto", default="",help="Path to store volume for receive")
-parser.add_argument("--remap", action="store_true", default=False, help="Remap volume during diff")
+parser.add_argument("--remap", action="store_true", default=False, help="Remap volume")
 parser.add_argument("--local", default="",    help="Init: LVM vg/pool containing source volumes")
 parser.add_argument("--dest", default="",     help="Init: type:location of archive")
 parser.add_argument("--subdir", default="",   help="Init: optional subdir for --dest")
