@@ -351,8 +351,10 @@ The digest size used for _'blake2b'_ is 256 bits.
 
 `--chunk-factor=1` sets the pre-compression data chunk size used within the destination archive.
 Accepted range is an integer exponent from '1' to '6', resulting in a chunk size of 64kB for
-factor '1', 128kB for factor '2', 256kB for factor '3' and so on.
-The recommended range of chunk factors for general use is 1-3.
+factor '1', 128kB for factor '2', 256kB for factor '3' and so on. It is suggested that factors
+of '2' or greater be considered for archives that will store volumes larger than about 100GB.
+
+Note that _compression, hashtype_ and _chunk-factor_ cannot be changed for an archive once it is initialized.
 
 
 ### Tips
@@ -381,14 +383,6 @@ To see the chunksize for your pool(s) run `sudo lvs -o name,chunksize`. Common s
 are 128-512kB so if random writes are prevalent (i.e. for
 large databases or mail archives) then using Wyng deduplication (which resolves
 at 64kB by default) can reduce the size of your backup sessions.
-
-* If your system root volume resides in the LVM thin pool, there may be no obvious
-way to back up this volume in a 'safe' offline manner since snapshotting it while
-the system is running could leave the archived filesystem in an inconsistent state.
-One way to do this is to place a small script in /lib/systemd/system-shutdown with
-[snapshot commands]() then `wyng add` the snapshot name instead of the actual root
-volume name.
-
 
 
 ### Troubleshooting notes
@@ -477,6 +471,30 @@ here are some encryption approaches you can use to secure your backup archives:
     'qubes-ssh://vm-name:user@address/path' destination. These qubes options can
     achieve faster performance than the above `qvm-block attach` setup, but they
     move archive encryption out of Domain 0.
+
+
+### Beta testers
+
+* Testing goals are basically stability, usability, security and efficiency. Compatibility
+is also a valued topic, where source systems are generally expected to be a fairly recent
+Linux distro or Qubes OS. Destination systems can vary a lot, they just need to have Python and
+support Unix conventions.
+
+* If you wish to run Wyng operations that may want to roll back later,
+its possible to "backup the backup" in a relatively quick manner using a hardlink copy:
+```
+sudo cp -rl /var/lib/wyng.backup /var/lib/wyng.backup-02
+sudo cp -rl /dest/path/wyng.backup /dest/path/wyng.backup-02
+```
+
+Rolling back would involve deleting the wyng.backup dirs and `cp -rl` in the reverse
+direction. Note that Wyng may require using --remap afterward. Also note this is _not_
+recommended for regular use.
+
+* Wyng is generally usable with filesystems that don't support hardlinks (such as encryption
+filesystems), however one exception is when using deduplication test modes. When setting
+dedup higher than '1', Wyng will report that the destination is "not ready to receive commands"
+if the destination fs doesn't allow hardlinks.
 
 
 Donations

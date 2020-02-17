@@ -305,7 +305,7 @@ class Lvm_VolGroup:
 
 class Lvm_Volume:
     colnames  = ["vg_name","lv_name","lv_attr","lv_size","lv_time","lv_uuid",
-                 "pool_lv","thin_id","lv_path"]
+                 "pool_lv","thin_id","origin"]
     attr_ints = ["lv_size"]
 
     def __init__(self, members):
@@ -364,7 +364,7 @@ def get_lv_path_pool(path):
 
 def lv_remove(vgname, lvname):
     do_exec([[CP.lvm,"lvchange", "-p", "rw", vgname+"/"+lvname]], check=False)
-    do_exec([[CP.blkdiscard, volgroups[vgname].lvs[lvname].lv_path]], check=False)
+    do_exec([[CP.blkdiscard, pjoin("/dev",vgname,lvname)]], check=False)
     do_exec([[CP.lvm,"lvremove", "-f",vgname+"/"+lvname]])
 
 
@@ -880,7 +880,7 @@ def prepare_snapshots(datavols):
         # Make deltamap or initial snapshot if necessary:
         if len(vol.sessions):
             if lv_exists(vgname, snap1vol) and not exists(mapfile) \
-                    and vol.sessions[vol.sesnames[-1]].uuid == l_vols[snap1vol].lv_uuid:
+                    and vol.sessions[vol.last].uuid == l_vols[snap1vol].lv_uuid:
                 # Latest session matches current snapshot; OK to make blank map.
                 init_deltamap(mapfile, vol.mapsize())
         elif not monitor_only:
@@ -894,8 +894,7 @@ def prepare_snapshots(datavols):
         if len(vol.sessions) and (not exists(mapfile) or not lv_exists(vgname, snap1vol)):
             # Handle unusual circumstance where remapping is needed.
             if options.remap:
-                print("Snapshot and deltamap not paired for "+datavol
-                      +"; Remapping.")
+                print("Snapshot and deltamap not paired for "+datavol+"; Remapping...")
                 receive_volume(datavol, save_path="", diff=True)
             else:
                 x_it(1,"Error: Sessions exist but deltamap not paired to "+datavol
@@ -1014,7 +1013,7 @@ def send_volume(datavol, localtime):
     ses.localtime = localtime
     ses.uuid      = l_vols[snap2vol].lv_uuid
     ses.volsize   = snap2size
-    ses.format    = "folders" #"tar" if options.tarfile else "folders"
+    ses.format    = "folders"
     ses.path      = vol.path+"/"+bksession+"-tmp"
 
     # testing deduplication types:
@@ -1632,7 +1631,6 @@ def rotate_snapshots(vol, rotate=True):
         lv_remove(aset.vgname, snap1vol)
         do_exec([[CP.lvm,"lvrename",aset.vgname+"/"+snap2vol, snap1vol]])
         l_vols[snap2vol].lv_name = l_vols[snap1vol].lv_name
-        l_vols[snap2vol].lv_path = l_vols[snap1vol].lv_path
         l_vols[snap1vol] = l_vols[snap2vol]
         del l_vols[snap2vol]
 
