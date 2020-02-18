@@ -2285,9 +2285,7 @@ prog_version          = "0.2.0_beta4wip"
 format_version        = 1
 
 topdir                = "/"+prog_name+".backup"
-metadir               = "/var/lib"
 tmpdir                = "/tmp/"+prog_name
-big_tmpdir            = metadir+topdir+"/.tmp"
 
 # Disk block size:
 bs                    = 512
@@ -2329,15 +2327,6 @@ try:
 except IOError:
     x_it(1, "ERROR: "+prog_name+" is already running.")
 
-# Create our tmp and meta dirs
-shutil.rmtree(tmpdir+"-old", ignore_errors=True)
-shutil.rmtree(big_tmpdir, ignore_errors=True)
-if exists(tmpdir):
-    os.rename(tmpdir, tmpdir+"-old")
-os.makedirs(tmpdir+"/rpc")
-os.makedirs(metadir+topdir+"/wyng.old", exist_ok=True)
-os.makedirs(big_tmpdir, exist_ok=True)
-
 # Parse Arguments:
 parser = argparse.ArgumentParser(description="")
 parser.add_argument("action", choices=["send","monitor","add","delete","prune","receive",
@@ -2367,6 +2356,7 @@ parser.add_argument("--chunk-factor", dest="chfactor", type=int,
                     help="Init: set chunk size to N*64kB")
 #parser.add_argument("--deltas", action="store_true", default=False,
 #                    help="Receive: differential mode")
+parser.add_argument("--meta-dir", dest="metadir", default="", help="Use alternate metadata path")
 parser.add_argument("--debug", action="store_true", default=False, help="Debug mode")
 parser.add_argument("--testing-dedup", dest="dedup", type=int, default=1,
                     help="Test experimental deduplication (send)")
@@ -2374,6 +2364,21 @@ parser.add_argument("volumes", nargs="*")
 options = parser.parse_args()
 #subparser = parser.add_subparsers(help="sub-command help")
 #prs_prune = subparser.add_parser("prune",help="prune help")
+
+
+
+# Setup tmp and metadata dirs
+metadir     = options.metadir if options.metadir else "/var/lib"
+tmpdir      = "/tmp/"+prog_name
+big_tmpdir  = metadir+topdir+"/.tmp"
+
+shutil.rmtree(tmpdir+"-old", ignore_errors=True)
+shutil.rmtree(big_tmpdir, ignore_errors=True)
+if exists(tmpdir):
+    os.rename(tmpdir, tmpdir+"-old")
+os.makedirs(tmpdir+"/rpc")
+os.makedirs(metadir+topdir+"/wyng.old", exist_ok=True)
+os.makedirs(big_tmpdir, exist_ok=True)
 
 
 # General Configuration:
