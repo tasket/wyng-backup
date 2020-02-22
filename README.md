@@ -484,11 +484,11 @@ support Unix conventions.
 * If you wish to run Wyng operations that may want to roll back later,
 its possible to "backup the backup" in a relatively quick manner using a hardlink copy:
 ```
-sudo cp -rl /var/lib/wyng.backup /var/lib/wyng.backup-02
+sudo cp -a /var/lib/wyng.backup /var/lib/wyng.backup-02
 sudo cp -rl /dest/path/wyng.backup /dest/path/wyng.backup-02
 ```
 
-Rolling back would involve deleting the wyng.backup dirs and `cp -rl` in the reverse
+Rolling back would involve deleting the wyng.backup dirs and then `cp` in the reverse
 direction. Note that Wyng may require using --remap afterward. Also note this is _not_
 recommended for regular use.
 
