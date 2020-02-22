@@ -1889,6 +1889,8 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
     if resume and compare_files(volumes=[volume], sessions=[volume.sessions[target]]):
         x_it(1, "Error: Local and dest metadata differ.")
 
+    print(" done.")
+
 
 # Compare files between local and dest archive, using hashes.
 # The file tmpdir/compare-files.lst can be pre-populated with file paths if clear=False;
@@ -2283,11 +2285,8 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.2.0_beta4wip"
+prog_version          = "0.2.0_beta4"
 format_version        = 1
-
-topdir                = "/"+prog_name+".backup"
-tmpdir                = "/tmp/"+prog_name
 
 # Disk block size:
 bs                    = 512
@@ -2371,6 +2370,7 @@ options = parser.parse_args()
 
 # Setup tmp and metadata dirs
 metadir     = options.metadir if options.metadir else "/var/lib"
+topdir      = "/"+prog_name+".backup"
 tmpdir      = "/tmp/"+prog_name
 big_tmpdir  = metadir+topdir+"/.tmp"
 

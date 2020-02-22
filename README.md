@@ -351,8 +351,9 @@ The digest size used for _'blake2b'_ is 256 bits.
 
 `--chunk-factor=1` sets the pre-compression data chunk size used within the destination archive.
 Accepted range is an integer exponent from '1' to '6', resulting in a chunk size of 64kB for
-factor '1', 128kB for factor '2', 256kB for factor '3' and so on. It is suggested that factors
-of '2' or greater be considered for archives that will store volumes larger than about 100GB.
+factor '1', 128kB for factor '2', 256kB for factor '3' and so on. To maintain a good
+space efficiency and performance balance, a factor of '2' or greater is suggested for archives
+that will store volumes larger than about 100GB.
 
 Note that _compression, hashtype_ and _chunk-factor_ cannot be changed for an archive once it is initialized.
 
