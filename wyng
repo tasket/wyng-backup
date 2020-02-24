@@ -1901,13 +1901,17 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
 
 def compare_files(pathlist=[], volumes=[], sessions=[], clear=True):
     if clear and exists(tmpdir+"/compare-files.lst"):  os.remove(tmpdir+"/compare-files.lst")
-    flist = open(tmpdir+"/compare-files.lst", "a") \
-            if len(volumes) or len(sessions) or len(pathlist) else None
-    for v in volumes:   print(v.name+"/volinfo", file=flist)
+    realvols  = [x for x in volumes if len(x.sessions)]
+    realpaths = [x for x in pathlist if exists(x)]
+    if len(realvols) or len(sessions) or len(realpaths):
+        flist = open(tmpdir+"/compare-files.lst", "a")
+    else:
+        return False
+    for v in realvols:  print(v.name+"/volinfo", file=flist)
     for s in sessions:
         for sf in ("info","manifest"): print(pjoin(s.volume.name,s.name,sf), file=flist)
-    for pth in pathlist:  print(pth, file=flist)
-    if flist:  flist.close()
+    for pth in realpaths:  print(pth, file=flist)
+    flist.close()
     do_exec([[CP.xargs, CP.sha256sum]], cwd=aset.path,
             infile=tmpdir+"/compare-files.lst", out=tmpdir+"/compare-hashes.local")
     dest_run([destcd + bkdir +" && xargs sha256sum"],
