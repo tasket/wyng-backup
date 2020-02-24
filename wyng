@@ -2256,6 +2256,36 @@ def delete_volume(dv):
     return
 
 
+def show_list(selected_vols):
+    if not selected_vols:
+        print("\nConfigured Volumes [%s/%s]\n" % (aset.vgname, aset.poolname))
+        nwidth = max([len(x.name) for x in aset.vols.values()])
+        fmt    = "%7.1f GB  %-" + str(nwidth+5) + "s  %s"
+        for name in sorted([x.name for x in aset.vols.values()]):
+            vol = aset.vols[name]   ; ses = vol.sesnames[-1][2:] if len(vol.sesnames) else " "
+            print(fmt % ((aset.vols[name].volsize / 1024**3), name, ses))
+        return
+
+    trows, tcols = os.popen('stty size', 'r').read().split()
+    cols = max(4, min(10, int(tcols)//17))
+    for dv in selected_vols:
+        print("\nSessions for volume",dv,":\n")
+        vol = aset.vols[dv]    ; lmonth = vol.sesnames[0][2:8]    ; slist = []
+        for ses in vol.sesnames + [""]:
+            month = ses[2:8]
+            if options.unattended:
+                print(ses)
+                continue
+            if month == lmonth:
+                slist.append(ses)
+            else:
+                size = len(slist)    ; num = size//cols+(size%cols > 0)
+                for ii in range(num):
+                    print("  ".join([slist[x][2:] for x in range(ii,min(size,size+ii),num)]))
+                print()
+                lmonth = month    ; slist = [ses]
+
+
 def show_mem_stats():
     vsz, rss = map(int, os.popen("ps -up"+str(os.getpid())).readlines()[-1].split()[4:6])
     print("\n  Memory use: Max %dMB" %
@@ -2285,7 +2315,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.2.0_beta4"
+prog_version          = "0.2.0_beta5wip"
 format_version        = 1
 
 # Disk block size:
@@ -2505,30 +2535,7 @@ elif options.action == "diff":
 
 
 elif options.action == "list":
-    if not selected_vols:
-        print("\nConfigured Volumes [%s/%s]\n" % (aset.vgname, aset.poolname))
-        nwidth = max([len(x.name) for x in aset.vols.values()])
-        fmt    = "%7.1f GB  %-" + str(nwidth+5) + "s  %s"
-        for name in sorted([x.name for x in aset.vols.values()]):
-            vol = aset.vols[name]   ; ses = vol.sesnames[-1][2:] if len(vol.sesnames) else " "
-            print(fmt % ((aset.vols[name].volsize / 1024**3), name, ses))
-
-    for dv in selected_vols:
-        print("\nSessions for volume",dv,":")
-        vol = aset.vols[dv]
-        lmonth = ""; count = 0; ending = "."
-        for ses in vol.sesnames:
-            if ses[:8] != lmonth:
-                print("" if ending else "\n", flush=True)
-                count = 0
-            print(" ",ses[2:]+(" (tar)"
-                        if vol.sessions[ses].format == "tar"
-                        else ""), end="")
-            ending = "\n" if count % 5 == 4 else ""
-            print("", end=ending)
-            lmonth = ses[:8]; count += 1
-
-    print("" if selected_vols and ending else "\n", end="")
+    show_list(selected_vols)
 
 
 elif options.action == "add":
