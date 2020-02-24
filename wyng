@@ -523,8 +523,8 @@ def detect_internal_state():
     if not desttype:
         raise ValueError("'%s' not an accepted type." % destsys)
 
-    for prg in (CP.thin_delta, CP.lvm, CP.blkdiscard,
-                CP.ssh if desttype=="ssh" else CP.sh):
+    #    CP.thin_delta, CP.lvm, CP.blkdiscard,
+    for prg in (CP.sort, CP.sed, CP.ssh if desttype=="ssh" else CP.sh):
         if not shutil.which(prg):
             raise RuntimeError("Required command not found: "+prg)
 
@@ -1567,6 +1567,8 @@ def dedup_existing():
 # Controls flow of monitor and send_volume procedures:
 
 def monitor_send(datavols, selected=[], monitor_only=True):
+    for prg in (CP.lvm, CP.blkdiscard, CP.dmsetup, CP.thin_delta ):
+        if not shutil.which(prg):  raise RuntimeError("Required command not found: "+prg)
 
     localtime = time.strftime("%Y%m%d-%H%M%S")
 
@@ -1949,6 +1951,10 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     elif not save_path:
         save_path = pjoin("/dev",vgname,datavol)
 
+    if save_path or diff:
+        for prg in (CP.lvm, CP.blkdiscard):
+            if not shutil.which(prg):  raise RuntimeError("Required command not found: "+prg)
+
     # Set the session to retrieve
     if select_ses:
         datetime.datetime.strptime(select_ses, "%Y%m%d-%H%M%S")
@@ -1979,14 +1985,12 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     last_chunkx = chformat % lchunk_addr
 
     # Collect session manifests
-    ##open(tmpdir+"/manifests.cat", "wb").close()
     include = False   ; incl_ses = []
     for ses in sessions:
         incl_ses.append(vol.sessions[ses])
 
         if vol.sessions[ses].format == "tar":
-            raise NotImplementedError(
-                "Receive from tarfile not yet implemented: "+ses)
+            raise NotImplementedError("Receive from tarfile not yet implemented: "+ses)
 
         if ses == select_ses:  break
 
@@ -2192,6 +2196,9 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 # Rename a volume in the archive
 
 def rename_volume(archive, oldname, newname):
+    for prg in (CP.lvm, CP.blkdiscard):
+        if not shutil.which(prg):  raise RuntimeError("Required command not found: "+prg)
+
     aset = ArchiveSet(archive.name, metadir+topdir, allvols=True)
     if oldname not in aset.vols:  x_it(1,"No '%s' found." % oldname)
     v = aset.vols[oldname]     ; meta_only = not exists(v.path) or not len(v.sessions)
@@ -2232,6 +2239,9 @@ def rename_volume(archive, oldname, newname):
 # Remove a volume from the archive
 
 def delete_volume(dv):
+    for prg in (CP.lvm, CP.blkdiscard):
+        if not shutil.which(prg):  raise RuntimeError("Required command not found: "+prg)
+
     if not options.unattended and not aset.in_process:
         print("Warning! Delete will remove ALL metadata AND archived data",
               "for volume", dv)
