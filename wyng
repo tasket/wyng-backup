@@ -528,13 +528,14 @@ def detect_internal_state():
         if not shutil.which(prg):
             raise RuntimeError("Required command not found: "+prg)
 
-    p = subprocess.check_output([CP.thin_delta, "-V"])
-    ver = p[:5].decode("UTF-8").strip()
-    target_ver = "0.7.4"
-    if ver < target_ver:
+    try:
+        p = subprocess.check_output([CP.thin_delta, "-V"])
+    except:
+        p = b""
+    ver = p[:5].decode("UTF-8").strip()    ; target_ver = "0.7.4"
+    if p and ver < target_ver:
         print("Note: Thin provisioning tools version", target_ver,
-              "or later is recommended for stabilty."
-              " Installed version =", ver+".")
+              "or later is recommended for stability. Installed version =", ver+".")
 
 
     #####>  Begin helper program  <#####
@@ -2258,7 +2259,7 @@ def delete_volume(dv):
 
 
 def show_list(selected_vols):
-    if not selected_vols:
+    if not selected_vols and not len(options.volumes):
         print("\nConfigured Volumes [%s/%s]\n" % (aset.vgname, aset.poolname))
         nwidth = max([len(x.name) for x in aset.vols.values()])
         fmt    = "%7.1f GB  %-" + str(nwidth+5) + "s  %s"
@@ -2270,7 +2271,7 @@ def show_list(selected_vols):
     trows, tcols = os.popen('stty size', 'r').read().split()
     cols = max(4, min(10, int(tcols)//17))
     for dv in selected_vols:
-        print("\nSessions for volume",dv,":\n")
+        print("\nSessions for volume '%s':\n" % dv)
         vol = aset.vols[dv]    ; lmonth = vol.sesnames[0][2:8]    ; slist = []
         for ses in vol.sesnames + [""]:
             month = ses[2:8]
