@@ -1010,7 +1010,12 @@ def send_volume(datavol, localtime):
     chdigits    = max_address.bit_length()//4   ; chformat    = "%0"+str(chdigits)+"x"
     bksession   = "S_"+localtime                ; sdir        = pjoin(datavol, bksession)
     send_all    = len(vol.sessions) == 0        ; dedup       = options.dedup
-    fullmanifest= open(merge_manifests(datavol), "r") if dedup and not send_all else None
+
+    if dedup and not send_all:
+        fullmanifest = open(merge_manifests(datavol), "r")
+        fullmanifest_readline = fullmanifest.readline
+    else:
+        fullmanifest = None
 
     ses = vol.new_session(bksession)
     ses.localtime = localtime
@@ -1055,19 +1060,6 @@ def send_volume(datavol, localtime):
     addrsplit = -address_split[1]
     lchunk_addr = vol.last_chunk_addr(snap2size)
 
-    if send_all:
-        # sends all from this address forward
-        sendall_addr = 0
-    else:
-    # Check volume size vs prior backup session
-        sendall_addr = snap2size + 1
-        next_chunk_addr  = vol.last_chunk_addr(prior_size) + chunksize
-        if prior_size > snap2size:
-            print("  Volume size has shrunk.")
-        elif snap2size-1 >= next_chunk_addr:
-            print("  Volume size has increased.")
-            sendall_addr = next_chunk_addr
-
     if aset.compression=="zlib":
         compress = zlib.compress
     # add zstd here.
@@ -1094,8 +1086,7 @@ def send_volume(datavol, localtime):
 
         # Feed delta bmap to inner loop in pieces segmented by large zero delimeter.
         # This allows skipping most areas when changes are few.
-        zdelim  = bytes(64)    ; bmsegsize = 24*1024    ; bmseg = None
-        minibmap= None         ; bmap_list = []
+        zdelim  = bytes(64)    ; bmseg = minibmap = None    ; bmap_list = []
 
         while addr < snap2size:
             if len(bmap_list):
@@ -1105,7 +1096,7 @@ def send_volume(datavol, localtime):
                 minibmap = bmap_list.pop()
             elif not send_all:
                 # Empty; Get more.
-                bmseg = bmapf.read(bmsegsize)
+                bmseg = bmapf.read(25000)
                 if bmseg:
                     bmap_list.extend(bmseg.split(zdelim))    ; bmap_list.reverse()
                 else:
@@ -1118,23 +1109,18 @@ def send_volume(datavol, localtime):
 
                 destfile = "x"+chformat % addr
 
-                if dedup and addr < sendall_addr: # level 1
-                    fman_hash, fman_fname = fullmanifest.readline().split()
+                if dedup: # level 1
+                    fman_hash, fman_fname = fullmanifest_readline().split()
                     if fman_fname != destfile:
                         raise ValueError("expected manifest addr %s, got %s"
                                          % (destfile, fman_fname))
                 else:
                     fman_hash = ""
 
-                # Calculate corresponding position in bitmap.
-                bmap_pos = chunk // 8    ; b = chunk % 8
+                # Skip chunk if its deltamap bit is off.
+                if not send_all and not (minibmap[chunk//8] & (1 << chunk%8)):  continue
 
-                # Skip chunk if its deltamap bit is off and address below send-all range.
-                if not send_all and not (minibmap[bmap_pos] & (1 << b)):  continue
-
-                vf_seek(addr)
-                buf = vf_read(chunksize)
-                destfile = "x"+chformat % addr
+                vf_seek(addr)    ; buf = vf_read(chunksize)
 
                 # Show progress.
                 percent = int(addr/snap2size*1000)
@@ -1906,6 +1892,7 @@ def compare_files(pathlist=[], volumes=[], sessions=[], clear=True):
     if len(realvols) or len(sessions) or len(realpaths):
         flist = open(tmpdir+"/compare-files.lst", "a")
     else:
+        #print("Compare list is empty.")
         return False
     for v in realvols:  print(v.name+"/volinfo", file=flist)
     for s in sessions:
