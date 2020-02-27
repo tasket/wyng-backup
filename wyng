@@ -772,6 +772,7 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", text=False):
         p = subprocess.Popen(clist, cwd=cwd, stdin=inf if i==0 else procs[i-1].stdout,
                              stdout=outf if i==len(commands)-1 else subprocess.PIPE,
                              stderr=errf)
+        if len(procs):  procs[-1].stdout.close()
         procs.append(p)
 
     # Monitor and control processes
@@ -783,7 +784,6 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", text=False):
                 try:
                     p1.wait(timeout=2)
                 except subprocess.TimeoutExpired:
-                    # print("..", end="", flush=True)
                     timeout = True
                     continue
                 retcode = p1.returncode   ; finish = True
@@ -795,8 +795,6 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", text=False):
 
         if err or not timeout:
             break
-        # else:
-        #     print("##", end="", flush=True)
 
     for f in [inf, outf, errf]:
         if type(f) is not int: f.close()
