@@ -602,7 +602,7 @@ elif cmd == "merge":
             ln = line.split() # default split() does strip()
             if ln[0] == "rename" and (not resume or exists(ln[1])):
                 replace(ln[1], ln[2])
-            elif ln[0] == "rm" and exists(ln[1]):
+            elif ln[0] == "-rm" and exists(ln[1]):
                 remove(ln[1])
         open("CHECK-END-mv-rm","w").close()   ; lstf.close()
     except Exception as err:
@@ -1011,6 +1011,8 @@ def send_volume(datavol, localtime):
     send_all    = len(vol.sessions) == 0        ; dedup       = options.dedup
 
     if dedup and not send_all:
+        # Our chunks are usually smaller than LVM's, so generate a full manifest to detect
+        # significant amount of unchanged chunks that are flagged in the delta bmap.
         fullmanifest = open(merge_manifests(datavol), "r")
         fullmanifest_readline = fullmanifest.readline
     else:
@@ -1089,7 +1091,7 @@ def send_volume(datavol, localtime):
 
         while addr < snap2size:
             if len(bmap_list):
-                # At boundary inside bmseg, so jump ahead here.
+                # At boundary inside list, so use islice to jump ahead here.
                 if fullmanifest:  list(islice(fullmanifest, len(zdelim)*8))
                 addr += chunksize*len(zdelim)*8
                 minibmap = bmap_list.pop()
@@ -1097,12 +1099,14 @@ def send_volume(datavol, localtime):
                 # Empty; Get more.
                 bmseg = bmapf.read(25000)
                 if bmseg:
+                    # split(zdelim) shows us where large unmodified zones exist in bmap.
+                    # Resulting list is reversed so we can use pop().
                     bmap_list.extend(bmseg.split(zdelim))    ; bmap_list.reverse()
                 else:
                     break
                 minibmap = bmap_list.pop()
 
-            # Cycle over range of addresses in volume.
+            # Cycle over range of chunk addresses.
             for chunk, addr in enumerate(range( addr, snap2size if send_all
                         else min(snap2size, addr+len(minibmap)*8*chunksize), chunksize)):
 
@@ -1817,7 +1821,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
                 [CP.sed, "-E",
 
                 "s|^0 x(\S{" + str(address_split[0]) + "})(\S+)\s+(S_\S+)|"
-                "rm "+merge_target+"/\\1/x\\1\\2|; t; "
+                "-rm "+merge_target+"/\\1/x\\1\\2|; t; "
 
                 "s|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)\s+(S_\S+)|"
                 "rename \\3/\\1/x\\1\\2 "+merge_target+"/\\1/x\\1\\2|"
@@ -1828,8 +1832,10 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
             # If volume size shrank in this period then make trim list.
             do_exec([[CP.awk, "$2>"+lc_filter, m_tmp+"/manifest.two"],
                     [CP.sed, "-E", "s|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)|"
-                    "rm "+merge_target+"/\\1/x\\1\\2|"]
+                    "-rm "+merge_target+"/\\1/x\\1\\2|"]
                     ], out=">>merge.tmp")
+
+        do_exec([[CP.gzip, "-f", "merge.tmp"]])
 
         # Update info records
         if clear_sources:
@@ -1843,7 +1849,6 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
                        tmp=True, dest=False)
 
         # Send new metadata and process lists to dest
-        do_exec([[CP.gzip, "-f", "merge.tmp"]])
         do_exec([[CP.tar, "-cf", "-", "../in_process.tmp", "volinfo.tmp", "merge.tmp.gz", target],
                 dest_run_args(desttype, [destcd + bkdir+"/"+datavol
                 +" && tar -xmf -"
@@ -1876,7 +1881,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
     if resume and compare_files(volumes=[volume], sessions=[volume.sessions[target]]):
         x_it(1, "Error: Local and dest metadata differ.")
 
-    print(" done.")
+    print("done.")
 
 
 # Compare files between local and dest archive, using hashes.
@@ -1885,11 +1890,12 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
 # Returns False if local and dest hashes match.
 
 def compare_files(pathlist=[], volumes=[], sessions=[], clear=True):
-    if clear and exists(tmpdir+"/compare-files.lst"):  os.remove(tmpdir+"/compare-files.lst")
+    cmp_list = tmpdir+"/compare-files.lst"
+    if clear and exists(cmp_list):  os.remove(cmp_list)
     realvols  = [x for x in volumes if len(x.sessions)]
     realpaths = [x for x in pathlist if exists(x)]
     if len(realvols) or len(sessions) or len(realpaths):
-        flist = open(tmpdir+"/compare-files.lst", "a")
+        flist = open(cmp_list, "a")
     else:
         #print("Compare list is empty.")
         return False
@@ -1899,9 +1905,9 @@ def compare_files(pathlist=[], volumes=[], sessions=[], clear=True):
     for pth in realpaths:  print(pth, file=flist)
     flist.close()
     do_exec([[CP.xargs, CP.sha256sum]], cwd=aset.path,
-            infile=tmpdir+"/compare-files.lst", out=tmpdir+"/compare-hashes.local")
+            infile=cmp_list, out=tmpdir+"/compare-hashes.local")
     dest_run([destcd + bkdir +" && xargs sha256sum"],
-            infile=tmpdir+"/compare-files.lst", out=tmpdir+"/compare-hashes.dest")
+             infile=cmp_list, out=tmpdir+"/compare-hashes.dest")
     # maybe switch cmp to diff/sha256sum if they are safe enough to read untrusted input
     return do_exec([[CP.cmp, tmpdir+"/compare-hashes.local",tmpdir+"/compare-hashes.dest"]],
                 check=False) > 0
@@ -2257,32 +2263,53 @@ def delete_volume(dv):
 
 
 def show_list(selected_vols):
+    # Print list of volumes if not volume is selected.
     if not selected_vols and not len(options.volumes):
         print("\nConfigured Volumes [%s/%s]\n" % (aset.vgname, aset.poolname))
-        nwidth = max([len(x.name) for x in aset.vols.values()])
-        fmt    = "%7.1f GB  %-" + str(nwidth+5) + "s  %s"
+        maxwidth = max([len(x.name) for x in aset.vols.values()])
+        fmt    = "%7.1f GB  %-" + str(maxwidth+5) + "s  %s"
         for name in sorted([x.name for x in aset.vols.values()]):
             vol = aset.vols[name]   ; ses = vol.sesnames[-1][2:] if len(vol.sesnames) else " "
             print(fmt % ((aset.vols[name].volsize / 1024**3), name, ses))
         return
 
-    trows, tcols = os.popen('stty size', 'r').read().split()
-    cols = max(4, min(10, int(tcols)//17))
+    # Print list of sessions for selected volume(s).
+    # Get the terminal column width and set cols to number of list columns.
+    ttycols = os.popen('stty size', 'r').read().split()[1]
+    cols = max(4, min(10, int(ttycols)//17))
     for dv in selected_vols:
         print("\nSessions for volume '%s':\n" % dv)
         vol = aset.vols[dv]    ; lmonth = vol.sesnames[0][2:8]    ; slist = []
+
+        # Blank at end of 'sesnames' is a terminator that doesn't match any month value.
         for ses in vol.sesnames + [""]:
             month = ses[2:8]
             if options.unattended:
+                # plain listing
                 print(ses)
                 continue
+
             if month == lmonth:
+                # group sessions by month
                 slist.append(ses)
             else:
-                size = len(slist)    ; num = size//cols+(size%cols > 0)
-                for ii in range(num):
-                    print("  ".join([slist[x][2:] for x in range(ii,min(size,size+ii),num)]))
+                # print the month listing: 'rows' is adjusted to carry the remainder on
+                # additional lines. 'extra' and 'steps' are used to eliminate ragged
+                # column on the right (a ragged row is more pleasing to the eye).
+                size  = len(slist)          ; rows    = size//cols
+                rows += (size%rows)//cols if rows else 0
+                extra = size - cols*rows    ; heights = [rows] * cols
+                if extra:
+                    # adjust 'steps' to enable printing a ragged row. 
+                    for i in range(extra):  heights[i] += 1
+
+                # output one row at a time
+                for ii in range(max(heights)):
+                    print("  ".join([  slist[ii+sum(heights[:c])][2:] for c in range(cols)
+                                       if ii < heights[c]  ]))
                 print()
+
+                # start new month list
                 lmonth = month    ; slist = [ses]
 
 
@@ -2413,10 +2440,10 @@ os.makedirs(metadir+topdir+"/wyng.old", exist_ok=True)
 os.makedirs(big_tmpdir, exist_ok=True)
 
 
-# General Configuration:
+## General Configuration ##
 
 hash_funcs       = {"sha256": hashlib.sha256}
-if sys.hexversion >= 0x3060000:
+if "blake2b" in hashlib.algorithms_available:
     hash_funcs["blake2b"] = functools.partial(hashlib.blake2b, digest_size=hash_bits//8)
 
 # Check --from usage (access other/unconfigured archive).
@@ -2426,7 +2453,12 @@ if options.from_arch and options.action not in ("receive","verify","list","arch-
 init_dedup_index = [None, init_dedup_index1, None, init_dedup_index3,
                     init_dedup_index4, init_dedup_index5][options.dedup]
 monitor_only     = options.action == "monitor" # gather metadata without backing up
+
+# Get LVM listings
 volgroups, l_vols= {}, {}    ; get_lvm_vgs()
+
+# Create an ArchiveSet object with get_configs() and set global vars pertaining
+# to the destination.
 destsys          = desttype  = dest_run_map  = dest_online  = dest_in_process  = None
 aset             = get_configs()
 destsys, desttype= detect_internal_state()
@@ -2435,13 +2467,16 @@ bkdir            = topdir+"/"+aset.name
 destpath         = os.path.normpath(pjoin(aset.destmountpoint,aset.destdir))
 destcd           = " cd '"+destpath+"'"
 
-if not dest_online and (options.remap or options.action not in local_actions) \
-    and destsys is not None:
+# Check online status for certain commands.
+if not dest_online and (options.remap or options.from_arch \
+                    or options.action not in local_actions): ## and destsys is not None:
     x_it(1, "Destination not ready to receive commands.")
+
 if options.from_arch:
     aset         = get_configs_remote()
 os.makedirs(metadir+bkdir, exist_ok=True)
 
+# Vol group is now known: Set 'l_vols' to reference it.
 if aset.vgname in volgroups.keys():
     l_vols       = volgroups[aset.vgname].lvs
 
