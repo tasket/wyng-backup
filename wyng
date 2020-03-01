@@ -1112,7 +1112,7 @@ def send_volume(datavol, localtime):
 
                 destfile = "x"+chformat % addr
 
-                if dedup: # level 1
+                if fullmanifest: # level 1
                     fman_hash, fman_fname = fullmanifest_readline().split()
                     if fman_fname != destfile:
                         raise ValueError("expected manifest addr %s, got %s"
@@ -2263,7 +2263,7 @@ def delete_volume(dv):
 
 
 def show_list(selected_vols):
-    # Print list of volumes if not volume is selected.
+    # Print list of volumes if no volume is selected.
     if not selected_vols and not len(options.volumes):
         print("\nConfigured Volumes [%s/%s]\n" % (aset.vgname, aset.poolname))
         maxwidth = max([len(x.name) for x in aset.vols.values()])
@@ -2600,8 +2600,7 @@ elif options.action == "arch-init":
 
 
 elif options.action == "arch-delete":
-    print("Warning! Wipe-all will remove ALL metadata AND archived data, "
-          "leaving only the configuration!")
+    print("Warning! Wipe-all will remove ALL metadata AND archived data!")
 
     ans = input("Are you sure? [y/N]: ")
     if ans.lower() not in {"y","yes"}:
@@ -2609,6 +2608,8 @@ elif options.action == "arch-delete":
 
     for dv in list(aset.vols):
         aset.delete_volume(dv)
+
+    shutil.rmtree(aset.path, ignore_errors=True)
 
     print("\nDeleting entire archive...")
     cmd = [destcd
