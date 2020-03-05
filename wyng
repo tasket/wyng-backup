@@ -9,7 +9,7 @@
 
 #  editor width: 96  --------------------------------------------------------------------------
 import sys, os, stat, shutil, subprocess, time, datetime
-import re, mmap, zlib, gzip, tarfile, io, fcntl, tempfile
+import re, mmap, bz2, zlib, gzip, tarfile, io, fcntl, tempfile
 import argparse, configparser, hashlib, functools, uuid
 import xml.etree.ElementTree    ; from itertools import islice
 # For deduplication tests:
@@ -422,12 +422,13 @@ def arch_init(aset):
     if options.compression:
         if ":" in options.compression:
             compression, compr_level = options.compression.strip().split(":")
-            aset.compr_level = compr_level.strip()
         else:
             compression = options.compression.strip()
-        if compression not in {"zlib"} or not compr_level.isdecimal():
+            compr_level = str(compressors[compression][1])
+        compression = compression.strip()   ; compr_level = compr_level.strip()
+        if compression not in compressors.keys() or not compr_level.isdecimal():
             x_it(1, "Invalid compression spec.")
-        aset.compression = compression
+        aset.compression = compression      ; aset.compr_level = compr_level
 
     if options.chfactor:
         # accepts an exponent from 1 to 6
@@ -523,18 +524,19 @@ def detect_internal_state():
     if not desttype:
         raise ValueError("'%s' not an accepted type." % destsys)
 
-    for prg in (CP.thin_delta, CP.lvm, CP.blkdiscard,
-                CP.ssh if desttype=="ssh" else CP.sh):
+    #    CP.thin_delta, CP.lvm, CP.blkdiscard,
+    for prg in (CP.sort, CP.sed, CP.ssh if desttype=="ssh" else CP.sh):
         if not shutil.which(prg):
             raise RuntimeError("Required command not found: "+prg)
 
-    p = subprocess.check_output([CP.thin_delta, "-V"])
-    ver = p[:5].decode("UTF-8").strip()
-    target_ver = "0.7.4"
-    if ver < target_ver:
+    try:
+        p = subprocess.check_output([CP.thin_delta, "-V"])
+    except:
+        p = b""
+    ver = p[:5].decode("UTF-8").strip()    ; target_ver = "0.7.4"
+    if p and ver < target_ver:
         print("Note: Thin provisioning tools version", target_ver,
-              "or later is recommended for stabilty."
-              " Installed version =", ver+".")
+              "or later is recommended for stability. Installed version =", ver+".")
 
 
     #####>  Begin helper program  <#####
@@ -601,7 +603,7 @@ elif cmd == "merge":
             ln = line.split() # default split() does strip()
             if ln[0] == "rename" and (not resume or exists(ln[1])):
                 replace(ln[1], ln[2])
-            elif ln[0] == "rm" and exists(ln[1]):
+            elif ln[0] == "-rm" and exists(ln[1]):
                 remove(ln[1])
         open("CHECK-END-mv-rm","w").close()   ; lstf.close()
     except Exception as err:
@@ -771,6 +773,7 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", text=False):
         p = subprocess.Popen(clist, cwd=cwd, stdin=inf if i==0 else procs[i-1].stdout,
                              stdout=outf if i==len(commands)-1 else subprocess.PIPE,
                              stderr=errf)
+        if len(procs):  procs[-1].stdout.close()
         procs.append(p)
 
     # Monitor and control processes
@@ -782,7 +785,6 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", text=False):
                 try:
                     p1.wait(timeout=2)
                 except subprocess.TimeoutExpired:
-                    # print("..", end="", flush=True)
                     timeout = True
                     continue
                 retcode = p1.returncode   ; finish = True
@@ -794,8 +796,6 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", text=False):
 
         if err or not timeout:
             break
-        # else:
-        #     print("##", end="", flush=True)
 
     for f in [inf, outf, errf]:
         if type(f) is not int: f.close()
@@ -866,6 +866,9 @@ def prepare_snapshots(datavols):
     print("Preparing snapshots...")
     dvs, nvs = [], []                   ; vgname = aset.vgname
     for datavol in datavols:
+        # 'mapfile' is the deltamap file, 'snapXvol' are the .tick and .tock snapshots.
+        # .tick holds vol state between send/monitor ops;
+        # .tock is new snapshot which is compared w .tick and then replaces it (send/monitor).
         vol      = aset.vols[datavol]   ; mapfile  = vol.mapfile
         snap1vol = datavol + ".tick"    ; snap2vol = datavol + ".tock"
 
@@ -877,6 +880,7 @@ def prepare_snapshots(datavols):
         # Remove stale snap2vol
         if lv_exists(vgname, snap2vol):  lv_remove(vgname, snap2vol)
 
+        # Reclaim deltamap from interrupted session.
         # Future: Expand recovery to start send-resume
         if exists(mapfile+"-tmp"):  os.rename(mapfile+"-tmp", mapfile)
 
@@ -886,16 +890,22 @@ def prepare_snapshots(datavols):
                     and vol.sessions[vol.last].uuid == l_vols[snap1vol].lv_uuid:
                 # Latest session matches current snapshot; OK to make blank map.
                 init_deltamap(mapfile, vol.mapsize())
+
         elif not monitor_only:
+            # This is new vol and we're send-ing, so make initial .tick snapshot.
             if not lv_exists(vgname, snap1vol):
                 do_exec([[CP.lvm, "lvcreate", "-pr", "-kn",
                     "-ay", "-s", vgname+"/"+datavol, "-n", snap1vol]])
                 volgroups[vgname].lvs[snap1vol] = "placeholder"
                 print("  Initial snapshot created for", datavol)
+            # add to 'new' vols list
             nvs.append(datavol)
 
         if len(vol.sessions) and (not exists(mapfile) or not lv_exists(vgname, snap1vol)):
-            # Handle unusual circumstance where remapping is needed.
+            # Handle unusual circumstance where remapping is needed. Vol has history
+            # but .tick and/or deltamap are still missing after above checks.
+            # In this case (which can occur after importing w '--from') the vol must
+            # be scanned to determine if any differences exist with lastest backup session.
             if options.remap:
                 print("Snapshot and deltamap not paired for "+datavol+"; Remapping...")
                 receive_volume(datavol, save_path="", diff=True)
@@ -903,30 +913,34 @@ def prepare_snapshots(datavols):
                 x_it(1,"Error: Deltamap not paired to "+datavol
                      +" snapshot. To resolve, run wyng with the '--remap' option.")
 
-        # Make current snapshot
+        # Make fresh snap2vol
         do_exec([[CP.lvm, "lvcreate", "-pr", "-kn", "-ay",
             "-s", vgname+"/"+datavol, "-n",snap2vol]])
 
+        # Volume is OK, add to list of vols.
         if datavol not in nvs:  dvs.append(datavol)
 
     return dvs, nvs
 
 
 # Get raw lvm deltas between snapshots
+# Runs the 'thin_delta' tool to output diffs between vol's old and new snapshots.
+# Result can be read as an xml file by update_delta_digest().
 
 def get_lvm_deltas(datavols):
     vgname   = aset.vgname    ; poolname = aset.poolname
     print("Acquiring deltas.")
 
+    # Reserve a metadata snapshot for the LVM thin pool; required for a live pool.
     lvm_meta_snapshot(aset, "reserve")
 
     err = False
     try:
         for datavol in datavols:
             snap1vol = datavol + ".tick"    ; snap2vol = datavol + ".tock"
-            do_exec([[CP.thin_delta, "-m", "--thin1=" + l_vols[snap1vol].thin_id,
-                        "--thin2=" + l_vols[snap2vol].thin_id,
-                        "/dev/mapper/"+vgname+"-"+poolname+"_tmeta"],
+            do_exec([[CP.thin_delta, "-m",  "--thin1=" + l_vols[snap1vol].thin_id,
+                                            "--thin2=" + l_vols[snap2vol].thin_id,
+                                    "/dev/mapper/"+vgname+"-"+poolname+"_tmeta"],
                         [CP.grep, "-v", "<same .*\/>$"]
                     ],  out=tmpdir+"/delta."+datavol )
     except:
@@ -940,31 +954,40 @@ def get_lvm_deltas(datavols):
 
 # update_delta_digest: Translates raw lvm delta information
 # into a bitmap (actually chunk map) that repeatedly accumulates change status
-# for volume block ranges until a send command is successfully performed and
-# the mapfile is reinitialzed with zeros.
+# for volume block ranges until a 'send' command is successfully completed and
+# the mapfile is cleared.
 
 def update_delta_digest(datavol):
 
     if monitor_only:  print("Scanning for changes.")
     vol         = aset.vols[datavol]      ; chunksize   = aset.chunksize
-    if len(vol.sessions) == 0:  return False
+    if len(vol.sessions) == 0:  return False # nothing to compare
     snap1vol    = vol.name + ".tick"      ; snap1size   = l_vols[snap1vol].lv_size
     snap2vol    = vol.name + ".tock"      ; snap2size   = l_vols[snap2vol].lv_size
+
+    # Put deltamap into a temporary state
     os.rename(vol.mapfile, vol.mapfile+"-tmp")
+
+    # Get xml parser and initialize vars
     dtree       = xml.etree.ElementTree.parse(tmpdir+"/delta."+datavol).getroot()
     dblocksize  = int(dtree.get("data_block_size"))
     bmap_byte   = lastindex   = dnewblocks   = dfreedblocks = 0
 
-    # Check for volume size increase
+    # Check for volume size increase;
+    # Chunks from 'markall_pos' onward will be marked for backup.
     next_chunk_addr  = vol.last_chunk_addr() + chunksize
     markall_pos = (next_chunk_addr//chunksize//8) if snap2size-1 >= next_chunk_addr else None
 
+    # Setup access to deltamap as an mmap object.
     with open(vol.mapfile+"-tmp", "r+b") as bmapf:
         snap_ceiling = max(snap1size, snap2size) // bs    ; chunkblocks = chunksize // bs
         bmap_size    = vol.mapsize(max(snap1size, snap2size))
         bmapf.truncate(bmap_size)    ; bmapf.flush()
         bmap_mm      = mmap.mmap(bmapf.fileno(), 0)
 
+        # Cycle through the 'thin_delta' metadata, marking bits in bmap_mm as needed.
+        # Entries carry a block position 'blockbegin' and the length of changed blocks.
+        # 'snap_ceiling' is used to discard ranges beyond current vol size.
         for delta in dtree.find("diff"):
             blockbegin = int(delta.get("begin")) * dblocksize
             if blockbegin >= snap_ceiling:  continue
@@ -977,16 +1000,17 @@ def update_delta_digest(datavol):
             else: # superfluous tag
                 continue
 
-            # blockpos iterates over disk blocks, with thin LVM constant of 512 bytes/block.
+            # 'blockpos' iterates over disk blocks, with thin LVM constant of 512 bytes/block.
             # dblocksize (local) & chunksize (dest) may be somewhat independant of each other.
+            # bmap_byte & lastindex buffer the changes, but perf impact not checked.
             for blockpos in range(blockbegin, blockend):
                 volsegment = blockpos // chunkblocks
                 bmap_pos = volsegment // 8
-                if bmap_pos != lastindex:
+                if bmap_pos != lastindex: #save it
                     bmap_mm[lastindex] |= bmap_byte      ; bmap_byte = 0
                 bmap_byte |= 1 << (volsegment % 8)   ; lastindex = bmap_pos
 
-        if bmap_byte:  bmap_mm[lastindex] |= bmap_byte
+        if bmap_byte:  bmap_mm[lastindex] |= bmap_byte # save last
 
         if markall_pos is not None:
             # If volsize increased, flag the corresponding bmap area as changed.
@@ -1000,7 +1024,15 @@ def update_delta_digest(datavol):
     return dnewblocks+dfreedblocks > 0
 
 
-# Send volume to destination:
+# Send volume to destination.
+#
+# send_volume() has two main modes which are full (send_all) and incremental. After send
+# finishes a full session, the volume will have a blank deltamap and .tick snapshot to
+# track changes. After an incremental send, snapshots are rotated and the deltamap is reset.
+#
+# The 'dedup' deduplication level also represents a range of modes, where '0' means that all
+# marked chunks will be sent unconditionally, '1' means a chunk won't be sent if its marked
+# but same content, and '>= 2' will check w the archive-wide index and link it if matched.
 
 def send_volume(datavol, localtime):
 
@@ -1010,7 +1042,14 @@ def send_volume(datavol, localtime):
     chdigits    = max_address.bit_length()//4   ; chformat    = "%0"+str(chdigits)+"x"
     bksession   = "S_"+localtime                ; sdir        = pjoin(datavol, bksession)
     send_all    = len(vol.sessions) == 0        ; dedup       = options.dedup
-    fullmanifest= open(merge_manifests(datavol), "r") if dedup and not send_all else None
+
+    if dedup and not send_all:
+        # Our chunks are usually smaller than LVM's, so generate a full manifest to detect
+        # significant amount of unchanged chunks that are flagged in the delta bmap.
+        fullmanifest = open(merge_manifests(datavol), "r")
+        fullmanifest_readline = fullmanifest.readline
+    else:
+        fullmanifest = None
 
     ses = vol.new_session(bksession)
     ses.localtime = localtime
@@ -1020,6 +1059,7 @@ def send_volume(datavol, localtime):
     ses.path      = vol.path+"/"+bksession+"-tmp"
 
     # testing deduplication types:
+    # Code from init_dedup_indexN() localized here for efficiency.
     dedup_idx     = dedup_db = None
     fman_hash     = fman_fname = ""
     if dedup == 3: # sql
@@ -1055,23 +1095,11 @@ def send_volume(datavol, localtime):
     addrsplit = -address_split[1]
     lchunk_addr = vol.last_chunk_addr(snap2size)
 
-    if send_all:
-        # sends all from this address forward
-        sendall_addr = 0
-    else:
-    # Check volume size vs prior backup session
-        sendall_addr = snap2size + 1
-        next_chunk_addr  = vol.last_chunk_addr(prior_size) + chunksize
-        if prior_size > snap2size:
-            print("  Volume size has shrunk.")
-        elif snap2size-1 >= next_chunk_addr:
-            print("  Volume size has increased.")
-            sendall_addr = next_chunk_addr
-
-    if aset.compression=="zlib":
-        compress = zlib.compress
-    # add zstd here.
-    compresslevel = int(aset.compr_level)
+    use_zlib = aset.compression == "zlib" # workaround for old zlib limitation
+    if aset.compression == "bz2":
+        compress = functools.partial(bz2.compress, compresslevel=int(aset.compr_level))
+    elif aset.compression == "zlib":
+        compress_zlib = zlib.compress    ; compresslevel = int(aset.compr_level)
 
     # Use tar to stream files to destination
     stream_started = False
@@ -1094,47 +1122,43 @@ def send_volume(datavol, localtime):
 
         # Feed delta bmap to inner loop in pieces segmented by large zero delimeter.
         # This allows skipping most areas when changes are few.
-        zdelim  = bytes(64)    ; bmsegsize = 24*1024    ; bmseg = None
-        minibmap= None         ; bmap_list = []
+        zdelim  = bytes(64)    ; bmseg = minibmap = None    ; bmap_list = []
 
         while addr < snap2size:
             if len(bmap_list):
-                # At boundary inside bmseg, so jump ahead here.
+                # At boundary inside list, so use islice to jump ahead here.
                 if fullmanifest:  list(islice(fullmanifest, len(zdelim)*8))
                 addr += chunksize*len(zdelim)*8
                 minibmap = bmap_list.pop()
             elif not send_all:
                 # Empty; Get more.
-                bmseg = bmapf.read(bmsegsize)
+                bmseg = bmapf.read(25000)
                 if bmseg:
+                    # split(zdelim) shows us where large unmodified zones exist in bmap.
+                    # Resulting list is reversed so we can use pop().
                     bmap_list.extend(bmseg.split(zdelim))    ; bmap_list.reverse()
                 else:
                     break
                 minibmap = bmap_list.pop()
 
-            # Cycle over range of addresses in volume.
+            # Cycle over range of chunk addresses.
             for chunk, addr in enumerate(range( addr, snap2size if send_all
                         else min(snap2size, addr+len(minibmap)*8*chunksize), chunksize)):
 
                 destfile = "x"+chformat % addr
 
-                if dedup and addr < sendall_addr: # level 1
-                    fman_hash, fman_fname = fullmanifest.readline().split()
+                if fullmanifest: # level 1
+                    fman_hash, fman_fname = fullmanifest_readline().split()
                     if fman_fname != destfile:
                         raise ValueError("expected manifest addr %s, got %s"
                                          % (destfile, fman_fname))
                 else:
                     fman_hash = ""
 
-                # Calculate corresponding position in bitmap.
-                bmap_pos = chunk // 8    ; b = chunk % 8
+                # Skip chunk if its deltamap bit is off.
+                if not send_all and not (minibmap[chunk//8] & (1 << chunk%8)):  continue
 
-                # Skip chunk if its deltamap bit is off and address below send-all range.
-                if not send_all and not (minibmap[bmap_pos] & (1 << b)):  continue
-
-                vf_seek(addr)
-                buf = vf_read(chunksize)
-                destfile = "x"+chformat % addr
+                vf_seek(addr)    ; buf = vf_read(chunksize)
 
                 # Show progress.
                 percent = int(addr/snap2size*1000)
@@ -1148,9 +1172,8 @@ def send_volume(datavol, localtime):
                     if fman_hash != "0":  print("0", destfile, file=hashf)
                     continue
 
-                # Performance fix: move compression into separate processes
-                buf      = compress(buf, compresslevel)
-                bhash    = gethash(buf)   ; hexhash = bhash.hexdigest()
+                buf    = compress_zlib(buf, compresslevel) if use_zlib else compress(buf)
+                bhash  = gethash(buf)   ; hexhash = bhash.hexdigest()
 
                 # level 1 dedup
                 if fman_hash == hexhash:  continue
@@ -1567,6 +1590,8 @@ def dedup_existing():
 # Controls flow of monitor and send_volume procedures:
 
 def monitor_send(datavols, selected=[], monitor_only=True):
+    for prg in (CP.lvm, CP.blkdiscard, CP.dmsetup, CP.thin_delta ):
+        if not shutil.which(prg):  raise RuntimeError("Required command not found: "+prg)
 
     localtime = time.strftime("%Y%m%d-%H%M%S")
 
@@ -1830,7 +1855,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
                 [CP.sed, "-E",
 
                 "s|^0 x(\S{" + str(address_split[0]) + "})(\S+)\s+(S_\S+)|"
-                "rm "+merge_target+"/\\1/x\\1\\2|; t; "
+                "-rm "+merge_target+"/\\1/x\\1\\2|; t; "
 
                 "s|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)\s+(S_\S+)|"
                 "rename \\3/\\1/x\\1\\2 "+merge_target+"/\\1/x\\1\\2|"
@@ -1841,8 +1866,10 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
             # If volume size shrank in this period then make trim list.
             do_exec([[CP.awk, "$2>"+lc_filter, m_tmp+"/manifest.two"],
                     [CP.sed, "-E", "s|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)|"
-                    "rm "+merge_target+"/\\1/x\\1\\2|"]
+                    "-rm "+merge_target+"/\\1/x\\1\\2|"]
                     ], out=">>merge.tmp")
+
+        do_exec([[CP.gzip, "-f", "merge.tmp"]])
 
         # Update info records
         if clear_sources:
@@ -1856,7 +1883,6 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
                        tmp=True, dest=False)
 
         # Send new metadata and process lists to dest
-        do_exec([[CP.gzip, "-f", "merge.tmp"]])
         do_exec([[CP.tar, "-cf", "-", "../in_process.tmp", "volinfo.tmp", "merge.tmp.gz", target],
                 dest_run_args(desttype, [destcd + bkdir+"/"+datavol
                 +" && tar -xmf -"
@@ -1889,7 +1915,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
     if resume and compare_files(volumes=[volume], sessions=[volume.sessions[target]]):
         x_it(1, "Error: Local and dest metadata differ.")
 
-    print(" done.")
+    print("done.")
 
 
 # Compare files between local and dest archive, using hashes.
@@ -1898,11 +1924,12 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
 # Returns False if local and dest hashes match.
 
 def compare_files(pathlist=[], volumes=[], sessions=[], clear=True):
-    if clear and exists(tmpdir+"/compare-files.lst"):  os.remove(tmpdir+"/compare-files.lst")
+    cmp_list = tmpdir+"/compare-files.lst"
+    if clear and exists(cmp_list):  os.remove(cmp_list)
     realvols  = [x for x in volumes if len(x.sessions)]
     realpaths = [x for x in pathlist if exists(x)]
     if len(realvols) or len(sessions) or len(realpaths):
-        flist = open(tmpdir+"/compare-files.lst", "a")
+        flist = open(cmp_list, "a")
     else:
         #print("Compare list is empty.")
         return False
@@ -1912,9 +1939,9 @@ def compare_files(pathlist=[], volumes=[], sessions=[], clear=True):
     for pth in realpaths:  print(pth, file=flist)
     flist.close()
     do_exec([[CP.xargs, CP.sha256sum]], cwd=aset.path,
-            infile=tmpdir+"/compare-files.lst", out=tmpdir+"/compare-hashes.local")
+            infile=cmp_list, out=tmpdir+"/compare-hashes.local")
     dest_run([destcd + bkdir +" && xargs sha256sum"],
-            infile=tmpdir+"/compare-files.lst", out=tmpdir+"/compare-hashes.dest")
+             infile=cmp_list, out=tmpdir+"/compare-hashes.dest")
     # maybe switch cmp to diff/sha256sum if they are safe enough to read untrusted input
     return do_exec([[CP.cmp, tmpdir+"/compare-hashes.local",tmpdir+"/compare-hashes.dest"]],
                 check=False) > 0
@@ -1941,6 +1968,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     verify_only = options.action == "verify"    ; remap  = options.remap
     attended    = not options.unattended        ; debug  = options.debug
     gethash     = hash_funcs[aset.hashtype] 
+    decompress  = compressors[aset.compression][0].decompress
 
     vgname    = aset.vgname
     vol       = aset.vols[datavol]
@@ -1953,6 +1981,10 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         save_path = ""
     elif not save_path:
         save_path = pjoin("/dev",vgname,datavol)
+
+    if save_path or diff:
+        for prg in (CP.lvm, CP.blkdiscard):
+            if not shutil.which(prg):  raise RuntimeError("Required command not found: "+prg)
 
     # Set the session to retrieve
     if select_ses:
@@ -1967,11 +1999,6 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
     volsize   = vol.sessions[select_ses].volsize
 
-    if aset.compression in {"zlib","gzip"}:
-        decompress  = zlib.decompress
-        decomp_bits = 32 + zlib.MAX_WBITS
-    # add zstd here.
-
     if save_path and exists(save_path) and attended:
         print("\n!! This will erase all existing data in",save_path,"!!")
         ans = input("   Are you sure? [y/N]: ")
@@ -1984,14 +2011,12 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     last_chunkx = chformat % lchunk_addr
 
     # Collect session manifests
-    ##open(tmpdir+"/manifests.cat", "wb").close()
     include = False   ; incl_ses = []
     for ses in sessions:
         incl_ses.append(vol.sessions[ses])
 
         if vol.sessions[ses].format == "tar":
-            raise NotImplementedError(
-                "Receive from tarfile not yet implemented: "+ses)
+            raise NotImplementedError("Receive from tarfile not yet implemented: "+ses)
 
         if ses == select_ses:  break
 
@@ -2141,8 +2166,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                 continue
 
             # Proceed with decompress.
-            # fix for zstd support
-            untrusted_decomp = decompress(untrusted_buf, decomp_bits, chunksize)
+            untrusted_decomp = decompress(untrusted_buf)
             if len(untrusted_decomp) != chunksize and addr < lchunk_addr:
                 raise BufferError("Decompressed to %d bytes." % len(untrusted_decomp))
             if addr == lchunk_addr and len(untrusted_decomp) != volsize - lchunk_addr:
@@ -2161,7 +2185,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         if rc is not None and rc > 0:
             raise RuntimeError("Error code from getvol process: "+str(rc))
 
-        buf = decompress(untrusted_buf, decomp_bits, chunksize)
+        buf = decompress(untrusted_buf)
         if addr+len(buf) != volsize:
             raise ValueError("Received range %d does not match volume size %d."
                              % (addr+len(buf), volsize))
@@ -2197,6 +2221,9 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 # Rename a volume in the archive
 
 def rename_volume(archive, oldname, newname):
+    for prg in (CP.lvm, CP.blkdiscard):
+        if not shutil.which(prg):  raise RuntimeError("Required command not found: "+prg)
+
     aset = ArchiveSet(archive.name, metadir+topdir, allvols=True)
     if oldname not in aset.vols:  x_it(1,"No '%s' found." % oldname)
     v = aset.vols[oldname]     ; meta_only = not exists(v.path) or not len(v.sessions)
@@ -2237,6 +2264,9 @@ def rename_volume(archive, oldname, newname):
 # Remove a volume from the archive
 
 def delete_volume(dv):
+    for prg in (CP.lvm, CP.blkdiscard):
+        if not shutil.which(prg):  raise RuntimeError("Required command not found: "+prg)
+
     if not options.unattended and not aset.in_process:
         print("Warning! Delete will remove ALL metadata AND archived data",
               "for volume", dv)
@@ -2259,6 +2289,54 @@ def delete_volume(dv):
     dest_run(cmd, infile=aset.confpath)
     set_in_process(None)
     return
+
+
+def show_list(selected_vols):
+    # Print list of volumes if no volume is selected.
+    if not selected_vols and not len(options.volumes):
+        print("\nConfigured Volumes [%s/%s]\n" % (aset.vgname, aset.poolname))
+        maxwidth = max([len(x.name) for x in aset.vols.values()])
+        fmt    = "%7.1f GB  %-" + str(maxwidth+5) + "s  %s"
+        for name in sorted([x.name for x in aset.vols.values()]):
+            vol = aset.vols[name]   ; ses = vol.sesnames[-1][2:] if len(vol.sesnames) else " "
+            print(fmt % ((aset.vols[name].volsize / 1024**3), name, ses))
+        return
+
+    # Print list of sessions for selected volume(s).
+    # Get the terminal column width and set cols to number of list columns.
+    ttycols = os.popen('stty size', 'r').read().split()[1]
+    cols = max(4, min(10, int(ttycols)//17))
+    for dv in selected_vols:
+        print("\nSessions for volume '%s':\n" % dv)
+        vol = aset.vols[dv]    ; lmonth = vol.sesnames[0][2:8]    ; slist = []
+
+        # Blank at end of 'sesnames' is a terminator that doesn't match any month value.
+        for ses in vol.sesnames + [""]:
+            month = ses[2:8]
+            if options.unattended:
+                # plain listing
+                print(ses)
+                continue
+
+            if month == lmonth:
+                # group sessions by month
+                slist.append(ses)
+            else:
+                # print the month listing: 'rows' is adjusted to carry the remainder on
+                # additional lines. 'extra' and 'steps' are used to eliminate ragged
+                # column on the right (a ragged row is more pleasing to the eye).
+                size  = len(slist)    ; rows = size//cols
+                rows += (size%rows)//cols if rows else 0     ; extra = size - cols*rows
+                heights = [rows+(x<extra) for x in range(cols) ]
+
+                # output one row at a time
+                for ii in range(max(heights)):
+                    print("  ".join([  slist[ii+sum(heights[:c])][2:] for c in range(cols)
+                                       if ii < heights[c]  ]))
+                print()
+
+                # start new month list
+                lmonth = month    ; slist = [ses]
 
 
 def show_mem_stats():
@@ -2290,7 +2368,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.2.0_beta4b"
+prog_version          = "0.2.0_beta5wip"
 format_version        = 1
 
 # Disk block size:
@@ -2388,10 +2466,12 @@ os.makedirs(metadir+topdir+"/wyng.old", exist_ok=True)
 os.makedirs(big_tmpdir, exist_ok=True)
 
 
-# General Configuration:
+## General Configuration ##
+
+compressors      = {"zlib": (zlib, 4), "bz2": (bz2, 9)}
 
 hash_funcs       = {"sha256": hashlib.sha256}
-if sys.hexversion >= 0x3060000:
+if "blake2b" in hashlib.algorithms_available:
     hash_funcs["blake2b"] = functools.partial(hashlib.blake2b, digest_size=hash_bits//8)
 
 # Check --from usage (access other/unconfigured archive).
@@ -2401,7 +2481,12 @@ if options.from_arch and options.action not in ("receive","verify","list","arch-
 init_dedup_index = [None, init_dedup_index1, None, init_dedup_index3,
                     init_dedup_index4, init_dedup_index5][options.dedup]
 monitor_only     = options.action == "monitor" # gather metadata without backing up
+
+# Get LVM listings
 volgroups, l_vols= {}, {}    ; get_lvm_vgs()
+
+# Create an ArchiveSet object with get_configs() and set global vars pertaining
+# to the destination.
 destsys          = desttype  = dest_run_map  = dest_online  = dest_in_process  = None
 aset             = get_configs()
 destsys, desttype= detect_internal_state()
@@ -2410,13 +2495,16 @@ bkdir            = topdir+"/"+aset.name
 destpath         = os.path.normpath(pjoin(aset.destmountpoint,aset.destdir))
 destcd           = " cd '"+destpath+"'"
 
-if not dest_online and (options.remap or options.action not in local_actions) \
-    and destsys is not None:
+# Check online status for certain commands.
+if not dest_online and (options.remap or options.from_arch \
+                    or options.action not in local_actions): ## and destsys is not None:
     x_it(1, "Destination not ready to receive commands.")
+
 if options.from_arch:
     aset         = get_configs_remote()
 os.makedirs(metadir+bkdir, exist_ok=True)
 
+# Vol group is now known: Set 'l_vols' to reference it.
 if aset.vgname in volgroups.keys():
     l_vols       = volgroups[aset.vgname].lvs
 
@@ -2510,30 +2598,7 @@ elif options.action == "diff":
 
 
 elif options.action == "list":
-    if not selected_vols:
-        print("\nConfigured Volumes [%s/%s]\n" % (aset.vgname, aset.poolname))
-        nwidth = max([len(x.name) for x in aset.vols.values()])
-        fmt    = "%7.1f GB  %-" + str(nwidth+5) + "s  %s"
-        for name in sorted([x.name for x in aset.vols.values()]):
-            vol = aset.vols[name]   ; ses = vol.sesnames[-1][2:] if len(vol.sesnames) else " "
-            print(fmt % ((aset.vols[name].volsize / 1024**3), name, ses))
-
-    for dv in selected_vols:
-        print("\nSessions for volume",dv,":")
-        vol = aset.vols[dv]
-        lmonth = ""; count = 0; ending = "."
-        for ses in vol.sesnames:
-            if ses[:8] != lmonth:
-                print("" if ending else "\n", flush=True)
-                count = 0
-            print(" ",ses[2:]+(" (tar)"
-                        if vol.sessions[ses].format == "tar"
-                        else ""), end="")
-            ending = "\n" if count % 5 == 4 else ""
-            print("", end=ending)
-            lmonth = ses[:8]; count += 1
-
-    print("" if selected_vols and ending else "\n", end="")
+    show_list(selected_vols)
 
 
 elif options.action == "add":
@@ -2563,8 +2628,7 @@ elif options.action == "arch-init":
 
 
 elif options.action == "arch-delete":
-    print("Warning! Wipe-all will remove ALL metadata AND archived data, "
-          "leaving only the configuration!")
+    print("Warning! Wipe-all will remove ALL metadata AND archived data!")
 
     ans = input("Are you sure? [y/N]: ")
     if ans.lower() not in {"y","yes"}:
@@ -2572,6 +2636,8 @@ elif options.action == "arch-delete":
 
     for dv in list(aset.vols):
         aset.delete_volume(dv)
+
+    shutil.rmtree(aset.path, ignore_errors=True)
 
     print("\nDeleting entire archive...")
     cmd = [destcd
