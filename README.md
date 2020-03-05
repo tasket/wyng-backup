@@ -342,9 +342,8 @@ Note: You can override the archive's LVM settings by specifying `--local`.
 `--subdir` In conjunction with `--dest` or `--from`, allows you to specify a subdirectory
 below the mountpoint.
 
-`--compression=zlib:4` accepts the form `type:level`. However, only zlib compression
-is supported at this time so this option is currently only useful to set the
-compression level.
+`--compression=zlib:4` accepts the form `type` or `type:level`. The two types available are
+the default `zlib` and `bz2`.
 
 `--hashtype=sha256` accepts a value of either _'sha256'_ (the default) or _'blake2b'_.
 The digest size used for _'blake2b'_ is 256 bits.
