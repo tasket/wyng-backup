@@ -9,7 +9,7 @@
 
 #  editor width: 96  --------------------------------------------------------------------------
 import sys, os, stat, shutil, subprocess, time, datetime
-import re, mmap, zlib, gzip, tarfile, io, fcntl, tempfile
+import re, mmap, bz2, zlib, gzip, tarfile, io, fcntl, tempfile
 import argparse, configparser, hashlib, functools, uuid
 import xml.etree.ElementTree    ; from itertools import islice
 # For deduplication tests:
@@ -422,12 +422,13 @@ def arch_init(aset):
     if options.compression:
         if ":" in options.compression:
             compression, compr_level = options.compression.strip().split(":")
-            aset.compr_level = compr_level.strip()
         else:
             compression = options.compression.strip()
-        if compression not in {"zlib"} or not compr_level.isdecimal():
+            compr_level = str(compressors[compression][1])
+        compression = compression.strip()   ; compr_level = compr_level.strip()
+        if compression not in compressors.keys() or not compr_level.isdecimal():
             x_it(1, "Invalid compression spec.")
-        aset.compression = compression
+        aset.compression = compression      ; aset.compr_level = compr_level
 
     if options.chfactor:
         # accepts an exponent from 1 to 6
@@ -1094,10 +1095,11 @@ def send_volume(datavol, localtime):
     addrsplit = -address_split[1]
     lchunk_addr = vol.last_chunk_addr(snap2size)
 
-    if aset.compression=="zlib":
-        compress = zlib.compress
-    # add zstd here.
-    compresslevel = int(aset.compr_level)
+    use_zlib = aset.compression == "zlib" # workaround for old zlib limitation
+    if aset.compression == "bz2":
+        compress = functools.partial(bz2.compress, compresslevel=int(aset.compr_level))
+    elif aset.compression == "zlib":
+        compress_zlib = zlib.compress    ; compresslevel = int(aset.compr_level)
 
     # Use tar to stream files to destination
     stream_started = False
@@ -1170,9 +1172,8 @@ def send_volume(datavol, localtime):
                     if fman_hash != "0":  print("0", destfile, file=hashf)
                     continue
 
-                # Performance fix: move compression into separate processes
-                buf      = compress(buf, compresslevel)
-                bhash    = gethash(buf)   ; hexhash = bhash.hexdigest()
+                buf    = compress_zlib(buf, compresslevel) if use_zlib else compress(buf)
+                bhash  = gethash(buf)   ; hexhash = bhash.hexdigest()
 
                 # level 1 dedup
                 if fman_hash == hexhash:  continue
@@ -1967,6 +1968,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     verify_only = options.action == "verify"    ; remap  = options.remap
     attended    = not options.unattended        ; debug  = options.debug
     gethash     = hash_funcs[aset.hashtype] 
+    decompress  = compressors[aset.compression][0].decompress
 
     vgname    = aset.vgname
     vol       = aset.vols[datavol]
@@ -1996,11 +1998,6 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         x_it(1, "No sessions available.")
 
     volsize   = vol.sessions[select_ses].volsize
-
-    if aset.compression in {"zlib","gzip"}:
-        decompress  = zlib.decompress
-        decomp_bits = 32 + zlib.MAX_WBITS
-    # add zstd here.
 
     if save_path and exists(save_path) and attended:
         print("\n!! This will erase all existing data in",save_path,"!!")
@@ -2169,8 +2166,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                 continue
 
             # Proceed with decompress.
-            # fix for zstd support
-            untrusted_decomp = decompress(untrusted_buf, decomp_bits, chunksize)
+            untrusted_decomp = decompress(untrusted_buf)
             if len(untrusted_decomp) != chunksize and addr < lchunk_addr:
                 raise BufferError("Decompressed to %d bytes." % len(untrusted_decomp))
             if addr == lchunk_addr and len(untrusted_decomp) != volsize - lchunk_addr:
@@ -2189,7 +2185,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         if rc is not None and rc > 0:
             raise RuntimeError("Error code from getvol process: "+str(rc))
 
-        buf = decompress(untrusted_buf, decomp_bits, chunksize)
+        buf = decompress(untrusted_buf)
         if addr+len(buf) != volsize:
             raise ValueError("Received range %d does not match volume size %d."
                              % (addr+len(buf), volsize))
@@ -2471,6 +2467,8 @@ os.makedirs(big_tmpdir, exist_ok=True)
 
 
 ## General Configuration ##
+
+compressors      = {"zlib": (zlib, 4), "bz2": (bz2, 9)}
 
 hash_funcs       = {"sha256": hashlib.sha256}
 if "blake2b" in hashlib.algorithms_available:
