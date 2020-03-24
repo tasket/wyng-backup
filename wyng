@@ -1750,12 +1750,6 @@ def prune_sessions(datavol, times):
     # Determine target session where data will be merged.
     target_s = sessions[sessions.index(to_prune[-1]) + 1]
 
-    if not options.unattended and len(to_prune)>1:
-        print("This will remove multiple sessions:\n"," ".join(to_prune))
-        ans = input("Are you sure? [y/N]: ")
-        if ans.lower() not in {"y","yes"}:
-            x_it(0,"")
-
     merge_sessions(datavol, to_prune, target_s,
                    clear_sources=True)
 
@@ -2138,7 +2132,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             untrusted_size = int.from_bytes(getvol.stdout.read(4),"big")
 
             # allow for slight expansion from compression algo
-            if untrusted_size > chunksize + (chunksize // 1024) \
+            if untrusted_size > chunksize + (chunksize // 64) \
                 or untrusted_size < 1:
                     raise BufferError("Bad chunk size: %d" % untrusted_size)
 
@@ -2315,7 +2309,7 @@ def show_list(selected_vols):
             month = ses[2:8]
             if options.unattended:
                 # plain listing
-                print(ses)
+                print(ses[2:])
                 continue
 
             if month == lmonth:
@@ -2567,6 +2561,13 @@ elif options.action == "prune":
     if not options.session:
         x_it(1, "Must specify --session for prune.")
     dvs = datavols if len(selected_vols) == 0 else selected_vols
+
+    if not options.unattended and len(dvs):
+        print("This operation will delete session(s) from the archive;")
+        ans = input("Are you sure? [y/N]: ")
+        if ans.lower() not in {"y","yes"}:
+            x_it(0,"")
+
     for dv in dvs:
         if dv in datavols:
             prune_sessions(dv, options.session.split(","))
