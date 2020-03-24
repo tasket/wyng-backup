@@ -28,7 +28,7 @@ untrusted data in guest filesystems to bolster container-based security.
 
 ### Status
 
-Beta, with a range of features including:
+Release candidate with a range of features including:
 
  - Incremental backups of Linux thin-provisioned LVM volumes
 

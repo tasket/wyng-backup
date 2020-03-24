@@ -2362,7 +2362,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.2.0_beta5"
+prog_version          = "0.2.0_rc1"
 format_version        = 1
 
 # Disk block size:
