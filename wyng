@@ -105,15 +105,12 @@ class ArchiveSet:
         self.save_conf()
 
     def delete_volume(self, datavol):
-        if datavol in self.conf["volumes"].keys():
-            del(self.conf["volumes"][datavol])
-            self.save_conf()
+        if datavol in self.conf["volumes"].keys():   del(self.conf["volumes"][datavol])
+        self.save_conf()
+        if exists(pjoin(self.path,datavol)):         shutil.rmtree(pjoin(self.path,datavol))
         for ext in {".tick",".tock"}:
             if lv_exists(self.vgname, datavol+ext):  lv_remove(self.vgname, datavol+ext)
         get_lvm_vgs(self.vgname)
-
-        if exists(pjoin(self.path,datavol)):
-            shutil.rmtree(pjoin(self.path,datavol))
 
 
     class Volume:
@@ -2271,7 +2268,7 @@ def delete_volume(dv):
 
     print("\nDeleting volume", dv, "from archive.")
     if not aset.in_process:       set_in_process(["delete", dv])
-    if dv in aset.vols:           aset.delete_volume(dv)
+    aset.delete_volume(dv)
     if exists(aset.path+"/"+dv):  shutil.rmtree(aset.path+"/"+dv)
 
     confname = os.path.basename(aset.confpath)
