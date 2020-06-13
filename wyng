@@ -636,11 +636,12 @@ elif cmd == "get-configs":
         vols = [sys.argv[2]] if len(sys.argv)>2 else \
                 [x.name for x in os.scandir() if x.is_dir()]
         for volname in vols:
-            print(volname+"/volinfo", file=tarlstf)
+            if exists(volname+"/volinfo"):   print(volname+"/volinfo", file=tarlstf)
             for ses in os.scandir(volname):
-                if ses.is_dir() and ses.name.rfind("-tmp") == -1:
-                    print(volname+"/"+ses.name+"/info", file=tarlstf)
-                    print(volname+"/"+ses.name+"/manifest", file=tarlstf)
+                if ses.is_dir() and ses.name.startswith("S_") and not ses.name.endswith("-tmp"):
+                    fn1 = volname+"/"+ses.name+"/info"   ; fn2 = volname+"/"+ses.name+"/manifest"
+                    if exists(fn1):   print(fn1, file=tarlstf)
+                    if exists(fn2):   print(fn2, file=tarlstf)
         if exists("in_process"):  print("in_process", file=tarlstf)
     p = subprocess.check_call(["tar","-czf","-","--verbatim-files-from",
     "--files-from="+tmpdir+"/tar.lst","archive.ini"], stderr=subprocess.DEVNULL)
@@ -1105,7 +1106,7 @@ def send_volume(datavol, localtime):
     stream_started = False
     untar_cmd = [destcd + " && mkdir -p ."+bkdir+"/"+sdir+"-tmp"
                         + " && "+destcd + bkdir
-                        + " && rm -f .set  &&  tar -xmf - && sync -f "+datavol]
+                        + " && rm -f .set  &&  tar -xmf -"]
 
     # Open source volume and its delta bitmap as r, session manifest as w.
     with open(pjoin("/dev",aset.vgname,snap2vol),"rb") as vf, \
@@ -1129,17 +1130,16 @@ def send_volume(datavol, localtime):
                 # At boundary inside list, so use islice to jump ahead here.
                 if fullmanifest:  list(islice(fullmanifest, len(zdelim)*8))
                 addr += chunksize*len(zdelim)*8
-                minibmap = bmap_list.pop()
+                minibmap = bmap_list.pop(0)
             elif not send_all:
                 # Empty; Get more.
                 bmseg = bmapf.read(25000)
                 if bmseg:
                     # split(zdelim) shows us where large unmodified zones exist in bmap.
-                    # Resulting list is reversed so we can use pop().
-                    bmap_list.extend(bmseg.split(zdelim))    ; bmap_list.reverse()
+                    bmap_list.extend(bmseg.split(zdelim))
                 else:
                     break
-                minibmap = bmap_list.pop()
+                minibmap = bmap_list.pop(0)
 
             # Cycle over range of chunk addresses.
             for chunk, addr in enumerate(range( addr, snap2size if send_all
@@ -1307,7 +1307,7 @@ def send_volume(datavol, localtime):
         else:
             retcode = untar.poll()
 
-        if retcode < 0:
+        if retcode != 0:
             raise RuntimeError("tar transport failure code %d" % retcode)
 
         # Finalize on VM/remote
@@ -1315,7 +1315,7 @@ def send_volume(datavol, localtime):
             +" && touch .set"
             +" && mv "+sdir+"-tmp "+sdir
             +" && mv "+datavol+"/volinfo-tmp "+datavol+"/volinfo"
-            +" && sync -f "+datavol+"/volinfo"])
+            +" && sync -f ."])
         # Local finalize
         os.replace(ses.path, ses.path[:-4])    ; ses.path = ses.path[:-4]
         os.replace(vol.path+"/volinfo-tmp", vol.path+"/volinfo")
@@ -1670,13 +1670,13 @@ def rotate_snapshots(vol, rotate=True):
 def finalize_monitor_session(vol, map_updated):
     rotate_snapshots(vol, rotate=map_updated)
     os.rename(vol.mapfile+"-tmp", vol.mapfile)
-    os.sync()
+    do_exec([[CP.sync, "-f", vol.mapfile]])
 
 
 def finalize_bk_session(vol, sent):
     rotate_snapshots(vol, rotate=sent)
     init_deltamap(vol.mapfile, vol.mapsize())
-    os.sync()
+    do_exec([[CP.sync, "-f", vol.mapfile]])
 
 
 # Prune backup sessions from an archive. Basis is a non-overwriting dir tree
