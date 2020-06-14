@@ -2013,9 +2013,11 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
     # compare metadata hashes
     if not options.from_arch:
-        #print("Checking metadata..")
+        print("Checking metadata...", end="", flush=True) ; print(" ", end=" ", flush=True)
         if compare_files(volumes=[vol], sessions=incl_ses):
             x_it(1, "Error: Local and archive metadata differ.")
+        else:
+            print("OK")
 
     # Merge manifests and send to archive system:
     # sed is used to expand chunk info into a path and filter out any entries
@@ -2112,7 +2114,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             if attended:
                 print(int(addr/volsize*100),"%  ",faddr,end="  ")
 
-            cksum, fname, ses = mf.readline().split()
+            mfline = mf.readline()
+            cksum, fname, ses = mfline.split()
             if fname != faddr:
                 raise ValueError("Address mismatch "+fname+" expected "+faddr)
 
@@ -2131,7 +2134,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             # allow for slight expansion from compression algo
             if untrusted_size > chunksize + (chunksize // 64) \
                 or untrusted_size < 1:
-                    raise BufferError("Bad chunk size: %d" % untrusted_size)
+                    raise BufferError("Bad chunk size %d for %s" % (untrusted_size, mfline))
 
             # Size is OK.
             size = untrusted_size
@@ -2145,11 +2148,12 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             if len(untrusted_buf) != size:
                 with open(tmpdir+"/bufdump", "wb") as dump:
                     dump.write(untrusted_buf)
-                raise BufferError("Got %d bytes, expected %d"
-                                  % (len(untrusted_buf), size))
+                print(mfline)
+                raise BufferError("Got %d bytes, expected %d" % (len(untrusted_buf), size))
             if cksum != gethash(untrusted_buf).hexdigest():
                 with open(tmpdir+"/bufdump", "wb") as dump:
                     dump.write(untrusted_buf)
+                print(mfline)
                 raise ValueError("Bad hash "+fname+" :: "+gethash(untrusted_buf).hexdigest())
 
             if verify_only:
@@ -2159,8 +2163,10 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             # Proceed with decompress.
             untrusted_decomp = decompress(untrusted_buf)
             if len(untrusted_decomp) != chunksize and addr < lchunk_addr:
+                print(mfline)
                 raise BufferError("Decompressed to %d bytes." % len(untrusted_decomp))
             if addr == lchunk_addr and len(untrusted_decomp) != volsize - lchunk_addr:
+                print(mfline)
                 raise BufferError("Decompressed to %d bytes." % len(untrusted_decomp))
 
             # Buffer is OK...
@@ -2359,7 +2365,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.2.0_rc1"
+prog_version          = "0.2.0_rc2"
 format_version        = 1
 
 # Disk block size:
