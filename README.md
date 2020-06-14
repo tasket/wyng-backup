@@ -274,8 +274,9 @@ wyng delete vm-untrusted-private
 
 ```
 
-Removes a volume's config, snapshots and metadata from the source system and
-all of its *data* from the destination archive. Use with caution!
+Removes a volume's wyng-managed snapshots, config and metadata from the source system and
+all of its *data* from the destination archive (everything deleted except the source
+volume). Use with caution!
 
 
 #### rename
