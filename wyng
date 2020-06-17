@@ -87,6 +87,7 @@ class ArchiveSet:
         confname = fname if fname else os.path.basename(self.confpath)
         with open(confdir+"/"+confname, "w") as f:
             self.conf.write(f)
+            f.flush()    ; os.fsync(f.fileno())
 
     def add_volume(self, datavol):
         if datavol in self.conf["volumes"].keys():
@@ -198,6 +199,7 @@ class ArchiveSet:
                 print("first =", self.first, file=f)
                 print("last =", self.last, file=f)
                 print("que_meta_update =", self.que_meta_update, file=f)
+                f.flush()    ; os.fsync(f.fileno())
 
         def new_session(self, sname):
             ns = self.Ses(self, sname)
@@ -277,6 +279,7 @@ class ArchiveSet:
                     print("format =",    self.format, file=f)
                     print("sequence =",  self.sequence, file=f)
                     print("previous =",  self.previous, file=f)
+                    f.flush()    ; os.fsync(f.fileno())
 
 
 # Define absolute paths of commands
@@ -561,11 +564,12 @@ elif cmd == "merge":
     resume = "--resume" in sys.argv
     if resume:
         if exists("merge-init") or not exists("merge"):
-            print("Merge: Init could not complete; Aborting merge.")   ; lstf.close
+            print("Merge: Init could not complete; Aborting merge.")
             if exists("merge-init"):
                 for i in os.scandir("merge-init"):
                     if i.is_dir() and i.name.startswith("S_"):  os.replace(i.path, i.name)
-            sys.exit(50)
+                shutil.rmtree("merge-init")
+            subprocess.run(["sync","-f","."])    ; sys.exit(50)
     try:
         src_list = []   ; subdirs = set()
         lstf = gzip.open("merge.lst.gz", "rt")
@@ -581,16 +585,17 @@ elif cmd == "merge":
             for ex in ("","-init"):  shutil.rmtree("merge"+ex, ignore_errors=True)
             os.makedirs("merge-init")   ; replace(merge_target, "merge-init/"+merge_target)
             for src in src_list:   replace(src, "merge-init/"+src)
-            replace("merge-init", "merge")
+            replace("merge-init", "merge")    ; subprocess.run(["sync","-f","."])
     except Exception as err:
         if exists("merge-init"):
             for i in os.scandir("merge-init"):
                 if i.is_dir() and i.name.startswith("S_"):  os.replace(i.path, i.name)
-        print(err)    ; sys.exit(50)
+            shutil.rmtree("merge-init")
+        subprocess.run(["sync","-f","."])    ; print(err)    ; sys.exit(50)
     try:
-        print("Merge: remove/replace files.")   ; open("CHECK-mv-rm","w").close()
         # CD
         os.chdir("merge")
+        print("Merge: remove/replace files.")   ; open("CHECK-mv-rm","w").close()
         for src in src_list:  # Enh: replace os.scandir w manifest method
             for i in os.scandir(src):
                 if i.is_dir():   subdirs.add(i.name)
@@ -616,6 +621,7 @@ elif cmd == "merge":
         print("Merge: Finalize target dir.")   ; open("CHECK-finalize-target","w").close()
         # CD
         os.chdir("..")   ; replace("merge/"+merge_target, target)   ; remove("../in_process")
+        subprocess.run(["sync","-f","."])
     except Exception as err:
         print(err)    ; sys.exit(80)
     open("merge/CHECK-cleanup","w").close()   ; shutil.rmtree("merge")   ; remove(lstf.name)
@@ -624,7 +630,14 @@ elif cmd == "dedup":
     for line in lstf:
         source, dest = line.split()
         if os.stat(source).st_ino != os.stat(dest).st_ino:
-            os.link(source, dest+"-lnk")
+            try:
+                os.link(source, dest+"-lnk")
+            except OSError as err:
+                if err.errno == 31:
+                    continue # too many links, skip
+                else:
+                    if exists(dest+"-lnk"):   remove(dest+"-lnk")
+                    print(err)   ; sys.exit(1)
             replace(dest+"-lnk", dest)
             ddcount += 1
     print(ddcount, "reduced.")
@@ -721,10 +734,13 @@ def set_in_process(outer_list, tmp=False, dest=True):
 
     if dest:
         dest_run([destcd + bkdir +" && cat >in_process.tmp"
-                                +(" && mv in_process.tmp in_process") if not tmp else ""],
+                                +(" && mv in_process.tmp in_process") if not tmp else ""
+                                 +" && sync -f ."],
                 infile=aset.path+"/in_process.tmp")
     if not tmp:
         os.rename(aset.path+"/in_process.tmp", aset.path+"/in_process")
+
+    do_exec([[CP.sync, "-f", aset.path]])
     aset.in_process = outer_list
 
 
@@ -1015,6 +1031,8 @@ def update_delta_digest(datavol):
             if monitor_only:  print("  Volume size has increased.")
             for pos in range(markall_pos, bmap_size):  bmap_mm[pos] = 0xff
             dnewblocks += (bmap_size - markall_pos) * 8 * dblocksize
+
+        bmapf.flush()    ; os.fsync(bmapf.fileno())
 
     if monitor_only and dnewblocks+dfreedblocks > 0:
         print(" ", dnewblocks, "changes,", dfreedblocks, "discards.")
@@ -1309,7 +1327,7 @@ def send_volume(datavol, localtime):
 
         # Finalize on VM/remote
         dest_run([ destcd + bkdir
-            +" && touch .set"
+            +" && sync -f .  && touch .set"
             +" && mv "+sdir+"-tmp "+sdir
             +" && mv "+datavol+"/volinfo-tmp "+datavol+"/volinfo"
             +" && sync -f ."])
@@ -1900,9 +1918,8 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
         if exists("volinfo.tmp"):  os.replace("volinfo.tmp", "volinfo")
         for f in ("/info","/manifest"):
             if exists(target+f+".tmp"):  os.replace(target+f+".tmp", target+f)
-        set_in_process(None, dest=False)   ; os.remove("merge.tmp.gz")
+        set_in_process(None, dest=False)    ; os.remove("merge.tmp.gz")
         for ses in sources:  shutil.rmtree(volume.path+"/"+ses, ignore_errors=True)
-    do_exec([[CP.sync, "-f", "volinfo"]])
     if resume and compare_files(volumes=[volume], sessions=[volume.sessions[target]]):
         x_it(1, "Error: Local and dest metadata differ.")
 
