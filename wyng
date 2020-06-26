@@ -465,7 +465,7 @@ def arch_check(vol_list=None):
         if compare_files(volumes=[vol], sessions=list(vol.sessions.values())):
             x_it(1, "Error: Local and archive metadata differ.")
 
-        for sesname in vol.sesnames:
+        for sesname in reversed(vol.sesnames):
             if attended:   print("  Session %s... " % sesname, end="", flush=True)
 
             # FixCheck for stray entries here
@@ -1197,7 +1197,7 @@ def send_volume(datavol, localtime):
     # Use tar to stream files to destination
     stream_started = False
     untar_cmd = [destcd + " && mkdir -p ."+bkdir+"/"+sdir+"-tmp  "+tmpdir+"-rpc"
-                        + " && "+destcd+bkdir + " && pwd >>"+tmpdir+"-rpc/tar.log"
+                        + " && "+destcd+bkdir + " && echo >>"+tmpdir+"-rpc/tar.log "+datavol
                         + " && tar -xmf - 2>>"+tmpdir+"-rpc/tar.log"]
 
     # Open source volume and its delta bitmap as r, session manifest as w.
@@ -2450,7 +2450,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.2.0_rc3"    ; prog_date = "20200619"
+prog_version          = "0.2.0_rc3pre3"    ; prog_date = "20200626"
 format_version        = 1
 print("%s %s %s" % (prog_name.capitalize(), prog_version, prog_date))
 
