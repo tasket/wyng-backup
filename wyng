@@ -1197,8 +1197,8 @@ def send_volume(datavol, localtime):
     # Use tar to stream files to destination
     stream_started = False
     untar_cmd = [destcd + " && mkdir -p ."+bkdir+"/"+sdir+"-tmp  "+tmpdir+"-rpc"
-                        + " && "+destcd + bkdir
-                        + " && rm -f .set  &&  tar -xmf - 2>"+tmpdir+"-rpc/tar.log"]
+                        + " && "+destcd+bkdir + " && pwd >>"+tmpdir+"-rpc/tar.log"
+                        + " && tar -xmf - 2>>"+tmpdir+"-rpc/tar.log"]
 
     # Open source volume and its delta bitmap as r, session manifest as w.
     with open(pjoin("/dev",aset.vgname,snap2vol),"rb") as vf, \
