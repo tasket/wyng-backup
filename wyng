@@ -453,7 +453,6 @@ def arch_check(vol_list=None):
 
     if not vol_list:   vol_list = [x.name for x in os.scandir(aset.path) if x.is_dir()]
     for volname in vol_list:
-    #for volname in sorted(list(aset.conf["volumes"].keys())):
         if not exists(pjoin(aset.path,volname,"volinfo")):
             print("Stray dir:", volname)    ; continue
         # Load disabled volumes
@@ -618,10 +617,30 @@ def detect_internal_state():
     dest_program = \
     '''#  Copyright Christopher Laprise 2018-2020
 #  Licensed under GNU General Public License v3. See github.com/tasket/wyng-backup
-import os, sys, shutil, subprocess, hashlib, gzip
+import os, sys, shutil, subprocess, hashlib, gzip, tarfile
 cmd = sys.argv[1] ;    tmpdir = "''' + tmpdir + '''-rpc"
 exists = os.path.exists   ; replace = os.replace;   remove = os.remove
-if cmd != "merge" and exists(tmpdir+"/dest.lst.gz"):
+def helper_send():
+    with tarfile.open(mode="r|", fileobj=sys.stdin.buffer) as tarf:
+        extract = tarf.extract    ; substitutions = {}
+        for member in tarf:
+            if not member.islnk():
+                extract(member)
+            else:
+                source = src_orig = member.linkname    ; dest = member.name
+                if source in substitutions:   source = substitutions[source]
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                try:
+                    os.link(source, dest)
+                except OSError as err:
+                    if err.errno == 31: # too many links
+                        print("Substitution:", source, dest) ####
+                        shutil.copyfile(source, dest)
+                        substitutions[src_orig] = dest
+                    else:
+                        print(err)   ; raise(err)
+
+if cmd not in ("merge","send") and exists(tmpdir+"/dest.lst.gz"):
     lstf = gzip.open(tmpdir+"/dest.lst.gz", "rt")
 if cmd == "receive":
     for line in lstf:
@@ -702,20 +721,24 @@ elif cmd == "merge":
     except Exception as err:
         print(err)    ; sys.exit(80)
     open("merge/CHECK-cleanup","w").close()   ; shutil.rmtree("merge")   ; remove(lstf.name)
+elif cmd == "send":
+    helper_send()
 elif cmd == "dedup":
-    ddcount = 0
+    ddcount = 0    ; substitutions = {}
     for line in lstf:
-        source, dest = line.split()
+        source, dest = line.split()   ; src_orig = source
+        if source in substitutions:   source = substitutions[source]
         if os.stat(source).st_ino != os.stat(dest).st_ino:
             try:
                 os.link(source, dest+"-lnk")
+                replace(dest+"-lnk", dest)
             except OSError as err:
                 if err.errno == 31:
-                    continue # too many links, skip
+                    # source has too many links; substitute
+                    substitutions[src_orig] = dest    ; continue
                 else:
                     if exists(dest+"-lnk"):   remove(dest+"-lnk")
-                    print(err)   ; sys.exit(1)
-            replace(dest+"-lnk", dest)
+                    print(err)   ; raise(err)
             ddcount += 1
     print(ddcount, "reduced.")
 elif cmd == "get-configs":
@@ -1197,8 +1220,9 @@ def send_volume(datavol, localtime):
     # Use tar to stream files to destination
     stream_started = False
     untar_cmd = [destcd + " && mkdir -p ."+bkdir+"/"+sdir+"-tmp  "+tmpdir+"-rpc"
-                        + " && "+destcd+bkdir + " && echo >>"+tmpdir+"-rpc/tar.log "+datavol
-                        + " && tar -xmf - 2>>"+tmpdir+"-rpc/tar.log"]
+                 + " && "+destcd+bkdir + " && echo >>"+tmpdir+"-rpc/send.log "+datavol
+                 + " && exec >>"+tmpdir+"-rpc/send.log 2>&1"
+                 + " && python3 "+tmpdir+"-rpc/dest_helper.py send" ]
 
     # Open source volume and its delta bitmap as r, session manifest as w.
     with open(pjoin("/dev",aset.vgname,snap2vol),"rb") as vf, \
@@ -1421,11 +1445,7 @@ def send_volume(datavol, localtime):
         vol.delete_session(bksession)
         shutil.rmtree(aset.path+"/"+sdir+"-tmp")
 
-    if bcount == 0:
-        print("  No changes.")
-
-    if dedup and options.debug:
-        show_mem_stats()
+    if dedup and options.debug:   show_mem_stats()
 
     return stream_started
 
@@ -2449,10 +2469,11 @@ def cleanup():
 ##  MAIN  #########################################################################################
 
 # Constants / Globals
-prog_name             = "wyng"
-prog_version          = "0.2.0_rc3pre3"    ; prog_date = "20200626"
+prog_name             = "Wyng"
+prog_version          = "0.2.0_rc4pre1"    ; prog_date = "20200626"
 format_version        = 1
-print("%s %s %s" % (prog_name.capitalize(), prog_version, prog_date))
+print("%s %s %s" % (prog_name, prog_version, prog_date))
+prog_name             = prog_name.lower()
 
 # Disk block size:
 bs                    = 512
