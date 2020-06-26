@@ -448,7 +448,71 @@ def arch_init(aset):
 # Check/verify an entire archive
 
 def arch_check(vol_list=None):
-    pass
+    gethash  = hash_funcs[aset.hashtype]   ; chunksize = aset.chunksize
+    attended = not options.unattended 
+
+    if not vol_list:   vol_list = [x.name for x in os.scandir(aset.path) if x.is_dir()]
+    for volname in vol_list:
+    #for volname in sorted(list(aset.conf["volumes"].keys())):
+        if not exists(pjoin(aset.path,volname,"volinfo")):
+            print("Stray dir:", volname)    ; continue
+        # Load disabled volumes
+        if volname in aset.conf["volumes"].keys() and aset.conf["volumes"][volname] == "disable":
+            aset.vols[volname] = ArchiveSet.Volume(aset, volname,aset.path+"/"+volname,aset.vgname)
+
+        print("Checking volume", volname, flush=True)
+        vol = aset.vols[volname]
+        if compare_files(volumes=[vol], sessions=list(vol.sessions.values())):
+            x_it(1, "Error: Local and archive metadata differ.")
+
+        for sesname in vol.sesnames:
+            if attended:   print("  Session %s... " % sesname, end="", flush=True)
+
+            # FixCheck for stray entries here
+            ses = vol.sessions[sesname]    ; manifest = ses.path+"/manifest"
+            cmd1 = [[CP.sed, "-E", "/^0\s/ d; "
+                    +"s|^\S+\s+x(\S{" +str(address_split[0])+ "})(\S+)|"+sesname+"/\\1/x\\1\\2|",
+                    manifest],
+                    [CP.gzip, "-c", "-4"],
+                    dest_run_args(desttype, ["cat >"+tmpdir+"-rpc/dest.lst.gz"])]
+            do_exec(cmd1)
+
+            cmd2 = dest_run_args(desttype,
+                    [destcd + bkdir+"/"+volname
+                    +"  && python3 "+tmpdir+"-rpc/dest_helper.py receive"
+                    ])
+            getses = subprocess.Popen(cmd2, stdout=subprocess.PIPE)
+
+
+            # Open manifest then receive, check and save data
+            with open(manifest, "r") as mf:
+                for mfline in mf:
+                    cksum, fname = mfline.split()
+                    if cksum.strip() == "0":   continue
+
+                    # Read chunk size
+                    untrusted_size = int.from_bytes(getses.stdout.read(4),"big")
+                    # allow for slight expansion from compression algo
+                    if untrusted_size > chunksize + (chunksize // 64) or untrusted_size < 1:
+                        raise BufferError("Bad chunk size %d for %s" % (untrusted_size, mfline))
+
+                    # Size is OK.
+                    size = untrusted_size
+                    # Read chunk buffer
+                    untrusted_buf = getses.stdout.read(size)
+                    rc  = getses.poll()
+                    if rc is not None and len(untrusted_buf) == 0:   break
+
+                    if len(untrusted_buf) != size:
+                        with open(tmpdir+"/bufdump", "wb") as dump:   dump.write(untrusted_buf)
+                        print(mfline)
+                        raise BufferError("Got %d bytes, expected %d" % (len(untrusted_buf), size))
+                    if cksum != gethash(untrusted_buf).hexdigest():
+                        with open(tmpdir+"/bufdump", "wb") as dump:   dump.write(untrusted_buf)
+                        print(mfline)
+                        raise ValueError("Bad hash "+fname+" :: "+gethash(untrusted_buf).hexdigest())
+
+            if attended:   print("OK")
 
 
 # Get global configuration settings:
