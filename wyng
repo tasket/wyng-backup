@@ -619,7 +619,7 @@ def detect_internal_state():
 #  Licensed under GNU General Public License v3. See github.com/tasket/wyng-backup
 import os, sys, shutil, subprocess, hashlib, gzip, tarfile
 cmd = sys.argv[1] ;    tmpdir = "''' + tmpdir + '''-rpc"
-exists = os.path.exists   ; replace = os.replace;   remove = os.remove
+exists = os.path.exists   ; replace = os.replace    ; remove = os.remove
 def helper_send():
     with tarfile.open(mode="r|", fileobj=sys.stdin.buffer) as tarf:
         extract = tarf.extract    ; substitutions = {}
@@ -638,7 +638,7 @@ def helper_send():
                         shutil.copyfile(source, dest)
                         substitutions[src_orig] = dest
                     else:
-                        print(err)   ; raise(err)
+                        print(err)   ; raise err
 
 if cmd not in ("merge","send") and exists(tmpdir+"/dest.lst.gz"):
     lstf = gzip.open(tmpdir+"/dest.lst.gz", "rt")
@@ -738,7 +738,7 @@ elif cmd == "dedup":
                     substitutions[src_orig] = dest    ; continue
                 else:
                     if exists(dest+"-lnk"):   remove(dest+"-lnk")
-                    print(err)   ; raise(err)
+                    print(err)   ; raise err
             ddcount += 1
     print(ddcount, "reduced.")
 elif cmd == "get-configs":
@@ -1220,8 +1220,8 @@ def send_volume(datavol, localtime):
     # Use tar to stream files to destination
     stream_started = False
     untar_cmd = [destcd + " && mkdir -p ."+bkdir+"/"+sdir+"-tmp  "+tmpdir+"-rpc"
-                 + " && "+destcd+bkdir + " && echo >>"+tmpdir+"-rpc/send.log "+datavol
                  + " && exec >>"+tmpdir+"-rpc/send.log 2>&1"
+                 + " && "+destcd+bkdir + " && echo "+datavol
                  + " && python3 "+tmpdir+"-rpc/dest_helper.py send" ]
 
     # Open source volume and its delta bitmap as r, session manifest as w.
@@ -1264,12 +1264,14 @@ def send_volume(datavol, localtime):
                 destfile = "x"+chformat % addr
 
                 if fullmanifest: # level 1
-                    fman_hash, fman_fname = fullmanifest_readline().split()
-                    if fman_fname != destfile:
-                        raise ValueError("expected manifest addr %s, got %s"
-                                         % (destfile, fman_fname))
-                else:
-                    fman_hash = ""
+                    try:
+                        fman_hash, fman_fname = fullmanifest_readline()
+                    except ValueError: # EOF
+                        fullmanifest = None    ; fman_hash = ""
+                    else:
+                        if fman_fname != destfile:
+                            raise ValueError("expected manifest addr %s, got %s"
+                                            % (destfile, fman_fname))
 
                 # Skip chunk if its deltamap bit is off.
                 if not send_all and not (minibmap[chunk//8] & (1 << chunk%8)):  continue
@@ -2458,7 +2460,7 @@ def x_it(code, text):
 
 
 def cleanup():
-    shutil.rmtree(big_tmpdir, ignore_errors=True)   ; return ####
+    shutil.rmtree(big_tmpdir, ignore_errors=True)
     if not options.debug:
         for f in (big_tmpdir, tmpdir, tmpdir+"-rpc"):
             shutil.rmtree(f, ignore_errors=True)
@@ -2470,7 +2472,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "Wyng"
-prog_version          = "0.2.0_rc4pre1"    ; prog_date = "20200626"
+prog_version          = "0.2.0_rc4pre2"    ; prog_date = "20200627"
 format_version        = 1
 print("%s %s %s" % (prog_name, prog_version, prog_date))
 prog_name             = prog_name.lower()
