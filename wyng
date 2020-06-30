@@ -2472,7 +2472,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "Wyng"
-prog_version          = "0.2.0_rc4pre2"    ; prog_date = "20200627"
+prog_version          = "0.2.0_rc4"    ; prog_date = "20200630"
 format_version        = 1
 print("%s %s %s" % (prog_name, prog_version, prog_date))
 prog_name             = prog_name.lower()
@@ -2655,7 +2655,7 @@ elif dest_in_process:
 
 
 # Check volume args against config
-datavols      = aset.vols.keys()
+datavols      = sorted(aset.vols.keys())
 selected_vols = options.volumes[:]
 for vol in options.volumes:
     if vol not in datavols and options.action not in {"add","delete","rename"}:
