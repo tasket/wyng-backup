@@ -380,6 +380,11 @@ def lvm_meta_snapshot(arch, action):
               "0", action+"_metadata_snap"]], check=checkerr)
 
 
+# Try to sync only selected filesystem
+def fssync(path):
+    if subprocess.run([CP.sync,"-f",path]).returncode != 0:   subprocess.run([CP.sync])
+
+
 # Initialize a new ArchiveSet:
 
 def arch_init(aset):
@@ -620,6 +625,8 @@ def detect_internal_state():
 import os, sys, shutil, subprocess, hashlib, gzip, tarfile
 cmd = sys.argv[1] ;    tmpdir = "''' + tmpdir + '''-rpc"
 exists = os.path.exists   ; replace = os.replace    ; remove = os.remove
+def fssync(path):
+    if subprocess.run(["sync","-f",path]).returncode != 0:   subprocess.run(["sync"])
 def helper_send():
     with tarfile.open(mode="r|", fileobj=sys.stdin.buffer) as tarf:
         extract = tarf.extract    ; substitutions = {}
@@ -665,7 +672,7 @@ elif cmd == "merge":
                 for i in os.scandir("merge-init"):
                     if i.is_dir() and i.name.startswith("S_"):  os.replace(i.path, i.name)
                 shutil.rmtree("merge-init")
-            subprocess.run(["sync","-f","."])    ; sys.exit(50)
+            fssync(".")    ; sys.exit(50)
     try:
         src_list = []   ; subdirs = set()
         lstf = gzip.open("merge.lst.gz", "rt")
@@ -681,13 +688,13 @@ elif cmd == "merge":
             for ex in ("","-init"):  shutil.rmtree("merge"+ex, ignore_errors=True)
             os.makedirs("merge-init")   ; replace(merge_target, "merge-init/"+merge_target)
             for src in src_list:   replace(src, "merge-init/"+src)
-            replace("merge-init", "merge")    ; subprocess.run(["sync","-f","."])
+            replace("merge-init", "merge")    ; fssync(".")
     except Exception as err:
         if exists("merge-init"):
             for i in os.scandir("merge-init"):
                 if i.is_dir() and i.name.startswith("S_"):  os.replace(i.path, i.name)
             shutil.rmtree("merge-init")
-        subprocess.run(["sync","-f","."])    ; print(err)    ; sys.exit(50)
+        fssync(".")    ; print(err)    ; sys.exit(50)
     try:
         # CD
         os.chdir("merge")
@@ -717,7 +724,7 @@ elif cmd == "merge":
         print("Merge: Finalize target dir.")   ; open("CHECK-finalize-target","w").close()
         # CD
         os.chdir("..")   ; replace("merge/"+merge_target, target)   ; remove("../in_process")
-        subprocess.run(["sync","-f","."])
+        fssync(".")
     except Exception as err:
         print(err)    ; sys.exit(80)
     open("merge/CHECK-cleanup","w").close()   ; shutil.rmtree("merge")   ; remove(lstf.name)
@@ -835,12 +842,12 @@ def set_in_process(outer_list, tmp=False, dest=True):
     if dest:
         dest_run([destcd + bkdir +" && cat >in_process.tmp"
                                 +(" && mv in_process.tmp in_process") if not tmp else ""
-                                 +" && sync -f ."],
+                                 +" && { sync -f . || sync; }"],
                 infile=aset.path+"/in_process.tmp")
     if not tmp:
         os.rename(aset.path+"/in_process.tmp", aset.path+"/in_process")
 
-    do_exec([[CP.sync, "-f", aset.path]])
+    fssync(aset.path)
     aset.in_process = outer_list
 
 
@@ -1388,6 +1395,12 @@ def send_volume(datavol, localtime):
                             ddses.name+"-tmp" if ddses is ses else ddses.name,
                             ddchx[:addrsplit],
                             ddchx)
+                    if datavol == "vm-personal-net-bak-private": ####
+                        print(i, pos, " to %s/%s/%s/x%s" % \
+                            (ddses.volume.name,
+                                ddses.name+"-tmp" if ddses is ses else ddses.name,
+                                ddchx[:addrsplit],
+                                ddchx)) ####
                     ddbytes += len(buf)
                     tarf_addfile(tarinfo=tar_info)
                 else:
@@ -1430,17 +1443,16 @@ def send_volume(datavol, localtime):
 
         # Finalize on VM/remote
         dest_run([ destcd + bkdir
-            +" && sync -f .  && touch .set"
             +" && mv "+sdir+"-tmp "+sdir
             +" && mv "+datavol+"/volinfo-tmp "+datavol+"/volinfo"
-            +" && sync -f ."])
+            +" && { sync -f . || sync; }"])
 
         # Local finalize
         ses.path = ses.path.rsplit("-tmp",maxsplit=1)[0]   ; os.replace(ses.path+"-tmp", ses.path)
         os.replace(vol.path+"/volinfo-tmp", vol.path+"/volinfo")
         rotate_snapshots(vol, rotate=True)
         init_deltamap(vol.mapfile, vol.mapsize())
-        do_exec([[CP.sync, "-f", vol.path]])
+        fssync(vol.path)
 
     else:
         init_deltamap(vol.mapfile, vol.mapsize())
@@ -1760,7 +1772,7 @@ def monitor_send(datavols, selected=[], monitor_only=True):
             rotate_snapshots(vol, rotate=map_updated)
             os.rename(vol.mapfile+"-tmp", vol.mapfile)
 
-    if monitor_only:   do_exec([[CP.sync, "-f", aset.path]])
+    if monitor_only:   fssync(aset.path)
 
 
 def init_deltamap(bmfile, bmsize):
@@ -2347,7 +2359,7 @@ def rename_volume(archive, oldname, newname):
                 +"  && cat >"+confname
                 +(" && { if [ -e '%s' ]; then  rm -rf '%s'" % (oldname, newname))
                 +(" && mv -T '%s' '%s'" % (oldname, newname)) + "; fi }"
-                +"  && sync -f ."],  infile=aset.path+"/"+confname+".tmp")
+                +"  && { sync -f . || sync; }"],  infile=aset.path+"/"+confname+".tmp")
     os.replace(aset.path+"/"+confname+".tmp", aset.confpath)
     was_in_process = aset.in_process is not None
     set_in_process(None)
@@ -2388,7 +2400,7 @@ def delete_volume(dv):
     cmd = [destcd + bkdir
           +"  && cat >"+confname
           +(" && rm -rf '%s'" % dv)
-          +"  && sync -f ."
+          +"  && { sync -f . || sync; }"
           ]
     dest_run(cmd, infile=aset.confpath)
     set_in_process(None)
@@ -2472,7 +2484,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "Wyng"
-prog_version          = "0.2.0_rc4"    ; prog_date = "20200630"
+prog_version          = "0.2.0_rc5pre1"    ; prog_date = "20200702"
 format_version        = 1
 print("%s %s %s" % (prog_name, prog_version, prog_date))
 prog_name             = prog_name.lower()
@@ -2776,7 +2788,7 @@ elif options.action == "arch-delete":
     print("\nDeleting entire archive...")
     cmd = [destcd
           +" && rm -rf ."+bkdir
-          +" && sync -f ."
+          +" && { sync -f . || sync; }"
           ]
     dest_run(cmd)
 
