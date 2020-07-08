@@ -1198,14 +1198,14 @@ def send_volume(datavol, localtime):
         ht_ksize  = ht_ksize//2
         hsegs     = hash_w//hash0len
         chtree_max= 2**(chtree[0].itemsize*8)
-        idxcount  = dataf.tell() // (ch_w+ses_w)
+        idxcount  = dataf.seek(0,2) // (ch_w+ses_w)
     elif dedup == 5: # bytearray tree
         ddsessions, hashtree, ht_ksize, hashdigits, hash_w, \
         dataf, chtree, chdigits, ch_w, ses_w \
                   = aset.hashindex
         chtree_max= 2**(chtree[0].itemsize*8)
         ht_ksize  = ht_ksize//2
-        idxcount  = dataf.tell() // (ch_w+ses_w)
+        idxcount  = dataf.seek(0,2) // (ch_w+ses_w)
     if dedup > 1:
         ddsessions.append(ses)    ; ses_index = ddsessions.index(ses)
 
@@ -1937,7 +1937,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
         last_chunk = chformat % volume.last_chunk_addr(volsize)
         lc_filter  = '"'+last_chunk+'"'
 
-        with open("merge.tmp", "wt") as lstf:
+        with open("merge.lst", "wt") as lstf:
             print(merge_target, target, file=lstf)
 
             # Get manifests, append session name to eol, print session names to list.
@@ -1971,33 +1971,33 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
                 "s|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)\s+(S_\S+)|"
                 "rename \\3/\\1/x\\1\\2 "+merge_target+"/\\1/x\\1\\2|"
                 ]
-                ], infile=m_tmp+"/manifest.one", out=">>merge.tmp")
+                ], infile=m_tmp+"/manifest.one", out=">>merge.lst")
 
         if vol_shrank:
             # If volume size shrank in this period then make trim list.
             do_exec([[CP.awk, "$2>"+lc_filter, m_tmp+"/manifest.two"],
                     [CP.sed, "-E", "s|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)|"
                     "-rm "+merge_target+"/\\1/x\\1\\2|"]
-                    ], out=">>merge.tmp")
+                    ], out=">>merge.lst")
 
-        do_exec([[CP.gzip, "-f", "merge.tmp"]])
+        do_exec([[CP.gzip, "-f", "merge.lst"]])
 
-        # Update info records
-        if clear_sources:
-            for ses in sources:
-                affected = volume.delete_session(ses, remove=False)
-            volume.sessions[target].save_info("info.tmp")  ; volume.save_volinfo("volinfo.tmp")
-            print("Removing %d" % len(sources), end="...", flush=True)
+    # Update info records
+    if clear_sources:
+        for ses in sources:
+            if ses in volume.sessions:   volume.delete_session(ses, remove=False)
+        volume.sessions[target].save_info("info.tmp")  ; volume.save_volinfo("volinfo.tmp")
+        print("Removing %d" % len(sources), end="...", flush=True)
 
+    if not resume:
         # Set archive in_process state to "merge"
         set_in_process(["merge", datavol, str(clear_sources), target, sources],
                        tmp=True, dest=False)
 
         # Send new metadata and process lists to dest
-        do_exec([[CP.tar, "-cf", "-", "../in_process.tmp", "volinfo.tmp", "merge.tmp.gz", target],
+        do_exec([[CP.tar, "-cf", "-", "../in_process.tmp", "volinfo.tmp", "merge.lst.gz", target],
                 dest_run_args(desttype, [destcd + bkdir+"/"+datavol
                 +" && tar -xmf -"
-                +" && mv merge.tmp.gz merge.lst.gz"
                 +" && mv in_process.tmp ../in_process"
                 ])
             ])
@@ -2006,21 +2006,21 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
     retcode = dest_run([destcd + bkdir+"/"+datavol +" && python3 "
                         +tmpdir+"-rpc/dest_helper.py merge"+(" --resume" if resume else "")],
                         check=False)
-    if retcode > 0:  print("Merge failed code", retcode)
+    if retcode != 0:  print("Merge failed code", retcode)
 
     if retcode == 50:
         print("Aborting merge initialization.")   ; set_in_process(None)
-        for f in ("merge.tmp.gz","volinfo.tmp",target+"/info.tmp"):
-            if exists(f):  os.remove(f)
+        for f in ("merge.lst.gz","volinfo.tmp",target+"/info.tmp"):
+            if exists(f):   os.remove(f)
         dest_run([destcd + bkdir+"/"+datavol
-                  +" && rm -f merge.tmp.gz merge.lst.gz volinfo.tmp"], check=False)
-    elif retcode >0:
+                  +" && rm -f merge.lst.gz volinfo.tmp"], check=False)
+    elif retcode != 0:
         x_it(retcode, "Exiting.")
     else:
         if exists("volinfo.tmp"):  os.replace("volinfo.tmp", "volinfo")
         for f in ("/info","/manifest"):
             if exists(target+f+".tmp"):  os.replace(target+f+".tmp", target+f)
-        set_in_process(None, dest=False)    ; os.remove("merge.tmp.gz")
+        set_in_process(None, dest=False)    ; os.remove("merge.lst.gz")
         for ses in sources:  shutil.rmtree(volume.path+"/"+ses, ignore_errors=True)
     if resume and compare_files(volumes=[volume], sessions=[volume.sessions[target]]):
         x_it(1, "Error: Local and dest metadata differ.")
@@ -2484,7 +2484,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "Wyng"
-prog_version          = "0.2.0_rc5pre1"    ; prog_date = "20200702"
+prog_version          = "0.2.0_rc5pre2"    ; prog_date = "20200708"
 format_version        = 1
 print("%s %s %s" % (prog_name, prog_version, prog_date))
 prog_name             = prog_name.lower()
