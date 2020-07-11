@@ -213,8 +213,7 @@ class ArchiveSet:
             self.last = sname
             self.sesnames.append(sname)
             self.sessions[sname] = ns
-            self.archive.allsessions.insert(0, ns)
-            #os.makedirs(pjoin(self.path, sname))
+            self.archive.allsessions.append(ns)
             return ns
 
         def delete_session(self, sname, remove=True):
@@ -382,7 +381,7 @@ def lvm_meta_snapshot(arch, action):
 
 # Try to sync only selected filesystem
 def fssync(path):
-    if subprocess.run([CP.sync,"-f",path]).returncode != 0:   subprocess.run([CP.sync])
+    if subprocess.call([CP.sync,"-f",path]) != 0:   subprocess.call([CP.sync])
 
 
 # Initialize a new ArchiveSet:
@@ -483,7 +482,8 @@ def arch_check(vol_list=None):
 
             cmd2 = dest_run_args(desttype,
                     [destcd + bkdir+"/"+volname
-                    +"  && python3 "+tmpdir+"-rpc/dest_helper.py receive"
+                    +" && exec 2>>"+tmpdir+"-rpc/receive.log"
+                    +" && python3 "+tmpdir+"-rpc/dest_helper.py receive"
                     ])
             getses = subprocess.Popen(cmd2, stdout=subprocess.PIPE)
 
@@ -622,66 +622,58 @@ def detect_internal_state():
     dest_program = \
     '''#  Copyright Christopher Laprise 2018-2020
 #  Licensed under GNU General Public License v3. See github.com/tasket/wyng-backup
-import os, sys, shutil, subprocess, hashlib, gzip, tarfile
+import os, sys, shutil, subprocess, gzip, tarfile
 cmd = sys.argv[1] ;    tmpdir = "''' + tmpdir + '''-rpc"
-exists = os.path.exists   ; replace = os.replace    ; remove = os.remove
+exists = os.path.exists    ; replace = os.replace    ; remove = os.remove
+
 def fssync(path):
-    if subprocess.run(["sync","-f",path]).returncode != 0:   subprocess.run(["sync"])
+    if subprocess.call(["sync","-f",path]) != 0:   subprocess.call(["sync"])
+
 def helper_send():
+    mkdirs = os.makedirs    ; hlink = os.link    ; dirname = os.path.dirname
     with tarfile.open(mode="r|", fileobj=sys.stdin.buffer) as tarf:
-        extract = tarf.extract    ; substitutions = {}
+        extract = tarf.extract    ; substitutions = {}    ; dirlist = set()
         for member in tarf:
             if not member.islnk():
                 extract(member)
             else:
-                source = src_orig = member.linkname    ; dest = member.name
+                source = src_orig = member.linkname   ; dest = member.name   ; ddir = dirname(dest)
                 if source in substitutions:   source = substitutions[source]
-                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                if ddir not in dirlist:   mkdirs(ddir, exist_ok=True)   ; dirlist.add(ddir)
                 try:
-                    os.link(source, dest)
+                    hlink(source, dest)
                 except OSError as err:
-                    if err.errno == 31: # too many links
-                        print("Substitution:", source, dest) ####
-                        shutil.copyfile(source, dest)
-                        substitutions[src_orig] = dest
-                    else:
-                        print(err)   ; raise err
+                    print(err)    ; print("Substitution:", source, dest)
+                    shutil.copyfile(source, dest)    ; substitutions[src_orig] = dest
 
-if cmd not in ("merge","send") and exists(tmpdir+"/dest.lst.gz"):
-    lstf = gzip.open(tmpdir+"/dest.lst.gz", "rt")
-if cmd == "receive":
+def helper_receive():
+    stdout_write = sys.stdout.buffer.write   ; exists = os.path.exists   ; getsize= os.path.getsize
     for line in lstf:
         fname = line.strip()
         if not fname:  continue
         if exists(fname):
-            fsize = os.path.getsize(fname)
+            fsize = getsize(fname)
         else:
             fsize = 0   ; i = sys.stderr.write("File not found: %s\\x0a" % fname)
-        i = sys.stdout.buffer.write(fsize.to_bytes(4,"big"))
+        stdout_write(fsize.to_bytes(4,"big"))
         if fsize:
             with open(fname,"rb") as dataf:
-                i = sys.stdout.buffer.write(dataf.read(fsize))
-elif cmd == "merge":
-    if not exists("../archive.ini") or not exists("volinfo"):
-        print("Error: Not in volume dir.")   ; sys.exit(40)
-    resume = "--resume" in sys.argv
-    if resume:
-        if exists("merge-init") or not exists("merge"):
-            print("Merge: Init could not complete; Aborting merge.")
-            if exists("merge-init"):
-                for i in os.scandir("merge-init"):
-                    if i.is_dir() and i.name.startswith("S_"):  os.replace(i.path, i.name)
-                shutil.rmtree("merge-init")
-            fssync(".")    ; sys.exit(50)
+                stdout_write(dataf.read(fsize))
+
+def helper_merge():
+    exists = os.path.exists    ; replace = os.replace    ; remove = os.remove
     try:
-        src_list = []   ; subdirs = set()
+        src_list = []    ; subdirs = set()    ; resume = "--resume" in sys.argv
         lstf = gzip.open("merge.lst.gz", "rt")
         merge_target, target = lstf.readline().split()
         while True:
             ln = lstf.readline().strip()
             if ln == "###":  break
             src_list.append(ln)
-        if not resume:
+        if resume:
+            if exists("merge-init") or not exists("merge"):
+                raise RuntimeError("Merge: Init could not complete; Aborting merge.")
+        else:
             print("Merge: Initialization.")
             for f in (target+"/info", target+"/manifest", "volinfo"):
                 if not exists(f+".tmp"):  raise FileNotFoundError(f)
@@ -692,44 +684,48 @@ elif cmd == "merge":
     except Exception as err:
         if exists("merge-init"):
             for i in os.scandir("merge-init"):
-                if i.is_dir() and i.name.startswith("S_"):  os.replace(i.path, i.name)
-            shutil.rmtree("merge-init")
+                if i.is_dir() and i.name.startswith("S_"):   replace(i.path, i.name)
         fssync(".")    ; print(err)    ; sys.exit(50)
     try:
-        # CD
-        os.chdir("merge")
-        print("Merge: remove/replace files.")   ; open("CHECK-mv-rm","w").close()
-        for src in src_list:  # Enh: replace os.scandir w manifest method
-            for i in os.scandir(src):
-                if i.is_dir():   subdirs.add(i.name)
-        for sdir in subdirs:
-            os.makedirs(merge_target+"/"+sdir, exist_ok=True)
-        for line in lstf:
-            ln = line.split() # default split() does strip()
-            if ln[0] == "rename" and (not resume or exists(ln[1])):
-                replace(ln[1], ln[2])
-            elif ln[0] == "-rm" and exists(ln[1]):
-                remove(ln[1])
-        open("CHECK-END-mv-rm","w").close()   ; lstf.close()
+        os.chdir("merge")  #  CD
+        if not resume or not exists("CHECK-mv-rm"):
+            print("Merge: remove/replace files.")
+            for src in src_list:  # Enh: replace os.scandir w manifest method
+                for i in os.scandir(src):
+                    if i.is_dir():   subdirs.add(i.name)
+            for sdir in subdirs:   os.makedirs(merge_target+"/"+sdir, exist_ok=True)
+            for line in lstf:
+                ln = line.split() # default split() does strip()
+                if ln[0] == "rename" and (not resume or exists(ln[1])):
+                    replace(ln[1], ln[2])
+                elif ln[0] == "-rm" and exists(ln[1]):
+                    remove(ln[1])
+            fssync(".")    ; open("CHECK-mv-rm","w").close()
     except Exception as err:
         print(err)    ; sys.exit(60)
     try:
-        print("Merge: Finalize tmp.")   ; open("CHECK-finalize-tmp","w").close()
+        print("Merge: Finalize target")
         for f in ("/info", "/manifest"):
             if not resume or exists(target+f+".tmp"):  replace(target+f+".tmp", merge_target+f)
-        if not resume or exists("../volinfo.tmp"):  replace("../volinfo.tmp", "../volinfo")
+        os.chdir("..")  #  CD
+        if not resume or exists("volinfo.tmp"):    replace("volinfo.tmp", "volinfo")
+        if not resume or not exists(target):       replace("merge/"+merge_target, target)
+        if not exists(target):   raise FileNotFoundError(target)
+        fssync(".")   ; open("merge/CHECK-finalize-target","w").close()
     except Exception as err:
         print(err)    ; sys.exit(70)
-    try:
-        print("Merge: Finalize target dir.")   ; open("CHECK-finalize-target","w").close()
-        # CD
-        os.chdir("..")   ; replace("merge/"+merge_target, target)   ; remove("../in_process")
-        fssync(".")
-    except Exception as err:
-        print(err)    ; sys.exit(80)
-    open("merge/CHECK-cleanup","w").close()   ; shutil.rmtree("merge")   ; remove(lstf.name)
+    print("wyng_check_free", shutil.disk_usage(".").free, flush=True)
+
+if cmd not in ("merge","send") and exists(tmpdir+"/dest.lst.gz"):
+    lstf = gzip.open(tmpdir+"/dest.lst.gz", "rt")
+if cmd == "receive":
+    helper_receive()
 elif cmd == "send":
     helper_send()
+elif cmd == "merge":
+    if not exists("../archive.ini") or not exists("volinfo"):
+        print("Error: Not in volume dir.")   ; sys.exit(40)
+    helper_merge()
 elif cmd == "dedup":
     ddcount = 0    ; substitutions = {}
     for line in lstf:
@@ -737,8 +733,7 @@ elif cmd == "dedup":
         if source in substitutions:   source = substitutions[source]
         if os.stat(source).st_ino != os.stat(dest).st_ino:
             try:
-                os.link(source, dest+"-lnk")
-                replace(dest+"-lnk", dest)
+                os.link(source, dest+"-lnk")    ; replace(dest+"-lnk", dest)    ; ddcount += 1
             except OSError as err:
                 if err.errno == 31:
                     # source has too many links; substitute
@@ -746,7 +741,6 @@ elif cmd == "dedup":
                 else:
                     if exists(dest+"-lnk"):   remove(dest+"-lnk")
                     print(err)   ; raise err
-            ddcount += 1
     print(ddcount, "reduced.")
 elif cmd == "get-configs":
     with open(tmpdir+"/tar.lst","w") as tarlstf:
@@ -1976,8 +1970,8 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
         if vol_shrank:
             # If volume size shrank in this period then make trim list.
             do_exec([[CP.awk, "$2>"+lc_filter, m_tmp+"/manifest.two"],
-                    [CP.sed, "-E", "s|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)|"
-                    "-rm "+merge_target+"/\\1/x\\1\\2|"]
+                     [CP.sed, "-E", "s|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)|"
+                                    "-rm "+merge_target+"/\\1/x\\1\\2|"]
                     ], out=">>merge.lst")
 
         do_exec([[CP.gzip, "-f", "merge.lst"]])
@@ -1986,44 +1980,55 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
     if clear_sources:
         for ses in sources:
             if ses in volume.sessions:   volume.delete_session(ses, remove=False)
-        volume.sessions[target].save_info("info.tmp")  ; volume.save_volinfo("volinfo.tmp")
         print("Removing %d" % len(sources), end="...", flush=True)
 
     if not resume:
+        volume.sessions[target].save_info("info.tmp")  ; volume.save_volinfo("volinfo.tmp")
+
         # Set archive in_process state to "merge"
         set_in_process(["merge", datavol, str(clear_sources), target, sources],
                        tmp=True, dest=False)
 
         # Send new metadata and process lists to dest
         do_exec([[CP.tar, "-cf", "-", "../in_process.tmp", "volinfo.tmp", "merge.lst.gz", target],
-                dest_run_args(desttype, [destcd + bkdir+"/"+datavol
-                +" && tar -xmf -"
-                +" && mv in_process.tmp ../in_process"
+                 dest_run_args(desttype, [destcd + bkdir+"/"+datavol + " && tar -xmf -"
+                                          +" && { sync -f . || sync; }"
+                                          +" && mv in_process.tmp ../in_process"
+                                          ])
                 ])
-            ])
         os.replace("../in_process.tmp", "../in_process")
 
-    retcode = dest_run([destcd + bkdir+"/"+datavol +" && python3 "
-                        +tmpdir+"-rpc/dest_helper.py merge"+(" --resume" if resume else "")],
-                        check=False)
-    if retcode != 0:  print("Merge failed code", retcode)
+    # Run merge operation on dest
+    retcode = dest_run([destcd + bkdir+"/"+datavol
+                        +" && python3 "
+                        +tmpdir+"-rpc/dest_helper.py merge"+(" --resume" if resume else "")
+                        +" && rm -rf ../in_process merge merge.lst.gz"
+                        ],
+                        check=False, out=">>"+tmpdir+"/merge.log"
+                      )
 
     if retcode == 50:
-        print("Aborting merge initialization.")   ; set_in_process(None)
+        # Initialization didn't complete, so abort
+        set_in_process(None)
         for f in ("merge.lst.gz","volinfo.tmp",target+"/info.tmp"):
-            if exists(f):   os.remove(f)
+            if exists(f):  os.remove(f)
         dest_run([destcd + bkdir+"/"+datavol
-                  +" && rm -f merge.lst.gz volinfo.tmp"], check=False)
+                  +" && rm -rf merge merge-init merge.lst.gz volinfo.tmp"], check=False)
+        x_it(retcode, "Error: Merge could not initialize!")
     elif retcode != 0:
-        x_it(retcode, "Exiting.")
-    else:
-        if exists("volinfo.tmp"):  os.replace("volinfo.tmp", "volinfo")
-        for f in ("/info","/manifest"):
-            if exists(target+f+".tmp"):  os.replace(target+f+".tmp", target+f)
-        set_in_process(None, dest=False)    ; os.remove("merge.lst.gz")
-        for ses in sources:  shutil.rmtree(volume.path+"/"+ses, ignore_errors=True)
+        x_it(retcode, "Error: Remote exited!")
+
+    # Merge went OK, finalize it
+    if exists("volinfo.tmp"):  os.replace("volinfo.tmp", "volinfo")
+    for f in ("/info","/manifest"):
+        if exists(target+f+".tmp"):  os.replace(target+f+".tmp", target+f)
+
+    # Check consistency after resuming merge
     if resume and compare_files(volumes=[volume], sessions=[volume.sessions[target]]):
         x_it(1, "Error: Local and dest metadata differ.")
+
+    set_in_process(None, dest=False)    ; os.remove("merge.lst.gz")
+    for ses in sources:  shutil.rmtree(volume.path+"/"+ses, ignore_errors=True)
 
     print("done.")
 
@@ -2221,7 +2226,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     # Create retriever process using py program
     cmd = dest_run_args(desttype,
             [destcd + bkdir+"/"+datavol
-            +"  && python3 "+tmpdir+"-rpc/dest_helper.py receive"
+             +" && exec 2>>"+tmpdir+"-rpc/receive.log"
+             +" && python3 "+tmpdir+"-rpc/dest_helper.py receive"
             ])
     getvol = subprocess.Popen(cmd, stdout=subprocess.PIPE)
 
@@ -2484,7 +2490,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "Wyng"
-prog_version          = "0.2.0_rc5pre2"    ; prog_date = "20200708"
+prog_version          = "0.2.0_rc5pre2"    ; prog_date = "20200710"
 format_version        = 1
 print("%s %s %s" % (prog_name, prog_version, prog_date))
 prog_name             = prog_name.lower()
@@ -2511,7 +2517,7 @@ ssh_opts              = ["-x", "-o", "ControlPath=~/.ssh/controlsocket-%r@%h-%p"
 
 local_actions         = ("index-test","monitor","list","version","add")
 
-pjoin     = os.path.join    ; exists = os.path.exists    ; sp_run = subprocess.run
+pjoin     = os.path.join    ; exists = os.path.exists
 
 
 if sys.hexversion < 0x3050000:
