@@ -8,7 +8,7 @@
 
 
 #  editor width: 100  -----------------------------------------------------------------------------
-import sys, os, stat, shutil, subprocess, time, datetime
+import sys, signal, os, stat, shutil, subprocess, time, datetime
 import re, mmap, bz2, zlib, gzip, tarfile, io, fcntl, tempfile
 import argparse, configparser, hashlib, functools, uuid
 import xml.etree.ElementTree    ; from itertools import islice
@@ -633,6 +633,7 @@ def helper_send():
     mkdirs = os.makedirs    ; hlink = os.link    ; dirname = os.path.dirname
     with tarfile.open(mode="r|", fileobj=sys.stdin.buffer) as tarf:
         extract = tarf.extract    ; substitutions = {}    ; dirlist = set()
+        for member in tarf:   sdir = member.name    ; mkdirs(sdir)    ; print(sdir)    ; break
         for member in tarf:
             if not member.islnk():
                 extract(member)
@@ -645,6 +646,8 @@ def helper_send():
                 except OSError as err:
                     print(err)    ; print("Substitution:", source, dest)
                     shutil.copyfile(source, dest)    ; substitutions[src_orig] = dest
+    # Finalize
+    # catch_signals here #
 
 def helper_receive():
     stdout_write = sys.stdout.buffer.write   ; exists = os.path.exists   ; getsize= os.path.getsize
@@ -744,17 +747,14 @@ elif cmd == "dedup":
     print(ddcount, "reduced.")
 elif cmd == "get-configs":
     with open(tmpdir+"/tar.lst","w") as tarlstf:
-        vols = [sys.argv[2]] if len(sys.argv)>2 else \
-                [x.name for x in os.scandir() if x.is_dir()]
+        vols = [sys.argv[2]] if len(sys.argv)>2 else [x.name for x in os.scandir() if x.is_dir()]
         for volname in vols:
             if exists(volname+"/volinfo"):   print(volname+"/volinfo", file=tarlstf)
             for ses in os.scandir(volname):
                 if ses.is_dir() and ses.name.startswith("S_") and not ses.name.endswith("-tmp"):
-                    fn1 = volname+"/"+ses.name+"/info"   ; fn2 = volname+"/"+ses.name+"/manifest"
-                    if exists(fn1):   print(fn1, file=tarlstf)
-                    if exists(fn2):   print(fn2, file=tarlstf)
+                    print(volname+"/"+ses.name, file=tarlstf)
         if exists("in_process"):  print("in_process", file=tarlstf)
-    p = subprocess.check_call(["tar","-czf","-","--verbatim-files-from",
+    p = subprocess.check_call(["tar","-czf","-","--no-recursion","--verbatim-files-from",
     "--files-from="+tmpdir+"/tar.lst","archive.ini"], stderr=subprocess.DEVNULL)
     '''
     with open(tmpdir +"/rpc/dest_helper.py", "wb") as progf:
@@ -1220,7 +1220,7 @@ def send_volume(datavol, localtime):
 
     # Use tar to stream files to destination
     stream_started = False
-    untar_cmd = [destcd + " && mkdir -p ."+bkdir+"/"+sdir+"-tmp  "+tmpdir+"-rpc"
+    untar_cmd = [destcd + " && mkdir -p ."+bkdir
                  + " && exec >>"+tmpdir+"-rpc/send.log 2>&1"
                  + " && "+destcd+bkdir + " && echo "+datavol
                  + " && python3 "+tmpdir+"-rpc/dest_helper.py send" ]
@@ -1303,13 +1303,13 @@ def send_volume(datavol, localtime):
                             stdin =subprocess.PIPE,    stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL)
                     tarf = tarfile.open(mode="w|", fileobj=untar.stdin)
-                    tarf_addfile = tarf.addfile; TarInfo = tarfile.TarInfo
-                    LNKTYPE = tarfile.LNKTYPE
-                    stream_started = True
+                    tarf_addfile = tarf.addfile        ; TarInfo = tarfile.TarInfo
+                    stream_started = True              ; LNKTYPE = tarfile.LNKTYPE
+                    tar_info = TarInfo(sdir+"-tmp")    ; tar_info.type = tarfile.DIRTYPE
+                    tarf_addfile(tarinfo=tar_info)
 
                 # Add buffer to stream
-                tar_info = TarInfo("%s-tmp/%s/%s" % 
-                                (sdir, destfile[1:addrsplit], destfile))
+                tar_info = TarInfo("%s-tmp/%s/%s" % (sdir, destfile[1:addrsplit], destfile))
                 print(hexhash, destfile, file=hashf)
 
                 # If chunk already in archive, link to it
@@ -1436,17 +1436,20 @@ def send_volume(datavol, localtime):
             raise RuntimeError("tar transport failure code %d" % retcode)
 
         # Finalize on VM/remote
-        dest_run([ destcd + bkdir
-            +" && mv "+sdir+"-tmp "+sdir
-            +" && mv "+datavol+"/volinfo-tmp "+datavol+"/volinfo"
-            +" && { sync -f . || sync; }"])
+        catch_signals()
+        dest_run([ "trap 'sleep 1' INT TERM QUIT ABRT ALRM HUP TSTP USR1\n"
+                 +destcd + bkdir
+                 +" && mv "+sdir+"-tmp "+sdir
+                 +" && mv "+datavol+"/volinfo-tmp "+datavol+"/volinfo"
+                 +" && { sync -f . || sync; }"])
 
         # Local finalize
         ses.path = ses.path.rsplit("-tmp",maxsplit=1)[0]   ; os.replace(ses.path+"-tmp", ses.path)
         os.replace(vol.path+"/volinfo-tmp", vol.path+"/volinfo")
-        rotate_snapshots(vol, rotate=True)
-        init_deltamap(vol.mapfile, vol.mapsize())
         fssync(vol.path)
+        rotate_snapshots(vol, rotate=True)
+        catch_signals(None)
+        init_deltamap(vol.mapfile, vol.mapsize())
 
     else:
         init_deltamap(vol.mapfile, vol.mapsize())
@@ -2356,12 +2359,14 @@ def rename_volume(archive, oldname, newname):
     confname = os.path.basename(aset.confpath)
     del aset.conf["volumes"][oldname]   ; aset.save_conf(confname+".tmp")
 
+    catch_signals()
     if not aset.in_process:
         set_in_process(["rename", oldname, newname], dest=not meta_only)
     if exists(v.path):
         os.replace(v.path, aset.path+"/"+newname)
     if not meta_only:
-        dest_run([destcd + bkdir
+        dest_run([ "trap 'sleep 1' INT TERM QUIT ABRT ALRM HUP TSTP USR1\n"
+                + destcd + bkdir
                 +"  && cat >"+confname
                 +(" && { if [ -e '%s' ]; then  rm -rf '%s'" % (oldname, newname))
                 +(" && mv -T '%s' '%s'" % (oldname, newname)) + "; fi }"
@@ -2369,6 +2374,7 @@ def rename_volume(archive, oldname, newname):
     os.replace(aset.path+"/"+confname+".tmp", aset.confpath)
     was_in_process = aset.in_process is not None
     set_in_process(None)
+    catch_signals(None)
 
     # cleanup
     if lv_exists(aset.vgname, oldname+".tick"):
@@ -2469,8 +2475,25 @@ def show_mem_stats():
     print("  Current: vsize %d, rsize %d" % (vsz/1000,rss/1000))
 
 
-# Exit with simple message
+def catch_signals(action="do"):
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGQUIT, signal.SIGABRT, signal.SIGALRM,
+                signal.SIGHUP, signal.SIGTSTP, signal.SIGUSR1):
+        if action is None:
+            signal.signal(sig, signal_handlers[sig])       ; del(signal_handlers[sig])
+        else:
+            signal_handlers[sig] = signal.getsignal(sig)   ; signal.signal(sig, handle_signal)
+            signal.siginterrupt(sig, False)
 
+    if action is None:
+        while len(signals_caught):   os.kill(os.getpid(), signals_caught.pop(0))
+
+
+def handle_signal(signum, frame):
+    print("*** Caught signal", signum)
+    if signum not in signals_caught:   signals_caught.append(signum)
+
+
+# Exit with simple message
 def x_it(code, text):
     sys.stderr.write(text+"\n")
     cleanup()
@@ -2592,6 +2615,8 @@ os.makedirs(big_tmpdir, exist_ok=True)
 
 
 ## General Configuration ##
+
+signal_handlers  = {}    ; signals_caught = []
 
 compressors      = {"zlib": (zlib, 4), "bz2": (bz2, 9)}
 
