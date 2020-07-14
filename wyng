@@ -96,9 +96,6 @@ class ArchiveSet:
         if not self.Volume.volname_check(datavol):
             x_it(1, "Exiting.")
 
-        if len(datavol) > 112:
-            x_it(1, "Volume name must be 112 characters or less.")
-
         #self.vols[datavol] = self.Volume(datavol, pjoin(self.path,datavol),
         #                                 self.vgname)
 
@@ -108,9 +105,25 @@ class ArchiveSet:
     def delete_volume(self, datavol):
         if datavol in self.conf["volumes"].keys():   del(self.conf["volumes"][datavol])
         self.save_conf()
+
         if exists(pjoin(self.path,datavol)):         shutil.rmtree(pjoin(self.path,datavol))
+
         for ext in {".tick",".tock"}:                lv_remove(self.vgname, datavol+ext)
         get_lvm_vgs(self.vgname)
+
+    def rename_volume(self, datavol, newname, confname=""):
+        if newname in self.conf["volumes"] or newname in os.listdir(self.path) \
+        or not self.Volume.volname_check(newname):
+            return False
+
+        if datavol in self.conf["volumes"]:
+            self.conf["volumes"][newname] = self.conf["volumes"][datavol]
+            del(self.conf["volumes"][datavol])    ; self.save_conf(fname=confname)
+        else:
+            print("Config for %s not present." % datavol)
+            return False
+
+        return True
 
 
     class Volume:
@@ -171,6 +184,9 @@ class ArchiveSet:
                 return False
             if vname in (".",".."):
                 print("Bad volume name.")
+                return False
+            if len(vname) > 112:
+                print("Volume name must be 112 characters or less.")
                 return False
             return True
 
@@ -627,12 +643,17 @@ def detect_internal_state():
     dest_program = \
     '''#  Copyright Christopher Laprise 2018-2020
 #  Licensed under GNU General Public License v3. See github.com/tasket/wyng-backup
-import os, sys, shutil, subprocess, gzip, tarfile
+import os, sys, signal, shutil, subprocess, gzip, tarfile
 cmd = sys.argv[1] ;    tmpdir = "''' + tmpdir + '''-rpc"
 exists = os.path.exists    ; replace = os.replace    ; remove = os.remove
 
 def fssync(path):
     if subprocess.call(["sync","-f",path]) != 0:   subprocess.call(["sync"])
+
+def catch_signals():
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGQUIT, signal.SIGABRT, signal.SIGALRM,
+                signal.SIGHUP, signal.SIGTSTP, signal.SIGUSR1):
+        signal.signal(sig, signal.SIG_IGN)    ; signal.siginterrupt(sig, False)
 
 def helper_send():
     mkdirs = os.makedirs    ; hlink = os.link    ; dirname = os.path.dirname
@@ -724,7 +745,7 @@ def helper_merge():
         print(err)    ; sys.exit(70)
     print("wyng_check_free", shutil.disk_usage(".").free, flush=True)
 
-if cmd not in ("merge","send") and exists(tmpdir+"/dest.lst.gz"):
+if cmd not in ("merge","send","rename") and exists(tmpdir+"/dest.lst.gz"):
     lstf = gzip.open(tmpdir+"/dest.lst.gz", "rt")
 if cmd == "receive":
     helper_receive()
@@ -750,6 +771,14 @@ elif cmd == "dedup":
                     if exists(dest+"-lnk"):   remove(dest+"-lnk")
                     print(err)   ; raise err
     print(ddcount, "reduced.")
+elif cmd == "rename":
+    catch_signals()    ; oldname = sys.argv[2]    ; newname = sys.argv[3]    ; replaced = False
+    if exists(oldname) and exists(newname):   sys.exit(50)
+    with open("archive.ini.tmp","wb") as conf:
+        for ln in sys.stdin.buffer:   conf.write(ln)
+    if exists(oldname):   replace(oldname, newname)   ; replaced = True
+    replace("archive.ini.tmp", "archive.ini")    ; fssync(".")
+    if not replaced:   sys.exit(40)
 elif cmd == "get-configs":
     with open(tmpdir+"/tar.lst","w") as tarlstf:
         vols = [sys.argv[2]] if len(sys.argv)>2 else [x.name for x in os.scandir() if x.is_dir()]
@@ -1793,7 +1822,10 @@ def init_deltamap(bmfile, bmsize):
 def rotate_snapshots(vol, rotate=True):
     snap1vol = vol.name+".tick"   ; snap2vol = vol.name+".tock"   ; snapdel = vol.name+".delete"
     if rotate:
+        #print("Rotating snapshots for", vol.name)
         lv_remove(aset.vgname, snap1vol)    ; lv_rename(aset.vgname, snap2vol, snap1vol)
+        #do_exec([[CP.lvm, "lvrename", aset.vgname+"/"+snap2vol, snap1vol]])
+        #l_vols[snap1vol] = l_vols[snap2vol]    ; l_vols[snap1vol].lv_name = snap1vol
     else:
         lv_remove(aset.vgname, snap2vol)
 
@@ -2351,47 +2383,42 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
 # Rename a volume in the archive
 
-def rename_volume(archive, oldname, newname):
+def rename_volume(oldname, newname):
     for prg in (CP.lvm, CP.blkdiscard):
         if not shutil.which(prg):  raise RuntimeError("Required command not found: "+prg)
 
-    aset = ArchiveSet(archive.name, metadir+topdir, allvols=True)    ; vg = aset.vgname
-    if oldname not in aset.vols:  x_it(1,"No '%s' found." % oldname)
-    vol = aset.vols[oldname]     ; meta_only = not exists(vol.path) or not len(vol.sessions)
-    if not meta_only and compare_files(volumes=[vol]):
-        x_it(1, "Error: Local and archive metadata differ.")
-
-    aset.add_volume(newname)   ; aset.conf["volumes"][newname] = aset.conf["volumes"][oldname]
-    confname = os.path.basename(aset.confpath)
-    del aset.conf["volumes"][oldname]   ; aset.save_conf(confname+".tmp")
+    confname = os.path.basename(aset.confpath)    ; was_in_process = aset.in_process is not None
+    if not aset.rename_volume(oldname, newname, confname=confname+".tmp"):
+        x_it(1, "Error: Cannot rename '%s' to '%s'." % (oldname,newname))
 
     catch_signals()
-    if not aset.in_process:
-        set_in_process(["rename", oldname, newname], dest=not meta_only)
-    if exists(vol.path):
-        os.replace(vol.path, aset.path+"/"+newname)
-    if not meta_only:
-        dest_run([ "trap 'sleep 1' INT TERM QUIT ABRT ALRM HUP TSTP USR1\n"
-                + destcd + bkdir
-                +"  && cat >"+confname
-                +(" && { if [ -e '%s' ]; then  rm -rf '%s'" % (oldname, newname))
-                +(" && mv -T '%s' '%s'" % (oldname, newname)) + "; fi }"
-                +"  && { sync -f . || sync; }"],  infile=aset.path+"/"+confname+".tmp")
-    os.replace(aset.path+"/"+confname+".tmp", aset.confpath)
-    was_in_process = aset.in_process is not None
-    set_in_process(None)
-    catch_signals(None)
+    if not aset.in_process:   set_in_process(["rename", oldname, newname])
+    rc = dest_run([ "trap 'sleep 1' INT TERM QUIT ABRT ALRM HUP TSTP USR1\n" + destcd + bkdir
+                    +" && python3 "+tmpdir+("-rpc/dest_helper.py rename '%s' '%s'"
+                        % (oldname, newname)) ], infile=aset.confpath+".tmp", check=False)
 
-    # cleanup
-    if lv_exists(vg, oldname+".tick"):   lv_rename(vg, oldname+".tick", oldname+".tick")
-    lv_remove(vg, oldname+".tock")
-    get_lvm_vgs(vg)
-    if was_in_process and not meta_only and \
-        compare_files(pathlist=["archive.ini"], volumes=[aset.vols[newname]]):
-            x_it(1, "Error: Local and archive metadata differ.")
-        # Enh: que automatic remap
+    if rc == 50:
+        set_in_process(None)
+        raise RuntimeError("'%s' already exists in destination!")
 
-    return ArchiveSet(archive.name, metadir+topdir)
+    if rc not in (0, 40):
+        raise RuntimeError("Destination exit code "+str(rc))
+
+    if oldname in os.listdir(aset.path):
+        os.replace(aset.path+"/"+oldname, aset.path+"/"+newname)
+    os.replace(aset.confpath+".tmp", aset.confpath)
+    set_in_process(None)    ; catch_signals(None)
+
+    for ext in (".tick",".tock"):
+        vg = aset.vgname    ; lv_remove(vg, newname+ext)
+        if lv_exists(vg, oldname+ext):   lv_rename(vg, oldname+ext, newname+ext)
+
+    full_aset = ArchiveSet(aset.name, metadir+topdir, allvols=True)
+    if rc != 40 and len(full_aset.vols[newname].sessions) \
+    and compare_files(pathlist=[confname], volumes=[full_aset.vols[newname]]):
+        x_it(1, "Error: Local and archive metadata differ.")
+
+    return ArchiveSet(aset.name, metadir+topdir)
 
 
 # Remove a volume from the archive
@@ -2665,7 +2692,7 @@ if aset.vgname in volgroups.keys():
     for lv in list(l_vols.values()):
         if "wyng" in lv.tags and lv.lv_name.endswith((".tick",".tock")):
             basename = lv.lv_name[:-5]
-            if basename not in aset.conf["volumes"].keys() \
+            if basename not in aset.conf["volumes"] \
             or (options.clean and basename not in l_vols.keys()):
                 print("Removing orphan snapshot:", lv.lv_name)
                 lv_remove(lv.vg_name, lv.lv_name)
@@ -2690,7 +2717,7 @@ if aset.in_process and dest_online and not options.from_arch \
         if aset.in_process[0] == "delete":
             delete_volume(aset.in_process[1])
         elif aset.in_process[0] == "rename":
-            aset = rename_volume(aset, aset.in_process[1], aset.in_process[2])
+            aset = rename_volume(aset.in_process[1], aset.in_process[2])
         elif aset.in_process[0] == "merge":
             merge_sessions(aset.in_process[1], aset.in_process[4],
                         aset.in_process[3], clear_sources=bool(aset.in_process[2]))
@@ -2780,15 +2807,11 @@ elif options.action == "add":
 
 elif options.action == "rename":
     if len(options.volumes) != 2:  x_it(1,"Rename requires two volume names.")
-    rename_volume(aset, options.volumes[0], options.volumes[1])
+    rename_volume(options.volumes[0], options.volumes[1])
 
 
 elif options.action == "delete":
     delete_volume(selected_vols[0])
-
-
-elif options.action == "untar":
-    raise NotImplementedError()
 
 
 elif options.action == "arch-init":
@@ -2836,12 +2859,8 @@ elif options.action == "arch-deduplicate":
         x_it(1,"Requires '--testing-dedup value greater than 1.")
 
 
-if options.action   == "index-test":
+elif options.action   == "index-test":
     init_dedup_index()
-elif options.action == "test":
-    pass
-    #merge_manifests("root", addcol=True)
-    #merge_sessions("root", aset.vols["root"].sesnames[:-1],  aset.vols["root"].sesnames[-1], clear_sources=True)
 
 
 cleanup()
