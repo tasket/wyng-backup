@@ -652,7 +652,7 @@ def fssync(path):
 
 def catch_signals():
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGQUIT, signal.SIGABRT, signal.SIGALRM,
-                signal.SIGHUP, signal.SIGTSTP, signal.SIGUSR1):
+                signal.SIGTSTP, signal.SIGUSR1):
         signal.signal(sig, signal.SIG_IGN)    ; signal.siginterrupt(sig, False)
 
 def helper_send():
@@ -733,7 +733,7 @@ def helper_merge():
     except Exception as err:
         print(err)    ; sys.exit(60)
     try:
-        print("Merge: Finalize target")
+        print("Merge: Finalize target")    ; catch_signals()
         for f in ("/info", "/manifest"):
             if not resume or exists(target+f+".tmp"):  replace(target+f+".tmp", merge_target+f)
         os.chdir("..")  #  CD
@@ -956,11 +956,11 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", text=False):
 
 # Run system commands on destination
 
-def dest_run(commands, dest_type=None, infile="", out="", check=True):
+def dest_run(commands, dest_type=None, infile="", out="", check=True, trap=False):
     if dest_type is None:
         dest_type = desttype
 
-    cmd = dest_run_args(dest_type, commands)
+    cmd = dest_run_args(dest_type, commands, trap=trap)
     return do_exec([cmd], infile=infile, out=out, check=check)
 
 
@@ -968,11 +968,12 @@ def dest_run(commands, dest_type=None, infile="", out="", check=True):
 # The input commands are stored in a temp file and a standard command that
 # runs the temp file is returned.
 
-def dest_run_args(dest_type, commands):
-
+def dest_run_args(dest_type, commands, trap=False):
+    trapcmd = "trap '' INT TERM QUIT ABRT ALRM TSTP USR1\n" if trap else ""
     # shunt commands to tmp file
     with tempfile.NamedTemporaryFile(dir=tmpdir, delete=False) as tmpf:
-        cmd = bytes(shell_prefix + " ".join(commands) + "\n", encoding="UTF-8")
+        cmd = bytes(trapcmd + shell_prefix
+                    + " ".join(commands) + "\n", encoding="UTF-8")
         tmpf.write(cmd)
         remotetmp = os.path.basename(tmpf.name)
 
@@ -1062,8 +1063,9 @@ def prepare_snapshots(datavols):
                 print("Snapshot and deltamap not paired for "+datavol+"; Remapping...")
                 receive_volume(datavol, save_path="", diff=True)
             else:
-                x_it(1,"Error: Deltamap not paired to "+datavol
+                print("Skipping: Delta map not paired to "+datavol
                      +" snapshot. To resolve, run wyng with the '--remap' option.")
+                continue
 
         # Make fresh snap2vol
         do_exec([[CP.lvm, "lvcreate", "-pr", "-kn", "-ay", "--addtag=wyng",
@@ -1475,11 +1477,10 @@ def send_volume(datavol, localtime):
 
         # Finalize on VM/remote
         catch_signals()
-        dest_run([ "trap 'sleep 1' INT TERM QUIT ABRT ALRM HUP TSTP USR1\n"
-                 +destcd + bkdir
+        dest_run([ destcd + bkdir
                  +" && mv "+sdir+"-tmp "+sdir
                  +" && mv "+datavol+"/volinfo-tmp "+datavol+"/volinfo"
-                 +" && { sync -f . || sync; }"])
+                 +" && { sync -f . || sync; }"], trap=True)
 
         # Local finalize
         ses.path = ses.path.rsplit("-tmp",maxsplit=1)[0]   ; os.replace(ses.path+"-tmp", ses.path)
@@ -1804,8 +1805,10 @@ def monitor_send(datavols, selected=[], monitor_only=True):
                 rotate_snapshots(vol, rotate=False)
                 os.rename(vol.mapfile+"-tmp", vol.mapfile)
         else:
+            catch_signals()
             rotate_snapshots(vol, rotate=map_updated)
             os.rename(vol.mapfile+"-tmp", vol.mapfile)
+            catch_signals(None)
 
     if monitor_only:   fssync(aset.path)
 
@@ -1822,10 +1825,7 @@ def init_deltamap(bmfile, bmsize):
 def rotate_snapshots(vol, rotate=True):
     snap1vol = vol.name+".tick"   ; snap2vol = vol.name+".tock"   ; snapdel = vol.name+".delete"
     if rotate:
-        #print("Rotating snapshots for", vol.name)
         lv_remove(aset.vgname, snap1vol)    ; lv_rename(aset.vgname, snap2vol, snap1vol)
-        #do_exec([[CP.lvm, "lvrename", aset.vgname+"/"+snap2vol, snap1vol]])
-        #l_vols[snap1vol] = l_vols[snap2vol]    ; l_vols[snap1vol].lv_name = snap1vol
     else:
         lv_remove(aset.vgname, snap2vol)
 
@@ -2060,15 +2060,18 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
         x_it(retcode, "Error: Remote exited!")
 
     # Merge went OK, finalize it
+    catch_signals()
     if exists("volinfo.tmp"):  os.replace("volinfo.tmp", "volinfo")
     for f in ("/info","/manifest"):
         if exists(target+f+".tmp"):  os.replace(target+f+".tmp", target+f)
+
+    set_in_process(None, dest=False)    ; os.remove("merge.lst.gz")
+    catch_signals(None)
 
     # Check consistency after resuming merge
     if resume and compare_files(volumes=[volume], sessions=[volume.sessions[target]]):
         x_it(1, "Error: Local and dest metadata differ.")
 
-    set_in_process(None, dest=False)    ; os.remove("merge.lst.gz")
     for ses in sources:  shutil.rmtree(volume.path+"/"+ses, ignore_errors=True)
 
     print("done.")
@@ -2345,7 +2348,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             elif diff:
                 diff_count += diff_compare(buf,False)
 
-        if rc is not None and rc > 0:
+        if rc is not None and rc != 0:
             raise RuntimeError("Error code from getvol process: "+str(rc))
 
         buf = decompress(untrusted_buf)
@@ -2393,9 +2396,9 @@ def rename_volume(oldname, newname):
 
     catch_signals()
     if not aset.in_process:   set_in_process(["rename", oldname, newname])
-    rc = dest_run([ "trap 'sleep 1' INT TERM QUIT ABRT ALRM HUP TSTP USR1\n" + destcd + bkdir
-                    +" && python3 "+tmpdir+("-rpc/dest_helper.py rename '%s' '%s'"
-                        % (oldname, newname)) ], infile=aset.confpath+".tmp", check=False)
+    rc = dest_run([ destcd + bkdir + " && python3 "
+                   +tmpdir+("-rpc/dest_helper.py rename '%s' '%s'" % (oldname, newname)) ],
+                    infile=aset.confpath+".tmp", check=False, trap=True)
 
     if rc == 50:
         set_in_process(None)
@@ -2508,6 +2511,7 @@ def show_mem_stats():
 
 
 def catch_signals(action="do"):
+    if action is not None and len(signal_handlers):   print("Already catching")   ; return
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGQUIT, signal.SIGABRT, signal.SIGALRM,
                 signal.SIGHUP, signal.SIGTSTP, signal.SIGUSR1):
         if action is None:
@@ -2545,7 +2549,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "Wyng"
-prog_version          = "0.2.0_rc5pre2"    ; prog_date = "20200710"
+prog_version          = "0.2.0_rc5pre3"    ; prog_date = "20200714"
 format_version        = 1
 print("%s %s %s" % (prog_name, prog_version, prog_date))
 prog_name             = prog_name.lower()
