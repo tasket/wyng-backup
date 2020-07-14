@@ -371,6 +371,11 @@ def lv_remove(vgname, lvname, check=True):
         del(volgroups[vgname].lvs[lvname])
 
 
+def lv_rename(vgname, vol1, vol2):
+    do_exec([[CP.lvm, "lvrename", vgname+"/"+vol1, vol2]])    ; lvs = volgroups[vgname].lvs
+    lvs[vol2] = lvs[vol1]    ; lvs[vol2].lv_name = vol2    ; del(lvs[vol1])
+
+
 # Reserve or release lvm thinpool metadata snapshot.
 # arch must be a configured ArchiveSet; action must be "reserve" or "release".
 def lvm_meta_snapshot(arch, action):
@@ -991,17 +996,18 @@ def prepare_snapshots(datavols):
             print("Warning:", datavol, "does not exist!")
             continue
 
-        # Remove stale snapshots
-        lv_remove(vgname, snap2vol)
-
         # Reclaim deltamap from interrupted session.
         # Future: Expand recovery to start send-resume
         if exists(mapfile+"-tmp"):  os.rename(mapfile+"-tmp", mapfile)
 
-        # Make deltamap or initial snapshot if necessary:
+        # Make deltamap or initial snapshot if necessary. Try to recover paired state
+        # by comparing snapshot UUIDs; a match means remap is unnecessary.
         if len(vol.sessions):
+            if not lv_exists(vgname, snap1vol) and lv_exists(vgname, snap2vol) \
+            and vol.sessions[vol.last].uuid == l_vols[snap2vol].uuid:
+                lv_rename(vgname, snap2vol, snap1vol)
             if lv_exists(vgname, snap1vol) and not exists(mapfile) \
-                    and vol.sessions[vol.last].uuid == l_vols[snap1vol].lv_uuid:
+            and vol.sessions[vol.last].uuid == l_vols[snap1vol].lv_uuid:
                 # Latest session matches current snapshot; OK to make blank map.
                 init_deltamap(mapfile, vol.mapsize())
 
@@ -1014,6 +1020,9 @@ def prepare_snapshots(datavols):
                 print("  Initial snapshot created for", datavol)
             # add to 'new' vols list
             nvs.append(datavol)
+
+        # Remove stale snapshots
+        lv_remove(vgname, snap2vol)
 
         if len(vol.sessions) and (not exists(mapfile) or not lv_exists(vgname, snap1vol)):
             # Handle unusual circumstance where remapping is needed. Vol has history
@@ -1784,10 +1793,7 @@ def init_deltamap(bmfile, bmsize):
 def rotate_snapshots(vol, rotate=True):
     snap1vol = vol.name+".tick"   ; snap2vol = vol.name+".tock"   ; snapdel = vol.name+".delete"
     if rotate:
-        #print("Rotating snapshots for", vol.name)
-        lv_remove(aset.vgname, snap1vol)
-        do_exec([[CP.lvm, "lvrename", aset.vgname+"/"+snap2vol, snap1vol]])
-        l_vols[snap1vol] = l_vols[snap2vol]    ; l_vols[snap1vol].lv_name = snap1vol
+        lv_remove(aset.vgname, snap1vol)    ; lv_rename(aset.vgname, snap2vol, snap1vol)
     else:
         lv_remove(aset.vgname, snap2vol)
 
@@ -2349,10 +2355,10 @@ def rename_volume(archive, oldname, newname):
     for prg in (CP.lvm, CP.blkdiscard):
         if not shutil.which(prg):  raise RuntimeError("Required command not found: "+prg)
 
-    aset = ArchiveSet(archive.name, metadir+topdir, allvols=True)
+    aset = ArchiveSet(archive.name, metadir+topdir, allvols=True)    ; vg = aset.vgname
     if oldname not in aset.vols:  x_it(1,"No '%s' found." % oldname)
-    v = aset.vols[oldname]     ; meta_only = not exists(v.path) or not len(v.sessions)
-    if not meta_only and compare_files(volumes=[v]):
+    vol = aset.vols[oldname]     ; meta_only = not exists(vol.path) or not len(vol.sessions)
+    if not meta_only and compare_files(volumes=[vol]):
         x_it(1, "Error: Local and archive metadata differ.")
 
     aset.add_volume(newname)   ; aset.conf["volumes"][newname] = aset.conf["volumes"][oldname]
@@ -2362,8 +2368,8 @@ def rename_volume(archive, oldname, newname):
     catch_signals()
     if not aset.in_process:
         set_in_process(["rename", oldname, newname], dest=not meta_only)
-    if exists(v.path):
-        os.replace(v.path, aset.path+"/"+newname)
+    if exists(vol.path):
+        os.replace(vol.path, aset.path+"/"+newname)
     if not meta_only:
         dest_run([ "trap 'sleep 1' INT TERM QUIT ABRT ALRM HUP TSTP USR1\n"
                 + destcd + bkdir
@@ -2377,10 +2383,9 @@ def rename_volume(archive, oldname, newname):
     catch_signals(None)
 
     # cleanup
-    if lv_exists(aset.vgname, oldname+".tick"):
-        do_exec([[CP.lvm,"lvrename",aset.vgname+"/"+oldname+".tick", newname+".tick"]])
-    lv_remove(aset.vgname, oldname+".tock")
-    get_lvm_vgs(aset.vgname)
+    if lv_exists(vg, oldname+".tick"):   lv_rename(vg, oldname+".tick", oldname+".tick")
+    lv_remove(vg, oldname+".tock")
+    get_lvm_vgs(vg)
     if was_in_process and not meta_only and \
         compare_files(pathlist=["archive.ini"], volumes=[aset.vols[newname]]):
             x_it(1, "Error: Local and archive metadata differ.")
