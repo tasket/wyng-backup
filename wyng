@@ -96,6 +96,10 @@ class ArchiveSet:
         if not self.Volume.volname_check(datavol):
             x_it(1, "Exiting.")
 
+        if lv_exists(self.vgname, datavol+".tick") \
+        and "arch-"+self.uuid not in volgroups[self.vgname].lvs[datavol+".tick"].tags:
+            print("Warning: Volume '%s' is already tracked by a Wyng snapshot from a" % datavol,
+                  "different archive!")
         #self.vols[datavol] = self.Volume(datavol, pjoin(self.path,datavol),
         #                                 self.vgname)
 
@@ -326,10 +330,12 @@ class Lvm_Volume:
         for attr in self.colnames:
             val = members[self.colnames.index(attr)]
             if attr == "tags":
-                setattr(self, attr, val.split(","))
+                setattr(self, attr, val.split(","))   ; uuid = None
             else:
                 setattr(self, attr, int(re.sub("[^0-9]", "", val)) if attr \
                     in self.attr_ints else val)
+
+        if uuid:   setattr(self, "lv_uuid", uuid)
 
 
 # Retrieves survey of all LVs as vgs[].lvs[] dicts
@@ -1004,7 +1010,7 @@ def dest_run_args(dest_type, commands, trap=False):
 # Prepare snapshots and check consistency with metadata.
 # Must run get_lvm_vgs() again after this.
 
-def prepare_snapshots(datavols):
+def prepare_snapshots(datavols, localtime):
 
     ''' Normal precondition will have a snap1vol already in existence in addition
     to the local datavol. Here we create a fresh snap2vol so we can compare
@@ -1014,7 +1020,7 @@ def prepare_snapshots(datavols):
     '''
 
     print("Preparing snapshots...")
-    dvs, nvs = [], []                   ; vgname = aset.vgname
+    dvs, nvs = [], []    ; vgname = aset.vgname    ; newsession = "S_"+localtime
     for datavol in datavols:
         # 'mapfile' is the deltamap file, 'snapXvol' are the .tick and .tock snapshots.
         # .tick holds vol state between send/monitor ops;
@@ -1026,6 +1032,10 @@ def prepare_snapshots(datavols):
             print("Warning:", datavol, "does not exist!")
             continue
 
+        if lv_exists(vgname, snap1vol) and "arch-"+aset.uuid not in l_vols[snap1vol].tags:
+            print("  Skipping %s; LV snapshot is from a different archive.")
+            continue
+
         # Reclaim deltamap from interrupted session.
         # Future: Expand recovery to start send-resume
         if exists(mapfile+"-tmp"):  os.rename(mapfile+"-tmp", mapfile)
@@ -1033,26 +1043,30 @@ def prepare_snapshots(datavols):
         # Make deltamap or initial snapshot if necessary. Try to recover paired state
         # by comparing snapshot UUIDs; a match means remap is unnecessary.
         if len(vol.sessions):
+            #if lv_exists(vgname, snap1vol) and vol.last not in l_vols[snap1vol].tags:
+                #lv_remove(vgname, snap1vol)
+                #print("  Removed mis-matched snapshot", snap1vol)
             if not lv_exists(vgname, snap1vol) and lv_exists(vgname, snap2vol) \
-            and vol.sessions[vol.last].uuid == l_vols[snap2vol].uuid:
+            and vol.last in l_vols[snap2vol].tags and "arch-"+aset.uuid in l_vols[snap2vol].tags:
                 lv_rename(vgname, snap2vol, snap1vol)
             if lv_exists(vgname, snap1vol) and not exists(mapfile) \
-            and vol.sessions[vol.last].uuid == l_vols[snap1vol].lv_uuid:
+            and vol.last in l_vols[snap1vol].tags:
                 # Latest session matches current snapshot; OK to make blank map.
                 init_deltamap(mapfile, vol.mapsize())
 
         elif not monitor_only:
             # This is new vol and we're send-ing, so make initial .tick snapshot.
-            if not lv_exists(vgname, snap1vol):
-                do_exec([[CP.lvm, "lvcreate", "-pr", "-kn", "-ay", "--addtag=wyng",
-                    "--addtag=arch-"+aset.uuid, "-s", vgname+"/"+datavol, "-n", snap1vol]])
-                volgroups[vgname].lvs[snap1vol] = "placeholder"
-                print("  Initial snapshot created for", datavol)
+            lv_remove(vgname, snap1vol)
+            do_exec([[CP.lvm, "lvcreate", "-pr", "-kn", "-ay",
+                "--addtag=wyng", "--addtag="+newsession,
+                "--addtag=arch-"+aset.uuid, "-s", vgname+"/"+datavol, "-n", snap1vol]])
+            volgroups[vgname].lvs[snap1vol] = "placeholder"
+            print("  Initial snapshot created for", datavol)
             # add to 'new' vols list
             nvs.append(datavol)
 
-        # Remove stale snapshots
-        lv_remove(vgname, snap2vol)
+        elif monitor_only:
+            print("  Skipping %s; No data." % datavol)    ; continue
 
         if len(vol.sessions) and (not exists(mapfile) or not lv_exists(vgname, snap1vol)):
             # Handle unusual circumstance where remapping is needed. Vol has history
@@ -1068,8 +1082,10 @@ def prepare_snapshots(datavols):
                 continue
 
         # Make fresh snap2vol
-        do_exec([[CP.lvm, "lvcreate", "-pr", "-kn", "-ay", "--addtag=wyng",
-            "--addtag=arch-"+aset.uuid, "-s", vgname+"/"+datavol, "-n",snap2vol]])
+        lv_remove(vgname, snap2vol)
+        tags =["--addtag="+vol.last,"--addtag=delta"] if monitor_only else ["--addtag="+newsession]
+        do_exec([[CP.lvm, "lvcreate", "-pr", "-kn", "-ay", "--addtag=wyng"] + tags
+                        + ["--addtag=arch-"+aset.uuid, "-s", vgname+"/"+datavol, "-n",snap2vol]])
 
         # Volume is OK, add to list of vols.
         if datavol not in nvs:  dvs.append(datavol)
@@ -1763,7 +1779,7 @@ def monitor_send(datavols, selected=[], monitor_only=True):
     localtime = time.strftime("%Y%m%d-%H%M%S")
 
     datavols, newvols \
-        = prepare_snapshots(selected if len(selected) >0 else datavols)
+        = prepare_snapshots(selected if len(selected) >0 else datavols, localtime)
 
     get_lvm_vgs(aset.vgname)
     if aset.vgname not in volgroups.keys():
@@ -2115,7 +2131,6 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
     def diff_compare(dbuf,z):
         if dbuf != cmpf.read(chunksize):
-            if attended:  print(" delta", faddr, "Z   " if z else "    ", end="\x0d")
             if remap:
                 volsegment = addr // chunksize 
                 bmap_pos = volsegment // 8
@@ -2155,6 +2170,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         select_ses = sessions[-1]
     else:
         x_it(1, "No sessions available.")
+    if diff and remap and select_ses != sessions[-1]:
+        x_it(1, "Cannot use prior session for remap.")
 
     volsize   = vol.sessions[select_ses].volsize
 
@@ -2243,11 +2260,12 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         if not lv_exists(vgname, datavol):
             x_it(1, "Local volume must exist for diff.")
         if remap:
-            if not lv_exists(vgname, snap1vol):
-                do_exec([[CP.lvm,"lvcreate", "-pr", "-kn", "-ay", "--addtag=wyng",
-                        "--addtag=arch-"+aset.uuid, "-s", vgname+"/"+datavol, "-n", snap1vol]])
-                print("  Initial snapshot created for", datavol)
-                get_lvm_vgs(aset.vgname)
+            lv_remove(vgname, snap1vol)
+            do_exec([[CP.lvm,"lvcreate", "-pr", "-kn", "-ay", "--addtag=wyng",
+                    "--addtag="+vol.last, "--addtag=delta",
+                    "--addtag=arch-"+aset.uuid, "-s", vgname+"/"+datavol, "-n", snap1vol]])
+            print("  Initial snapshot created for", datavol)
+            get_lvm_vgs(aset.vgname)
             if not exists(vol.mapfile):
                 init_deltamap(vol.mapfile, vol.mapsize())
             bmapf = open(vol.mapfile, "r+b")
@@ -2280,8 +2298,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     with open(manifest, "r") as mf:
         for addr in range(0, volsize, chunksize):
             faddr = chformat % addr
-            if attended:
-                print(int(addr/volsize*100),"%  ",faddr,end="  ")
+            if attended:   print("%.2f%%" % (addr/volsize*100), end="\x0d")
 
             mfline = mf.readline()
             cksum, fname, ses = mfline.split()
@@ -2289,7 +2306,6 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                 raise ValueError("Address mismatch "+fname+" expected "+faddr)
 
             if cksum.strip() == "0":
-                if attended:  print("OK",end="\x0d")
                 if save_path:
                     savef.seek(chunksize, 1)
                 elif diff:
@@ -2301,8 +2317,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             untrusted_size = int.from_bytes(getvol.stdout.read(4),"big")
 
             # allow for slight expansion from compression algo
-            if untrusted_size > chunksize + (chunksize // 64) \
-                or untrusted_size < 1:
+            if untrusted_size > chunksize + (chunksize // 64) or untrusted_size < 1:
                     raise BufferError("Bad chunk size %d for %s" % (untrusted_size, mfline))
 
             # Size is OK.
@@ -2325,9 +2340,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                 print(mfline)
                 raise ValueError("Bad hash "+fname+" :: "+gethash(untrusted_buf).hexdigest())
 
-            if verify_only:
-                if attended:  print("OK",end="\x0d")
-                continue
+            if verify_only:   continue
 
             # Proceed with decompress.
             untrusted_decomp = decompress(untrusted_buf)
@@ -2340,13 +2353,12 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
             # Buffer is OK...
             buf = untrusted_decomp    ; bcount += len(buf)
-            if attended:
-                print("OK",end="\x0d")
 
             if save_path:
                 savef.write(buf)
             elif diff:
                 diff_count += diff_compare(buf,False)
+
 
         if rc is not None and rc != 0:
             raise RuntimeError("Error code from getvol process: "+str(rc))
@@ -2355,24 +2367,24 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         if addr+len(buf) != volsize:
             raise ValueError("Received range %d does not match volume size %d."
                              % (addr+len(buf), volsize))
-        print("100%")
+        print("100.00%")
         if debug:
             print("Received range:", addr+len(buf),
                 "\n    Data bytes:", bcount)
 
         if save_path:
             savef.flush() ; savef.close()
-            if returned_home:
-                if not lv_exists(vgname, snap1vol):
-                    do_exec([[CP.lvm, "lvcreate", "-pr", "-kn", "-ay", "--addtag=wyng",
-                        "--addtag=arch-"+aset.uuid, "-s", vgname+"/"+datavol, "-n", snap1vol]])
-                    print("  Initial snapshot created for", datavol)
-                if not exists(vol.mapfile):
-                    init_deltamap(vol.mapfile, vol.mapsize())
-                if select_ses != sessions[-1]:
-                    print("Restored from older session: Volume may be out of"
-                        " sync with archive until '%s --remap diff %s' is run!"
-                        % (prog_name, datavol))
+            if returned_home and select_ses == sessions[-1]:
+                lv_remove(vgname, snap1vol)
+                do_exec([[CP.lvm, "lvcreate", "-pr", "-kn", "-ay",
+                    "--addtag=wyng", "--addtag="+vol.last,
+                    "--addtag=arch-"+aset.uuid, "-s", vgname+"/"+datavol, "-n", snap1vol]])
+                print("  Initial snapshot created for", datavol)
+                init_deltamap(vol, vol.mapfile, vol.mapsize())
+            elif returned_home:
+                print("Restored from older session: Volume may be out of"
+                    " sync with archive until '%s --remap diff %s' is run!"
+                    % (prog_name, datavol))
         elif diff:
             cmpf.close()
             if remap:
@@ -2549,7 +2561,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "Wyng"
-prog_version          = "0.2.0_rc5pre3"    ; prog_date = "20200714"
+prog_version          = "0.2.0_rc5pre4"    ; prog_date = "20200718"
 format_version        = 1
 print("%s %s %s" % (prog_name, prog_version, prog_date))
 prog_name             = prog_name.lower()
@@ -2602,8 +2614,6 @@ parser.add_argument("action", choices=["send","monitor","add","delete","prune","
                     default="monitor", help="Action to take")
 parser.add_argument("-u", "--unattended", action="store_true", default=False,
                     help="Non-interactive, supress prompts")
-parser.add_argument("-a", "--all", action="store_true", default=False,
-                    help="Apply action to all volumes")
 parser.add_argument("--all-before", dest="allbefore", action="store_true", default=False,
                     help="Select all sessions before --session date-time.")
 #parser.add_argument("--tarfile", action="store_true", dest="tarfile", default=False,
@@ -2694,7 +2704,8 @@ os.makedirs(metadir+bkdir, exist_ok=True)
 if aset.vgname in volgroups.keys():
     l_vols       = volgroups[aset.vgname].lvs
     for lv in list(l_vols.values()):
-        if "wyng" in lv.tags and lv.lv_name.endswith((".tick",".tock")):
+        if "wyng" in lv.tags and lv.lv_name.endswith((".tick",".tock")) \
+        and "arch-"+aset.uuid in lv.tags:
             basename = lv.lv_name[:-5]
             if basename not in aset.conf["volumes"] \
             or (options.clean and basename not in l_vols.keys()):

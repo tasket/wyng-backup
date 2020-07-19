@@ -115,6 +115,7 @@ Please note that dashed parameters are always placed before the command.
 | **delete** _volume_name_    | Remove entire volume from config and archive.
 | **rename** _vol_name_ _new_name_  | Renames a volume in the archive.
 | **arch-init**               | Initialize archive configuration.
+| **arch-check** _[volume_name]_    | Thorough check of archive data & metadata
 | **arch-delete**             | Remove data and metadata for all volumes.
 | **arch-deduplicate**        | Deduplicate existing data in archive (experimental).
 
@@ -135,6 +136,8 @@ Please note that dashed parameters are always placed before the command.
 --hashtype             | (arch-init) Set hash algorithm: _sha256_ or _blake2b_.
 --chunk-factor         | (arch-init) Set archive chunk size.
 --testing-dedup=_N_    | Use deduplication algorithm for send (see Testing notes).
+--clean                | Perform garbage collection during arch-check.
+--meta-dir=_path_      | Use a different metadata dir than the default.
 
 
 #### send
@@ -387,23 +390,6 @@ at 64kB by default) can reduce the size of your backup sessions.
 
 
 ### Troubleshooting notes
-
-* If you are coming to Wyng from the `sparsebak` alpha version, your configuration
-will not be immediately recognized. To make your config and archive visible to Wyng,
-rename them like so:
-
-```
-# Local command:
-sudo mv /var/lib/sparsebak /var/lib/wyng.backup
-
-# Backup drive or remote destination:
-sudo mv /my-dest-path/sparsebak /my-dest-path/wyng.backup
-```
-
-* If your are recovering sparsebak volumes on a rebuilt or reinstalled system that doesn't
-have a local copy of the sparsebak configuration, you can skip the local step above, do the
-rename on the destination, then use `wyng --from=URL [--subdir=dirname] arch-init` to import
-the configuration.
 
 * Backup sessions shown in `list` output may be seemingly (but not actually) out of
 order if the system's local time shifts
