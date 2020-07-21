@@ -238,20 +238,23 @@ class ArchiveSet:
 
         def delete_session(self, sname, remove=True):
             ses = self.sessions[sname]
-            index = self.sesnames.index(sname)
+            index = self.sesnames.index(sname)    ; affected = "none"
             indexall = self.archive.allsessions.index(ses)
-            if len(self.sessions)==1 and not ses.saved:
-                affected = "none"
-                self.first = self.last = None
-            elif sname == self.last:
+            if sname == self.last and ses.saved:
                 raise NotImplementedError("Cannot delete last session")
-            else:
-                affected = self.sesnames[index+1]
+
+            del(self.sesnames[index], self.sessions[sname], self.archive.allsessions[indexall])
+
+            # Following condition means:
+            #   * sesnames cannot be empty
+            #   * ses wasn't deleted from end of list
+
+            if len(self.sesnames) > index:   
+                affected = self.sesnames[index]
                 self.sessions[affected].previous = ses.previous
-                if index == 0:  self.first = self.sesnames[1]
-            del self.sesnames[index]
-            del self.sessions[sname]
-            del self.archive.allsessions[indexall]
+
+            self.first = self.sesnames[0] if len(self.sesnames) else "none"
+            self.last  = self.sesnames[-1] if len(self.sesnames) else "none"
 
             if remove and exists(pjoin(self.path, sname)):
                 shutil.rmtree(pjoin(self.path, sname))
@@ -282,8 +285,7 @@ class ArchiveSet:
                             vname, value = ln.strip().split(" = ")
                             setattr(self, vname, 
                                 int(value) if vname in attr_int else value)
-                    if self.localtime is None or self.localtime == "None":
-                        self.localtime = self.name[2:]
+                    self.saved = True
 
             def save_info(self, fname="info"):
                 if not self.path:
@@ -1032,7 +1034,8 @@ def prepare_snapshots(datavols, localtime):
             print("Warning:", datavol, "does not exist!")
             continue
 
-        if lv_exists(vgname, snap1vol) and "arch-"+aset.uuid not in l_vols[snap1vol].tags:
+        if lv_exists(vgname, snap1vol) and "arch-"+aset.uuid not in l_vols[snap1vol].tags \
+        and "arch-" in " ".join(l_vols[snap1vol].tags):
             print("  Skipping %s; LV snapshot is from a different archive.")
             continue
 
@@ -1043,12 +1046,14 @@ def prepare_snapshots(datavols, localtime):
         # Make deltamap or initial snapshot if necessary. Try to recover paired state
         # by comparing snapshot UUIDs; a match means remap is unnecessary.
         if len(vol.sessions):
-            #if lv_exists(vgname, snap1vol) and vol.last not in l_vols[snap1vol].tags:
-                #lv_remove(vgname, snap1vol)
-                #print("  Removed mis-matched snapshot", snap1vol)
+            if lv_exists(vgname, snap1vol) and vol.last not in l_vols[snap1vol].tags \
+            and l_vols[snap1vol].lv_uuid != vol.sessions[vol.last].uuid:
+                print("  Removed mis-matched snapshot", snap1vol)
+
             if not lv_exists(vgname, snap1vol) and lv_exists(vgname, snap2vol) \
             and vol.last in l_vols[snap2vol].tags and "arch-"+aset.uuid in l_vols[snap2vol].tags:
                 lv_rename(vgname, snap2vol, snap1vol)
+
             if lv_exists(vgname, snap1vol) and not exists(mapfile) \
             and vol.last in l_vols[snap1vol].tags:
                 # Latest session matches current snapshot; OK to make blank map.
@@ -1077,9 +1082,12 @@ def prepare_snapshots(datavols, localtime):
                 print("Snapshot and deltamap not paired for "+datavol+"; Remapping...")
                 receive_volume(datavol, save_path="", diff=True)
             else:
-                print("Skipping: Delta map not paired to "+datavol
-                     +" snapshot. To resolve, run wyng with the '--remap' option.")
-                continue
+                msg = "  Delta map not paired to "+datavol \
+                     +" snapshot. To resolve, run wyng with the '--remap' option."
+                if monitor_only:
+                    print(msg)    ; continue
+                else:
+                    x_it(1, msg)
 
         # Make fresh snap2vol
         lv_remove(vgname, snap2vol)
@@ -1102,6 +1110,7 @@ def get_lvm_deltas(datavols):
     print("Acquiring deltas.")
 
     # Reserve a metadata snapshot for the LVM thin pool; required for a live pool.
+    catch_signals()
     lvm_meta_snapshot(aset, "reserve")
 
     err = False
@@ -1118,6 +1127,7 @@ def get_lvm_deltas(datavols):
     finally:
         lvm_meta_snapshot(aset, "release")
 
+    catch_signals(None)
     if err:
         x_it(1, "ERROR running thin_delta process.")
 
@@ -1322,7 +1332,7 @@ def send_volume(datavol, localtime):
 
                 if fullmanifest: # level 1
                     try:
-                        fman_hash, fman_fname = fullmanifest_readline()
+                        fman_hash, fman_fname = fullmanifest_readline().split()
                     except ValueError: # EOF
                         fullmanifest = None    ; fman_hash = ""
                     else:
@@ -2561,7 +2571,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "Wyng"
-prog_version          = "0.2.0_rc5pre4"    ; prog_date = "20200718"
+prog_version          = "0.2.0_rc5pre5"    ; prog_date = "20200720"
 format_version        = 1
 print("%s %s %s" % (prog_name, prog_version, prog_date))
 prog_name             = prog_name.lower()
