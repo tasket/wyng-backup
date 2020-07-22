@@ -249,7 +249,7 @@ class ArchiveSet:
             #   * sesnames cannot be empty
             #   * ses wasn't deleted from end of list
 
-            if len(self.sesnames) > index:   
+            if len(self.sesnames) > index:
                 affected = self.sesnames[index]
                 self.sessions[affected].previous = ses.previous
 
@@ -680,8 +680,6 @@ def helper_send():
                 except OSError as err:
                     print(err)    ; print("Substitution:", source, dest)
                     shutil.copyfile(source, dest)    ; substitutions[src_orig] = dest
-    # Finalize
-    # catch_signals here #
 
 def helper_receive():
     stdout_write = sys.stdout.buffer.write   ; exists = os.path.exists   ; getsize= os.path.getsize
@@ -700,13 +698,6 @@ def helper_receive():
 def helper_merge():
     exists = os.path.exists    ; replace = os.replace    ; remove = os.remove
     try:
-        src_list = []    ; subdirs = set()    ; resume = "--resume" in sys.argv
-        lstf = gzip.open("merge.lst.gz", "rt")
-        merge_target, target = lstf.readline().split()
-        while True:
-            ln = lstf.readline().strip()
-            if ln == "###":  break
-            src_list.append(ln)
         if resume:
             if exists("merge-init") or not exists("merge"):
                 raise RuntimeError("Merge: Init could not complete; Aborting merge.")
@@ -726,7 +717,7 @@ def helper_merge():
     try:
         os.chdir("merge")  #  CD
         if not resume or not exists("CHECK-mv-rm"):
-            print("Merge: remove/replace files.")
+            print("Merge: remove/replace files.")    ; subdirs = set()
             for src in src_list:  # Enh: replace os.scandir w manifest method
                 for i in os.scandir(src):
                     if i.is_dir():   subdirs.add(i.name)
@@ -740,11 +731,14 @@ def helper_merge():
             fssync(".")    ; open("CHECK-mv-rm","w").close()
     except Exception as err:
         print(err)    ; sys.exit(60)
+
+def helper_merge_finalize():
     try:
-        print("Merge: Finalize target")    ; catch_signals()
+        print("Merge: Finalize target")
+        os.chdir("merge")  #  CD
         for f in ("/info", "/manifest"):
             if not resume or exists(target+f+".tmp"):  replace(target+f+".tmp", merge_target+f)
-        os.chdir("..")  #  CD
+        os.chdir("..")     #  CD
         if not resume or exists("volinfo.tmp"):    replace("volinfo.tmp", "volinfo")
         if not resume or not exists(target):       replace("merge/"+merge_target, target)
         if not exists(target):   raise FileNotFoundError(target)
@@ -753,16 +747,28 @@ def helper_merge():
         print(err)    ; sys.exit(70)
     print("wyng_check_free", shutil.disk_usage(".").free, flush=True)
 
-if cmd not in ("merge","send","rename") and exists(tmpdir+"/dest.lst.gz"):
+## MAIN ##
+if "--finalize" in sys.argv:   catch_signals()
+if cmd not in ("merge","merge-finalize","send","rename") and exists(tmpdir+"/dest.lst.gz"):
     lstf = gzip.open(tmpdir+"/dest.lst.gz", "rt")
-if cmd == "receive":
+if cmd == "merge":
+    if not exists("../archive.ini") or not exists("volinfo"):
+        print("Error: Not in volume dir.")   ; sys.exit(40)
+    src_list = []    ; resume = "--resume" in sys.argv
+    lstf = gzip.open("merge.lst.gz", "rt")
+    merge_target, target = lstf.readline().split()
+    while True:
+        ln = lstf.readline().strip()
+        if ln == "###":  break
+        src_list.append(ln)
+    if "--finalize" in sys.argv:
+        helper_merge_finalize()
+    else:
+        helper_merge()
+elif cmd == "receive":
     helper_receive()
 elif cmd == "send":
     helper_send()
-elif cmd == "merge":
-    if not exists("../archive.ini") or not exists("volinfo"):
-        print("Error: Not in volume dir.")   ; sys.exit(40)
-    helper_merge()
 elif cmd == "dedup":
     ddcount = 0    ; substitutions = {}
     for line in lstf:
@@ -892,11 +898,7 @@ def get_in_process(archpath=""):
     if not archpath: archpath = aset.path
     if exists(archpath+"/in_process"):
         with open(archpath+"/in_process", "r") as ipf:
-            for ln in ipf:
-                if ln.find("/") >= 0:
-                    outer_list.append(ln.strip().split("/"))
-                else:
-                    outer_list.append(ln.strip())
+            for ln in ipf:   outer_list.append(ln.strip())
 
             #self.in_process = [x.strip() for x in ipf]
     return outer_list if len(outer_list) else None
@@ -1036,7 +1038,7 @@ def prepare_snapshots(datavols, localtime):
 
         if lv_exists(vgname, snap1vol) and "arch-"+aset.uuid not in l_vols[snap1vol].tags \
         and "arch-" in " ".join(l_vols[snap1vol].tags):
-            print("  Skipping %s; LV snapshot is from a different archive.")
+            print("  Skipping %s; LV snapshot is from a different archive." % datavol)
             continue
 
         # Reclaim deltamap from interrupted session.
@@ -1455,12 +1457,6 @@ def send_volume(datavol, localtime):
                             ddses.name+"-tmp" if ddses is ses else ddses.name,
                             ddchx[:addrsplit],
                             ddchx)
-                    if datavol == "vm-personal-net-bak-private": ####
-                        print(i, pos, " to %s/%s/%s/x%s" % \
-                            (ddses.volume.name,
-                                ddses.name+"-tmp" if ddses is ses else ddses.name,
-                                ddchx[:addrsplit],
-                                ddchx)) ####
                     ddbytes += len(buf)
                     tarf_addfile(tarinfo=tar_info)
                 else:
@@ -1994,7 +1990,6 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
         volsize    = volume.sessions[target].volsize
         vol_shrank = volsize < max([x.volsize for x in volume.sessions.values()
                                     if x.name in sources])
-        if vol_shrank: print("Volume has shrunk.") ####
         last_chunk = chformat % volume.last_chunk_addr(volsize)
         lc_filter  = '"'+last_chunk+'"'
 
@@ -2065,11 +2060,9 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
                 ])
         os.replace("../in_process.tmp", "../in_process")
 
-    # Run merge operation on dest
-    retcode = dest_run([destcd + bkdir+"/"+datavol
-                        +" && python3 "
+    # Start merge operation on dest
+    retcode = dest_run([destcd + bkdir+"/"+datavol + " && python3 "
                         +tmpdir+"-rpc/dest_helper.py merge"+(" --resume" if resume else "")
-                        +" && rm -rf ../in_process merge merge.lst.gz"
                         ],
                         check=False, out=">>"+tmpdir+"/merge.log"
                       )
@@ -2085,8 +2078,16 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
     elif retcode != 0:
         x_it(retcode, "Error: Remote exited!")
 
-    # Merge went OK, finalize it
     catch_signals()
+    # Finalize merge operation on dest
+    dest_run([destcd + bkdir+"/"+datavol + " && python3 "
+                +tmpdir+"-rpc/dest_helper.py merge --finalize"+(" --resume" if resume else "")
+                +" && rm -rf ../in_process merge merge.lst.gz"
+                ],
+                trap=True, out=">>"+tmpdir+"/merge.log"
+            )
+
+    # Local finalize
     if exists("volinfo.tmp"):  os.replace("volinfo.tmp", "volinfo")
     for f in ("/info","/manifest"):
         if exists(target+f+".tmp"):  os.replace(target+f+".tmp", target+f)
@@ -2220,7 +2221,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     # Note address_split is used to bisect filename to construct the subdir.
     manifest = merge_manifests(datavol, msessions=[x.name for x in incl_ses], addcol=True)
 
-    cmds = [[CP.sed, "-E", "/"+last_chunkx+"/q", manifest],  #### Enh: detect vol_shrank
+    cmds = [[CP.sed, "-E", "/"+last_chunkx+"/q", manifest],  ## Enh: detect vol_shrank
             [CP.sed, "-E", "/^0\s/ d; "
              "s|^\S+\s+x(\S{" +str(address_split[0])+ "})(\S+)\s+(S_\S+)|\\3/\\1/x\\1\\2|;"],
             [CP.gzip, "-c", "-4"
@@ -2293,7 +2294,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         cmpf  = open(pjoin("/dev",vgname,snap1vol), "rb")
         diff_count = 0
 
-    print("Receiving" if save_path else "Scanning", "volume :", datavol, select_ses)
+    print("Receiving" if save_path else "Scanning", "volume :", datavol, select_ses[2:])
     if save_path:    print("Saving to %s '%s'" % (save_type, save_path))
     # Create retriever process using py program
     cmd = dest_run_args(desttype,
@@ -2571,7 +2572,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "Wyng"
-prog_version          = "0.2.0_rc5pre5"    ; prog_date = "20200720"
+prog_version          = "0.2.0_rc5"    ; prog_date = "20200722"
 format_version        = 1
 print("%s %s %s" % (prog_name, prog_version, prog_date))
 prog_name             = prog_name.lower()
@@ -2744,7 +2745,7 @@ if aset.in_process and dest_online and not options.from_arch \
         elif aset.in_process[0] == "rename":
             aset = rename_volume(aset.in_process[1], aset.in_process[2])
         elif aset.in_process[0] == "merge":
-            merge_sessions(aset.in_process[1], aset.in_process[4],
+            merge_sessions(aset.in_process[1], aset.in_process[4].split("/"),
                         aset.in_process[3], clear_sources=bool(aset.in_process[2]))
 
     else:
