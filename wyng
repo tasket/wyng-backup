@@ -481,7 +481,6 @@ def arch_init(aset):
 # Check/verify an entire archive
 
 def arch_check(vol_list=None, startup=False):
-
     gethash  = hash_funcs[aset.hashtype]   ; chunksize = aset.chunksize
     attended = not options.unattended      ; stray_dirs= []
 
@@ -498,11 +497,11 @@ def arch_check(vol_list=None, startup=False):
                 lv_remove(lv.vg_name, lv.lv_name)
 
     # Check volume contents at various levels (dirs, metadata, content)
-    for volname in vol_list:
+    for volname in vol_list if dest_online else []:
 
         # Load disabled volumes
-        if volname in aset.conf["volumes"] and aset.conf["volumes"][volname] == "disable" \
-        and dest_online and not startup:
+        if volname in aset.conf["volumes"] and aset.conf["volumes"][volname] == "disable":
+            if startup:   continue
             aset.vols[volname] = ArchiveSet.Volume(aset, volname,aset.path+"/"+volname,aset.vgname)
         elif volname not in aset.vols and not startup:
             print("Stray dir '%s'" % volname)    ; stray_dirs.append(volname)    ; continue
@@ -511,13 +510,14 @@ def arch_check(vol_list=None, startup=False):
         if not startup or options.debug:   print("Checking volume", volname, flush=True)
 
         # Remove session tmp dirs
-        for sdir in os.scandir(vol.path) if dest_online else []:
+        for sdir in os.scandir(vol.path):
             if sdir.name.startswith("S_") and sdir.name.endswith("-tmp"):
                 if options.debug:   print("Removing partial session dir '%s'" % sdir.name)
                 dest_run([destcd+bkdir + " && rm -rf " + volname+"/"+sdir.name])
                 shutil.rmtree(vol.path+"/"+sdir.name, ignore_errors=True)
 
-        if startup or not dest_online:   continue
+        if startup:   continue
+
         if compare_files(volumes=[vol], sessions=list(vol.sessions.values())):
             x_it(1, "Error: Local and archive metadata differ.")
 
@@ -1119,7 +1119,7 @@ def prepare_snapshots(datavols, localtime):
 
         # Make fresh snap2vol
         lv_remove(vgname, snap2vol)
-        tags =["--addtag="+vol.last,"--addtag=delta"] if monitor_only else ["--addtag="+newsession]
+        tags =["--addtag=delta"] if monitor_only else []
         do_exec([[CP.lvm, "lvcreate", "-pr", "-kn", "-ay", "--addtag=wyng"] + tags
                         + ["--addtag=arch-"+aset.uuid, "-s", vgname+"/"+datavol, "-n",snap2vol]])
 
@@ -1871,8 +1871,9 @@ def init_deltamap(bmfile, bmsize):
 
 
 def rotate_snapshots(vol, rotate=True):
-    snap1vol = vol.name+".tick"   ; snap2vol = vol.name+".tock"   ; snapdel = vol.name+".delete"
+    snap1vol = vol.name+".tick"   ; snap2vol = vol.name+".tock"
     if rotate:
+        do_exec([[CP.lvm,"lvchange","--addtag="+vol.last, aset.vgname+"/"+snap2vol]])
         lv_remove(aset.vgname, snap1vol)    ; lv_rename(aset.vgname, snap2vol, snap1vol)
     else:
         lv_remove(aset.vgname, snap2vol)
