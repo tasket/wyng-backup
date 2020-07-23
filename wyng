@@ -480,28 +480,53 @@ def arch_init(aset):
 
 # Check/verify an entire archive
 
-def arch_check(vol_list=None):
+def arch_check(vol_list=None, startup=False):
+
     gethash  = hash_funcs[aset.hashtype]   ; chunksize = aset.chunksize
-    attended = not options.unattended 
+    attended = not options.unattended      ; stray_dirs= []
 
     if not vol_list:   vol_list = [x.name for x in os.scandir(aset.path) if x.is_dir()]
-    for volname in vol_list:
-        if not exists(pjoin(aset.path,volname,"volinfo")):
-            print("Stray dir:", volname)    ; continue
-        # Load disabled volumes
-        if volname in aset.conf["volumes"].keys() and aset.conf["volumes"][volname] == "disable":
-            aset.vols[volname] = ArchiveSet.Volume(aset, volname,aset.path+"/"+volname,aset.vgname)
 
-        print("Checking volume", volname, flush=True)
+    # Remove orphan snapshots
+    for lv in list(l_vols.values()):
+        if "wyng" in lv.tags and lv.lv_name.endswith((".tick",".tock")) \
+        and "arch-"+aset.uuid in lv.tags:
+            basename = lv.lv_name[:-5]
+            if basename not in aset.conf["volumes"] \
+            or (options.clean and basename not in l_vols.keys()):
+                print("Removing orphan snapshot:", lv.lv_name)
+                lv_remove(lv.vg_name, lv.lv_name)
+
+    # Check volume contents at various levels (dirs, metadata, content)
+    for volname in vol_list:
+
+        # Load disabled volumes
+        if volname in aset.conf["volumes"] and aset.conf["volumes"][volname] == "disable" \
+        and dest_online and not startup:
+            aset.vols[volname] = ArchiveSet.Volume(aset, volname,aset.path+"/"+volname,aset.vgname)
+        elif volname not in aset.vols and not startup:
+            print("Stray dir '%s'" % volname)    ; stray_dirs.append(volname)    ; continue
+
         vol = aset.vols[volname]
+        if not startup or options.debug:   print("Checking volume", volname, flush=True)
+
+        # Remove session tmp dirs
+        for sdir in os.scandir(vol.path) if dest_online else []:
+            if sdir.name.startswith("S_") and sdir.name.endswith("-tmp"):
+                if options.debug:   print("Removing partial session dir '%s'" % sdir.name)
+                dest_run([destcd+bkdir + " && rm -rf " + volname+"/"+sdir.name])
+                shutil.rmtree(vol.path+"/"+sdir.name, ignore_errors=True)
+
+        if startup or not dest_online:   continue
         if compare_files(volumes=[vol], sessions=list(vol.sessions.values())):
             x_it(1, "Error: Local and archive metadata differ.")
 
         for sesname in reversed(vol.sesnames):
+            ses = vol.sessions[sesname]    ; manifest = ses.path+"/manifest"
+            if options.session and options.session < ses.localtime:   continue # Enh: use seq
             if attended:   print("  Session %s... " % sesname, end="", flush=True)
 
             # FixCheck for stray entries here
-            ses = vol.sessions[sesname]    ; manifest = ses.path+"/manifest"
             cmd1 = [[CP.sed, "-E", "/^0\s/ d; "
                     +"s|^\S+\s+x(\S{" +str(address_split[0])+ "})(\S+)|"+sesname+"/\\1/x\\1\\2|",
                     manifest],
@@ -735,16 +760,17 @@ def helper_merge():
 def helper_merge_finalize():
     try:
         print("Merge: Finalize target")
-        os.chdir("merge")  #  CD
+        os.chdir("merge")  #  CD                 ; open("CHECK-start-finalize","w").close()
         for f in ("/info", "/manifest"):
             if not resume or exists(target+f+".tmp"):  replace(target+f+".tmp", merge_target+f)
         os.chdir("..")     #  CD
         if not resume or exists("volinfo.tmp"):    replace("volinfo.tmp", "volinfo")
         if not resume or not exists(target):       replace("merge/"+merge_target, target)
         if not exists(target):   raise FileNotFoundError(target)
-        fssync(".")   ; open("merge/CHECK-finalize-target","w").close()
+        fssync(".")
     except Exception as err:
         print(err)    ; sys.exit(70)
+    shutil.rmtree("merge", ignore_errors=True)
     print("wyng_check_free", shutil.disk_usage(".").free, flush=True)
 
 ## MAIN ##
@@ -1122,7 +1148,7 @@ def get_lvm_deltas(datavols):
             do_exec([[CP.thin_delta, "-m",  "--thin1=" + l_vols[snap1vol].thin_id,
                                             "--thin2=" + l_vols[snap2vol].thin_id,
                                     "/dev/mapper/"+vgname+"-"+poolname+"_tmeta"],
-                        [CP.grep, "-v", "<same .*\/>$"]
+                        [CP.grep, "-v", "^\s*<same .*\/>$"]
                     ],  out=tmpdir+"/delta."+datavol )
     except:
         err = True
@@ -2572,7 +2598,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "Wyng"
-prog_version          = "0.2.0_rc5"    ; prog_date = "20200722"
+prog_version          = "0.2.0_rc6pre1"    ; prog_date = "20200723"
 format_version        = 1
 print("%s %s %s" % (prog_name, prog_version, prog_date))
 prog_name             = prog_name.lower()
@@ -2712,16 +2738,7 @@ if options.from_arch:
 os.makedirs(metadir+bkdir, exist_ok=True)
 
 # Vol group is now known: Set 'l_vols' to reference it.
-if aset.vgname in volgroups.keys():
-    l_vols       = volgroups[aset.vgname].lvs
-    for lv in list(l_vols.values()):
-        if "wyng" in lv.tags and lv.lv_name.endswith((".tick",".tock")) \
-        and "arch-"+aset.uuid in lv.tags:
-            basename = lv.lv_name[:-5]
-            if basename not in aset.conf["volumes"] \
-            or (options.clean and basename not in l_vols.keys()):
-                print("Removing orphan snapshot:", lv.lv_name)
-                lv_remove(lv.vg_name, lv.lv_name)
+if aset.vgname in volgroups.keys():   l_vols = volgroups[aset.vgname].lvs
 
 
 # Handle unfinished in_process:
@@ -2753,6 +2770,10 @@ if aset.in_process and dest_online and not options.from_arch \
         x_it(1,"Exiting.")
 elif dest_in_process:
     x_it(1, "Archive locked in_process without local indicator. Exiting.")
+
+
+if aset.vgname in volgroups and options.action != "arch-check":
+    arch_check([], startup=True)
 
 
 # Check volume args against config
