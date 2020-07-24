@@ -1075,6 +1075,7 @@ def prepare_snapshots(datavols, localtime):
         # by comparing snapshot UUIDs; a match means remap is unnecessary.
         if len(vol.sessions):
             if lv_exists(vgname, snap1vol) and vol.last not in l_vols[snap1vol].tags \
+            and "S_" in " ".join(l_vols[snap1vol].tags) \
             and l_vols[snap1vol].lv_uuid != vol.sessions[vol.last].uuid:
                 print("  Removed mis-matched snapshot", snap1vol)
 
@@ -2599,7 +2600,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "Wyng"
-prog_version          = "0.2.0_rc6pre1"    ; prog_date = "20200723"
+prog_version          = "0.2.0_rc6"    ; prog_date = "20200724"
 format_version        = 1
 print("%s %s %s" % (prog_name, prog_version, prog_date))
 prog_name             = prog_name.lower()
