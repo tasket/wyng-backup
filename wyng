@@ -499,12 +499,14 @@ def arch_check(vol_list=None, startup=False):
     # Check volume contents at various levels (dirs, metadata, content)
     for volname in vol_list if dest_online else []:
 
-        # Load disabled volumes
-        if volname in aset.conf["volumes"] and aset.conf["volumes"][volname] == "disable":
-            if startup:   continue
+        # Handle disabled volumes and stray dirs
+        if startup and volname not in aset.vols:   continue
+        if volname not in aset.conf["volumes"]:
+            print("Stray dir '%s'" % volname)    ; stray_dirs.append(volname)
+            if not startup:   continue
+        elif aset.conf["volumes"][volname] == "disable":
+            if startup:       continue
             aset.vols[volname] = ArchiveSet.Volume(aset, volname,aset.path+"/"+volname,aset.vgname)
-        elif volname not in aset.vols and not startup:
-            print("Stray dir '%s'" % volname)    ; stray_dirs.append(volname)    ; continue
 
         vol = aset.vols[volname]
         if not startup or options.debug:   print("Checking volume", volname, flush=True)
@@ -2600,7 +2602,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "Wyng"
-prog_version          = "0.2.0_rc6"    ; prog_date = "20200724"
+prog_version          = "0.2.0_rc6"    ; prog_date = "20200725"
 format_version        = 1
 print("%s %s %s" % (prog_name, prog_version, prog_date))
 prog_name             = prog_name.lower()
