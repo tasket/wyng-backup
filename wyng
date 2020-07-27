@@ -378,7 +378,7 @@ def vg_exists(vgname):
 # Converts a non-cannonical LV path to LV name plus pool and vg names.
 def get_lv_path_pool(path):
     try:
-        p = sp_run([CP.lvm, "lvs", "--separator=::", "--noheadings",
+        p = subprocess.run([CP.lvm, "lvs", "--separator=::", "--noheadings",
                             "--options=lv_name,pool_lv,vg_name", path], check=True,
                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     except subprocess.CalledProcessError:
