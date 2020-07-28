@@ -2421,7 +2421,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                     "--addtag=wyng", "--addtag="+vol.last,
                     "--addtag=arch-"+aset.uuid, "-s", vgname+"/"+datavol, "-n", snap1vol]])
                 print("  Initial snapshot created for", datavol)
-                init_deltamap(vol, vol.mapfile, vol.mapsize())
+                init_deltamap(vol.mapfile, vol.mapsize())
             elif returned_home:
                 print("Restored from older session: Volume may be out of"
                     " sync with archive until '%s --remap diff %s' is run!"
