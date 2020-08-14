@@ -697,7 +697,7 @@ def helper_send():
         for member in tarf:   sdir = member.name    ; mkdirs(sdir)    ; print(sdir)    ; break
         for member in tarf:
             if not member.islnk():
-                extract(member)
+                extract(member, set_attrs=False)
             else:
                 source = src_orig = member.linkname   ; dest = member.name   ; ddir = dirname(dest)
                 if source in substitutions:   source = substitutions[source]
@@ -828,7 +828,7 @@ elif cmd == "get-configs":
             if exists(volname+"/volinfo"):   print(volname+"/volinfo", file=tarlstf)
             for ses in os.scandir(volname):
                 if ses.is_dir() and ses.name.startswith("S_") and not ses.name.endswith("-tmp"):
-                    print(volname+"/"+ses.name, file=tarlstf)
+                    for f in ("info","manifest"):   print(volname+"/"+ses.name+"/"+f, file=tarlstf)
         if exists("in_process"):  print("in_process", file=tarlstf)
     p = subprocess.check_call(["tar","-czf","-","--no-recursion","--verbatim-files-from",
     "--files-from="+tmpdir+"/tar.lst","archive.ini"], stderr=subprocess.DEVNULL)
@@ -2602,7 +2602,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "Wyng"
-prog_version          = "0.2.0_rc6"    ; prog_date = "20200725"
+prog_version          = "0.2.0_rc6-4"    ; prog_date = "20200814"
 format_version        = 1
 print("%s %s %s" % (prog_name, prog_version, prog_date))
 prog_name             = prog_name.lower()
