@@ -1965,21 +1965,49 @@ def prune_sessions(datavol, times):
 # ndays & nsessions: a days/sessions ratio for amount of sessions left after thinning
 
 def autoprune(datavol):
-    import collections ##
-    days_ago  = 32    ; ndays = 7     ; nsessions = 2
-    sessions  = aset.vols[datavol].sesnames[:-1]
-    #localtime = time.strftime("%Y%m%d-%H%M%S")
-    localtime = time.time()    ; da_time = localtime - (days_ago * 60*60*24)
-    startdate = datetime.date(int(sessions[0][2:6]),int(sessions[0][6:8]),int(sessions[0][8:10]))
-    enddate = datetime.date(int(sessions[-1][2:6]),int(sessions[-1][6:8]),int(sessions[-1][8:10]))
-    apcal = collections.OrderedDict()
-    for d in range((enddate-startdate).days+1):
-        apcal[(startdate + datetime.timedelta(d)).strftime("%Y%m%d")] = []
-    #for d in apcal.keys():  print(d, end=" ")
-    #print()
+    dtdate = datetime.date
+    def to_date(sesdate):
+        return dtdate(int(sesdate[2:6]),int(sesdate[6:8]),int(sesdate[8:10]))
 
-    for ses in sessions:  apcal[ses[2:10]].append(ses)
+    today    = datetime.date.today()         ; oldest  = today-datetime.timedelta(days=183)
+    days_ago = datetime.timedelta(days=31)   ; ndays   = 2      ; nsessions = 1
+    vol      = aset.vols[datavol]            ; sessions = vol.sesnames[:-1]
+    startdate = to_date(sessions[0])
+    enddate  = min(to_date(sessions[-1]), today-days_ago)
 
+    # Make a 2d array of ordinal dates and populate with session id + flag
+    apcal = { day: [] for day in range(datetime.date(startdate.year,1,1).toordinal(),
+                                       to_date(sessions[-1]).toordinal()+ndays) }
+    for ses in sessions:  apcal[to_date(ses).toordinal()].append([ses, True])
+
+    # Mark all sessions before the oldest date setting
+    for ses in sessions:
+        sdate = to_date(ses)
+        if sdate > oldest:
+            break
+        else:
+            for dses in apcal[sdate.toordinal()]:
+                dses[1] = False
+                vol.sessions[dses[0]].toggle = False ####
+
+    # Mark sessions for thinning-out according to ndays + nsessions
+    for year in range(startdate.year, enddate.year+1):
+        for span in range(datetime.date(year,1,1).toordinal(),
+                          min(datetime.date(year,12,31), enddate).toordinal(), ndays):
+            dlist = []    ; offset = 0
+            for day in range(span, min(span+ndays, enddate.toordinal())):
+                dlist.append(sum([ x[1] for x in apcal[day] ]))
+            while sum(dlist) > nsessions: ## Enh: Make even distribution
+                #print(" ",sum(dlist),offset) ####
+                bigday = dlist.index(max(dlist[offset:]), offset)
+                offset += ndays//nsessions    ; offset %= ndays
+                for dses in apcal[span+bigday]:
+                    if dses[1]:
+                        dses[1] = False    ; dlist[bigday] -= 1
+                        vol.sessions[dses[0]].toggle = False ####
+                        break
+
+    show_list([datavol])
     exit(0)
 
 
@@ -2561,7 +2589,8 @@ def show_list(selected_vols):
 
             if month == lmonth:
                 # group sessions by month
-                slist.append(ses)
+                #### slist.append(ses)
+                slist.append(ses+(" " if not vol.sessions[ses].toggle else "*"))
             else:
                 # print the month listing: 'rows' is adjusted to carry the remainder on
                 # additional lines. 'extra' and 'steps' are used to eliminate ragged
@@ -2815,6 +2844,10 @@ for vol in options.volumes:
 
 
 # Process Commands:
+
+if options.action  == "test":
+    autoprune("root") ####
+
 
 if options.action   == "monitor":
     monitor_send(datavols, monitor_only=True)
