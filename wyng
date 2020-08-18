@@ -1958,6 +1958,31 @@ def prune_sessions(datavol, times):
                    clear_sources=True)
 
 
+# Likely parameters for autoprune:
+# target_size (0 or MB int): Size cap for archive
+# smallest (bool): full autoprune before cap is reached?
+# days_ago (int): number of days ago before which the thinning params are applied
+# ndays & nsessions: a days/sessions ratio for amount of sessions left after thinning
+
+def autoprune(datavol):
+    import collections ##
+    days_ago  = 32    ; ndays = 7     ; nsessions = 2
+    sessions  = aset.vols[datavol].sesnames[:-1]
+    #localtime = time.strftime("%Y%m%d-%H%M%S")
+    localtime = time.time()    ; da_time = localtime - (days_ago * 60*60*24)
+    startdate = datetime.date(int(sessions[0][2:6]),int(sessions[0][6:8]),int(sessions[0][8:10]))
+    enddate = datetime.date(int(sessions[-1][2:6]),int(sessions[-1][6:8]),int(sessions[-1][8:10]))
+    apcal = collections.OrderedDict()
+    for d in range((enddate-startdate).days+1):
+        apcal[(startdate + datetime.timedelta(d)).strftime("%Y%m%d")] = []
+    #for d in apcal.keys():  print(d, end=" ")
+    #print()
+
+    for ses in sessions:  apcal[ses[2:10]].append(ses)
+
+    exit(0)
+
+
 # Accepts a list of session names in ascending order (or else uses all sessions in the volume)
 # and merges the manifests. Setting 'addcol' will add a colunm showing the session dir name.
 
