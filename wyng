@@ -2216,7 +2216,7 @@ def compare_files(pathlist=[], volumes=[], sessions=[], clear=True):
     result = do_exec([[CP.cmp] + files], check=False) > 0
     if result and options.debug:
         print("'diff %s %s' output:" % tuple(files))
-        do_exec([[CP.diff] + files])
+        subprocess.call([CP.diff] + files)
 
     return result
 
