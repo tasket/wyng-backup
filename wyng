@@ -312,7 +312,7 @@ class CP:
     rm   = "/bin/rm"         ; lvm   = "/sbin/lvm"       ; qvm_run  = "/usr/bin/qvm-run"
     tee  = "/usr/bin/tee"    ; sync  = "/bin/sync"       ; dmsetup  = "/sbin/dmsetup"
     find = "/usr/bin/find"   ; xargs = "/usr/bin/xargs"  ; sha256sum= "/usr/bin/sha256sum"
-    cmp  = "/usr/bin/cmp"    ; gzip  = "/bin/gzip"
+    cmp  = "/usr/bin/cmp"    ; gzip  = "/bin/gzip"       ; diff     = "/usr/bin/diff"
     mountpoint = "/bin/mountpoint"    ; thin_delta = "/usr/sbin/thin_delta"
     blkdiscard = "/sbin/blkdiscard"
 
@@ -2212,8 +2212,13 @@ def compare_files(pathlist=[], volumes=[], sessions=[], clear=True):
     dest_run([destcd + bkdir +" && xargs sha256sum"],
              infile=cmp_list, out=tmpdir+"/compare-hashes.dest")
     # maybe switch cmp to diff/sha256sum if they are safe enough to read untrusted input
-    return do_exec([[CP.cmp, tmpdir+"/compare-hashes.local",tmpdir+"/compare-hashes.dest"]],
-                check=False) > 0
+    files  = [tmpdir+"/compare-hashes.local", tmpdir+"/compare-hashes.dest"]
+    result = do_exec([[CP.cmp] + files], check=False) > 0
+    if result and options.debug:
+        print("'diff %s %s' output:" % tuple(files))
+        do_exec([[CP.diff] + files])
+
+    return result
 
 
 # Receive volume from archive. If no save_path specified, then verify only.
