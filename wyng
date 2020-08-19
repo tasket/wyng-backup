@@ -2670,7 +2670,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "Wyng"
-prog_version          = "0.2.0_rc6-4"    ; prog_date = "20200814"
+prog_version          = "0.2.0_rc7pre"    ; prog_date = "20200817"
 format_version        = 1
 print("%s %s %s" % (prog_name, prog_version, prog_date))
 prog_name             = prog_name.lower()
