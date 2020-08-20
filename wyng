@@ -1261,21 +1261,7 @@ def send_volume(datavol, localtime, send_all):
     # testing deduplication types:
     # Code from init_dedup_indexN() localized here for efficiency.
     dedup_idx     = dedup_db = None
-    if dedup == 3: # sql
-        dedup_db  = aset.hashindex
-        cursor    = dedup_db.cursor()
-        c_uint64  = ctypes.c_uint64
-        c_int64   = ctypes.c_int64
-        ddsessions= aset.allsessions
-    elif dedup == 4: # array tree
-        ddsessions, hashtree, ht_ksize, hashdigits, hash_w, hash0len, \
-        dataf, chtree, chdigits, ch_w, ses_w \
-                  = aset.hashindex
-        ht_ksize  = ht_ksize//2
-        hsegs     = hash_w//hash0len
-        chtree_max= 2**(chtree[0].itemsize*8)
-        idxcount  = dataf.seek(0,2) // (ch_w+ses_w)
-    elif dedup == 5: # bytearray tree
+    if dedup == 5: # bytearray tree
         ddsessions, hashtree, ht_ksize, hashdigits, hash_w, \
         dataf, chtree, chdigits, ch_w, ses_w \
                   = aset.hashindex
@@ -1388,57 +1374,7 @@ def send_volume(datavol, localtime, send_all):
                 print(hexhash, destfile, file=hashf)
 
                 # If chunk already in archive, link to it
-                if dedup < 2:
-                    pass
-
-                elif dedup == 3:
-                    bhashb = bhash.digest()
-                    row    = cursor.execute("SELECT chunk,ses_id FROM hashindex "
-                            "WHERE id = ?", (bhashb,)).fetchone()
-                    if row:
-                        ddch, ddses_i = row
-                        ddses = ddsessions[ddses_i]
-                        ddchx = chformat % (c_uint64(ddch).value)
-                        tar_info.type = LNKTYPE
-                    else:
-                        # perf fix: use execute_many + index of waiting inserts
-                        cursor.execute("INSERT INTO hashindex(id,chunk,ses_id)"
-                            " VALUES(?,?,?)", 
-                            (bhashb, c_int64(addr).value, ses_index))
-
-                elif dedup == 4:
-                    bhashb = bhash.digest()
-                    i      = int.from_bytes(bhashb[:ht_ksize], "big")
-                    ht     = hashtree[i]; ct = chtree[i]
-                    while True:
-                        try:
-                            pos = ht.index(int.from_bytes(bhashb[:hash0len],
-                                                        "little"))
-                        except ValueError:
-                            if idxcount < chtree_max:
-                                hashtree[i].frombytes(bhashb)
-                                chtree[i].append(idxcount)
-                                dataf.write(ses_index.to_bytes(ses_w,"big"))
-                                dataf.write(addr.to_bytes(ch_w,"big"))
-                                idxcount += 1
-                                break # while
-
-                        if pos % hsegs == 0 and \
-                            ht[pos+1:pos+hsegs].tobytes() == bhashb[hash0len:]:
-                            # First hash segment matched; test remaining segments.
-                            data_i = ct[pos//hsegs]
-                            dataf.seek(data_i*(ses_w+ch_w))
-                            ddses  = ddsessions[int.from_bytes(
-                                        dataf.read(ses_w),"big")]
-                            ddchx  = dataf.read(ch_w).hex().zfill(chdigits)
-                            dataf.seek(0,2)
-                            tar_info.type = LNKTYPE
-                            break # while
-
-                        pos += hsegs - (pos % hsegs)
-                        ht = ht[pos:]; ct = ct[pos//hsegs:]
-
-                elif dedup == 5:
+                if dedup == 5:
                     bhashb = bhash.digest()
                     i      = int.from_bytes(bhashb[:ht_ksize], "big")
 
@@ -1531,168 +1467,6 @@ def send_volume(datavol, localtime, send_all):
 
 def init_dedup_index1(listfile=""):
     return
-
-
-def init_dedup_index3(listfile=""):
-
-    addrsplit = -address_split[1]
-    sessions  = aset.allsessions
-    c_int64   = ctypes.c_int64
-    chdigits  = max_address.bit_length() // 4
-    chformat  = "%0"+str(chdigits)+"x"
-    ctime     = time.time()
-
-    db     = sqlite3.connect(tmpdir+"/hashindex.db")
-    #db    = sqlite3.connect(":memory:")
-    cursor = db.cursor()
-    cursor.execute('''
-        CREATE TABLE hashindex(id BLOB PRIMARY KEY ON CONFLICT IGNORE,
-        chunk INTEGER, ses_id INTEGER
-        )''')
-    insert_phrase = 'INSERT INTO hashindex(id, chunk, ses_id) VALUES(?,?,?)'
-    cursor.execute('PRAGMA cache_size = 15000')
-    #cursor.execute('PRAGMA synchronous = OFF')
-    #cursor.execute('PRAGMA journal_mode = OFF')
-
-    if listfile:
-        dedupf = open(tmpdir+"/"+listfile, "w")
-
-    inserts = []; rows = 0
-    for sesnum, ses in enumerate(sessions):
-        volname = ses.volume.name; sesname = ses.name
-        with open(pjoin(ses.path,"manifest"),"r") as manf:
-            for ln in manf:
-                line = ln.split()
-                if line[0] == "0":
-                    continue
-                bhash = bytes().fromhex(line[0])
-                uint  = int(line[1][1:],16)
-                addr  = c_int64(uint)
-
-                inserts.append((bhash, addr.value, sesnum))
-                # Insert only 1 at a time when generating a listfile.
-                if listfile or not len(inserts) % 2000:
-                    cursor.executemany(insert_phrase, inserts)
-                    rows += cursor.rowcount
-                    inserts.clear()
-
-                    if listfile and cursor.rowcount < 1:
-                        row = cursor.execute("SELECT chunk,ses_id FROM hashindex "
-                                "WHERE id = ?", (bhash,)).fetchone()
-                        if row:
-                            ddch, ddses_i = row
-                            ddses = sessions[ddses_i]
-                            ddchx = chformat % ddch
-                            print("%s/%s/%s/x%s %s/%s/%s/%s" % \
-                                (ddses.volume.name, ddses.name, ddchx[:addrsplit], ddchx,
-                                volname, sesname, line[1][1:addrsplit], line[1]),
-                                file=dedupf)
-
-    if len(inserts):
-        cursor.executemany(insert_phrase, inserts)
-        rows += cursor.rowcount
-    db.commit()
-    aset.hashindex = db
-
-    if listfile:
-        dedupf.close()
-
-    ####
-    if not options.debug:  return
-    print("\nIndexed in %.1f seconds." % int(time.time()-ctime))
-    vsz, rss = map(int, os.popen("ps -up"+str(os.getpid())).readlines()[-1].split()[4:6])
-    print("\nMemory use: Max %dMB, index count: %d" %
-        (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * resource.getpagesize() // 1024//1024,
-        rows)
-        )
-    print("Current: vsize %d, rsize %d" % (vsz/1000,rss/1000))
-
-
-def init_dedup_index4(listfile=""):
-
-    ctime     = time.time()
-    # Define arrays and element widths
-    hashdigits = hash_bits // 4 # 4bits per hex digit
-    hash_w     = hash_bits // 8
-    hash0len   = 8        # "Q" ulonglong = 8bytes
-    hsegs      = hash_w//hash0len
-    ht_ksize   = 4 # hex digits for tree key
-    hashtree   = [array("Q") for x in range(2**(ht_ksize*4))]
-    chtree     = [array("I") for x in range(2**(ht_ksize*4))]
-    chtree_max = 2**(chtree[0].itemsize*8) # "I" has 32bit range
-    chdigits   = max_address.bit_length() // 4 # 4bits per digit
-    ses_w = 2; ch_w = chdigits //2
-    # limit number of sessions to ses_w + room for vol set:
-    sessions   = aset.allsessions[:2**(ses_w*8)-(len(aset.vols))-1]
-    addrsplit  = -address_split[1]
-
-    dataf = open(tmpdir+"/hashindex.dat","w+b")
-    dataf_write = dataf.write
-    if listfile:
-        dedupf = open(tmpdir+"/"+listfile, "w")
-
-    count = match = 0
-    for sesnum, ses in enumerate(sessions):
-        volname = ses.volume.name; sesname = ses.name
-        with open(pjoin(ses.path,"manifest"),"r") as manf:
-            for ln in manf:
-                ln1, ln2 = ln.split()
-                if ln1 == "0":
-                    continue
-                bhashb = bytes().fromhex(ln1)
-                #bhash = int(ln1[:hash0len*2], 16)
-                i      = int(ln1[:ht_ksize], 16)
-
-                ht = hashtree[i]; ct = chtree[i]
-                while True:
-                    try:
-                        pos = ht.index(int.from_bytes(bhashb[:hash0len],
-                                                      "little"))
-                    except ValueError:
-                        if count < chtree_max:
-                            hashtree[i].frombytes(bhashb)
-                            chtree[i].append(count)
-                            dataf_write(sesnum.to_bytes(ses_w,"big"))
-                            dataf_write(bytes().fromhex(ln2[1:]))
-                            count += 1
-                            break # while
-
-                    if pos % hsegs == 0 and \
-                       ht[pos+1:pos+hsegs].tobytes() == bhashb[hash0len:]:
-                        #First hash segment matched; test remaining segments.
-                        if listfile:
-                            data_i = ct[pos//hsegs]
-                            dataf.seek(data_i*(ses_w+ch_w))
-                            ddses  = sessions[int.from_bytes(
-                                     dataf.read(ses_w),"big")]
-                            ddchx  = dataf.read(ch_w).hex().zfill(chdigits)
-                            print("%s/%s/%s/x%s %s/%s/%s/%s" % \
-                                (ddses.volume.name, ddses.name, ddchx[:addrsplit], ddchx,
-                                volname, sesname, ln2[1:addrsplit], ln2),
-                                file=dedupf)
-                            dataf.seek(0,2)
-                        match += 1
-                        break # while
-
-                    pos += hsegs - (pos % hsegs)
-                    ht = ht[pos:]; ct = ct[pos//hsegs:]
-
-    if listfile:
-        dedupf.close()
-        dataf.close()
-
-    aset.hashindex = (sessions, hashtree, ht_ksize, hashdigits, hash_w, hash0len,
-                      dataf, chtree, chdigits, ch_w, ses_w)
-
-
-    if not options.debug:  return
-    print("\n %d matches in %.1f seconds." % (match, int(time.time()-ctime)))
-    vsz, rss = map(int, os.popen("ps -up"+str(os.getpid())).readlines()[-1].split()[4:6])
-    print("\nMemory use: Max %dMB, index count: %d" %
-        (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * resource.getpagesize() // 1024//1024,
-         count)
-        )
-    print("Current: vsize %d, rsize %d" % (vsz/1000,rss/1000))
 
 
 def init_dedup_index5(listfile=""):
@@ -2752,8 +2526,7 @@ if "blake2b" in hashlib.algorithms_available:
 if options.from_arch and options.action not in ("receive","verify","list","arch-init"):
     x_it(1,"--from option can be used only with: receive, verify, list, arch-init")
 # Select dedup test algorithm.
-init_dedup_index = [None, init_dedup_index1, None, init_dedup_index3,
-                    init_dedup_index4, init_dedup_index5][options.dedup]
+init_dedup_index = [None, init_dedup_index1, None, None, None, init_dedup_index5][options.dedup]
 monitor_only     = options.action == "monitor" # gather metadata without backing up
 
 # Get LVM listings
