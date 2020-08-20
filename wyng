@@ -1042,7 +1042,7 @@ def dest_run_args(dest_type, commands, trap=False):
 # Prepare snapshots and check consistency with metadata.
 # Must run get_lvm_vgs() again after this.
 
-def prepare_snapshots(datavols, localtime):
+def prepare_snapshots(datavols):
 
     ''' Normal precondition will have a snap1vol already in existence in addition
     to the local datavol. Here we create a fresh snap2vol so we can compare
@@ -1052,7 +1052,7 @@ def prepare_snapshots(datavols, localtime):
     '''
 
     print("Preparing snapshots...")
-    dvs, nvs = [], []    ; vgname = aset.vgname    ; newsession = "S_"+localtime
+    dvs, nvs = set(), set()    ; vgname = aset.vgname
     for datavol in datavols:
         # 'mapfile' is the deltamap file, 'snapXvol' are the .tick and .tock snapshots.
         # .tick holds vol state between send/monitor ops;
@@ -1079,6 +1079,7 @@ def prepare_snapshots(datavols, localtime):
             if lv_exists(vgname, snap1vol) and vol.last not in l_vols[snap1vol].tags \
             and "S_" in " ".join(l_vols[snap1vol].tags) \
             and l_vols[snap1vol].lv_uuid != vol.sessions[vol.last].uuid:
+                lv_remove(vgname, snap1vol)
                 print("  Removed mis-matched snapshot", snap1vol)
 
             if not lv_exists(vgname, snap1vol) and lv_exists(vgname, snap2vol) \
@@ -1088,37 +1089,21 @@ def prepare_snapshots(datavols, localtime):
             if lv_exists(vgname, snap1vol) and not exists(mapfile) \
             and vol.last in l_vols[snap1vol].tags:
                 # Latest session matches current snapshot; OK to make blank map.
-                init_deltamap(mapfile, vol.mapsize())
-
-        elif not monitor_only:
-            # This is new vol and we're send-ing, so make initial .tick snapshot.
-            lv_remove(vgname, snap1vol)
-            do_exec([[CP.lvm, "lvcreate", "-pr", "-kn", "-ay",
-                "--addtag=wyng", "--addtag="+newsession,
-                "--addtag=arch-"+aset.uuid, "-s", vgname+"/"+datavol, "-n", snap1vol]])
-            volgroups[vgname].lvs[snap1vol] = "placeholder"
-            print("  Initial snapshot created for", datavol)
-            # add to 'new' vols list
-            nvs.append(datavol)
+                init_deltamap(vol, mapfile, vol.mapsize())
 
         elif monitor_only:
             print("  Skipping %s; No data." % datavol)    ; continue
 
-        if len(vol.sessions) and (not exists(mapfile) or not lv_exists(vgname, snap1vol)):
-            # Handle unusual circumstance where remapping is needed. Vol has history
-            # but .tick and/or deltamap are still missing after above checks.
-            # In this case (which can occur after importing w '--from') the vol must
-            # be scanned to determine if any differences exist with lastest backup session.
-            if options.remap:
-                print("Snapshot and deltamap not paired for "+datavol+"; Remapping...")
-                receive_volume(datavol, save_path="", diff=True)
+        # Handle circumstances where a new mapping is needed. New volume or vol has history
+        # but .tick and/or deltamap are still missing after above checks.
+        # In this case 'send' can determine any differences w prior backups.
+        if not exists(mapfile) or not lv_exists(vgname, snap1vol):
+            if not monitor_only:
+                print("  Pairing new snapshot to", datavol)
+                nvs.add(datavol)
             else:
-                msg = "  Delta map not paired to "+datavol \
-                     +" snapshot. To resolve, run wyng with the '--remap' option."
-                if monitor_only:
-                    print(msg)    ; continue
-                else:
-                    x_it(1, msg)
+                if not monitor_only:   error_cache.append(datavol)
+                print("  Skipping %s; No snapshot." % datavol)    ; continue
 
         # Make fresh snap2vol
         lv_remove(vgname, snap2vol)
@@ -1127,7 +1112,7 @@ def prepare_snapshots(datavols, localtime):
                         + ["--addtag=arch-"+aset.uuid, "-s", vgname+"/"+datavol, "-n",snap2vol]])
 
         # Volume is OK, add to list of vols.
-        if datavol not in nvs:  dvs.append(datavol)
+        if datavol not in nvs:  dvs.add(datavol)
 
     return dvs, nvs
 
