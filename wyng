@@ -1248,22 +1248,23 @@ def update_delta_digest(datavol):
 # marked chunks will be sent unconditionally, '1' means a chunk won't be sent if its marked
 # but same content, and '>= 2' will check w the archive-wide index and link it if matched.
 
-def send_volume(datavol, localtime):
+def send_volume(datavol, localtime, send_all):
 
-    vol         = aset.vols[datavol]            ; prior_size  = vol.volsize 
+    vol         = aset.vols[datavol]            ; dedup       = options.dedup
     snap2vol    = vol.name + ".tock"            ; snap2size   = l_vols[snap2vol].lv_size
     bmap_size   = vol.mapsize(snap2size)        ; chunksize   = aset.chunksize
     chdigits    = max_address.bit_length()//4   ; chformat    = "%0"+str(chdigits)+"x"
     bksession   = "S_"+localtime                ; sdir        = pjoin(datavol, bksession)
-    send_all    = len(vol.sessions) == 0        ; dedup       = options.dedup
+    prior_size  = vol.volsize()                 ; prior_ses   = vol.last
 
-    if dedup and not send_all:
+    if dedup and len(vol.sessions):
         # Our chunks are usually smaller than LVM's, so generate a full manifest to detect
         # significant amount of unchanged chunks that are flagged in the delta bmap.
         fullmanifest = open(merge_manifests(datavol), "r")
         fullmanifest_readline = fullmanifest.readline
     else:
         fullmanifest = None
+    fman_hash     = fman_fname = ""
 
     ses = vol.new_session(bksession)
     ses.localtime = localtime
@@ -1275,7 +1276,6 @@ def send_volume(datavol, localtime):
     # testing deduplication types:
     # Code from init_dedup_indexN() localized here for efficiency.
     dedup_idx     = dedup_db = None
-    fman_hash     = fman_fname = ""
     if dedup == 3: # sql
         dedup_db  = aset.hashindex
         cursor    = dedup_db.cursor()
@@ -1309,11 +1309,7 @@ def send_volume(datavol, localtime):
     addrsplit = -address_split[1]
     lchunk_addr = vol.last_chunk_addr(snap2size)
 
-    use_zlib = aset.compression == "zlib" # workaround for old zlib limitation
-    if aset.compression == "bz2":
-        compress = functools.partial(bz2.compress, compresslevel=int(aset.compr_level))
-    elif aset.compression == "zlib":
-        compress_zlib = zlib.compress    ; compresslevel = int(aset.compr_level)
+    compress = compressors[aset.compression][0].compress    ; compresslevel = int(aset.compr_level)
 
     # Use tar to stream files to destination
     stream_started = False
@@ -1323,7 +1319,7 @@ def send_volume(datavol, localtime):
                  + " && python3 "+tmpdir+"-rpc/dest_helper.py send" ]
 
     # Open source volume and its delta bitmap as r, session manifest as w.
-    with open(pjoin("/dev",aset.vgname,snap2vol),"rb") as vf, \
+    with open(pjoin("/dev",aset.vgname,snap2vol),"rb", buffering=chunksize) as vf, \
          open(sdir+"-tmp/manifest", "w") as hashf,             \
          open("/dev/zero" if send_all else vol.mapfile+"-tmp","rb") as bmapf:
 
@@ -1337,7 +1333,7 @@ def send_volume(datavol, localtime):
 
         # Feed delta bmap to inner loop in pieces segmented by large zero delimeter.
         # This allows skipping most areas when changes are few.
-        zdelim  = bytes(64)    ; bmseg = minibmap = None    ; bmap_list = []
+        zdelim  = bytes(64)    ; minibmap = None    ; bmap_list = []
 
         while addr < snap2size:
             if len(bmap_list):
@@ -1345,14 +1341,9 @@ def send_volume(datavol, localtime):
                 if fullmanifest:  list(islice(fullmanifest, len(zdelim)*8))
                 addr += chunksize*len(zdelim)*8
                 minibmap = bmap_list.pop(0)
-            elif not send_all:
-                # Empty; Get more.
-                bmseg = bmapf.read(25000)
-                if bmseg:
-                    # split(zdelim) shows us where large unmodified zones exist in bmap.
-                    bmap_list.extend(bmseg.split(zdelim))
-                else:
-                    break
+            elif fullmanifest and not send_all:
+                # Get more: split(zdelim) shows where large unmodified zones exist.
+                bmap_list.extend(bmapf.read(25000).split(zdelim))
                 minibmap = bmap_list.pop(0)
 
             # Cycle over range of chunk addresses.
@@ -1361,7 +1352,7 @@ def send_volume(datavol, localtime):
 
                 destfile = "x"+chformat % addr
 
-                if fullmanifest: # level 1
+                if fullmanifest:
                     try:
                         fman_hash, fman_fname = fullmanifest_readline().split()
                     except ValueError: # EOF
@@ -1374,24 +1365,26 @@ def send_volume(datavol, localtime):
                 # Skip chunk if its deltamap bit is off.
                 if not send_all and not (minibmap[chunk//8] & (1 << chunk%8)):  continue
 
+                # Fetch chunk as buf
                 vf_seek(addr)    ; buf = vf_read(chunksize)
 
                 # Show progress.
                 percent = int(addr/snap2size*1000)
                 if percent >= checkpt:
-                    print("  %.1f%%   %dMB " % (percent/10, bcount//1000000),
-                            end="\x0d", flush=True)
+                    print("\x0d  %4.1f%% %7dM" % (percent/10, bcount//1000000),
+                            end="", flush=True)
                     checkpt += checkpt_pct
 
-                # Compress & write only non-empty and last chunks
-                if buf == zeros and addr < lchunk_addr:
+                # Compress & write only non-empty chunks
+                if buf == zeros: ## and addr < lchunk_addr:
                     if fman_hash != "0":  print("0", destfile, file=hashf)
                     continue
 
-                buf    = compress_zlib(buf, compresslevel) if use_zlib else compress(buf)
+                # Compress chunk and hash it
+                buf    = compress(buf, compresslevel)
                 bhash  = gethash(buf)   ; hexhash = bhash.hexdigest()
 
-                # level 1 dedup
+                # Skip when current and prior chunks are the same
                 if fman_hash == hexhash:  continue
 
                 # Start tar stream
@@ -1493,20 +1486,18 @@ def send_volume(datavol, localtime):
                     tarf_addfile(tarinfo=tar_info, fileobj=BytesIO(buf))
                     bcount += len(buf)
 
-            if minibmap or send_all:  addr += chunksize
+            if minibmap or send_all:  addr += chunksize  ## FIX: maybe fullmanifest (not send_all)?
+
+    print("\r  100%", ("%8.1fM   |  %s" % (bcount/1000000, datavol)),
+          ("\n  (reduced %0.1fM)" % (ddbytes/1000000)) if ddbytes else "")
 
     # Send session info, end stream and cleanup
     if stream_started:
-        print("  100%  ", ("%.1f" % (bcount/1000000)) +"MB",
-              ("  ( reduced %0.1fMB )" % (ddbytes/1000000)) 
-              if ddbytes else "")
-
         # Save session info
         ses.save_info()
-        for session in vol.sessions.values() \
-                        if vol.que_meta_update == "true" else [ses]:
+        for session in vol.sessions.values() if vol.que_meta_update == "true" else [ses]:
             tarf.add(pjoin(vol.name, os.path.basename(session.path)))
-        vol.que_meta_update = "false"
+        vol.que_meta_update = "false"    #; vol.changed_bytes = 0
         vol.save_volinfo("volinfo-tmp")
         tarf.add(datavol+"/volinfo-tmp")
         tarf.add(os.path.basename(aset.confpath))
@@ -1529,22 +1520,22 @@ def send_volume(datavol, localtime):
         # Finalize on VM/remote
         catch_signals()
         dest_run([ destcd + bkdir
-                 +" && mv "+sdir+"-tmp "+sdir
-                 +" && mv "+datavol+"/volinfo-tmp "+datavol+"/volinfo"
+                 +" && mv -fT "+sdir+"-tmp "+sdir
+                 +" && mv -f "+datavol+"/volinfo-tmp "+datavol+"/volinfo"
                  +" && { sync -f . || sync; }"], trap=True)
 
         # Local finalize
         ses.path = ses.path.rsplit("-tmp",maxsplit=1)[0]   ; os.replace(ses.path+"-tmp", ses.path)
         os.replace(vol.path+"/volinfo-tmp", vol.path+"/volinfo")
         fssync(vol.path)
-        rotate_snapshots(vol, rotate=True)
-        catch_signals(None)
-        init_deltamap(vol.mapfile, vol.mapsize())
 
     else:
-        init_deltamap(vol.mapfile, vol.mapsize())
-        vol.delete_session(bksession)
-        shutil.rmtree(aset.path+"/"+sdir+"-tmp")
+        catch_signals()
+        vol.delete_session(bksession)    ; shutil.rmtree(aset.path+"/"+sdir+"-tmp")
+
+    rotate_snapshots(vol, rotate=True)
+    init_deltamap(vol, vol.mapfile, vol.mapsize())
+    catch_signals(None)
 
     if dedup and options.debug:   show_mem_stats()
 
@@ -1813,28 +1804,27 @@ def monitor_send(datavols, selected=[], monitor_only=True):
 
     localtime = time.strftime("%Y%m%d-%H%M%S")
 
-    datavols, newvols \
-        = prepare_snapshots(selected if len(selected) >0 else datavols, localtime)
+    incrementals, send_alls \
+        = prepare_snapshots(selected if len(selected) >0 else datavols)
 
     get_lvm_vgs(aset.vgname)
     if aset.vgname not in volgroups.keys():
         raise ValueError("Volume group "+aset.vgname+" not present.")
 
     if monitor_only:
-        newvols = []
-        volumes = []
+        send_alls = []
 
-    if len(datavols)+len(newvols) == 0:
+    if len(incrementals)+len(send_alls) == 0:
         x_it(0, "No new data.")
 
-    if len(datavols) > 0:
-        get_lvm_deltas(datavols)
+    if len(incrementals) > 0:
+        get_lvm_deltas(incrementals)
 
     if options.dedup:
         init_dedup_index()
 
     if not monitor_only:
-        cmpvols = [x for x in aset.vols.values() if x.name in datavols]
+        cmpvols = [x for x in aset.vols.values() if x.name in incrementals]
         cmpses  = [v.sessions[v.sesnames[-1]] for v in cmpvols]
         if compare_files(volumes=cmpvols, sessions=cmpses):
             x_it(1, "Error: Local and archive metadata differ.")
@@ -1842,26 +1832,20 @@ def monitor_send(datavols, selected=[], monitor_only=True):
         print("\nSending backup session", localtime,
               "to", (desttype+"://"+destsys) if desttype != "internal" else destpath)
 
-    for datavol in datavols+newvols:
-        print("\nVolume :", datavol, flush=True)
+    for datavol in sorted(incrementals.union(send_alls)):
+        print(" ", "Scan" if monitor_only else "Send", "volume      | ", datavol, flush=True,end="")
         vol = aset.vols[datavol]
 
-        map_updated = update_delta_digest(datavol)
+        dnew, dfreed = update_delta_digest(datavol)   ; map_updated = dnew+dfreed > 0
 
         if not monitor_only:
-            if datavol in newvols or os.stat(vol.mapfile+"-tmp").st_blocks > 0:
-                sent = send_volume(datavol, localtime)
+
+            if datavol in send_alls or os.stat(vol.mapfile+"-tmp").st_blocks > 0:
+                sent = send_volume(datavol, localtime, send_all=datavol in send_alls)
             else:
-                print("  No changes.", flush=True)
+                print("\x0d  No changes   ", flush=True)
                 rotate_snapshots(vol, rotate=False)
                 os.rename(vol.mapfile+"-tmp", vol.mapfile)
-        else:
-            catch_signals()
-            rotate_snapshots(vol, rotate=map_updated)
-            os.rename(vol.mapfile+"-tmp", vol.mapfile)
-            catch_signals(None)
-
-    if monitor_only:   fssync(aset.path)
 
 
 def init_deltamap(bmfile, bmsize):
