@@ -1158,10 +1158,11 @@ def get_lvm_deltas(datavols):
 def update_delta_digest(datavol):
 
     if monitor_only:  print("Scanning for changes.")
-    vol         = aset.vols[datavol]      ; chunksize   = aset.chunksize
-    if len(vol.sessions) == 0:  return False # nothing to compare
-    snap1vol    = vol.name + ".tick"      ; snap1size   = l_vols[snap1vol].lv_size
-    snap2vol    = vol.name + ".tock"      ; snap2size   = l_vols[snap2vol].lv_size
+    vol         = aset.vols[datavol]         ; chunksize  = aset.chunksize
+    snap1vol    = vol.name + ".tick"         ; snap2vol   = vol.name + ".tock"
+
+    if len(vol.sessions) == 0 or not lv_exists(aset.vgname, snap1vol):   return 0, 0
+    snap1size   = l_vols[snap1vol].lv_size    ; snap2size = l_vols[snap2vol].lv_size
 
     # Put deltamap into a temporary state
     os.rename(vol.mapfile, vol.mapfile+"-tmp")
@@ -2415,7 +2416,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "Wyng"
-prog_version          = "0.2.0_rc7pre"    ; prog_date = "20200817"
+prog_version          = "0.2.0_rc7pre"    ; prog_date = "20200820"
 format_version        = 1
 print("%s %s %s" % (prog_name, prog_version, prog_date))
 prog_name             = prog_name.lower()
