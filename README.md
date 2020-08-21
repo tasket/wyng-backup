@@ -126,8 +126,9 @@ Please note that dashed parameters are always placed before the command.
 -u, --unattended       | Don't prompt for interactive input.
 --session=_date-time[,date-time]_ | Select a session or session range by date-time (receive, verify, prune).
 --all-before           | Select all sessions before the specified _--session date-time_ (prune).
+--autoprune=off        | Automatic pruning by calendar date.
 --save-to=_path_       | Save volume to _path_ (receive).
---remap                | Remap volume during `diff`.
+--remap                | Remap volume during `send` or `diff`.
 --from=_type:location_ | Retrieve from a specific unconfigured archive (receive, verify, list, arch-init).
 --local=_vg/pool_      | (arch-init) Pool containing local volumes.
 --dest=_type:location_ | (arch-init) Destination of backup archive.
@@ -153,12 +154,16 @@ wyng send
 
 ```
 
-If wyng has no metadata on file about a
+If Wyng has no metadata on file about a
 volume, its treated as a new addition to the backup set so an initial snapshot will
 be made and a full backup will be sent to the archive;
 otherwise it will automatically use snapshot delta information to send a much faster
 incremental backup. Whenever a `send` operation is completed, snapshots are
 renewed just as with the `monitor` command.
+
+A `send` operation may refuse to backup a volume if there is not enough space on the
+destination. One way to avoid this situation is to specify `--autoprune=default` which
+will cause Wyng to remove older backup sessions from the archive when space is needed.
 
 
 #### receive

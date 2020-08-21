@@ -24,15 +24,15 @@ class ArchiveSet:
         self.name        = name
         self.path        = pjoin(top,name)
         self.confpath    = pjoin(self.path,"archive.ini")
-        self.hashindex   = {}
         self.vols        = {}
-        self.allsessions = []
+        self.dedupindex  = {}
+        self.dedupsessions = []
         self.in_process  = get_in_process(self.path)
         # persisted:
         self.chunksize   = bkchunksize
         self.compression = "zlib"
-        self.compr_level = "4"
-        self.hashtype    = "sha256"
+        self.compr_level = str(compressors[self.compression][1])
+        self.hashtype    = "blake2b" if "blake2b" in hash_funcs else "sha256"
         self.vgname      = None
         self.poolname    = None
         self.destsys     = None
@@ -65,10 +65,10 @@ class ArchiveSet:
                 os.makedirs(pjoin(self.path,key), exist_ok=True)
                 self.vols[key] = self.Volume(self, key, pjoin(self.path,key), self.vgname)
                 self.vols[key].enabled = cp["volumes"][key] != "disable"
-                self.allsessions += self.vols[key].sessions.values()
+                if options.dedup > 1:   self.dedupsessions += self.vols[key].sessions.values()
 
         # Create master session list sorted by date-time
-        self.allsessions.sort(key=lambda x: x.localtime, reverse=True)
+        self.dedupsessions.sort(key=lambda x: x.localtime, reverse=True)
 
 
     def save_conf(self, fname=""):
@@ -110,10 +110,9 @@ class ArchiveSet:
         if datavol in self.conf["volumes"]:   del(self.conf["volumes"][datavol])
         self.save_conf()
 
-        if exists(pjoin(self.path,datavol)):         shutil.rmtree(pjoin(self.path,datavol))
+        if exists(pjoin(self.path,datavol)):      shutil.rmtree(pjoin(self.path,datavol))
 
-        for ext in {".tick",".tock"}:                lv_remove(self.vgname, datavol+ext)
-        get_lvm_vgs(self.vgname)
+        for ext in {".tick",".tock"}:          lv_remove(self.vgname, datavol+ext)
 
     def rename_volume(self, datavol, newname, confname=""):
         if newname in self.conf["volumes"] or newname in os.listdir(self.path) \
@@ -179,7 +178,7 @@ class ArchiveSet:
             if int(self.format_ver) > format_version:
                 raise ValueError("Archive format ver = "+self.format_ver+
                                  ". Expected = "+format_version)
-            elif self.format_ver == "0":
+            elif len(self.sessions) and self.format_ver == "0":
                 raise ValueError("No format_version; Alpha archive?")
 
 
@@ -248,17 +247,21 @@ class ArchiveSet:
             self.last = sname
             self.sesnames.append(sname)
             self.sessions[sname] = ns
-            self.archive.allsessions.append(ns)
+            self.archive.dedupsessions.append(ns)
+            #os.makedirs(pjoin(self.path, sname))
             return ns
 
-        def delete_session(self, sname, remove=True):
-            ses = self.sessions[sname]
-            index = self.sesnames.index(sname)    ; affected = "none"
-            indexall = self.archive.allsessions.index(ses)
-            if sname == self.last and ses.saved:
-                raise NotImplementedError("Cannot delete last session")
+        def delete_session(self, sname, remove=True, force=False):
+            ses     = self.sessions[sname]
+            index   = self.sesnames.index(sname)    ; affected = "none"
+            if sname == self.last and ses.saved and not force:
+                raise ValueError("Cannot delete last session")
 
-            del(self.sesnames[index], self.sessions[sname], self.archive.allsessions[indexall])
+            del(self.sesnames[index], self.sessions[sname])
+
+            if self.archive.dedupsessions:
+                indexdd = self.archive.dedupsessions.index(ses)
+                self.archive.dedupsessions[indexdd] = None
 
             # Following condition means:
             #   * sesnames cannot be empty
@@ -271,8 +274,7 @@ class ArchiveSet:
             self.first = self.sesnames[0] if len(self.sesnames) else "none"
             self.last  = self.sesnames[-1] if len(self.sesnames) else "none"
 
-            if remove and exists(pjoin(self.path, sname)):
-                shutil.rmtree(pjoin(self.path, sname))
+            if remove and exists(pjoin(self.path, sname)):   shutil.rmtree(ses.path)
             return affected
 
 
@@ -938,6 +940,7 @@ def detect_dest_state(destsys):
 # Format is list containing strings or list of strings. For latter, '/' is the delimiter.
 
 def set_in_process(outer_list, tmp=False, dest=True):
+    fssync(aset.path)
 
     if outer_list is None:
         if dest:  dest_run([destcd + bkdir + " && rm -f in_process"])
@@ -958,7 +961,6 @@ def set_in_process(outer_list, tmp=False, dest=True):
     if not tmp:
         os.rename(aset.path+"/in_process.tmp", aset.path+"/in_process")
 
-    fssync(aset.path)
     aset.in_process = outer_list
 
 
@@ -1313,18 +1315,14 @@ def send_volume(datavol, localtime, send_all):
     ses.format    = "folders"
     ses.path      = vol.path+"/"+bksession+"-tmp"
 
-    # testing deduplication types:
     # Code from init_dedup_indexN() localized here for efficiency.
     dedup_idx     = dedup_db = None
-    if dedup == 5: # bytearray tree
-        ddsessions, hashtree, ht_ksize, hashdigits, hash_w, \
-        dataf, chtree, chdigits, ch_w, ses_w \
-                  = aset.hashindex
+    if dedup == 5:
+        hashtree, ht_ksize, hash_w, dataf, chtree, chdigits, ch_w, ses_w \
+                  = aset.dedupindex
         chtree_max= 2**(chtree[0].itemsize*8)
-        ht_ksize  = ht_ksize//2
-        idxcount  = dataf.seek(0,2) // (ch_w+ses_w)
-    if dedup > 1:
-        ddsessions.append(ses)    ; ses_index = ddsessions.index(ses)
+        idxcount  = dataf.seek(0,2) // (ch_w+ses_w)    ; ddblank_ch = bytes(hash_w)
+    if dedup > 1:   ddsessions = aset.dedupsessions    ; ses_index = ddsessions.index(ses)
 
     # Set current dir and make new session folder
     os.chdir(metadir+bkdir)
@@ -1431,23 +1429,21 @@ def send_volume(datavol, localtime, send_all):
                 # If chunk already in archive, link to it
                 if dedup == 5:
                     bhashb = bhash.digest()
-                    i      = int.from_bytes(bhashb[:ht_ksize], "big")
-
-                    pos = hashtree[i].find(bhashb)
+                    i      = int(hexhash[:ht_ksize], 16)
+                    pos    = hashtree[i].find(bhashb)     ; ddses = None
                     if pos % hash_w == 0:
-                        data_i = chtree[i][pos//hash_w]
-                        dataf.seek(data_i*(ses_w+ch_w))
-                        ddses = ddsessions[int.from_bytes(
-                                dataf.read(ses_w),"big")]
-                        ddchx = dataf.read(ch_w).hex().zfill(chdigits)
+                        data_i = chtree[i][pos//hash_w]   ; dataf.seek(data_i*(ses_w+ch_w))
+                        ddses  = ddsessions[int.from_bytes(dataf.read(ses_w),"big")]
+                        if ddses is None: ## and data_i > 0:
+                            hashtree[i][pos:pos+hash_w] = ddblank_ch # zero-out obsolete entry
+                            ##chtree[i][pos//hash_w] = 0
+                        else:
+                            ddchx = dataf.read(ch_w).hex().zfill(chdigits)
+                            tar_info.type = LNKTYPE
                         dataf.seek(0,2)
-                        tar_info.type = LNKTYPE
-                    elif idxcount < chtree_max:
-                        hashtree[i].extend(bhashb)
-                        chtree[i].append(idxcount)
-                        dataf.write(ses_index.to_bytes(ses_w,"big"))
-                        dataf.write(addr.to_bytes(ch_w,"big"))
-                        idxcount += 1
+                    if ddses is None and bhashb != ddblank_ch and idxcount < chtree_max:
+                        hashtree[i].extend(bhashb)   ; chtree[i].append(idxcount)   ; idxcount += 1
+                        dataf.write(ses_index.to_bytes(ses_w,"big") + addr.to_bytes(ch_w,"big"))
 
                 if tar_info.type == LNKTYPE:
                     tar_info.linkname = "%s/%s/%s/x%s" % \
@@ -1527,9 +1523,9 @@ def init_dedup_index1(listfile=""):
 
 def init_dedup_index5(listfile=""):
 
-    ctime = time.time()
+    if options.debug and not listfile:   listfile = "dedup.lst.gz"
+    ctime = time.time()    ; makelist = bool(listfile)
     # Define arrays and element widths
-    hashdigits = hash_bits // 4  # 256 @4bits per hex digit
     hash_w     = hash_bits // 8
     ht_ksize   = 4 # hex digits for tree key
     hashtree   = [bytearray() for x in range(2**(ht_ksize*4))]
@@ -1538,31 +1534,30 @@ def init_dedup_index5(listfile=""):
     chdigits   = max_address.bit_length() // 4 # 4bits per digit
     ses_w = 2; ch_w = chdigits //2
     # limit number of sessions to ses_w range:
-    sessions   = aset.allsessions[:2**(ses_w*8)-(len(aset.vols))-1]
+    ddsessions = aset.dedupsessions[:2**(ses_w*8)-(len(aset.vols))-1]
     addrsplit  = -address_split[1]
 
-    dataf  = open(tmpdir+"/hashindex.dat","w+b")
-    dataf_write = dataf.write
-    if listfile:
-        dedupf = gzip.open(tmpdir+"/"+listfile, "wt")
+    dataf  = open(tmpdir+"/hashindex.dat","w+b", buffering=512)
+    dataf_write = dataf.write   ; bfromhex = bytes().fromhex
+    if makelist:   dedupf = gzip.open(tmpdir+"/"+listfile, "wt")
 
     count = match = 0
-    for sesnum, ses in enumerate(sessions):
+    ##count = 1; dataf.write(bytes(ses_w + ch_w)) # first is null
+    for sesnum, ses in enumerate(ddsessions):
         volname = ses.volume.name; sesname = ses.name
         with open(pjoin(ses.path,"manifest"),"r") as manf:
             for ln in manf:
                 ln1, ln2 = ln.split()
-                if ln1 == "0":
-                    continue
-                bhashb = bytes().fromhex(ln1)
+                if ln1 == "0":   continue
+                bhashb = bfromhex(ln1)
                 i      = int(ln1[:ht_ksize], 16)
                 pos    = hashtree[i].find(bhashb)
                 if pos % hash_w == 0:
                     match += 1
-                    if listfile:
+                    if makelist:
                         data_i = chtree[i][pos//hash_w]
                         dataf.seek(data_i*(ses_w+ch_w))
-                        ddses  = sessions[int.from_bytes(
+                        ddses  = ddsessions[int.from_bytes(
                                  dataf.read(ses_w),"big")]
                         ddchx  = dataf.read(ch_w).hex().zfill(chdigits)
                         print("%s/%s/%s/x%s %s/%s/%s/%s" % \
@@ -1574,16 +1569,15 @@ def init_dedup_index5(listfile=""):
                     hashtree[i].extend(bhashb)
                     chtree[i].append(count)
                     dataf_write(sesnum.to_bytes(ses_w,"big"))
-                    dataf_write(bytes().fromhex(ln2[1:]))
+                    dataf_write(bfromhex(ln2[1:]))
                     count += 1
 
     if listfile:
         dedupf.close()
-        dataf.close()
+        #dataf.close()
 
-    aset.hashindex = (sessions, hashtree, ht_ksize, hashdigits, hash_w,
-                      dataf, chtree, chdigits, ch_w, ses_w)
-
+    aset.dedupindex    = (hashtree, ht_ksize, hash_w, dataf, chtree, chdigits, ch_w, ses_w)
+    aset.dedupsessions = ddsessions
 
     if not options.debug:  return
     print("\nIndexed in %.1f seconds." % int(time.time()-ctime))
@@ -2394,7 +2388,6 @@ def delete_volume(dv):
     print("\nDeleting volume", dv, "from archive.")
     if not aset.in_process:       set_in_process(["delete", dv])
     aset.delete_volume(dv)
-    if exists(aset.path+"/"+dv):  shutil.rmtree(aset.path+"/"+dv)
 
     confname = os.path.basename(aset.confpath)
     cmd = [destcd + bkdir
@@ -2505,7 +2498,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "Wyng"
-prog_version          = "0.2.0_rc7pre"    ; prog_date = "20200820"
+prog_version          = "0.2.0_rc7pre"    ; prog_date = "20200821"
 format_version        = 1
 print("%s %s %s" % (prog_name, prog_version, prog_date))
 prog_name             = prog_name.lower()
@@ -2793,9 +2786,8 @@ elif options.action == "arch-delete":
     # Remove any stray snapshots associated with archive
     for vg in volgroups.values():
         for lv in vg.lvs.values():
-            if "wyng" not in lv.tags:   continue
-            uuid = [x[5:] for x in lv.tags if x.startswith("arch-")]
-            if len(uuid) and uuid[0] == aset.uuid:   lv_remove(vg.name, lv.lv_name)
+            if "wyng" in lv.tags and "arch-"+aset.uuid in lv.tags:
+                lv_remove(vg.name, lv.lv_name)
 
     # Remove metadata dir
     shutil.rmtree(aset.path, ignore_errors=True)
