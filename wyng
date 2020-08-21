@@ -90,7 +90,7 @@ class ArchiveSet:
             f.flush()    ; os.fsync(f.fileno())
 
     def add_volume(self, datavol):
-        if datavol in self.conf["volumes"].keys():
+        if datavol in self.conf["volumes"]:
             x_it(1, datavol+" is already configured.")
 
         if not self.Volume.volname_check(datavol):
@@ -107,7 +107,7 @@ class ArchiveSet:
         self.save_conf()
 
     def delete_volume(self, datavol):
-        if datavol in self.conf["volumes"].keys():   del(self.conf["volumes"][datavol])
+        if datavol in self.conf["volumes"]:   del(self.conf["volumes"][datavol])
         self.save_conf()
 
         if exists(pjoin(self.path,datavol)):         shutil.rmtree(pjoin(self.path,datavol))
@@ -150,6 +150,8 @@ class ArchiveSet:
             self.first   = None
             self.last    = None
             self.que_meta_update = "false"
+            # other:
+            self.changed_bytes = 0
 
             # load volume info
             if exists(pjoin(path,"volinfo")):
@@ -220,6 +222,16 @@ class ArchiveSet:
                 print("que_meta_update =", self.que_meta_update, file=f)
                 f.flush()    ; os.fsync(f.fileno())
 
+        def changed_bytes_add(self, amount, reset=False):
+            if reset:
+                if exists(self.path+"/volchanged"):   os.remove(self.path+"/volchanged")
+                self.changed_bytes = 0  ; return
+
+            self.changed_bytes += amount
+            with open(self.path+"/volchanged", "w") as f:
+                print(self.changed_bytes, file=f)
+                f.flush()    ; os.fsync(f.fileno())
+
         def new_session(self, sname):
             ns = self.Ses(self, sname)
             ns.path = pjoin(self.path, sname)
@@ -268,6 +280,7 @@ class ArchiveSet:
                 self.present  = exists(pjoin(path,"manifest"))
                 self.saved    = False
                 self.volume   = volume
+                self.toggle   = True
                 # persisted:
                 self.uuid     = "none"
                 self.localtime= None
@@ -299,6 +312,22 @@ class ArchiveSet:
                     print("sequence =",  self.sequence, file=f)
                     print("previous =",  self.previous, file=f)
                     f.flush()    ; os.fsync(f.fileno())
+
+
+class Destination:
+    def __init__(self, dtype):
+        self.dtype       = dtype
+        self.free_space  = None
+
+    def check_free_dest(self): ## Do we need this??
+        do_exec([dest_run_args(desttype, ["stat -f -c '%a %S' " + aset.destmountpoint]),
+                    # sanitize remote output:
+                    ["cat","-v"],  ["head","--bytes=128000"]
+                ], out=tmpdir+"/check_free")
+
+        one, two = open(tmpdir+"/check_free","r").readlines[0].split()
+        self.free_space = int(one) * int(two)
+        return self.free_space
 
 
 # Define absolute paths of commands
@@ -386,8 +415,8 @@ def get_lv_path_pool(path):
         return p.stdout.decode("utf-8").strip().split("::")
 
 
-def lv_remove(vgname, lvname, check=True):
-    if (not check) or lv_exists(vgname, lvname):
+def lv_remove(vgname, lvname):
+    if lv_exists(vgname, lvname):
         do_exec([[CP.lvm,"lvchange", "-p", "rw", vgname+"/"+lvname]], check=False)
         do_exec([[CP.blkdiscard, pjoin("/dev",vgname,lvname)]], check=False)
         do_exec([[CP.lvm,"lvremove", "-f",vgname+"/"+lvname]])
@@ -848,6 +877,8 @@ def detect_dest_state(destsys):
                         "qubes-ssh":[CP.qvm_run, "-p", destsys.split(":")[0]]
                         }
 
+    dest_in_proc = False    ; dest_free = None    ; online = False
+
     if (options.action not in local_actions and destsys is not None) \
         or options.remap or options.from_arch:
 
@@ -861,35 +892,43 @@ def detect_dest_state(destsys):
             do_exec([cmd])
 
         # Fix: get OSTYPE env variable
-        online = True
         cmd = ["mountpoint -q '"+aset.destmountpoint
                 +"' && mkdir -p '"+aset.destmountpoint+"/"+aset.destdir+topdir
                 +"' && cd '"+aset.destmountpoint+"/"+aset.destdir+topdir+"'"
 
+                # get space free info
+                +"  && echo -n 'wyng_check_free ' && stat -f -c '%a %S' ."
+
                 # send helper program to remote dest
-                +((" && rm -rf "+tmpdir+"-rpc  &&  mkdir -p "+tmpdir+"-rpc"
-                    +" && cat >"+tmpdir+"-rpc/dest_helper.py"))
+                +"  && rm -rf "+tmpdir+"-rpc  &&  mkdir -p "+tmpdir+"-rpc"
+                +"  && cat >"+tmpdir+"-rpc/dest_helper.py"
 
                 # check in_process status on remote
                 +"  && { if [ -e "+aset.name+"/in_process ]; then"
-                +"  echo 'in_process yes'; fi }"
+                +"  echo 'wyng_in_process'; fi }"
 
                 +"  && touch archive.dat"
                 +(" && ln -f archive.dat .hardlink" if options.dedup > 1 else "")
                 ]
         try:
-            dest_run(cmd, out=tmpdir+"/dest-state-log",
-                     infile=tmpdir+"/rpc/dest_helper.py")
-
+            do_exec([dest_run_args(desttype, cmd),
+                     # sanitize remote output:
+                     ["cat","-v"],  ["tail","--bytes=8000"]
+                    ],
+                    out=tmpdir+"/dest-state.log", infile=tmpdir+"/rpc/dest_helper.py")
+            online = True
         except subprocess.CalledProcessError:
             online = False
 
-    else:
-        online = False
+    if online:
+        with open(tmpdir+"/dest-state.log","r") as logf:
+            for ln in logf:
+                if ln.startswith("wyng_in_process"):
+                    dest_in_proc = True
+                elif ln.startswith("wyng_check_free"):
+                    parts = ln.split()    ; dest_free = int(parts[1]) * int(parts[2])
 
-    dest_in_proc = online and do_exec([[CP.grep, "in_process yes", tmpdir+"/dest-state-log"]],
-                                      check=False) == 0
-    return online, dest_in_proc
+    return dest_free is not None, dest_free, dest_in_proc
 
 
 # Set or clear state for the archive as 'in_process' in case of interruption during write.
@@ -1157,7 +1196,6 @@ def get_lvm_deltas(datavols):
 
 def update_delta_digest(datavol):
 
-    if monitor_only:  print("Scanning for changes.")
     vol         = aset.vols[datavol]         ; chunksize  = aset.chunksize
     snap1vol    = vol.name + ".tick"         ; snap2vol   = vol.name + ".tock"
 
@@ -1170,7 +1208,7 @@ def update_delta_digest(datavol):
     # Get xml parser and initialize vars
     dtree       = xml.etree.ElementTree.parse(tmpdir+"/delta."+datavol).getroot()
     dblocksize  = int(dtree.get("data_block_size"))
-    bmap_byte   = lastindex   = dnewblocks   = dfreedblocks = 0
+    bmap_byte   = lastindex   = dnewchunks   = isnew  = dfreedblocks = 0
 
     # Check for volume size increase;
     # Chunks from 'markall_pos' onward will be marked for backup.
@@ -1193,9 +1231,9 @@ def update_delta_digest(datavol):
             blocklen   = int(delta.get("length")) * dblocksize
             blockend   = min(blockbegin+blocklen, snap_ceiling)
             if delta.tag in ("different", "right_only"):
-                dnewblocks += blockend - blockbegin
+                isnew = 1 ##dnewblocks += blockend - blockbegin
             elif delta.tag == "left_only":
-                dfreedblocks += blockend - blockbegin
+                isnew = 0    ; dfreedblocks += blockend - blockbegin
             else: # superfluous tag
                 continue
 
@@ -1204,26 +1242,36 @@ def update_delta_digest(datavol):
             # bmap_byte & lastindex buffer the changes, but perf impact not checked.
             for blockpos in range(blockbegin, blockend):
                 volsegment = blockpos // chunkblocks
-                bmap_pos = volsegment // 8
-                if bmap_pos != lastindex: #save it
-                    bmap_mm[lastindex] |= bmap_byte      ; bmap_byte = 0
-                bmap_byte |= 1 << (volsegment % 8)   ; lastindex = bmap_pos
+                bmap_pos = volsegment // 8    ; b = 1 << (volsegment%8)
+                if not bmap_mm[bmap_pos] & b:
+                    bmap_mm[bmap_pos] |= b    ; dnewchunks += isnew
+                ##if bmap_pos != lastindex: #save it
+                    ##bmap_mm[lastindex] |= bmap_byte      ; bmap_byte = 0
+                ##bmap_byte |= 1 << (volsegment % 8)   ; lastindex = bmap_pos
 
-        if bmap_byte:  bmap_mm[lastindex] |= bmap_byte # save last
+        ##if bmap_byte:  bmap_mm[lastindex] |= bmap_byte # save last
 
         if markall_pos is not None:
             # If volsize increased, flag the corresponding bmap area as changed.
             if monitor_only:  print("  Volume size has increased.")
             for pos in range(markall_pos, bmap_size):  bmap_mm[pos] = 0xff
-            dnewblocks += (bmap_size - markall_pos) * 8 * dblocksize
+            dnewchunks += (bmap_size - markall_pos) * 8
+            #dnewblocks += (bmap_size - markall_pos) * 8 * dblocksize
 
         bmapf.flush()    ; os.fsync(bmapf.fileno())
 
-    map_updated = dnewblocks+dfreedblocks > 0
-    if monitor_only and map_updated:
-        print(" ", dnewblocks, "changes,", dfreedblocks, "discards.")
+    map_updated = dnewchunks+dfreedblocks > 0
+    catch_signals()
+    if monitor_only:
+        rotate_snapshots(vol, rotate=map_updated)
+        os.rename(vol.mapfile+"-tmp", vol.mapfile)
+        print(("\r  %d ch, %d dis" % (dnewchunks, dfreedblocks//chunksize))
+                if map_updated else "\r  No changes   ")
 
-    return dnewblocks, dfreedblocks
+    if dnewchunks:   vol.changed_bytes_add(dnewchunks*aset.chunksize)
+    catch_signals(None)
+
+    return dnewchunks, dfreedblocks #fix
 
 
 # Send volume to destination.
@@ -1617,6 +1665,10 @@ def init_deltamap(vol, bmfile, bmsize):
         os.remove(bmfile+"-tmp")
     with open(bmfile, "wb") as bmapf:
         bmapf.truncate(bmsize)    ; bmapf.flush()
+    if exists(vol.path+"/volchanged"):
+        os.remove(vol.path+"/volchanged")
+
+    vol.changed_bytes_add(0, reset=True)
 
 
 def rotate_snapshots(vol, rotate=True):
@@ -2537,10 +2589,10 @@ volgroups, l_vols= {}, {}    ; get_lvm_vgs()
 
 # Create an ArchiveSet object with get_configs() and set global vars pertaining
 # to the destination.
-destsys          = desttype  = dest_run_map  = dest_online  = dest_in_process  = None
+destsys          = desttype  = dest_run_map  = dest_online  = dest_in_process  = dest_free  = None
 aset             = get_configs()
 destsys, desttype= detect_internal_state()
-dest_online, dest_in_process  = detect_dest_state(destsys)
+dest_online, dest_free, dest_in_process  = detect_dest_state(destsys)
 bkdir            = topdir+"/"+aset.name
 destpath         = os.path.normpath(pjoin(aset.destmountpoint,aset.destdir))
 destcd           = " cd '"+destpath+"'"
