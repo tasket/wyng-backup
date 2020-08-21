@@ -13,7 +13,7 @@ import re, mmap, bz2, zlib, gzip, tarfile, io, fcntl, tempfile
 import argparse, configparser, hashlib, functools, uuid
 import xml.etree.ElementTree    ; from itertools import islice
 # For deduplication tests:
-import ctypes, sqlite3, resource
+import resource
 from array import array
 
 
@@ -140,7 +140,6 @@ class ArchiveSet:
             self.present = lv_exists(vgname, name)
             self.enabled = False
             self.error   = False
-            self.volsize = None
             self.mapfile = path+"/deltamap"
             self.mapped  = exists(self.mapfile)
             self.sessions= {}
@@ -175,11 +174,9 @@ class ArchiveSet:
             if int(self.format_ver) > format_version:
                 raise ValueError("Archive format ver = "+self.format_ver+
                                  ". Expected = "+format_version)
-            #elif self.format_ver == "0":
-            #    raise ValueError("No format_version; Alpha archive?")
+            elif self.format_ver == "0":
+                raise ValueError("No format_version; Alpha archive?")
 
-            # use latest volsize
-            self.volsize = self.sessions[self.last].volsize if self.sessions else 0
 
         def volname_check(vname):
             check = re.compile("^[a-zA-Z0-9\+\._-]+$")
@@ -194,8 +191,11 @@ class ArchiveSet:
                 return False
             return True
 
+        def volsize(self):
+            return self.sessions[self.last].volsize if self.sessions else 0
+
         def last_chunk_addr(self, vsize=None):
-            if vsize is None:  vsize = self.volsize
+            if vsize is None:  vsize = self.volsize()
             return (vsize-1) - ((vsize-1) % self.archive.chunksize)
 
         def map_exists(self):
@@ -208,7 +208,7 @@ class ArchiveSet:
         # Based on last session size unless volume_size is specified.
         def mapsize(self, volume_size=None):
             if not volume_size:
-                volume_size = self.volsize
+                volume_size = self.volsize()
             return (volume_size // self.archive.chunksize // 8) + 1
 
         def save_volinfo(self, fname="volinfo"):
@@ -290,7 +290,6 @@ class ArchiveSet:
             def save_info(self, fname="info"):
                 if not self.path:
                     raise ValueError("Path not set for save_info")
-                self.volume.volsize = self.volsize
                 self.saved = True
                 with open(pjoin(self.path,fname), "w") as f:
                     print("uuid =",      self.uuid, file=f)
@@ -1066,8 +1065,11 @@ def prepare_snapshots(datavols):
 
         if lv_exists(vgname, snap1vol) and "arch-"+aset.uuid not in l_vols[snap1vol].tags \
         and "arch-" in " ".join(l_vols[snap1vol].tags):
-            print("  Skipping %s; LV snapshot is from a different archive." % datavol)
-            continue
+            if options.remap:
+                lv_remove(vgname, snap1vol)    ; print("  Removed mis-matched snapshot", snap1vol)
+            else:
+                print("  Skipping %s; LV snapshot is from a different archive." % datavol)
+                continue
 
         # Reclaim deltamap from interrupted session.
         # Future: Expand recovery to start send-resume
@@ -1079,15 +1081,15 @@ def prepare_snapshots(datavols):
             if lv_exists(vgname, snap1vol) and vol.last not in l_vols[snap1vol].tags \
             and "S_" in " ".join(l_vols[snap1vol].tags) \
             and l_vols[snap1vol].lv_uuid != vol.sessions[vol.last].uuid:
-                lv_remove(vgname, snap1vol)
-                print("  Removed mis-matched snapshot", snap1vol)
+                lv_remove(vgname, snap1vol)    ; print("  Removed mis-matched snapshot", snap1vol)
 
             if not lv_exists(vgname, snap1vol) and lv_exists(vgname, snap2vol) \
             and vol.last in l_vols[snap2vol].tags and "arch-"+aset.uuid in l_vols[snap2vol].tags:
                 lv_rename(vgname, snap2vol, snap1vol)
 
             if lv_exists(vgname, snap1vol) and not exists(mapfile) \
-            and vol.last in l_vols[snap1vol].tags:
+            and vol.last in l_vols[snap1vol].tags and "delta" not in l_vols[snap1vol].tags \
+            and l_vols[snap1vol].lv_uuid == vol.sessions[vol.last].uuid:
                 # Latest session matches current snapshot; OK to make blank map.
                 init_deltamap(vol, mapfile, vol.mapsize())
 
@@ -1099,7 +1101,7 @@ def prepare_snapshots(datavols):
         # In this case 'send' can determine any differences w prior backups.
         if not exists(mapfile) or not lv_exists(vgname, snap1vol):
             if not monitor_only:
-                print("  Pairing new snapshot to", datavol)
+                print("  Pairing snapshot for", datavol)
                 nvs.add(datavol)
             else:
                 if not monitor_only:   error_cache.append(datavol)
@@ -1220,7 +1222,7 @@ def update_delta_digest(datavol):
     if monitor_only and map_updated:
         print(" ", dnewblocks, "changes,", dfreedblocks, "discards.")
 
-    return map_updated
+    return dnewblocks, dfreedblocks
 
 
 # Send volume to destination.
@@ -1607,7 +1609,7 @@ def monitor_send(datavols, selected=[], monitor_only=True):
                 os.rename(vol.mapfile+"-tmp", vol.mapfile)
 
 
-def init_deltamap(bmfile, bmsize):
+def init_deltamap(vol, bmfile, bmsize):
     if exists(bmfile):
         os.remove(bmfile)
     if exists(bmfile+"-tmp"):
@@ -1771,7 +1773,7 @@ def merge_manifests(datavol, msessions=None, mtarget=None, addcol=False):
     # Enh: implement mtarget to support merge_sessions()
     volume    = aset.vols[datavol]
     msessions = volume.sesnames if not msessions else msessions
-    tmp = big_tmpdir if volume.volsize > 128000000000 else tmpdir
+    tmp = big_tmpdir if volume.volsize() > 128000000000 else tmpdir
     outfile   = tmp+"/manifest.mrg"     ; slist  = []
     for suffix in ("/manifest\x00", "\x00"):
         with tempfile.NamedTemporaryFile(dir=tmp, delete=False) as tmpf:
@@ -1809,7 +1811,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
     volume     = aset.vols[datavol]    ; resume = aset.in_process is not None
     chdigits   = max_address.bit_length() // 4 # 4bits per digit
     chformat   = "x%0"+str(chdigits)+"x"
-    m_tmp      = tmpdir if volume.volsize < 128000000000 else big_tmpdir
+    m_tmp      = tmpdir if volume.volsize() < 128000000000 else big_tmpdir
 
     # Prepare manifests for efficient merge using fs mv/replace. The target is
     # included as a source, and oldest source is our target for mv. At the end
@@ -2326,7 +2328,7 @@ def show_list(selected_vols):
         fmt    = "%7.1f GB  %-" + str(maxwidth+5) + "s  %s"
         for name in sorted([x.name for x in aset.vols.values()]):
             vol = aset.vols[name]   ; ses = vol.sesnames[-1][2:] if len(vol.sesnames) else " "
-            print(fmt % ((aset.vols[name].volsize / 1024**3), name, ses))
+            print(fmt % ((aset.vols[name].volsize() / 1024**3), name, ses))
         return
 
     # Print list of sessions for selected volume(s).
