@@ -1523,7 +1523,6 @@ def init_dedup_index1(listfile=""):
 
 def init_dedup_index5(listfile=""):
 
-    if options.debug and not listfile:   listfile = "dedup.lst.gz"
     ctime = time.time()    ; makelist = bool(listfile)
     # Define arrays and element widths
     hash_w     = hash_bits // 8
@@ -1537,7 +1536,7 @@ def init_dedup_index5(listfile=""):
     ddsessions = aset.dedupsessions[:2**(ses_w*8)-(len(aset.vols))-1]
     addrsplit  = -address_split[1]
 
-    dataf  = open(tmpdir+"/hashindex.dat","w+b", buffering=512)
+    dataf  = open(tmpdir+"/hashindex.dat","w+b")
     dataf_write = dataf.write   ; bfromhex = bytes().fromhex
     if makelist:   dedupf = gzip.open(tmpdir+"/"+listfile, "wt")
 
@@ -2498,7 +2497,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "Wyng"
-prog_version          = "0.2.0_rc7pre"    ; prog_date = "20200821"
+prog_version          = "0.2.0_rc7pre"    ; prog_date = "20200822"
 format_version        = 1
 print("%s %s %s" % (prog_name, prog_version, prog_date))
 prog_name             = prog_name.lower()
