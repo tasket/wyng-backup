@@ -128,6 +128,8 @@ Please note that dashed parameters are always placed before the command.
 --all-before           | Select all sessions before the specified _--session date-time_ (prune).
 --autoprune=off        | Automatic pruning by calendar date.
 --save-to=_path_       | Save volume to _path_ (receive).
+--sparse               | Receive volume data sparsely (implies --no-clobber)
+--no-clobber           | Overwrite local data only when it differs (receive)
 --remap                | Remap volume during `send` or `diff`.
 --from=_type:location_ | Retrieve from a specific unconfigured archive (receive, verify, list, arch-init).
 --local=_vg/pool_      | (arch-init) Pool containing local volumes.

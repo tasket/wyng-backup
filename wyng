@@ -741,19 +741,23 @@ def helper_send():
                     print(err)    ; print("Substitution:", source, dest)
                     shutil.copyfile(source, dest)    ; substitutions[src_orig] = dest
 
-def helper_receive():
+def helper_receive(lstf):
     stdout_write = sys.stdout.buffer.write   ; exists = os.path.exists   ; getsize= os.path.getsize
     for line in lstf:
+    ##while True:
+        ##line = lstf.readline()
         fname = line.strip()
-        if not fname:  continue
+        ##print("line", fname, file=sys.stderr) ####
+        if not fname:       break ##continue
         if exists(fname):
             fsize = getsize(fname)
         else:
             fsize = 0   ; i = sys.stderr.write("File not found: %s\\x0a" % fname)
-        stdout_write(fsize.to_bytes(4,"big"))
+        stdout_write(fsize.to_bytes(4,"big"))   ## ; sys.stdout.flush()
         if fsize:
             with open(fname,"rb") as dataf:
                 stdout_write(dataf.read(fsize))
+        sys.stdout.flush()
 
 def helper_merge():
     exists = os.path.exists    ; replace = os.replace    ; remove = os.remove
@@ -812,6 +816,8 @@ def helper_merge_finalize():
 if "--finalize" in sys.argv:   catch_signals()
 if cmd not in ("merge","merge-finalize","send","rename") and exists(tmpdir+"/dest.lst.gz"):
     lstf = gzip.open(tmpdir+"/dest.lst.gz", "rt")
+else:
+    lstf = None
 if cmd == "merge":
     if not exists("../archive.ini") or not exists("volinfo"):
         print("Error: Not in volume dir.")   ; sys.exit(40)
@@ -827,7 +833,7 @@ if cmd == "merge":
     else:
         helper_merge()
 elif cmd == "receive":
-    helper_receive()
+    helper_receive(lstf if lstf else sys.stdin)
 elif cmd == "send":
     helper_send()
 elif cmd == "dedup":
@@ -1279,6 +1285,19 @@ def update_delta_digest(datavol):
     return dnewchunks, dfreedblocks #fix
 
 
+# Reads addresses from manifest and marks corresponding chunks in a volume's deltamap.
+
+def manifest_to_deltamap(datavol, manifest, mapsize):
+    with open(manifest, "r") as mf, \
+         open(aset.vols[datavol].mapfile, "r+b") as bmapf:
+
+        bmapf.truncate(mapsize)    ; bmapf.flush()
+        bmap_mm = mmap.mmap(bmapf.fileno(), 0)       ; chunksize  = aset.chunksize
+        for ln in mf:
+            addr = int(ln.split()[1][1:], 16)        ; volsegment = addr // chunksize
+            bmap_pos = volsegment // 8               ; bmap_mm[bmap_pos] |= 1 << (volsegment % 8)
+
+
 # Send volume to destination.
 #
 # send_volume() has two main modes which are full (send_all) and incremental. After send
@@ -1400,7 +1419,7 @@ def send_volume(datavol, localtime, send_all):
                     checkpt += checkpt_pct
 
                 # Compress & write only non-empty chunks
-                if buf == zeros: ## and addr < lchunk_addr:
+                if buf == zeros:
                     if fman_hash != "0":  print("0", destfile, file=hashf)
                     continue
 
@@ -1434,9 +1453,8 @@ def send_volume(datavol, localtime, send_all):
                     if pos % hash_w == 0:
                         data_i = chtree[i][pos//hash_w]   ; dataf.seek(data_i*(ses_w+ch_w))
                         ddses  = ddsessions[int.from_bytes(dataf.read(ses_w),"big")]
-                        if ddses is None: ## and data_i > 0:
+                        if ddses is None:
                             hashtree[i][pos:pos+hash_w] = ddblank_ch # zero-out obsolete entry
-                            ##chtree[i][pos//hash_w] = 0
                         else:
                             ddchx = dataf.read(ch_w).hex().zfill(chdigits)
                             tar_info.type = LNKTYPE
@@ -2063,7 +2081,7 @@ def compare_files(pathlist=[], volumes=[], sessions=[], clear=True):
 def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
     def diff_compare(dbuf,z):
-        if dbuf != cmpf.read(chunksize):
+        if dbuf != volf.read(chunksize):
             if remap:
                 volsegment = addr // chunksize 
                 bmap_pos = volsegment // 8
@@ -2072,17 +2090,15 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         else:
             return 0
 
-    verify_only = options.action == "verify"    ; remap  = options.remap
-    attended    = not options.unattended        ; debug  = options.debug
-    gethash     = hash_funcs[aset.hashtype] 
+    verify_only = options.action == "verify"      ; remap     = options.remap
+    attended    = not options.unattended          ; debug     = options.debug
+    sparse      = options.sparse                  ; chunksize = aset.chunksize
+    vgname      = aset.vgname                     ; zeros     = bytes(chunksize)
+    vol         = aset.vols[datavol]              ; snap1vol  = datavol+".tick"
+    gethash     = hash_funcs[aset.hashtype]       ; sessions  = vol.sesnames
     decompress  = compressors[aset.compression][0].decompress
+    compress = compressors[aset.compression][0].compress    ; compresslevel = int(aset.compr_level)
 
-    vgname    = aset.vgname
-    vol       = aset.vols[datavol]
-    chunksize = aset.chunksize
-    zeros     = bytes(chunksize)
-    snap1vol  = datavol+".tick"
-    sessions  = vol.sesnames
 
     if diff or verify_only:
         save_path = ""
@@ -2106,7 +2122,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     if diff and remap and select_ses != sessions[-1]:
         x_it(1, "Cannot use prior session for remap.")
 
-    volsize   = vol.sessions[select_ses].volsize
+    volsize   = vol.sessions[select_ses].volsize    ; volf = None
 
     if save_path and exists(save_path) and attended:
         print("\n!! This will erase all existing data in",save_path,"!!")
@@ -2114,10 +2130,9 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         if ans.lower() not in {"y","yes"}:
             x_it(0,"")
 
-    chdigits    = max_address.bit_length() // 4 # 4bits per digit
-    chformat    = "x%0"+str(chdigits)+"x"
-    lchunk_addr = vol.last_chunk_addr(volsize)
-    last_chunkx = chformat % lchunk_addr
+    chdigits    = max_address.bit_length() // 4      ; chformat    = "x%0"+str(chdigits)+"x"
+    lchunk_addr = vol.last_chunk_addr(volsize)       ; last_chunkx = chformat % lchunk_addr
+    addrsplit   = -address_split[1]                  ; rc = None
 
     # Collect session manifests
     include = False   ; incl_ses = []
@@ -2143,14 +2158,15 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     # Note address_split is used to bisect filename to construct the subdir.
     manifest = merge_manifests(datavol, msessions=[x.name for x in incl_ses], addcol=True)
 
-    cmds = [[CP.sed, "-E", "/"+last_chunkx+"/q", manifest],  ## Enh: detect vol_shrank
-            [CP.sed, "-E", "/^0\s/ d; "
-             "s|^\S+\s+x(\S{" +str(address_split[0])+ "})(\S+)\s+(S_\S+)|\\3/\\1/x\\1\\2|;"],
-            [CP.gzip, "-c", "-4"
-            ],
-            dest_run_args(desttype, ["cat >"+tmpdir+"-rpc/dest.lst.gz"]),
-           ]
-    do_exec(cmds)
+    if not sparse:
+        cmds = [[CP.sed, "-E", "/"+last_chunkx+"/q", manifest],  ## Enh: detect vol_shrank
+                [CP.sed, "-E", "/^0\s/ d; "
+                "s|^\S+\s+x(\S{" +str(address_split[0])+ "})(\S+)\s+(S_\S+)|\\3/\\1/x\\1\\2|;"],
+                [CP.gzip, "-c", "-4"
+                ],
+                dest_run_args(desttype, ["cat >"+tmpdir+"-rpc/dest.lst.gz"]),
+            ]
+        do_exec(cmds)
 
     # Prepare save volume
     if save_path:
@@ -2177,17 +2193,17 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                 do_exec([[CP.lvm, "lvresize", "-L", str(volsize)+"b", "-f", save_path]])
 
         if exists(save_path) and stat.S_ISBLK(os.stat(save_path).st_mode):
-            do_exec([[CP.blkdiscard, save_path]])
-            savef = open(save_path, "w+b")
+            if not sparse:   do_exec([[CP.blkdiscard, save_path]])
+            volf = open(save_path, "w+b")
         elif save_path.startswith("/dev/"):
             x_it(1,"Cannot create new volume from ambiguous /dev path."
                  " Please create the volume before using 'receive', or specify"
                  " --save-to=/dev/volgroup/lv in case of a thin LV.")
         else: # file
             save_type = "file"
-            savef = open(save_path, "w+b")
-            savef.truncate(0)          ; savef.flush()
-            savef.truncate(volsize)    ; savef.flush()
+            volf = open(save_path, "w+b")
+            if not sparse:   volf.truncate(0)   ; volf.flush()
+            volf.truncate(volsize)    ; volf.flush()
 
     elif diff:
         if not lv_exists(vgname, datavol):
@@ -2213,121 +2229,136 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                 x_it(1, "Volume sizes differ:"
                     "\n  Archive = %d \n  Local   = %d" % (volsize, l_vols[snap1vol].lv_size))
 
-        cmpf  = open(pjoin("/dev",vgname,snap1vol), "rb")
-        diff_count = 0
+        volf  = open(pjoin("/dev",vgname,snap1vol), "rb")
+
+
+    if volf:   volf_read = volf.read    ; volf_write = volf.write    ; volf_seek = volf.seek
 
     print("Receiving" if save_path else "Scanning", "volume :", datavol, select_ses[2:])
     if save_path:    print("Saving to %s '%s'" % (save_type, save_path))
+    print("Last",last_chunkx) ####
     # Create retriever process using py program
     cmd = dest_run_args(desttype,
             [destcd + bkdir+"/"+datavol
              +" && exec 2>>"+tmpdir+"-rpc/receive.log"
              +" && python3 "+tmpdir+"-rpc/dest_helper.py receive"
             ])
-    getvol = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+    getvol   = subprocess.Popen(cmd, stdout=subprocess.PIPE, stdin=subprocess.PIPE)
+    gv_stdin = io.TextIOWrapper(getvol.stdin, encoding="utf-8")
 
     # Open manifest then receive, check and save data
-    bcount = 0
-    with open(manifest, "r") as mf:
-        for addr in range(0, volsize, chunksize):
-            faddr = chformat % addr
-            if attended:   print("%.2f%%" % (addr/volsize*100), end="\x0d")
+    addr = bcount = diff_count = 0
+    for mfline in open(manifest, "r"):
+        if addr >= lchunk_addr:   break
+        cksum, faddr, ses = mfline.split()    ; addr = int(faddr[1:], 16)
 
-            mfline = mf.readline()
-            cksum, fname, ses = mfline.split()
-            if fname != faddr:
-                print(mfline)
-                raise ValueError("Address mismatch "+fname+" expected "+faddr)
+        if attended:   print("%.2f%%" % (addr/volsize*100), end="\x0d")
 
-            if cksum.strip() == "0":
-                if save_path:
-                    savef.seek(chunksize, 1)
-                elif diff:
-                    diff_count += diff_compare(zeros,True)
-
-                continue
-
-            # Read chunk size
-            untrusted_size = int.from_bytes(getvol.stdout.read(4),"big")
-
-            # allow for slight expansion from compression algo
-            if untrusted_size > chunksize + (chunksize // 64) or untrusted_size < 1:
-                    raise BufferError("Bad chunk size %d for %s" % (untrusted_size, mfline))
-
-            # Size is OK.
-            size = untrusted_size
-
-            # Read chunk buffer
-            untrusted_buf = getvol.stdout.read(size)
-            rc  = getvol.poll()
-            if rc is not None and len(untrusted_buf) == 0:
-                break
-
-            if len(untrusted_buf) != size:
-                with open(tmpdir+"/bufdump", "wb") as dump:
-                    dump.write(untrusted_buf)
-                print(mfline)
-                raise BufferError("Got %d bytes, expected %d" % (len(untrusted_buf), size))
-            if cksum != gethash(untrusted_buf).hexdigest():
-                with open(tmpdir+"/bufdump", "wb") as dump:
-                    dump.write(untrusted_buf)
-                print(mfline)
-                raise ValueError("Bad hash "+fname+" :: "+gethash(untrusted_buf).hexdigest())
-
-            if verify_only:   continue
-
-            # Proceed with decompress.
-            untrusted_decomp = decompress(untrusted_buf)
-            if len(untrusted_decomp) != chunksize and addr < lchunk_addr:
-                print(mfline)
-                raise BufferError("Decompressed to %d bytes." % len(untrusted_decomp))
-            if addr == lchunk_addr and len(untrusted_decomp) != volsize - lchunk_addr:
-                print(mfline)
-                raise BufferError("Decompressed to %d bytes." % len(untrusted_decomp))
-
-            # Buffer is OK...
-            buf = untrusted_decomp    ; bcount += len(buf)
-
+        if cksum.strip() == "0":
             if save_path:
-                savef.write(buf)
+                volf_seek(addr)
+                if sparse and volf_read(chunksize) != zeros:
+                    print(faddr) ####
+                    volf_seek(addr)    ; volf_write(zeros)    ; diff_count += chunksize
             elif diff:
-                diff_count += diff_compare(buf,False)
+                volf_seek(addr)    ; diff_count += diff_compare(zeros,True)
 
+            continue
 
-        if rc is not None and rc != 0:
-            raise RuntimeError("Error code from getvol process: "+str(rc))
+        if sparse and save_path:
+            volf_seek(addr)
+            if gethash(compress(volf_read(chunksize), compresslevel)).hexdigest() == cksum:
+                continue
+            else:
+                print("%s/%s/%s" % (ses, faddr[1:addrsplit], faddr), flush=True, file=gv_stdin)
+                print(faddr)
 
-        buf = decompress(untrusted_buf)
-        if addr+len(buf) != volsize:
-            raise ValueError("Received range %d does not match volume size %d."
-                             % (addr+len(buf), volsize))
-        print("100.00%")
-        if debug:
-            print("Received range:", addr+len(buf),
-                "\n    Data bytes:", bcount)
+        # Read chunk size
+        untrusted_size = int.from_bytes(getvol.stdout.read(4),"big")
+
+        # allow for slight expansion from compression algo
+        if untrusted_size > chunksize + (chunksize // 64) or untrusted_size < 1:
+                raise BufferError("Bad chunk size %d for %s" % (untrusted_size, mfline))
+
+        # Size is OK.
+        size = untrusted_size
+
+        # Read chunk buffer
+        untrusted_buf = getvol.stdout.read(size)
+        rc  = getvol.poll()
+        if rc is not None and len(untrusted_buf) == 0:
+            break
+
+        if len(untrusted_buf) != size:
+            with open(tmpdir+"/bufdump", "wb") as dump:
+                dump.write(untrusted_buf)
+            print(mfline)
+            raise BufferError("Got %d bytes, expected %d" % (len(untrusted_buf), size))
+        if cksum != gethash(untrusted_buf).hexdigest():
+            with open(tmpdir+"/bufdump", "wb") as dump:
+                dump.write(untrusted_buf)
+            print(mfline)
+            raise ValueError("Bad hash "+faddr+" :: "+gethash(untrusted_buf).hexdigest())
+
+        if verify_only:   continue
+
+        # Proceed with decompress.
+        untrusted_decomp = decompress(untrusted_buf)
+        if len(untrusted_decomp) != chunksize and addr < lchunk_addr:
+            print(mfline)
+            raise BufferError("Decompressed to %d bytes." % len(untrusted_decomp))
+        if addr == lchunk_addr and len(untrusted_decomp) != volsize - lchunk_addr:
+            print(mfline)
+            raise BufferError("Decompressed to %d bytes." % len(untrusted_decomp))
+
+        # Buffer is OK...
+        buf = untrusted_decomp    ; bcount += len(buf)
 
         if save_path:
-            savef.flush() ; savef.close()
-            if returned_home and select_ses == sessions[-1]:
-                lv_remove(vgname, snap1vol)
-                do_exec([[CP.lvm, "lvcreate", "-pr", "-kn", "-ay",
-                    "--addtag=wyng", "--addtag="+vol.last,
-                    "--addtag=arch-"+aset.uuid, "-s", vgname+"/"+datavol, "-n", snap1vol]])
-                print("  Initial snapshot created for", datavol)
-                init_deltamap(vol, vol.mapfile, vol.mapsize())
-            elif returned_home:
-                print("Restored from older session: Volume may be out of"
-                    " sync with archive until '%s --remap diff %s' is run!"
-                    % (prog_name, datavol))
+            volf_seek(addr)
+            if sparse:
+                if volf_read(chunksize) != buf:
+                    volf_seek(addr)    ; volf_write(buf)    ; diff_count += len(buf)
+            else:
+                volf_write(buf)
         elif diff:
-            cmpf.close()
-            if remap:
-                bmapf.close()
-                print("Delta bytes re-mapped:", diff_count)
-                if diff_count > 0 and options.action != "send":
-                    print("\nNext 'send' will bring this volume into sync.")
-            elif diff_count:
-                x_it(1, "%d bytes differ." % diff_count)
+            volf_seek(addr)    ; diff_count += diff_compare(buf,False)
+
+
+    if rc is not None and rc != 0:
+        raise RuntimeError("Error code from getvol process: "+str(rc))
+
+    if not sparse and addr+len(decompress(untrusted_buf)) != volsize:
+        raise ValueError("Received range %d does not match volume size %d."
+                            % (addr+len(decompress(untrusted_buf)), volsize))
+    print("100.00%")
+    if debug:
+        print("Received range:", addr+len(buf),
+            "\n    Data bytes:", bcount)
+    if diff_count:  print("Diff bytes:", diff_count)
+
+    if volf:  volf.close()
+    if save_path:
+        os.sync()
+        if returned_home and select_ses == sessions[-1]:
+            lv_remove(vgname, snap1vol)
+            do_exec([[CP.lvm, "lvcreate", "-pr", "-kn", "-ay",
+                "--addtag=wyng", "--addtag="+vol.last,
+                "--addtag=arch-"+aset.uuid, "-s", vgname+"/"+datavol, "-n", snap1vol]])
+            print("  Initial snapshot created for", datavol)
+            init_deltamap(vol, vol.mapfile, vol.mapsize())
+        elif returned_home:
+            print("Restored from older session: Volume may be out of"
+                " sync with archive until '%s --remap diff %s' is run!"
+                % (prog_name, datavol))
+    elif diff:
+        if remap:
+            bmapf.close()
+            print("Delta bytes re-mapped:", diff_count)
+            if diff_count > 0 and options.action != "send":
+                print("\nNext 'send' will bring this volume into sync.")
+        elif diff_count:
+            x_it(1, "%d bytes differ." % diff_count)
 
 
 # Rename a volume in the archive
@@ -2560,6 +2591,7 @@ parser.add_argument("--autoprune", default="off", help="Automatic pruning")
 parser.add_argument("--from", dest="from_arch", default="",
                     help="Address+Path of other non-configured archive (receive, verify)")
 parser.add_argument("--save-to", dest="saveto", default="",help="Path to store volume for receive")
+parser.add_argument("--sparse", action="store_true", default=False, help="Save differences only")
 parser.add_argument("--remap", action="store_true", default=False, help="Remap volume")
 parser.add_argument("--local", default="",    help="Init: LVM vg/pool containing source volumes")
 parser.add_argument("--dest", default="",     help="Init: type:location of archive")
