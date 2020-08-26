@@ -743,21 +743,19 @@ def helper_send():
 
 def helper_receive(lstf):
     stdout_write = sys.stdout.buffer.write   ; exists = os.path.exists   ; getsize= os.path.getsize
+    stdout_flush = sys.stdout.flush
     for line in lstf:
-    ##while True:
-        ##line = lstf.readline()
         fname = line.strip()
-        ##print("line", fname, file=sys.stderr) ####
-        if not fname:       break ##continue
+        if not fname:   break
         if exists(fname):
             fsize = getsize(fname)
         else:
             fsize = 0   ; i = sys.stderr.write("File not found: %s\\x0a" % fname)
-        stdout_write(fsize.to_bytes(4,"big"))   ## ; sys.stdout.flush()
+        stdout_write(fsize.to_bytes(4,"big"))
         if fsize:
             with open(fname,"rb") as dataf:
                 stdout_write(dataf.read(fsize))
-        sys.stdout.flush()
+        stdout_flush()
 
 def helper_merge():
     exists = os.path.exists    ; replace = os.replace    ; remove = os.remove
@@ -2093,6 +2091,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     verify_only = options.action == "verify"      ; remap     = options.remap
     attended    = not options.unattended          ; debug     = options.debug
     sparse      = options.sparse                  ; chunksize = aset.chunksize
+    noclobber   = options.no_clobber or sparse
     vgname      = aset.vgname                     ; zeros     = bytes(chunksize)
     vol         = aset.vols[datavol]              ; snap1vol  = datavol+".tick"
     gethash     = hash_funcs[aset.hashtype]       ; sessions  = vol.sesnames
@@ -2125,7 +2124,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     volsize   = vol.sessions[select_ses].volsize    ; volf = None
 
     if save_path and exists(save_path) and attended:
-        print("\n!! This will erase all existing data in",save_path,"!!")
+        print("\n!! This will", "overwrite" if noclobber else "erase all",
+              "existing data in",save_path,"!!")
         ans = input("   Are you sure? [y/N]: ")
         if ans.lower() not in {"y","yes"}:
             x_it(0,"")
@@ -2193,7 +2193,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                 do_exec([[CP.lvm, "lvresize", "-L", str(volsize)+"b", "-f", save_path]])
 
         if exists(save_path) and stat.S_ISBLK(os.stat(save_path).st_mode):
-            if not sparse:   do_exec([[CP.blkdiscard, save_path]])
+            if not noclobber:   do_exec([[CP.blkdiscard, save_path]])
             volf = open(save_path, "w+b")
         elif save_path.startswith("/dev/"):
             x_it(1,"Cannot create new volume from ambiguous /dev path."
@@ -2202,7 +2202,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         else: # file
             save_type = "file"
             volf = open(save_path, "w+b")
-            if not sparse:   volf.truncate(0)   ; volf.flush()
+            if not noclobber:   volf.truncate(0)   ; volf.flush()
             volf.truncate(volsize)    ; volf.flush()
 
     elif diff:
@@ -2236,15 +2236,16 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
     print("Receiving" if save_path else "Scanning", "volume :", datavol, select_ses[2:])
     if save_path:    print("Saving to %s '%s'" % (save_type, save_path))
-    print("Last",last_chunkx) ####
+
     # Create retriever process using py program
     cmd = dest_run_args(desttype,
             [destcd + bkdir+"/"+datavol
              +" && exec 2>>"+tmpdir+"-rpc/receive.log"
              +" && python3 "+tmpdir+"-rpc/dest_helper.py receive"
             ])
-    getvol   = subprocess.Popen(cmd, stdout=subprocess.PIPE, stdin=subprocess.PIPE)
-    gv_stdin = io.TextIOWrapper(getvol.stdin, encoding="utf-8")
+    getvol   = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                     stdin =subprocess.PIPE if sparse else subprocess.DEVNULL)
+    gv_stdin = io.TextIOWrapper(getvol.stdin, encoding="utf-8") if sparse else None
 
     # Open manifest then receive, check and save data
     addr = bcount = diff_count = 0
@@ -2254,31 +2255,31 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
         if attended:   print("%.2f%%" % (addr/volsize*100), end="\x0d")
 
+        # Process zeros quickly
         if cksum.strip() == "0":
             if save_path:
                 volf_seek(addr)
-                if sparse and volf_read(chunksize) != zeros:
-                    print(faddr) ####
+                if noclobber and volf_read(chunksize) != zeros:
                     volf_seek(addr)    ; volf_write(zeros)    ; diff_count += chunksize
             elif diff:
                 volf_seek(addr)    ; diff_count += diff_compare(zeros,True)
 
             continue
 
+        # Request chunks on-demand if local chunk doesn't match cksum
         if sparse and save_path:
             volf_seek(addr)
             if gethash(compress(volf_read(chunksize), compresslevel)).hexdigest() == cksum:
                 continue
             else:
                 print("%s/%s/%s" % (ses, faddr[1:addrsplit], faddr), flush=True, file=gv_stdin)
-                print(faddr)
 
         # Read chunk size
         untrusted_size = int.from_bytes(getvol.stdout.read(4),"big")
 
         # allow for slight expansion from compression algo
         if untrusted_size > chunksize + (chunksize // 64) or untrusted_size < 1:
-                raise BufferError("Bad chunk size %d for %s" % (untrusted_size, mfline))
+            raise BufferError("Bad chunk size %d for %s" % (untrusted_size, mfline))
 
         # Size is OK.
         size = untrusted_size
@@ -2316,7 +2317,10 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
         if save_path:
             volf_seek(addr)
+            # Don't re-check buffer for sparse mode, check for noclobber:
             if sparse:
+                volf_write(buf)    ; diff_count += len(buf)
+            elif noclobber:
                 if volf_read(chunksize) != buf:
                     volf_seek(addr)    ; volf_write(buf)    ; diff_count += len(buf)
             else:
@@ -2528,7 +2532,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "Wyng"
-prog_version          = "0.2.0_rc7pre"    ; prog_date = "20200822"
+prog_version          = "0.2.0_rc7pre2"    ; prog_date = "20200826"
 format_version        = 1
 print("%s %s %s" % (prog_name, prog_version, prog_date))
 prog_name             = prog_name.lower()
@@ -2591,7 +2595,8 @@ parser.add_argument("--autoprune", default="off", help="Automatic pruning")
 parser.add_argument("--from", dest="from_arch", default="",
                     help="Address+Path of other non-configured archive (receive, verify)")
 parser.add_argument("--save-to", dest="saveto", default="",help="Path to store volume for receive")
-parser.add_argument("--sparse", action="store_true", default=False, help="Save differences only")
+parser.add_argument("--sparse", action="store_true", default=False, help="Retrieve differences only")
+parser.add_argument("--no-clobber", action="store_true", default=False, help="Save differences only")
 parser.add_argument("--remap", action="store_true", default=False, help="Remap volume")
 parser.add_argument("--local", default="",    help="Init: LVM vg/pool containing source volumes")
 parser.add_argument("--dest", default="",     help="Init: type:location of archive")
