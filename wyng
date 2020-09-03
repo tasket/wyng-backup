@@ -556,6 +556,15 @@ def arch_check(vol_list=None, startup=False):
         if compare_files(volumes=[vol], sessions=list(vol.sessions.values())):
             x_it(1, "Error: Local and archive metadata differ.")
 
+        # Check index sequencing in first and combined manifests
+        print("Checking index sequence...")
+        mset = []
+        for ses in vol.sesnames:
+            print(ses, "size =", vol.sessions[ses].volsize)   ; mset.append(ses)
+            check_manifest_sequence(volname, mset)
+
+        # Check hashes of each session individually
+        print("Checking digests...")
         for sesname in reversed(vol.sesnames):
             ses = vol.sessions[sesname]    ; manifest = ses.path+"/manifest"
             if options.session and options.session < ses.localtime:   continue # Enh: use seq
@@ -575,7 +584,6 @@ def arch_check(vol_list=None, startup=False):
                     +" && python3 "+tmpdir+"-rpc/dest_helper.py receive"
                     ])
             getses = subprocess.Popen(cmd2, stdout=subprocess.PIPE)
-
 
             # Open manifest then receive, check and save data
             with open(manifest, "r") as mf:
@@ -606,6 +614,22 @@ def arch_check(vol_list=None, startup=False):
                         raise ValueError("Bad hash "+fname+" :: "+gethash(untrusted_buf).hexdigest())
 
             if attended:   print("OK")
+
+
+def check_manifest_sequence(datavol, sesnames):
+    vol = aset.vols[datavol]     ; volsize = vol.sessions[sesnames[-1]].volsize
+    with open(merge_manifests(datavol, msessions=sesnames, addcol=False), "r") as mrgf:
+        for addr in range(0, volsize, aset.chunksize):
+            ln = mrgf.readline().strip()
+            if not ln:   break
+            ln1, ln2 = ln.split()
+            assert (len(ln1) == 64 or ln1 == "0")    ; h1 = int(ln1, 16)
+            assert len(ln2) == 17    ; a1 = int("0"+ln2, 16)
+            if addr != a1:
+                print(ln); raise("Manifest seq error. Expected %d got %d." % (addr, a1))
+
+    if addr+aset.chunksize != volsize:
+        raise ValueError("Manifest range stopped short at", addr)
 
 
 # Get global configuration settings:
@@ -1382,7 +1406,7 @@ def send_volume(datavol, localtime, send_all):
                 if fullmanifest:  list(islice(fullmanifest, len(zdelim)*8))
                 addr += chunksize*len(zdelim)*8
                 minibmap = bmap_list.pop(0)
-            elif fullmanifest and not send_all:
+            elif not send_all:
                 # Get more: split(zdelim) shows where large unmodified zones exist.
                 bmap_list.extend(bmapf.read(25000).split(zdelim))
                 minibmap = bmap_list.pop(0)
@@ -1474,12 +1498,14 @@ def send_volume(datavol, localtime, send_all):
                     tarf_addfile(tarinfo=tar_info, fileobj=BytesIO(buf))
                     bcount += len(buf)
 
-            if minibmap or send_all:  addr += chunksize  ## FIX: maybe fullmanifest (not send_all)?
+            # Advance addr, except when minibmap is zero len.
+            if minibmap or send_all:  addr += chunksize
 
     print("\r  100%", ("%8.1fM   |  %s" % (bcount/1000000, datavol)),
-          ("\n  (reduced %0.1fM)" % (ddbytes/1000000)) if ddbytes else "")
+          ("\n  (reduced %0.1fM)" % (ddbytes/1000000)) if ddbytes and options.debug else "")
 
     # Send session info, end stream and cleanup
+    if fullmanifest:   fullmanifest.close()
     if stream_started:
         # Save session info
         ses.save_info()
@@ -1491,8 +1517,7 @@ def send_volume(datavol, localtime, send_all):
         tarf.add(os.path.basename(aset.confpath))
 
         #print("Ending tar process ", end="")
-        tarf.close()
-        untar.stdin.close()
+        tarf.close()    ; untar.stdin.close()
         try:
             untar.wait(timeout=60)
         except subprocess.TimeoutExpired:
@@ -1504,6 +1529,8 @@ def send_volume(datavol, localtime, send_all):
 
         if retcode != 0:
             raise RuntimeError("tar transport failure code %d" % retcode)
+
+        if ses.volsize != prior_size:   check_manifest_sequence(datavol, vol.sesnames)
 
         # Finalize on VM/remote
         catch_signals()
@@ -1868,11 +1895,12 @@ def merge_manifests(datavol, msessions=None, mtarget=None, addcol=False):
     # Enh: implement mtarget to support merge_sessions()
     volume    = aset.vols[datavol]
     msessions = volume.sesnames if not msessions else msessions
+    sespaths  = [ os.path.basename(volume.sessions[x].path) for x in msessions ]
     tmp = big_tmpdir if volume.volsize() > 128000000000 else tmpdir
     outfile   = tmp+"/manifest.mrg"     ; slist  = []
     for suffix in ("/manifest\x00", "\x00"):
         with tempfile.NamedTemporaryFile(dir=tmp, delete=False) as tmpf:
-            tmpf.write(bytes(suffix.join(reversed(msessions)), encoding="UTF-8"))
+            tmpf.write(bytes(suffix.join(reversed(sespaths)), encoding="UTF-8"))
             tmpf.write(bytes(suffix, encoding="UTF-8"))
             slist.append(tmpf.name)
 
@@ -2436,7 +2464,9 @@ def delete_volume(dv):
 
 def show_list(selected_vols):
     # Print list of volumes if no volume is selected.
-    if not selected_vols and not len(options.volumes):
+    if not aset.vols:
+        print("No volumes.")    ; return
+    elif not selected_vols and not len(options.volumes):
         print("\nConfigured Volumes [%s/%s]\n" % (aset.vgname, aset.poolname))
         maxwidth = max([len(x.name) for x in aset.vols.values()])
         fmt    = "%7.1f GB  %-" + str(maxwidth+5) + "s  %s"
@@ -2532,7 +2562,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "Wyng"
-prog_version          = "0.2.0_rc7pre2"    ; prog_date = "20200826"
+prog_version          = "0.2.0_rc7pre3"    ; prog_date = "20200903"
 format_version        = 1
 print("%s %s %s" % (prog_name, prog_version, prog_date))
 prog_name             = prog_name.lower()
