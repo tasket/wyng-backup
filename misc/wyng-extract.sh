@@ -134,9 +134,16 @@ rm -rf $tmpdir  &&  mkdir $tmpdir
       cd CHK
 
       # Compress chunk files
-      find . -type f -printf '%f\n'  |  xargs -r $COMPRESS
+      find . -name '*[0-9][0-2]'  |  xargs -r $COMPRESS  ||  touch ../cmprfail  &
+      find . -name '*[0-9][3-5]'  |  xargs -r $COMPRESS  ||  touch ../cmprfail  &
+      find . -name '*[0-9][6-8]'  |  xargs -r $COMPRESS  ||  touch ../cmprfail  &
+      find . -name '*[0-9]9'   |  xargs -r $COMPRESS  ||  touch ../cmprfail  &
+      wait
+      if [ -e ../cmprfail ]; then
+        echo "Compression error."; exit 1
+      fi
 
-      # Hash the chunk files, remove extension, convert 2nd col to hex fname, mark zeros
+      # Hash the chunk files, remove extension, convert 2nd col to hex fname
       find . -type f -printf '%f\n' \
       |  xargs -r $HASH_CHECK  |  sort -k2,2  |  sed -E 's/\..+$//'  \
       |  awk -v i="$i" -v cs="$chunksize" '{ printf "%s x%.16x\n", $1, $2 * cs + i }' \
@@ -146,8 +153,8 @@ rm -rf $tmpdir  &&  mkdir $tmpdir
     done
 
     echo -en "\nCreating diff index..."
-    sort -um -k2,2 $m_last $m_therest  |sed -E '/ x'$lastchunk'/q; s|^0\s+|'$zhash' |' \
-    |  sort -ms -k2,2 - local-manifest  |  uniq -u -w $uniqw  | sort -um -k2,2  \
+    sort -um -k2,2 $m_last $m_therest  |  sed -E '/ x'$lastchunk'/q; s|^0\s+|'$zhash' |' \
+    |  sort -ms -k2,2 - local-manifest  |  uniq -u -w $uniqw  |  sort -um -k2,2  \
     |  sed -E 's|^'$zhash'|0|'  \
     >diff-manifest
 
@@ -155,20 +162,11 @@ rm -rf $tmpdir  &&  mkdir $tmpdir
     # This will fill-in any address gaps in the diff as zero chunks.
     sed -E 's|^\S+|0|' local-manifest  >zerofill-manifest
 
-#exit 0
     # Zeros from diff-manifest must be 'punched' into local volume since
     # final step uses zeros for sparse seeking. Needs optimizing.
     echo -en "\nFilling zeros..."
     sed -E 's|^0\s+(\S+)\s*.*|0\1|; t; d' diff-manifest  \
     |  xargs -i -r $HOLEPUNCH -z -l $chunksize -o {} "$outvol"
-
-#     # experiment #
-#     cat diff-manifest \
-#     |  sed -E 's|'"$mregex"'|\2\3 \4/\2/x\2\3|'  \
-#     |  while read addr chpath; do
-#          $DECOMPRESS -f $chpath \
-#          |  dd of="$outvol" bs=$chunksize seek=**** oflag=seek_bytes conv=notrunc,nocreat
-#        done
 
     # Change the merge-sort inputs to use the differential versions during extraction.
     m_last=diff-manifest
