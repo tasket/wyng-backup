@@ -13,10 +13,12 @@ echo "Wyng archive extractor, V0.2.4 20200907"
 formatver=1
 hashw=64;  addrw=17;  delimw=1;  uniqw=$(( hashw + delimw + addrw ))
 
-while getopts "so:c" opt; do
+while getopts "so:lt:c" opt; do
   case $opt in
     s)  opt_sparse=1;;
     o)  outopt="$OPTARG";;
+    l)  opt_list=1;;
+    t)  sestag="$OPTARG";;
     c)  opt_check=1;;
     \?) opterr=1;;
   esac
@@ -26,12 +28,13 @@ shift $(( OPTIND - 1 ))
 if [ -n "$outopt" ]; then
   ## outvol=`readlink -f "$outopt"`
   outvol="$outopt"
-elif [ -z "$opt_check" ]; then
+elif [ -z "$opt_check" ] && [ -z "$opt_list" ]; then
   opterr=1
 fi
 if [ -n "$opterr" ] || [ -z "$1" ] || [ -z "$2" ]; then
-  echo "Usage: wyng-extract.sh -c <wyng-dir-path> <volume-name>"
-  echo "       wyng-extract.sh [-s] -o <save-path> <wyng-dir-path> <volume-name>"
+  echo 'Usage: wyng-extract.sh -l <wyng-dir-path> [volume-name]'
+  echo '       wyng-extract.sh -c <wyng-dir-path> <volume-name>'
+  echo '       wyng-extract.sh [-t session/tag] [-s] -o <save-path> <wyng-dir-path> <volume-name>'
   exit 1
 fi
 
@@ -44,7 +47,7 @@ fi
 volname="$2"
 voldir="$1/default/$volname"
 if [ ! -e "$voldir" ]; then
-  echo "Path $voldir nor found."
+  echo "Error: Path $voldir nor found."
   exit 1
 fi
 
@@ -54,26 +57,48 @@ rm -rf $tmpdir  &&  mkdir $tmpdir
 
 ( cd "$voldir";  curdir=`pwd`
 
-  if ! grep -q '^format_ver = 1$' volinfo; then
+  if ! grep -q '^format_ver = '$formatver'$' volinfo; then
     echo "Error: Did not find a compatible format."
     exit 1
   fi
   echo "Getting metadata for volume $volname."
+  ln=`grep -E '^last =' volinfo`;   read one two s_last <<<"$ln"
   cp volinfo $tmpdir;  sed -E '/\[volumes/q' ../archive.ini >$tmpdir/archive.ini
 
   # Add session column to manifests and create symlinks using sequence number.
-  for session in S_*[!t][!m][!p]; do
+  if [ -z "$sestag" ]; then sestag=${s_last:2}; fi
+  session=$s_last
+  while [ ! "$session" = 'none' ]; do
+    ln=`grep '^previous =' $session/info`;  read one two s_prev <<<"$ln"
+    if [ -z "$sesnames" ] && [ ! "${session:2}" = "$sestag" ]; then session=$s_prev;  continue; fi
+
     ln=`grep '^sequence =' $session/info`;  read one two sequence <<<"$ln"
     sed 's|$| S_'$sequence'|'  $session/manifest  >$tmpdir/m_$sequence
     ln -s "$curdir/$session" $tmpdir/S_$sequence
+
+    sesnames="$session $sesnames";  session=$s_prev
   done
+
+  # List sessions and exit.
+  if [ -n "$opt_list" ]; then
+    for ses in $sesnames; do echo ${ses:2}; done
+    exit 0
+  fi
+
+  if [ -z "$sesnames" ]; then echo "Error: Session not found."; exit 1; fi
+  echo -n "$sesnames"  >$tmpdir/sesnames
 )
 
 
+if [ -n "$opt_list" ]; then exit 0; fi
+
+
 ( cd $tmpdir
+
   # Get a list of manifest files, sorted by sequence in filename, as 'm_last' and 'm_therest'.
   ln=`find . -name 'm_*' -exec basename '{}' \; | sort --reverse -V | tr '\n' ' '`
   read m_last m_therest <<<"$ln"
+  read sesnames  <<< `cat sesnames`
 
   # Get volume size, chunk size, compression, hash type and last chunk address.
   ln=`grep -E '^volsize =' S_${m_last#m_}/info`;  read one two volsize <<<"$ln"
@@ -98,17 +123,6 @@ rm -rf $tmpdir  &&  mkdir $tmpdir
   # Parse manifest fields: 1=digest, 2=first fname segment, 3=second fname seg, 4=session
   mregex='^(\S+)\s+x(\S{9})(\S+)\s+(S_\S+)'
 
-  # Test data integrity against manifest hashes.
-  if [ "$opt_check" = 1 ]; then
-    echo -n "Checking volume hashes..."
-
-    sort -umd -k2,2 $m_last $m_therest  |  sed -E "/ x$lastchunk/q" \
-    |  sed -E '/^0 x/ d; s|'"$mregex"'|\1 \4/\2/x\2\3|;' \
-    |  $HASH_CHECK -c --status
-
-    exit 0
-  fi
-
 
   # Hash local volume for sparse mode:
   # Creates a complete 'manifest' from a local volume
@@ -122,7 +136,7 @@ rm -rf $tmpdir  &&  mkdir $tmpdir
 
   if [ -n "$opt_sparse" ]; then
     if [ "$compr" = "zlib" ]; then
-      echo "Sparse mode not yet supported with zlib compression."
+      echo "Error: Sparse mode not yet supported with zlib compression."
       exit 1
     fi
 
@@ -143,9 +157,9 @@ rm -rf $tmpdir  &&  mkdir $tmpdir
         echo "Compression error."; exit 1
       fi
 
-      # Hash the chunk files, remove extension, convert 2nd col to hex fname
+      # Hash the chunk files, chg zhash to 0, remove extension, convert 2nd col to hex fname
       find . -type f -printf '%f\n' \
-      |  xargs -r $HASH_CHECK  |  sort -k2,2  |  sed -E 's/\..+$//'  \
+      |  xargs -r $HASH_CHECK  |  sed -E 's|\..+$||'  |  sort -k2,2  \
       |  awk -v i="$i" -v cs="$chunksize" '{ printf "%s x%.16x\n", $1, $2 * cs + i }' \
       >>../local-manifest
 
@@ -168,14 +182,27 @@ rm -rf $tmpdir  &&  mkdir $tmpdir
     sed -E 's|^0\s+(\S+)\s*.*|0\1|; t; d' diff-manifest  \
     |  xargs -i -r $HOLEPUNCH -z -l $chunksize -o {} "$outvol"
 
+    echo -en "\nChecking volume hashes..."
+    sed -E '/^0 x/ d; s|'"$mregex"'|\1 \4/\2/x\2\3|;' diff-manifest  \
+    |  $HASH_CHECK -c --status
+
     # Change the merge-sort inputs to use the differential versions during extraction.
     m_last=diff-manifest
     m_therest=zerofill-manifest
 
+  elif [ "$opt_check" = 1 ]; then
+    # Test entire arch volume integrity against manifest hashes.
+    echo -n "Checking volume hashes..."
+
+    sort -umd -k2,2 $m_last $m_therest  |  sed -E "/ x$lastchunk/q" \
+    |  sed -E '/^0 x/ d; s|'"$mregex"'|\1 \4/\2/x\2\3|;' \
+    |  $HASH_CHECK -c --status
+
+    exit 0
   fi
 
 
-  echo -en "\nExtracting volume data to $outvol..."
+  echo -en "\nExtracting data to $outvol..."
 
   if [ ! -b "$outvol" ]; then
     if [ -z "$opt_sparse" ]; then rm "$outvol"; fi
@@ -185,7 +212,7 @@ rm -rf $tmpdir  &&  mkdir $tmpdir
     lvresize -L ${volsize}B "$outvol" 2>/dev/null || true
   fi
   if [ ! -e "$outvol" ]; then
-    echo "ERROR: Output/save path does not exist!"
+    echo "Error: Output/save path does not exist!"
     exit 1
   fi
 
