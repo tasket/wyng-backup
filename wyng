@@ -1132,7 +1132,7 @@ def prepare_snapshots(datavols):
         snap1vol = datavol + ".tick"    ; snap2vol = datavol + ".tock"
 
         if not lv_exists(vgname, datavol):
-            print("Warning:", datavol, "does not exist!")
+            print("Warning: Local '%s' does not exist!" % datavol)
             continue
 
         if lv_exists(vgname, snap1vol) and "arch-"+aset.uuid not in l_vols[snap1vol].tags \
@@ -1803,8 +1803,10 @@ def prune_sessions(datavol, times):
     # Determine target session where data will be merged.
     target_s = sessions[sessions.index(to_prune[-1]) + 1]
 
-    merge_sessions(datavol, to_prune, target_s,
-                   clear_sources=True)
+    if not options.autoprune or options.autoprune.lower=="off":
+        merge_sessions(datavol, to_prune, target_s, clear_sources=True)
+    else:
+        autoprune(datavol, apmode=options.autoprune, include=to_prune)
 
 
 # Likely parameters for autoprune:
@@ -1814,7 +1816,7 @@ def prune_sessions(datavol, times):
 # ndays_ago (int): number of days ago before which the thinning params are applied
 # ndays & nsessions: a days/sessions ratio for amount of sessions left after thinning
 
-def autoprune(datavol, needed_space=0, apmode="default"):
+def autoprune(datavol, needed_space=0, apmode="default", include=[]):
     global dest_free
 
     dtdate = datetime.date
@@ -1834,14 +1836,13 @@ def autoprune(datavol, needed_space=0, apmode="default"):
                                        to_date(sessions[-1]).toordinal()+ndays) }
     for ses in sessions:  apcal[to_date(ses).toordinal()].append([ses, True])
 
-    # Mark all sessions prior to oldest date setting
+    # Mark all sessions prior to oldest date setting, plus include list
     for ses in sessions:
         sdate = to_date(ses)
-        if sdate > oldest:
-            break
-        else:
+        if sdate <= oldest or ses in include:
             for dses in apcal[sdate.toordinal()]:
-                dses[1] = False    ; vol.sessions[dses[0]].toggle = False   ; marked += 1
+                if dses[0] == ses:
+                    dses[1] = False    ; vol.sessions[ses].toggle = False
 
     # Mark sessions for thinning-out according to ndays + nsessions
     if needed_space or not nthresh:
@@ -1856,11 +1857,11 @@ def autoprune(datavol, needed_space=0, apmode="default"):
                     offset += ndays//nsessions    ; offset %= min(ndays, len(dlist))-1
                     for dses in apcal[span+bigday]:
                         if dses[1]:
-                            dses[1] = False    ; dlist[bigday] -= 1   ; marked += 1
+                            dses[1] = False    ; dlist[bigday] -= 1
                             vol.sessions[dses[0]].toggle = False
                             break
 
-    # Find contiguous marked ranges and merge/prune them. Repeat if/until free > needed space.
+    # Find contiguous marked ranges and merge/prune them. Repeat until free >= needed space.
     factor = 1
     while needed_space > dest_free or not nthresh:
         to_prune = []    ; removed_ct = 0
