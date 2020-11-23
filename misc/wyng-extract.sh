@@ -13,13 +13,14 @@ echo "Wyng archive extractor, V0.2.4 20200907"
 formatver=1
 hashw=64;  addrw=17;  delimw=1;  uniqw=$(( hashw + delimw + addrw ))
 
-while getopts "so:lt:c" opt; do
+while getopts "so:lt:cd" opt; do
   case $opt in
     s)  opt_sparse=1;;
     o)  outopt="$OPTARG";;
     l)  opt_list=1;;
     t)  sestag="$OPTARG";;
     c)  opt_check=1;;
+    d)  opt_sparse=1; opt_diff=1;;
     \?) opterr=1;;
   esac
 done
@@ -157,7 +158,7 @@ if [ -n "$opt_list" ]; then exit 0; fi
         echo "Compression error."; exit 1
       fi
 
-      # Hash the chunk files, chg zhash to 0, remove extension, convert 2nd col to hex fname
+      # Hash the chunk files, remove extension, convert 2nd col to hex fname
       find . -type f -printf '%f\n' \
       |  xargs -r $HASH_CHECK  |  sed -E 's|\..+$||'  |  sort -k2,2  \
       |  awk -v i="$i" -v cs="$chunksize" '{ printf "%s x%.16x\n", $1, $2 * cs + i }' \
@@ -171,6 +172,12 @@ if [ -n "$opt_list" ]; then exit 0; fi
     |  sort -ms -k2,2 - local-manifest  |  uniq -u -w $uniqw  |  sort -um -k2,2  \
     |  sed -E 's|^'$zhash'|0|'  \
     >diff-manifest
+
+    if [ -n "$opt_diff" ]; then
+      echo '---'
+      cat diff-manifest
+      exit $(( `wc -l diff-manifest | cut -d ' ' -f1` > 0 ))
+    fi
 
     # Create a zerofill manifest for the extraction merge-sort.
     # This will fill-in any address gaps in the diff as zero chunks.
@@ -204,6 +211,7 @@ if [ -n "$opt_list" ]; then exit 0; fi
 
   echo -en "\nExtracting data to $outvol..."
 
+  # Set local volume to correct size.
   if [ ! -b "$outvol" ]; then
     if [ -z "$opt_sparse" ]; then rm "$outvol"; fi
     truncate --size $volsize "$outvol"
@@ -216,6 +224,8 @@ if [ -n "$opt_list" ]; then exit 0; fi
     exit 1
   fi
 
+  # Merge-sort complete manifest & convert to simple filenames for decompressor,
+  # then pipe data to dd.
   sort -um -k2,2 $m_last $m_therest  |  sed -E "/ x$lastchunk/q" \
   |  sed -E 's|^0 x.*|ZERO|; t; s|'"$mregex"'|\4/\2/x\2\3|'  \
   |  xargs $DECOMPRESS -f  \
