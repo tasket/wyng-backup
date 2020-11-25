@@ -352,8 +352,9 @@ class CP:
 
 class Lvm_VolGroup:
     def __init__(self, name):
-        self.name = name
-        self.lvs  = {}
+        self.name  = name
+        self.lvs   = {}
+        self.poolnames = set()
 
 
 class Lvm_Volume:
@@ -386,10 +387,11 @@ def get_lvm_vgs(vg_to_lvols=None):
         for ln in vlistf:
             members = ln.strip().split("::")
             vgname = members[0] # Fix: use colname index
-            lvname = members[1]
+            lvname = members[1]    ; lv = Lvm_Volume(members)
             if vgname not in volgroups.keys():
                 volgroups[vgname] = Lvm_VolGroup(vgname)
-            volgroups[vgname].lvs[lvname] = Lvm_Volume(members)
+            volgroups[vgname].lvs[lvname] = lv
+            if lv.pool_lv:   volgroups[vgname].poolnames.add(lv.pool_lv)
 
     if vg_to_lvols:  l_vols = volgroups[vg_to_lvols].lvs
 
@@ -435,11 +437,17 @@ def lv_rename(vgname, vol1, vol2):
 
 # Reserve or release lvm thinpool metadata snapshot.
 # arch must be a configured ArchiveSet; action must be "reserve" or "release".
-def lvm_meta_snapshot(arch, action):
-    vgname   = arch.vgname.replace("-","--")    ; poolname = arch.poolname.replace("-","--")
+# Specifying "release" without "pool=" will attempt to release all pools.
+def lvm_meta_snapshot(arch, action, pool=None):
+    vgname   = arch.vgname.replace("-","--")
+    the_pool = pool if pool else arch.poolname
     checkerr = action == "reserve"
-    do_exec([[CP.dmsetup,"message", vgname+"-"+poolname+"-tpool",
-              "0", action+"_metadata_snap"]], check=checkerr)
+
+    for pool in volgroups[arch.vgname].poolnames if not pool and action == "release" \
+                else [the_pool]:
+        poolname = pool.replace("-","--")
+        do_exec([[CP.dmsetup,"message", vgname+"-"+poolname+"-tpool",
+                "0", action+"_metadata_snap"]], check=checkerr)
 
 
 # Try to sync only selected filesystem
@@ -561,7 +569,8 @@ def arch_check(vol_list=None, startup=False):
         print("Checking index sequence...")
         mset = []
         for ses in vol.sesnames:
-            print(ses, "size =", vol.sessions[ses].volsize)   ; mset.append(ses)
+            # print(ses, "size =", vol.sessions[ses].volsize)
+            mset.append(ses)
             check_manifest_sequence(volname, mset)
 
         # Check hashes of each session individually
@@ -1200,30 +1209,34 @@ def prepare_snapshots(datavols):
 # Result can be read as an xml file by update_delta_digest().
 
 def get_lvm_deltas(datavols):
-    vgname   = aset.vgname.replace("-","--")    ; poolname = aset.poolname.replace("-","--")
+    vgname   = aset.vgname.replace("-","--")
+    poolset  = set(l_vols[x].pool_lv for x in datavols)
     print("Acquiring deltas.")
 
     # Reserve a metadata snapshot for the LVM thin pool; required for a live pool.
     catch_signals()
-    lvm_meta_snapshot(aset, "reserve")
+    for apool in sorted(poolset):
+        poolname = apool.replace("-","--")
+        lvm_meta_snapshot(aset, "reserve", pool=apool)
 
-    err = False
-    try:
-        for datavol in datavols:
-            snap1vol = datavol + ".tick"    ; snap2vol = datavol + ".tock"
-            do_exec([[CP.thin_delta, "-m",  "--thin1=" + l_vols[snap1vol].thin_id,
-                                            "--thin2=" + l_vols[snap2vol].thin_id,
-                                    "/dev/mapper/"+vgname+"-"+poolname+"_tmeta"],
+        err = False
+        try:
+            for datavol in datavols:
+                if l_vols[datavol].pool_lv != apool:   continue
+                snap1vol = datavol + ".tick"    ; snap2vol = datavol + ".tock"
+                cmds = [[CP.thin_delta, "-m",   "--thin1=" + l_vols[snap1vol].thin_id,
+                                                "--thin2=" + l_vols[snap2vol].thin_id,
+                                        "/dev/mapper/"+vgname+"-"+poolname+"_tmeta"],
                         [CP.grep, "-v", "^\s*<same .*\/>$"]
-                    ],  out=tmpdir+"/delta."+datavol )
-    except:
-        err = True
-    finally:
-        lvm_meta_snapshot(aset, "release")
+                        ]
+                do_exec(cmds,  out=tmpdir+"/delta."+datavol)
+        except Exception as e:
+            print("ERROR running thin_delta process.")
+            raise e
+        finally:
+            lvm_meta_snapshot(aset, "release", pool=apool)
 
     catch_signals(None)
-    if err:
-        x_it(1, "ERROR running thin_delta process.")
 
 
 # update_delta_digest: Translates raw lvm delta information
@@ -1699,7 +1712,7 @@ def monitor_send(datavols, selected=[], monitor_only=True):
         if not monitor_only:
             #print("**",vol.changed_bytes, dest_free) ####
             if vol.changed_bytes > dest_free:
-                if options.autoprune:   autoprune(datavol, vol.changed_bytes)
+                if options.autoprune != "off":   autoprune(datavol, vol.changed_bytes)
                 if vol.changed_bytes > dest_free and False: ####
                     print(vol.changed_bytes-dest_free, "additional bytes needed.")
                     print("Insufficient space on destination; Skipping.")
@@ -1855,7 +1868,7 @@ def autoprune(datavol, needed_space=0, apmode="default", include=[]):
                             min(dtdate(year,12,31), enddate).toordinal(), ndays):
                 dlist = []    ; offset = 0
                 for day in range(span, min(span+ndays, enddate.toordinal())):
-                    dlist.append(sum([ x[1] for x in apcal[day] ]))
+                    dlist.append(sum( x[1] for x in apcal[day] ))
                 while sum(dlist) > nsessions: ## Enh: Make even distribution
                     bigday = dlist.index(max(dlist[offset:]), offset)
                     offset += (ndays//nsessions)+1    ; offset %= min(ndays, len(dlist))
@@ -1957,8 +1970,8 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
             if volume.sessions[ses].format == "tar":
                 x_it(1, "Cannot merge range containing tarfile session.")
         volsize    = volume.sessions[target].volsize
-        vol_shrank = volsize < max([x.volsize for x in volume.sessions.values()
-                                    if x.name in sources])
+        vol_shrank = volsize < max(x.volsize for x in volume.sessions.values()
+                                    if x.name in sources)
         last_chunk = chformat % volume.last_chunk_addr(volsize)
         lc_filter  = '"'+last_chunk+'"'
 
@@ -2476,9 +2489,9 @@ def show_list(selected_vols):
         print("No volumes.")    ; return
     elif not selected_vols and not len(options.volumes):
         print("\nConfigured Volumes [%s/%s]\n" % (aset.vgname, aset.poolname))
-        maxwidth = max([len(x.name) for x in aset.vols.values()])
+        maxwidth = max(len(x.name) for x in aset.vols.values())
         fmt    = "%7.1f GB  %-" + str(maxwidth+5) + "s  %s"
-        for name in sorted([x.name for x in aset.vols.values()]):
+        for name in sorted(x.name for x in aset.vols.values()):
             vol = aset.vols[name]   ; ses = vol.sesnames[-1][2:] if len(vol.sesnames) else " "
             print(fmt % ((aset.vols[name].volsize() / 1024**3), name, ses))
         return
@@ -2512,8 +2525,8 @@ def show_list(selected_vols):
 
                 # output one row at a time
                 for ii in range(max(heights)):
-                    print("  ".join([  slist[ii+sum(heights[:c])][2:] for c in range(cols)
-                                       if ii < heights[c]  ]))
+                    print("  ".join(  slist[ii+sum(heights[:c])][2:] for c in range(cols)
+                                       if ii < heights[c]  ))
                 print()
 
                 # start new month list
@@ -2570,7 +2583,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "Wyng"
-prog_version          = "0.2.0_rc7pre4"    ; prog_date = "20201005"
+prog_version          = "0.2.0_rc7pre5"    ; prog_date = "20201125"
 format_version        = 1
 print("%s %s %s" % (prog_name, prog_version, prog_date))
 prog_name             = prog_name.lower()
