@@ -126,10 +126,10 @@ Please note that dashed parameters are always placed before the command.
 -u, --unattended       | Don't prompt for interactive input.
 --session=_date-time[,date-time]_ | Select a session or session range by date-time (receive, verify, prune).
 --all-before           | Select all sessions before the specified _--session date-time_ (prune).
---autoprune=off        | Automatic pruning by calendar date.
+--autoprune=off        | Automatic pruning by calendar date. (experimental)
 --save-to=_path_       | Save volume to _path_ (receive).
---sparse               | Receive volume data sparsely (implies --no-clobber)
---no-clobber           | Overwrite local data only where it differs (receive)
+--sparse               | Receive volume data sparsely (implies --sparse-write)
+--sparse-write         | Overwrite local data only where it differs (receive)
 --remap                | Remap volume during `send` or `diff`.
 --from=_type:location_ | Retrieve from a specific unconfigured archive (receive, verify, list, arch-init).
 --local=_vg/pool_      | (arch-init) Pool containing local volumes.
@@ -164,7 +164,7 @@ incremental backup. Whenever a `send` operation is completed, snapshots are
 renewed just as with the `monitor` command.
 
 A `send` operation may refuse to backup a volume if there is not enough space on the
-destination. One way to avoid this situation is to specify `--autoprune=default` which
+destination. One way to avoid this situation is to specify `--autoprune=on` which
 will cause Wyng to remove older backup sessions from the archive when space is needed.
 
 
@@ -327,7 +327,7 @@ wyng --from=internal:/mountpoint arch-init
 ```
 
 
-#### Parameters for arch-init
+#### Options/Parameters for arch-init
 
 `--local` takes the source volume group and pool as 'vgname/poolname' for the `arch-init` command.
 These LVM objects don't have to exist before using `arch-init` but they will
@@ -366,6 +366,52 @@ space efficiency and performance balance, a factor of '2' or greater is suggeste
 that will store volumes larger than about 100GB.
 
 Note that _compression, hashtype_ and _chunk-factor_ cannot be changed for an archive once it is initialized.
+
+### Misc Options
+
+`--session=<datetime>[,<datetime>]`
+
+Session allows you to specify a datetime spec or in some cases a datetime range for the
+`receive`, `verify`, `diff`, `prune` and `arch-check` commands.
+
+`--sparse-write`
+
+Used with `receive`, this option does _not_ prevent Wyng from overwriting existing local volumes!
+The sparse-write mode merely tells Wyng not to create a brand-new local volume for `receive`, and
+results in the data being sparsely written into the volume instead. This is useful if the existing
+local volume is a clone/snapshot of another volume and you wish to save local disk space. It is also
+best used when the backup/archive storage is local (i.e. fast USB drive or similar) and you don't
+want the added CPU usage of full `--sparse` mode.
+
+`--sparse`
+
+The sparse mode can be used with the `receive` command to intelligently overwrite an existing
+local volume so that only the differences between the local and archived volumes will be fetched
+from the archive and written to the local volume. This results in reduced remote disk and network
+usage while receiving at the expense of some extra CPU usage on the local machine, and also uses
+less local disk space when snapshots are a factor (implies '--sparse-write`).
+
+`--autoprune[=off|on|min|full]` (experimental)
+
+Autoprune may be used with either the `prune` or `send` commands and will cause Wyng to
+automatically remove older backup sessions according to date criteria. When used with `send`
+specifically, the autopruning process will only be triggered if the destination filessytem is
+low on free space.
+
+The criteria are currently hard-coded to remove all sessions after 183 days,
+and after 64 days to thin-out the number of sessions down to a rate of 2 sessions every 7 days.
+In the future these parameters can be reconfigured by the user.
+
+Selectable modes are:
+
+__off__ is the current default.
+
+__on__ removes more sessions as space is needed, while trying to retain any/all older sessions
+whenever available storage space allows.
+
+__full__ removes all sessions that are due to expire according to above criteria.
+
+__min__ removes sessions before the 183 day mark, but no thinning-out (64 days) is performed.
 
 
 ### Tips

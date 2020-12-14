@@ -1315,12 +1315,11 @@ def update_delta_digest(datavol):
     if monitor_only:
         rotate_snapshots(vol, rotate=map_updated)
         os.rename(vol.mapfile+"-tmp", vol.mapfile)
+        if dnewchunks:   vol.changed_bytes_add(dnewchunks*aset.chunksize)
         print(("\r  %d ch, %d dis" % (dnewchunks, dfreedblocks//chunksize))
                 if map_updated else "\r  No changes   ")
 
-    if dnewchunks:   vol.changed_bytes_add(dnewchunks*aset.chunksize)
     catch_signals(None)
-
     return dnewchunks, dfreedblocks #fix
 
 
@@ -1712,10 +1711,10 @@ def monitor_send(datavols, selected=[], monitor_only=True):
         if not monitor_only:
             #print("**",vol.changed_bytes, dest_free) ####
             if vol.changed_bytes > dest_free:
-                if options.autoprune != "off":   autoprune(datavol, vol.changed_bytes)
-                if vol.changed_bytes > dest_free and False: ####
-                    print(vol.changed_bytes-dest_free, "additional bytes needed.")
-                    print("Insufficient space on destination; Skipping.")
+                autoprune(datavol, needed_space=vol.changed_bytes, apmode=options.autoprune)
+                if vol.changed_bytes > dest_free:
+                    print(" %d additional bytes needed." % (vol.changed_bytes-dest_free))
+                    print("Insufficient space on destination %d; Skipping." % dest_free)
                     continue
 
             if datavol in send_alls or os.stat(vol.mapfile+"-tmp").st_blocks > 0:
@@ -1727,16 +1726,13 @@ def monitor_send(datavols, selected=[], monitor_only=True):
 
 
 def init_deltamap(vol, bmfile, bmsize):
+    vol.changed_bytes_add(0, reset=True)
     if exists(bmfile):
         os.remove(bmfile)
     if exists(bmfile+"-tmp"):
         os.remove(bmfile+"-tmp")
     with open(bmfile, "wb") as bmapf:
         bmapf.truncate(bmsize)    ; bmapf.flush()
-    if exists(vol.path+"/volchanged"):
-        os.remove(vol.path+"/volchanged")
-
-    vol.changed_bytes_add(0, reset=True)
 
 
 def rotate_snapshots(vol, rotate=True):
@@ -1820,7 +1816,7 @@ def prune_sessions(datavol, times):
     # Determine target session where data will be merged.
     target_s = sessions[sessions.index(to_prune[-1]) + 1]
 
-    if not options.autoprune or options.autoprune.lower=="off":
+    if options.autoprune.lower()=="off":
         merge_sessions(datavol, to_prune, target_s, clear_sources=True)
     else:
         autoprune(datavol, apmode=options.autoprune, include=to_prune)
@@ -1833,19 +1829,26 @@ def prune_sessions(datavol, times):
 # ndays_ago (int): number of days ago before which the thinning params are applied
 # ndays & nsessions: a days/sessions ratio for amount of sessions left after thinning
 
-def autoprune(datavol, needed_space=0, apmode="default", include=[]):
+def autoprune(datavol, needed_space=0, apmode="off", include=[]):
     global dest_free
 
+    def get_dest_free():
+        for ln in open(tmpdir+"/merge.log","r").readlines():
+            if ln.startswith("wyng_check_free"):  dest_free = int(ln.split()[1])
+        return dest_free
+
+    apmode = apmode.lower()
+    if apmode not in ("on","min","full"):  return False
     dtdate = datetime.date
     def to_date(sesdate):
         return dtdate(int(sesdate[2:6]),int(sesdate[6:8]),int(sesdate[8:10]))
 
     vol       = aset.vols[datavol]
-    if len(vol.sesnames) < 4:  return ####
+    if len(vol.sesnames) < 4:  return False
     sessions  = vol.sesnames[:-1]             ; marked  = 0
     today     = dtdate.today()                ; oldest  = today-datetime.timedelta(days=183)
     ndays_ago = datetime.timedelta(days=64)   ; ndays   = 7      ; nsessions = 2
-    startdate = to_date(sessions[0])          ; nthresh = 0 if "full" in apmode.split(",") else 0
+    startdate = to_date(sessions[0])          ; nthresh = 3 if apmode == "on" else 0
     enddate   = min(to_date(sessions[-2]), today-ndays_ago)
 
     # Make a 2d array of ordinal dates and populate with session id + flag
@@ -1860,9 +1863,10 @@ def autoprune(datavol, needed_space=0, apmode="default", include=[]):
             for dses in apcal[sdate.toordinal()]:
                 if dses[0] == ses:
                     dses[1] = False    ; vol.sessions[ses].toggle = False
+                    print("*",end="") ####
 
     # Mark sessions for thinning-out according to ndays + nsessions
-    if needed_space or not nthresh:
+    if needed_space or apmode != "min":
         for year in range(startdate.year, enddate.year+1):
             for span in range(dtdate(year,1,1).toordinal(),
                             min(dtdate(year,12,31), enddate).toordinal(), ndays):
@@ -1880,7 +1884,7 @@ def autoprune(datavol, needed_space=0, apmode="default", include=[]):
 
     # Find contiguous marked ranges and merge/prune them. Repeat until free >= needed space.
     factor = 1
-    while needed_space > dest_free or not nthresh:
+    while True:
         to_prune = []    ; removed_ct = 0
         for ses in sessions:
             if ses is None:   continue
@@ -1896,17 +1900,23 @@ def autoprune(datavol, needed_space=0, apmode="default", include=[]):
                 to_prune.append(ses)
 
         if removed_ct:
-            print("Removed", removed_ct) ####
-            for ln in open(tmpdir+"/merge.log","r").readlines():
-                if ln.startswith("wyng_check_free"):  dest_free = int(ln.split()[1])
-            os.remove(tmpdir+"/merge.log")
+            print("Removed", removed_ct)
+            dest_free = get_dest_free()    ; os.remove(tmpdir+"/merge.log")
 
-        if nthresh == 0:
+        if removed_ct == 0 or nthresh == 0 or needed_space <= dest_free:
             break # while
         elif factor > 4:
             nthresh = 0
         else:
             factor += 2
+
+    # If needed_space loop above quit before processing 'include' range, then process it now.
+    if include and include[0] in sessions:
+        target_s = vol.sesnames[vol.sesnames.index(include[-1]) + 1]
+        merge_sessions(datavol, include, target_s, clear_sources=True)
+        print("Removed", len(include))    ; dest_free = get_dest_free()
+
+    return True
 
 
 # Accepts a list of session names in ascending order (or else uses all sessions in the volume)
@@ -2140,7 +2150,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     verify_only = options.action == "verify"      ; remap     = options.remap
     attended    = not options.unattended          ; debug     = options.debug
     sparse      = options.sparse                  ; chunksize = aset.chunksize
-    noclobber   = options.no_clobber or sparse
+    sparse_write= options.sparse_write or sparse
     vgname      = aset.vgname                     ; zeros     = bytes(chunksize)
     vol         = aset.vols[datavol]              ; snap1vol  = datavol+".tick"
     gethash     = hash_funcs[aset.hashtype]       ; sessions  = vol.sesnames
@@ -2173,7 +2183,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     volsize   = vol.sessions[select_ses].volsize    ; volf = None
 
     if save_path and exists(save_path) and attended:
-        print("\n!! This will", "overwrite" if noclobber else "erase all",
+        print("\n!! This will", "overwrite" if sparse_write else "erase all",
               "existing data in",save_path,"!!")
         ans = input("   Are you sure? [y/N]: ")
         if ans.lower() not in {"y","yes"}:
@@ -2242,7 +2252,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                 do_exec([[CP.lvm, "lvresize", "-L", str(volsize)+"b", "-f", save_path]])
 
         if exists(save_path) and stat.S_ISBLK(os.stat(save_path).st_mode):
-            if not noclobber:   do_exec([[CP.blkdiscard, save_path]])
+            if not sparse_write:   do_exec([[CP.blkdiscard, save_path]])
             volf = open(save_path, "w+b")
         elif save_path.startswith("/dev/"):
             x_it(1,"Cannot create new volume from ambiguous /dev path."
@@ -2251,7 +2261,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         else: # file
             save_type = "file"
             volf = open(save_path, "w+b")
-            if not noclobber:   volf.truncate(0)   ; volf.flush()
+            if not sparse_write:   volf.truncate(0)   ; volf.flush()
             volf.truncate(volsize)    ; volf.flush()
 
     elif diff:
@@ -2308,7 +2318,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         if cksum.strip() == "0":
             if save_path:
                 volf_seek(addr)
-                if noclobber and volf_read(chunksize) != zeros:
+                if sparse_write and volf_read(chunksize) != zeros:
                     volf_seek(addr)    ; volf_write(zeros)    ; diff_count += chunksize
             elif diff:
                 volf_seek(addr)    ; diff_count += diff_compare(zeros,True)
@@ -2366,10 +2376,10 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
         if save_path:
             volf_seek(addr)
-            # Don't re-check buffer for sparse mode, check for noclobber:
+            # Don't re-check buffer for sparse mode, check for sparse_write:
             if sparse:
                 volf_write(buf)    ; diff_count += len(buf)
-            elif noclobber:
+            elif sparse_write:
                 if volf_read(chunksize) != buf:
                     volf_seek(addr)    ; volf_write(buf)    ; diff_count += len(buf)
             else:
@@ -2571,7 +2581,7 @@ def cleanup():
     if error_cache:
         print("Error on volume(s): " + ", ".join(error_cache))
         sys.exit(1)
-    shutil.rmtree(big_tmpdir, ignore_errors=True)  ;  return ####
+    shutil.rmtree(big_tmpdir, ignore_errors=True)
     if not options.debug:
         for f in (big_tmpdir, tmpdir, tmpdir+"-rpc"):
             shutil.rmtree(f, ignore_errors=True)
@@ -2583,7 +2593,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "Wyng"
-prog_version          = "0.2.0_rc7pre5"    ; prog_date = "20201125"
+prog_version          = "0.2.0_rc7"    ; prog_date = "20201214"
 format_version        = 1
 print("%s %s %s" % (prog_name, prog_version, prog_date))
 prog_name             = prog_name.lower()
@@ -2647,7 +2657,7 @@ parser.add_argument("--from", dest="from_arch", default="",
                     help="Address+Path of other non-configured archive (receive, verify)")
 parser.add_argument("--save-to", dest="saveto", default="",help="Path to store volume for receive")
 parser.add_argument("--sparse", action="store_true", default=False, help="Retrieve differences only")
-parser.add_argument("--no-clobber", action="store_true", default=False, help="Save differences only")
+parser.add_argument("--sparse-write", action="store_true", default=False, help="Save differences only")
 parser.add_argument("--remap", action="store_true", default=False, help="Remap volume")
 parser.add_argument("--local", default="",    help="Init: LVM vg/pool containing source volumes")
 parser.add_argument("--dest", default="",     help="Init: type:location of archive")
@@ -2800,10 +2810,10 @@ elif options.action == "prune":
     for dv in dvs:
         if dv in datavols:
             print("Pruning", dv)
-            if options.autoprune in ("default","full","lazy"):
-                autoprune(dv, apmode=options.autoprune)
             if options.session:
                 prune_sessions(dv, options.session.split(","))
+            elif options.autoprune.lower() in ("on","min","full"):
+                autoprune(dv, apmode=options.autoprune)
 
 
 elif options.action == "receive":
