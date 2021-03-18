@@ -224,15 +224,16 @@ class ArchiveSet:
                 print("que_meta_update =", self.que_meta_update, file=f)
                 f.flush()    ; os.fsync(f.fileno())
 
-        def changed_bytes_add(self, amount, reset=False):
+        def changed_bytes_add(self, amount, reset=False, save=False):
             if reset:
                 if exists(self.path+"/volchanged"):   os.remove(self.path+"/volchanged")
                 self.changed_bytes = 0  ; return
 
             self.changed_bytes += amount
-            with open(self.path+"/volchanged", "w") as f:
-                print(self.changed_bytes, file=f)
-                f.flush()    ; os.fsync(f.fileno())
+            if save:
+                with open(self.path+"/volchanged", "w") as f:
+                    print(self.changed_bytes, file=f)
+                    f.flush()    ; os.fsync(f.fileno())
 
         def new_session(self, sname):
             ns = self.Ses(self, sname)
@@ -1295,18 +1296,12 @@ def update_delta_digest(datavol):
                 bmap_pos = volsegment // 8    ; b = 1 << (volsegment%8)
                 if not bmap_mm[bmap_pos] & b:
                     bmap_mm[bmap_pos] |= b    ; dnewchunks += isnew
-                ##if bmap_pos != lastindex: #save it
-                    ##bmap_mm[lastindex] |= bmap_byte      ; bmap_byte = 0
-                ##bmap_byte |= 1 << (volsegment % 8)   ; lastindex = bmap_pos
-
-        ##if bmap_byte:  bmap_mm[lastindex] |= bmap_byte # save last
 
         if markall_pos is not None:
             # If volsize increased, flag the corresponding bmap area as changed.
             if monitor_only:  print("  Volume size has increased.")
             for pos in range(markall_pos, bmap_size):  bmap_mm[pos] = 0xff
             dnewchunks += (bmap_size - markall_pos) * 8
-            #dnewblocks += (bmap_size - markall_pos) * 8 * dblocksize
 
         bmapf.flush()    ; os.fsync(bmapf.fileno())
 
@@ -1315,10 +1310,10 @@ def update_delta_digest(datavol):
     if monitor_only:
         rotate_snapshots(vol, rotate=map_updated)
         os.rename(vol.mapfile+"-tmp", vol.mapfile)
-        if dnewchunks:   vol.changed_bytes_add(dnewchunks*aset.chunksize)
         print(("\r  %d ch, %d dis" % (dnewchunks, dfreedblocks//chunksize))
                 if map_updated else "\r  No changes   ")
 
+    if dnewchunks:   vol.changed_bytes_add(dnewchunks*aset.chunksize, save=monitor_only)
     catch_signals(None)
     return dnewchunks, dfreedblocks #fix
 
@@ -1692,7 +1687,7 @@ def monitor_send(datavols, selected=[], monitor_only=True):
         init_dedup_index()
 
     if not monitor_only:
-        cmpvols = [x for x in aset.vols.values() if x.name in incrementals]
+        cmpvols = [x for x in aset.vols.values() if x.name in incrementals | send_alls and x.sessions]
         cmpses  = [v.sessions[v.sesnames[-1]] for v in cmpvols]
         if compare_files(volumes=cmpvols, sessions=cmpses):
             x_it(1, "Error: Local and archive metadata differ.")
@@ -1709,7 +1704,6 @@ def monitor_send(datavols, selected=[], monitor_only=True):
         dnew, dfreed = update_delta_digest(datavol)   ; map_updated = dnew+dfreed > 0
 
         if not monitor_only:
-            #print("**",vol.changed_bytes, dest_free) ####
             if vol.changed_bytes > dest_free:
                 autoprune(datavol, needed_space=vol.changed_bytes, apmode=options.autoprune)
                 if vol.changed_bytes > dest_free:
