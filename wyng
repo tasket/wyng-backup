@@ -1674,8 +1674,7 @@ def monitor_send(datavols, selected=[], monitor_only=True):
     if aset.vgname not in volgroups.keys():
         raise ValueError("Volume group "+aset.vgname+" not present.")
 
-    if monitor_only:
-        send_alls = []
+    if monitor_only:   send_alls.clear()
 
     if len(incrementals)+len(send_alls) == 0:
         x_it(0, "No new data.")
@@ -2587,7 +2586,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "Wyng"
-prog_version          = "0.2.0_rc7"    ; prog_date = "20201214"
+prog_version          = "0.2.0_rc8"    ; prog_date = "20210318"
 format_version        = 1
 print("%s %s %s" % (prog_name, prog_version, prog_date))
 prog_name             = prog_name.lower()
