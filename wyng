@@ -140,9 +140,9 @@ class ArchiveSet:
             self.enabled = False
             self.error   = False
             self.mapfile = path+"/deltamap"
-            self.mapped  = exists(self.mapfile)
             self.sessions= {}
             self.sesnames= []
+            self.meta_checked = False
             # persisted:
             self.format_ver = "0"
             self.uuid    = None
@@ -287,6 +287,7 @@ class ArchiveSet:
                 self.saved    = False
                 self.volume   = volume
                 self.toggle   = True
+                self.meta_checked = False
                 # persisted:
                 self.uuid     = "none"
                 self.localtime= None
@@ -2117,17 +2118,20 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
 def compare_files(pathlist=[], volumes=[], sessions=[], clear=True):
     cmp_list = tmpdir+"/compare-files.lst"
     if clear and exists(cmp_list):  os.remove(cmp_list)
-    realvols  = [x for x in volumes if len(x.sessions)]
-    realpaths = [x for x in pathlist if exists(x)]
-    if len(realvols) or len(sessions) or len(realpaths):
-        flist = open(cmp_list, "a")
-    else:
-        return False
-    for v in realvols:  print(v.name+"/volinfo", file=flist)
-    for s in sessions:
-        for sf in ("info","manifest"): print(pjoin(s.volume.name,s.name,sf), file=flist)
-    for pth in realpaths:  print(pth, file=flist)
-    flist.close()
+    realvols  = [x for x in volumes if len(x.sessions) and not x.meta_checked]
+    realses   = [x for x in sessions if not x.meta_checked]
+    if len(volumes)+len(sessions)+len(pathlist) == 0:   return True
+
+    with open(cmp_list, "a") as flist:
+        for pth in pathlist:
+            if not exists(pth):   raise FileNotFoundError(pth)
+            print(pth, file=flist)
+        for v in realvols:
+            v.meta_checked = True    ; print(v.name+"/volinfo", file=flist)
+        for s in realses:
+            s.meta_checked = True
+            for sf in ("info","manifest"):   print(pjoin(s.volume.name,s.name,sf), file=flist)
+
     do_exec([[CP.xargs, CP.sha256sum]], cwd=aset.path,
             infile=cmp_list, out=tmpdir+"/compare-hashes.local")
     dest_run([destcd + bkdir +" && xargs sha256sum"],
