@@ -2,7 +2,7 @@
 
 
 ###  Wyng – Logical volume backup tool
-###  Copyright Christopher Laprise 2018-2020 / tasket@protonmail.com
+###  Copyright Christopher Laprise 2018-2021 / tasket@protonmail.com
 ###  Licensed under GNU General Public License v3. See file 'LICENSE'.
 
 
@@ -766,7 +766,7 @@ def detect_internal_state():
     #####>  Begin helper program  <#####
 
     dest_program = \
-    '''#  Copyright Christopher Laprise 2018-2020
+    '''#  Copyright Christopher Laprise 2018-2021
 #  Licensed under GNU General Public License v3. See github.com/tasket/wyng-backup
 import os, sys, signal, shutil, subprocess, gzip, tarfile
 cmd = sys.argv[1] ;    tmpdir = "''' + tmpdir + '''-rpc"
@@ -1156,7 +1156,7 @@ def prepare_snapshots(datavols):
     '''
 
     print("Preparing snapshots...")
-    incr_vols, complete_vols, unchanged_vols = set(), set(), set()    ; vgname = aset.vgname
+    incr_vols, complete_vols = set(), set()    ; vgname = aset.vgname
     for datavol in datavols:
         # 'mapfile' is the deltamap file, 'snapXvol' are the .tick and .tock snapshots.
         # .tick holds vol state between send/monitor ops;
@@ -1224,7 +1224,7 @@ def prepare_snapshots(datavols):
         else:
             complete_vols.add(datavol)
 
-    return incr_vols, complete_vols, unchanged_vols
+    return incr_vols, complete_vols
 
 
 # Get raw lvm deltas between snapshots
@@ -1614,6 +1614,7 @@ def init_dedup_index5(listfile=""):
     addrsplit  = -address_split[1]
 
     dataf  = open(tmpdir+"/hashindex.dat","w+b")
+    dataf_read  = dataf.read    ; dataf_seek = dataf.seek    ; int_frbytes = int.from_bytes
     dataf_write = dataf.write   ; bfromhex = bytes().fromhex
     if makelist:   dedupf = gzip.open(tmpdir+"/"+listfile, "wt")
 
@@ -1632,15 +1633,15 @@ def init_dedup_index5(listfile=""):
                     match += 1
                     if makelist:
                         data_i = chtree[i][pos//hash_w]
-                        dataf.seek(data_i*(ses_w+ch_w))
-                        ddses  = ddsessions[int.from_bytes(
-                                 dataf.read(ses_w),"big")]
-                        ddchx  = dataf.read(ch_w).hex().zfill(chdigits)
+                        dataf_seek(data_i*(ses_w+ch_w))
+                        ddses  = ddsessions[int_frbytes(
+                                 dataf_read(ses_w),"big")]
+                        ddchx  = dataf_read(ch_w).hex().zfill(chdigits)
                         print("%s/%s/%s/x%s %s/%s/%s/%s" % \
                             (ddses.volume.name, ddses.name, ddchx[:addrsplit], ddchx,
                             volname, sesname, ln2[1:addrsplit], ln2),
                             file=dedupf)
-                        dataf.seek(0,2)
+                        dataf_seek(0,2)
                 elif count < chtree_max:
                     hashtree[i].extend(bhashb)
                     chtree[i].append(count)
@@ -1689,7 +1690,7 @@ def monitor_send(datavols, selected=[], monitor_only=True):
 
     localtime = time.strftime("%Y%m%d-%H%M%S")
 
-    incrementals, send_alls, unchanged \
+    incrementals, send_alls \
         = prepare_snapshots(selected if len(selected) >0 else datavols)
 
     get_lvm_vgs(aset.vgname)
@@ -1716,28 +1717,28 @@ def monitor_send(datavols, selected=[], monitor_only=True):
         print("\nSending backup session", localtime,
               "to", (desttype+"://"+destsys) if desttype != "internal" else destpath)
 
-    for datavol in sorted(incrementals | send_alls | unchanged):
-        print(" ", "Scan" if monitor_only else "Send", "volume      | ", datavol, flush=True,end="")
-        if datavol in unchanged:
-            print("\r  No changes   ")    ; continue
-
+    for datavol in sorted(incrementals | send_alls):
         vol = aset.vols[datavol]
-        dnew, dfreed = update_delta_digest(datavol)   ; map_updated = dnew+dfreed > 0
+        print(" ", "Scan" if monitor_only else "Send", "volume      | ", datavol, flush=True,end="")
 
-        if not monitor_only:
+        dnew, dfreed = update_delta_digest(datavol)
+        if monitor_only:   continue
+
+        if datavol in send_alls or os.stat(vol.mapfile+"-tmp").st_blocks > 0:
             if vol.changed_bytes > dest_free:
                 autoprune(datavol, needed_space=vol.changed_bytes, apmode=options.autoprune)
                 if vol.changed_bytes > dest_free:
                     print(" %d additional bytes needed." % (vol.changed_bytes-dest_free))
                     print("Insufficient space on destination %d; Skipping." % dest_free)
+                    error_cache.append(datavol)
                     continue
 
-            if datavol in send_alls or os.stat(vol.mapfile+"-tmp").st_blocks > 0:
-                sent = send_volume(datavol, localtime, send_all=datavol in send_alls)
-            else:
-                print("\r  No changes   ", flush=True)
-                rotate_snapshots(vol, rotate=False)
-                os.rename(vol.mapfile+"-tmp", vol.mapfile)
+            sent = send_volume(datavol, localtime, send_all=datavol in send_alls)
+
+        else:
+            print("\r  No changes   ", flush=True)
+            rotate_snapshots(vol, rotate=False)
+            os.rename(vol.mapfile+"-tmp", vol.mapfile)
 
 
 def init_deltamap(vol, bmfile, bmsize):
@@ -2674,7 +2675,7 @@ parser.add_argument("--from", dest="from_arch", default="",
 parser.add_argument("--save-to", dest="saveto", default="",help="Path to store volume for receive")
 parser.add_argument("--sparse", action="store_true", default=False, help="Retrieve differences only")
 parser.add_argument("--sparse-write", action="store_true", default=False, help="Save differences only")
-parser.add_argument("--remap", action="store_true", default=False, help="Remap volume")
+parser.add_argument("--remap", action="store_true", default=False, help="Remap snapshots")
 parser.add_argument("--local", default="",    help="Init: LVM vg/pool containing source volumes")
 parser.add_argument("--dest", default="",     help="Init: type:location of archive")
 parser.add_argument("--subdir", default="",   help="Init: optional subdir for --dest")
@@ -2813,7 +2814,7 @@ elif options.action == "version":
 
 
 elif options.action == "prune":
-    if not (options.autoprune or options.session):
+    if options.autoprune.lower() == "off" and not options.session:
         x_it(1, "Must specify --autoprune or --session for prune.")
     dvs = datavols if len(selected_vols) == 0 else selected_vols
 
