@@ -40,34 +40,41 @@ class ArchiveSet:
         self.destmountpoint = None
         self.uuid        = None
 
+        # parser for the .ini formatted configuration
         self.conf = cp   = configparser.ConfigParser()
         cp.optionxform   = lambda option: option
         cp["var"]        = {}
         cp["volumes"]    = {}
+
+        # halt configuration if this is a new or temp config
         if not exists(self.confpath):
             self.uuid = str(uuid.uuid4())
             return
+
         cp.read(self.confpath)
         self.a_ints      = {"chunksize"}
         for name in cp["var"].keys():
             setattr(self, name, int(cp["var"][name]) \
                                 if name in self.a_ints else cp["var"][name])
 
-        # convert old delimiter to colon
-        if self.destsys.startswith("qubes-ssh://") and self.destsys.find("|") > 0:
-            self.destsys = self.destsys.replace("|",":",1)
-            self.save_conf()
-
+        # load volume metadata objects
         for key in cp["volumes"]:
+            # conditions when a volume must be loaded:
+            # - allvols flag is set
+            # - in_process flag from an unfinished action
+            # - volume specified on command line
+            # - no volumes specified (hence all)
+            # - deduplication is in effect
             if allvols or self.in_process or options.from_arch or \
             (cp["volumes"][key] != "disable" and \
             (len(options.volumes)==0 or key in options.volumes or options.dedup>1)):
                 os.makedirs(pjoin(self.path,key), exist_ok=True)
+                # instantiate:
                 self.vols[key] = self.Volume(self, key, pjoin(self.path,key), self.vgname)
                 self.vols[key].enabled = cp["volumes"][key] != "disable"
                 if options.dedup > 1:   self.dedupsessions += self.vols[key].sessions.values()
 
-        # Create master session list sorted by date-time
+        # Create master session list sorted for deduplication
         self.dedupsessions.sort(key=lambda x: x.localtime, reverse=True)
 
 
@@ -100,9 +107,6 @@ class ArchiveSet:
         and "arch-"+self.uuid not in volgroups[self.vgname].lvs[datavol+".tick"].tags:
             print("Warning: Volume '%s' is already tracked by a Wyng snapshot from a" % datavol,
                   "different archive!")
-        #self.vols[datavol] = self.Volume(datavol, pjoin(self.path,datavol),
-        #                                 self.vgname)
-
         self.conf["volumes"][datavol] = "enable"
         self.save_conf()
 
@@ -162,11 +166,13 @@ class ArchiveSet:
             if exists(pjoin(path,"volchanged")):
                 self.changed_bytes = int(open(pjoin(path,"volchanged"),"r").readlines()[0].strip())
 
-            # load sessions in dict and ordered list of session names
+            # load sessions as reverse-linked list, starting with the last;
+            # store as dict and sequential list of session names
             if debug:  print("\nVOLUME",self.name, self.first, self.last)
             sprev = self.last if self.last else "none"
             while sprev != "none":
                 if debug:  print(sprev, end="  ")
+                # instantiate:
                 s = self.sessions[sprev] = self.Ses(self, sprev, path+"/"+sprev)
                 sprev = s.previous    ; self.sesnames.insert(0, s.name)
                 if sprev == "none" and self.first != s.name:
@@ -201,9 +207,6 @@ class ArchiveSet:
         def last_chunk_addr(self, vsize=None):
             if vsize is None:  vsize = self.volsize()
             return (vsize-1) - ((vsize-1) % self.archive.chunksize)
-
-        def map_exists(self):
-            return exists(self.mapfile)
 
         #def map_used(self):
             ## fix: account for -tmp filename
@@ -432,21 +435,24 @@ def get_lv_path_pool(path):
 
 def lv_remove(vgname, lvname, sync=True, check=False):
     # Enh: re-write with asyncio
+    assert not (sync == False and check)
     if lv_exists(vgname, lvname):
         del(volgroups[vgname].lvs[lvname])
         procs = volgroups[vgname].gc_procs    ; maxprocs = 16
         if len(procs) == maxprocs:
+            clean = options.clean
             for ii in reversed(range(len(procs))):
                 retcode = procs[ii].returncode
                 if retcode is not None:
-                    if check and retcode != 0:
+                    if clean and retcode != 0:
                         raise CalledProcessError("lvremove failed "+str(retcode))
                     del(procs[ii])
 
-        cmds = CP.lvm + " lvchange -p rw " + vgname+"/"+lvname + " ; "  \
-             + CP.blkdiscard + " /dev/" + vgname+"/"+lvname    + " ; "  \
-             + CP.lvm + " lvremove -f " + vgname+"/"+lvname
-        p = subprocess.Popen([CP.nice, CP.sh, "-c", cmds], shell=False,
+        cmds = [CP.sh, "-c", CP.lvm + " lvchange -p rw " + vgname+"/"+lvname + " ; "  \
+               + CP.blkdiscard + " /dev/" + vgname+"/"+lvname    + " ; "  \
+               + CP.lvm + " lvremove -f " + vgname+"/"+lvname]
+        if not (sync or options.clean):   cmds.insert(0, CP.nice)
+        p = subprocess.Popen(cmds, shell=False,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if not sync and len(procs) < maxprocs:
             procs.append(p)
@@ -964,19 +970,18 @@ def detect_dest_state(destsys):
                 +"' && mkdir -p '"+aset.destmountpoint+"/"+aset.destdir+topdir
                 +"' && cd '"+aset.destmountpoint+"/"+aset.destdir+topdir+"'"
 
-                # get space free info
-                +"  && echo -n 'wyng_check_free ' && stat -f -c '%a %S' ."
-
                 # send helper program to remote dest
                 +"  && rm -rf "+tmpdir+"-rpc  &&  mkdir -p "+tmpdir+"-rpc"
                 +"  && cat >"+tmpdir+"-rpc/dest_helper.py"
 
-                # check in_process status on remote
-                +"  && { if [ -e "+aset.name+"/in_process ]; then"
-                +"  echo 'wyng_in_process'; fi }"
-
+                # test write access and hardlinks
                 +"  && touch archive.dat"
                 +(" && ln -f archive.dat .hardlink" if options.dedup > 1 else "")
+
+                # check free space and in_process status on remote
+                +"  && echo -n 'wyng_check_free ' && stat -f -c '%a %S' ."
+                +"  && { if [ -e "+aset.name+"/in_process ]; then"
+                +"  echo 'wyng_in_process'; fi }"
                 ]
         try:
             do_exec([dest_run_args(desttype, cmd),
@@ -1283,7 +1288,7 @@ def update_delta_digest(datavol):
     # Get xml parser and initialize vars
     dtree       = xml.etree.ElementTree.parse(tmpdir+"/delta."+datavol).getroot()
     dblocksize  = int(dtree.get("data_block_size"))
-    bmap_byte   = lastindex   = dnewchunks   = isnew  = dfreedblocks = 0
+    dnewchunks   = isnew  = dfreedblocks = 0
 
     # Check for volume size increase;
     # Chunks from 'markall_pos' onward will be marked for backup.
@@ -1314,7 +1319,6 @@ def update_delta_digest(datavol):
 
             # 'blockpos' iterates over disk blocks, with thin LVM constant of 512 bytes/block.
             # dblocksize (local) & chunksize (dest) may be somewhat independant of each other.
-            # bmap_byte & lastindex buffer the changes, but perf impact not checked.
             for blockpos in range(blockbegin, blockend):
                 volsegment = blockpos // chunkblocks
                 bmap_pos = volsegment // 8    ; b = 1 << (volsegment%8)
@@ -1537,8 +1541,9 @@ def send_volume(datavol, localtime, send_all):
             # Advance addr, except when minibmap is zero len.
             if minibmap or send_all:  addr += chunksize
 
-    print("\r  100%", ("%8.1fM   |  %s" % (bcount/1000000, datavol)),
-          ("\n  (reduced %0.1fM)" % (ddbytes/1000000)) if ddbytes and options.debug else "")
+    print("\r  100% ", ("%8.1fM   |  %s" % (bcount/1000000, datavol)),
+          ("\n  (reduced %0.1fM)" % (ddbytes/1000000)) if ddbytes and options.debug else "",
+          end="")
 
     # Send session info, end stream and cleanup
     if fullmanifest:   fullmanifest.close()
@@ -1591,7 +1596,7 @@ def send_volume(datavol, localtime, send_all):
     if dedup and options.debug:   show_mem_stats()
 
     dest_free -= int(bcount + (bcount * 0.05))
-    return stream_started
+    return stream_started + (bcount//bs)
 
 
 # Build deduplication hash index and list
@@ -1602,7 +1607,7 @@ def init_dedup_index1(listfile=""):
 
 def init_dedup_index5(listfile=""):
 
-    ctime = time.time()    ; makelist = bool(listfile)
+    ctime = time.perf_counter()    ; makelist = bool(listfile)
     # Define arrays and element widths
     hash_w     = hash_bits // 8
     ht_ksize   = 4 # hex digits for tree key
@@ -1659,7 +1664,7 @@ def init_dedup_index5(listfile=""):
     aset.dedupsessions = ddsessions
 
     if not options.debug:  return
-    print("\nIndexed in %.1f seconds." % int(time.time()-ctime))
+    print("\nIndexed in %.1f seconds." % (time.perf_counter()-ctime))
     vsz, rss = map(int, os.popen("ps -up"+str(os.getpid())).readlines()[-1].split()[4:6])
     print("\nMemory use: Max %dMB, index count: %d, matches: %d" %
         (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * resource.getpagesize() // 1024//1024,
@@ -1720,7 +1725,7 @@ def monitor_send(datavols, selected=[], monitor_only=True):
               "to", (desttype+"://"+destsys) if desttype != "internal" else destpath)
 
     for datavol in sorted(incrementals | send_alls):
-        vol = aset.vols[datavol]
+        vol = aset.vols[datavol]    ; dnew = dfreed = 0
         print(" ", "Scan" if monitor_only else "Send", "volume      | ", datavol, flush=True,end="")
 
         dnew, dfreed = update_delta_digest(datavol)
@@ -1728,6 +1733,7 @@ def monitor_send(datavols, selected=[], monitor_only=True):
 
         if datavol in send_alls or os.stat(vol.mapfile+"-tmp").st_blocks > 0:
             if vol.changed_bytes > dest_free:
+                # Enh: add loop here for all volumes, implement a 'forced' mode
                 autoprune(datavol, needed_space=vol.changed_bytes, apmode=options.autoprune)
                 if vol.changed_bytes > dest_free:
                     print(" %d additional bytes needed." % (vol.changed_bytes-dest_free))
@@ -1735,12 +1741,13 @@ def monitor_send(datavols, selected=[], monitor_only=True):
                     error_cache.append(datavol)
                     continue
 
-            sent = send_volume(datavol, localtime, send_all=datavol in send_alls)
+            dnew = send_volume(datavol, localtime, send_all=datavol in send_alls)
 
         else:
-            print("\r  No changes   ", flush=True)
             rotate_snapshots(vol, rotate=False)
             os.rename(vol.mapfile+"-tmp", vol.mapfile)
+
+        print("\r" if dnew+dfreed else "\r  No changes   ", flush=True)
 
 
 def init_deltamap(vol, bmfile, bmsize):
@@ -2599,7 +2606,7 @@ def x_it(code, text):
 def cleanup():
     if not options.debug:
         shutil.rmtree(big_tmpdir, ignore_errors=True)
-        for f in (big_tmpdir, tmpdir, tmpdir+"-rpc"):
+        for f in (big_tmpdir, tmpdir, tmpdir+"-rpc", tmpdir+"-old"):
             shutil.rmtree(f, ignore_errors=True)
     if error_cache:
         sys.stderr.write("Error on volume(s): " + ", ".join(error_cache) + "\n")
@@ -2612,7 +2619,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "Wyng"
-prog_version          = "0.2.0wip"    ; prog_date = "20210506"
+prog_version          = "0.2.0rc9"    ; prog_date = "20210511"
 format_version        = 1
 print("%s %s %s" % (prog_name, prog_version, prog_date))
 prog_name             = prog_name.lower()
@@ -2930,3 +2937,6 @@ elif options.action   == "index-test":
 
 
 cleanup()
+
+
+# END
