@@ -146,6 +146,7 @@ class ArchiveSet:
             self.mapfile = path+"/deltamap"
             self.sessions= {}
             self.sesnames= []
+            self.tags    = set()
             self.meta_checked = False
             # persisted:
             self.format_ver = "0"
@@ -187,7 +188,7 @@ class ArchiveSet:
 
 
         def volname_check(vname):
-            check = re.compile("^[a-zA-Z0-9\+\._-]+$")
+            check = re.compile(alphanumsym)
             if check.match(vname) is None:
                 print("Only characters A-Z 0-9 . + _ - are allowed in volume names.")
                 return False
@@ -306,7 +307,8 @@ class ArchiveSet:
                             if ln.strip() == "uuid =":  continue
                             vname, value = ln.strip().split(" = ")
                             if vname == "tag" and vname not in self.tags:
-                                self.tags[value.split()[0]] = " ".join(value.split()[1:])
+                                tag_id = value.split()[0]    ; volume.tags.add(tag_id)
+                                self.tags[tag_id] = " ".join(value.split()[1:])
                                 continue
                             setattr(self, vname, 
                                 int(value) if vname in attr_int else value)
@@ -1717,15 +1719,19 @@ def monitor_send(datavols, selected=[], monitor_only=True):
 
     ses_tags = {}
     if options.tag and not options.unattended and not monitor_only:
+        print("Enter tag info as 'tagID[, tag description]'. Blank to end input.")
         while True:
-            ans = input("Tag for new session (blank to end)\n[%d]: " % (len(ses_tags)+1)).strip()
-            if len(ans) < 2 or not ans[0:2].isalnum():   break
+            ans = input("[%d]: " % (len(ses_tags)+1)).strip()
+            if not ans:   break
             tags = ans.split(",")    ; stag = tags[0].strip().lower()
             if len(stag) > 25 or " " in stag:
-                print("Max 25 alphanumeric chars for tag descriptor.")
+                print("Error: Max 25 alphanumeric chars for tag ID.")
+            elif not re.match(alphanumsym, stag):
+                print("Error: Allowed tag ID chars are", alphanumsym)
             else:
                 ses_tags[stag] = ",".join(tags[1:]).strip()[:90]
             if len(ses_tags) > 4:   break
+        print(len(ses_tags), "tags total.")
 
     if len(incrementals) > 0:
         get_lvm_deltas(incrementals)
@@ -1759,7 +1765,7 @@ def monitor_send(datavols, selected=[], monitor_only=True):
                     error_cache.append(datavol)
                     continue
 
-            dnew       = send_volume(datavol, localtime, send_all=datavol in send_alls)
+            dnew       = send_volume(datavol, localtime, ses_tags, send_all=datavol in send_alls)
             dest_free -= int(dnew + (dnew * 0.05))
 
         else:
@@ -1797,13 +1803,26 @@ def rotate_snapshots(vol, rotate=True):
 
 def prune_sessions(datavol, times):
 
+    volume = aset.vols[datavol]    ; sessions = volume.sesnames
+
     # Validate date-time params
-    for dt in times:
-        datetime.datetime.strptime(dt, "%Y%m%d-%H%M%S")
+    for pos, dt in enumerate(times):
+        if dt[0] != "^":
+            datetime.datetime.strptime(dt, "%Y%m%d-%H%M%S")
+            t1 = "S_"+times[0].strip()
+        elif dt[1:] not in volume.tags:
+            x_it(1, dt+" tag not in archive")
+        elif pos == 0:
+            t1 = dt[1:]
+            for s in sessions:
+                if t1 in volume.sessions[s].tags:   t1 = s   ; break
+        elif pos == 1:
+            t2 = dt[1:]
+            for s in reverse(sessions):
+                if t2 in volume.sessions[s].tags:   t2 = s   ; break
 
     # t1 alone should be a specific session date-time,
     # t1 and t2 together are a date-time range.
-    t1 = "S_"+times[0].strip()
     if len(times) > 1:
         if options.allbefore:  x_it(1, "Error: --all-before cannot be used with range.")
         t2 = "S_"+times[1].strip()
@@ -1813,8 +1832,6 @@ def prune_sessions(datavol, times):
 
     print("\nPruning Volume :", datavol)
 
-    volume = aset.vols[datavol]
-    sessions = volume.sesnames
     if len(sessions) < 2:
         print("  No extra sessions to prune.")
         return
@@ -1829,10 +1846,12 @@ def prune_sessions(datavol, times):
             to_prune.append(ses)
 
     elif t2 == "":
+        # find single session
         if t1 in sessions:
             to_prune.append(t1)
 
     else:
+        # find sessions in a date-time range
         start = len(sessions)   ; end = 0
         if t1 in sessions:
             start = sessions.index(t1)
@@ -2641,7 +2660,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "Wyng"
-prog_version          = "0.3.0wip"    ; prog_date = "20210512"
+prog_version          = "0.3.0wip"    ; prog_date = "20210513"
 format_version        = 1
 print("%s %s %s" % (prog_name, prog_version, prog_date))
 prog_name             = prog_name.lower()
@@ -2667,7 +2686,7 @@ ssh_opts              = ["-x", "-o", "ControlPath=~/.ssh/controlsocket-%r@%h-%p"
                          "-o", "ControlMaster=auto", "-o", "ControlPersist=60"]
 
 local_actions         = ("index-test","monitor","list","version","add")
-
+alphanumsym           = "^[a-zA-Z0-9\+\._-]+$"
 pjoin     = os.path.join    ; exists = os.path.exists
 
 
