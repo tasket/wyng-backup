@@ -1370,7 +1370,6 @@ def manifest_to_deltamap(datavol, manifest, mapsize):
 # but same content, and '>= 2' will check w the archive-wide index and link it if matched.
 
 def send_volume(datavol, localtime, send_all):
-    global dest_free
 
     vol         = aset.vols[datavol]            ; dedup       = options.dedup
     snap2vol    = vol.name + ".tock"            ; snap2size   = l_vols[snap2vol].lv_size
@@ -1592,10 +1591,8 @@ def send_volume(datavol, localtime, send_all):
     rotate_snapshots(vol, rotate=True)
     init_deltamap(vol, vol.mapfile, vol.mapsize())
     catch_signals(None)
-
     if dedup and options.debug:   show_mem_stats()
 
-    dest_free -= int(bcount + (bcount * 0.05))
     return stream_started + (bcount//bs)
 
 
@@ -1692,6 +1689,8 @@ def dedup_existing():
 # Controls flow of monitor and send_volume procedures:
 
 def monitor_send(datavols, selected=[], monitor_only=True):
+    global dest_free
+
     for prg in (CP.lvm, CP.blkdiscard, CP.dmsetup, CP.thin_delta ):
         if not shutil.which(prg):  raise RuntimeError("Required command not found: "+prg)
 
@@ -1741,7 +1740,8 @@ def monitor_send(datavols, selected=[], monitor_only=True):
                     error_cache.append(datavol)
                     continue
 
-            dnew = send_volume(datavol, localtime, send_all=datavol in send_alls)
+            dnew       = send_volume(datavol, localtime, send_all=datavol in send_alls)
+            dest_free -= int(dnew + (dnew * 0.05))
 
         else:
             rotate_snapshots(vol, rotate=False)
