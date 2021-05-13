@@ -1,4 +1,4 @@
-_<h1 align="center">wyng</h1>_
+_<h1 align="center">Wyng</h1>_
 <p align="center">
 Fast incremental backups for logical volumes.
 </p>
@@ -38,13 +38,13 @@ Release candidate with a range of features including:
 
  - Fast pruning of old backup sessions
 
- - Basic archive management such as add and delete volume
+ - Basic archive management such as add/delete volume and auto-pruning
 
  - Data deduplication (experimental)
 
 Data verification currently relies on hash tables being safely stored on the
 source admin system or encrypted volume. Integrated encryption and key-based
-verification are not yet implemented.
+verification are not yet implemented (see notes below for encryption methods).
 
 Wyng is released under a GPL license and comes with no warranties expressed or implied.
 
@@ -118,12 +118,12 @@ Please note that dashed parameters are always placed before the command.
 | **arch-check** _[volume_name]_    | Thorough check of archive data & metadata
 | **arch-delete**             | Remove data and metadata for all volumes.
 | **arch-deduplicate**        | Deduplicate existing data in archive (experimental).
+| **version**                 | Print the Wyng version and exit.
 
 ### Parameters / Options summary
 
 | _Option_                      | _Description_
 |-------------------------------|--------------
--u, --unattended       | Don't prompt for interactive input.
 --session=_date-time[,date-time]_ | Select a session or session range by date-time (receive, verify, prune).
 --all-before           | Select all sessions before the specified _--session date-time_ (prune).
 --autoprune=off        | Automatic pruning by calendar date. (experimental)
@@ -141,6 +141,9 @@ Please note that dashed parameters are always placed before the command.
 --testing-dedup=_N_    | Use deduplication algorithm for send (see Testing notes).
 --clean                | Perform garbage collection during arch-check.
 --meta-dir=_path_      | Use a different metadata dir than the default.
+--force                | Needed for arch-delete.
+-u, --unattended       | Don't prompt for interactive input.
+-t, --tag              | Use session tags (send, list).
 
 
 #### send
@@ -406,22 +409,25 @@ Selectable modes are:
 
 __off__ is the current default.
 
-__on__ removes more sessions as space is needed, while trying to retain any/all older sessions
+__on__ removes more sessions than _min_ as space is needed, while trying to retain any/all older sessions
 whenever available storage space allows.
+
+__min__ removes sessions before the 183 day mark, but no thinning-out (64 days) is performed.
 
 __full__ removes all sessions that are due to expire according to above criteria.
 
-__min__ removes sessions before the 183 day mark, but no thinning-out (64 days) is performed.
+
+`--tag`
+
+This will cause `send` to ask for tag(s) to be input, which will be applied to the new
+backup session; this currently doesn't work with `-u`. Also causes `list` to show tag
+information with each session.
 
 
 ### Tips
 
-* If the destination volume is not thoroughly trusted, its currently recommended
-to avoid backing up sensitive data to such a volume -- exercise caution
-and add encryption where necessary.
-
 * To reduce the size of incremental backups it may be helpful to remove cache
-files, if they exist in your volume(s). Typically, the greatest cache space
+files, if they exist in your source volume(s). Typically, the greatest cache space
 consumption comes from web browsers, so
 volumes holding paths like /home/user/.cache can impacted by this, depending
 on the amount and type of browser use associated with the volume. Three possible
