@@ -140,13 +140,12 @@ class ArchiveSet:
             self.archive = archive
             self.path    = path
             self.vgname  = vgname
-            ##self.present = lv_exists(vgname, name)
             self.enabled = False
             self.error   = False
             self.mapfile = path+"/deltamap"
             self.sessions= {}
             self.sesnames= []
-            self.tags    = set()
+            self.tags    = {}
             self.meta_checked = False
             # persisted:
             self.format_ver = "0"
@@ -237,8 +236,8 @@ class ArchiveSet:
                     print(self.changed_bytes, file=f)
                     f.flush()    ; os.fsync(f.fileno())
 
-        def new_session(self, sname):
-            ns = self.Ses(self, sname)
+        def new_session(self, sname, addtags={}):
+            ns = self.Ses(self, sname, addtags=addtags)
             ns.path = pjoin(self.path, sname)
             if self.first is None:
                 ns.sequence = 0
@@ -260,6 +259,7 @@ class ArchiveSet:
             if sname == self.last and ses.saved and not force:
                 raise ValueError("Cannot delete last session")
 
+            for tag in ses.tags:   self.tag_del(tag, sname)
             del(self.sesnames[index], self.sessions[sname])
 
             if self.archive.dedupsessions:
@@ -280,12 +280,22 @@ class ArchiveSet:
             if remove and exists(pjoin(self.path, sname)):   shutil.rmtree(ses.path)
             return affected
 
+        def tag_add(self, tag, sesname):
+            if tag in self.tags:
+                self.tags[tag].add(sesname)
+            else:
+                self.tags[tag] = {sesname}
+
+        def tag_del(self, tag, sesname):
+            if tag in self.tags:
+                if sesname in self.tags[tag]:   self.tags[tag].remove(sesname)
+                if len(self.tags[tag]) == 0:    del(self.tags[tag])
+
 
         class Ses:
-            def __init__(self, volume, name, path=""):
+            def __init__(self, volume, name, path="", addtags={}):
                 self.name     = name
                 self.path     = path
-                ##self.present  = exists(pjoin(path,"manifest"))
                 self.saved    = False
                 self.volume   = volume
                 self.toggle   = True
@@ -307,14 +317,31 @@ class ArchiveSet:
                             if ln.strip() == "uuid =":  continue
                             vname, value = ln.strip().split(" = ")
                             if vname == "tag" and vname not in self.tags:
-                                tag_id = value.split()[0]    ; volume.tags.add(tag_id)
-                                self.tags[tag_id] = " ".join(value.split()[1:])
+                                self.tag_add(value.split()[0], " ".join(value.split()[1:]))
                                 continue
+
                             setattr(self, vname, 
                                 int(value) if vname in attr_int else value)
+
                     if not exists(pjoin(path,"manifest")):
                         raise FileNotFoundError("ERROR: Manifest does not exist for "+name)
                     self.saved = True
+
+                for tag, tdesc in addtags.items():   self.tag_add(tag, tdesc)
+
+
+            def tag_add(self, tag, tdesc):
+                self.tags[tag] = tdesc    ; self.saved = False    ; voltags = self.volume.tags
+                if tag in voltags:
+                    voltags[tag].add(self.name)
+                else:
+                    voltags[tag] = {self.name}
+
+            def tag_del(self, tag, sesname):
+                del(self.tags[tag])       ; voltags = self.volume.tags
+                if tag in voltags:
+                    if sesname in voltags[tag]:   voltags[tag].remove(self.name)
+                    if len(voltags[tag]) == 0:    del(voltags[tag])
 
             def save_info(self, fname="info"):
                 if not self.path:
@@ -327,25 +354,11 @@ class ArchiveSet:
                     print("format =",    self.format, file=f)
                     print("sequence =",  self.sequence, file=f)
                     print("previous =",  self.previous, file=f)
-                    for tkey, tdata in self.tags.items():
-                        print("tag =",   tkey, tdata, file=f)
+                    for tkey, tdesc in self.tags.items():
+                        print("tag =",   tkey, tdesc, file=f)
                     f.flush()    ; os.fsync(f.fileno())
 
-
-class Destination:
-    def __init__(self, dtype):
-        self.dtype       = dtype
-        self.free_space  = None
-
-    def check_free_dest(self): ## Do we need this??
-        do_exec([dest_run_args(desttype, ["stat -f -c '%a %S' " + aset.destmountpoint]),
-                    # sanitize remote output:
-                    ["cat","-v"],  ["head","--bytes=128000"]
-                ], out=tmpdir+"/check_free")
-
-        one, two = open(tmpdir+"/check_free","r").readlines[0].split()
-        self.free_space = int(one) * int(two)
-        return self.free_space
+# END ArchiveSet, Volume, Ses
 
 
 # Define absolute paths of commands
@@ -1319,7 +1332,7 @@ def update_delta_digest(datavol):
             blocklen   = int(delta.get("length")) * dblocksize
             blockend   = min(blockbegin+blocklen, snap_ceiling)
             if delta.tag in ("different", "right_only"):
-                isnew = 1 ##dnewblocks += blockend - blockbegin
+                isnew = 1
             elif delta.tag == "left_only":
                 isnew = 0    ; dfreedblocks += blockend - blockbegin
             else: # superfluous tag
@@ -1395,14 +1408,13 @@ def send_volume(datavol, localtime, ses_tags, send_all):
         fullmanifest = None
     fman_hash     = fman_fname = ""
 
-    ses = vol.new_session(bksession)
+    ses = vol.new_session(bksession, addtags=ses_tags)
     ses.localtime = localtime
     ses.uuid      = l_vols[snap2vol].lv_uuid
     ses.trans_id  = l_vols[datavol].transaction_id
     ses.volsize   = snap2size
     ses.format    = "folders"
     ses.path      = vol.path+"/"+bksession+"-tmp"
-    ses.tags      = ses_tags
 
     # Code from init_dedup_indexN() localized here for efficiency.
     dedup_idx     = dedup_db = None
@@ -1740,7 +1752,8 @@ def monitor_send(datavols, selected=[], monitor_only=True):
         init_dedup_index()
 
     if not monitor_only:
-        cmpvols = [x for x in aset.vols.values() if x.name in incrementals | send_alls and x.sessions]
+        cmpvols = [x for x in aset.vols.values()
+                         if x.name in incrementals | send_alls and x.sessions]
         cmpses  = [v.sessions[v.sesnames[-1]] for v in cmpvols]
         if compare_files(volumes=cmpvols, sessions=cmpses):
             x_it(1, "Error: Local and archive metadata differ.")
@@ -1804,41 +1817,64 @@ def rotate_snapshots(vol, rotate=True):
 def prune_sessions(datavol, times):
 
     volume = aset.vols[datavol]    ; sessions = volume.sesnames
-
-    # Validate date-time params
-    for pos, dt in enumerate(times):
-        if dt[0] != "^":
-            datetime.datetime.strptime(dt, "%Y%m%d-%H%M%S")
-            t1 = "S_"+times[0].strip()
-        elif dt[1:] not in volume.tags:
-            x_it(1, dt+" tag not in archive")
-        elif pos == 0:
-            t1 = dt[1:]
-            for s in sessions:
-                if t1 in volume.sessions[s].tags:   t1 = s   ; break
-        elif pos == 1:
-            t2 = dt[1:]
-            for s in reverse(sessions):
-                if t2 in volume.sessions[s].tags:   t2 = s   ; break
-
-    # t1 alone should be a specific session date-time,
-    # t1 and t2 together are a date-time range.
-    if len(times) > 1:
-        if options.allbefore:  x_it(1, "Error: --all-before cannot be used with range.")
-        t2 = "S_"+times[1].strip()
-        if t2 <= t1:  x_it(1, "Error: Second date-time must be later than first.")
-    else:
-        t2 = ""
-
-    print("\nPruning Volume :", datavol)
+    t1 = t2 = ""                   ; taglist, to_prune  = [], []
 
     if len(sessions) < 2:
         print("  No extra sessions to prune.")
         return
 
+    # Validate date-time params
+    for pos, dt in enumerate(times):
+        if dt[0] != "^":
+            if dt[:2] != "S_":   times[pos] = "S_"+dt.strip()
+            datetime.datetime.strptime(dt[2:], "%Y%m%d-%H%M%S")
+        elif dt[1:] not in volume.tags:
+            print(" No match for", dt)
+            return
+        elif pos == 0:
+            t1 = dt[1:]
+            for sesname in sessions:
+                if t1 in volume.sessions[sesname].tags:
+                    if len(times) == 1:
+                        taglist.append(sesname)
+                    else:
+                        t1 = sesname   ; break
+        elif pos == 1:
+            t2 = dt[1:]
+            for sesname in reversed(sessions):
+                if t2 in volume.sessions[sesname].tags:   t2 = sesname   ; break
+
+    # taglist may contain a discontinuous range of sessions. Detect ranges and
+    # send back through prune_sessions() as date-times.
+    if taglist:
+        seslist = sessions[:] + ["END"]
+        for sesname in seslist:
+            if sesname in taglist:
+                to_prune.append(sesname)
+            else:
+                if to_prune:  print(" ", "  ".join(to_prune))
+                if len(to_prune) > 1:
+                    prune_sessions(datavol, [to_prune[0], to_prune[-1]])
+                elif len(to_prune) == 1:
+                    prune_sessions(datavol, to_prune)
+                to_prune.clear()
+        return
+
+
+    # t1 alone should be a specific session date-time,
+    # t1 and t2 together are a date-time range.
+    if not t1:   t1 = times[0]
+    if len(times) > 1:
+        if options.allbefore:  x_it(1, "Error: --all-before cannot be used with range.")
+        if not t2:   t2 = times[1]
+        if t2 <= t1:  x_it(1, "Error: Second date-time must be later than first.")
+    else:
+        t2 = ""
+
+    #print("\nPruning Volume :", datavol)
+
     # Find specific sessions to prune;
     # Use contiguous ranges.
-    to_prune = []
     if options.allbefore:
         for ses in sessions:
             if ses >= t1:
@@ -1952,7 +1988,6 @@ def autoprune(datavol, needed_space=0, apmode="off", include=[]):
             if ses is None:   continue
             if vol.sessions[ses].toggle:
                 if to_prune:
-                    #print("\n", to_prune) ####
                     target_s = vol.sesnames[vol.sesnames.index(to_prune[-1]) + 1]
                     merge_sessions(datavol, to_prune, target_s, clear_sources=True)
                     for i in to_prune:   sessions[sessions.index(i)] = None
@@ -2155,8 +2190,6 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
 
     for ses in sources:  shutil.rmtree(volume.path+"/"+ses, ignore_errors=True)
 
-    ##print("done.")
-
 
 # Compare files between local and dest archive, using hashes.
 # The file tmpdir/compare-files.lst can be pre-populated with file paths if clear=False;
@@ -2233,14 +2266,25 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
     # Set the session to retrieve
     if select_ses:
-        datetime.datetime.strptime(select_ses, "%Y%m%d-%H%M%S")
-        select_ses = "S_"+select_ses
+        if select_ses[0] == "^":
+            # match tag to session id
+            tag = select_ses[1:]
+            if tag in vol.tags:
+                select_ses = sorted(vol.tags[tag])[-1]
+                print("Matched tag to", select_ses)
+        else:
+            # validate date-time input
+            datetime.datetime.strptime(select_ses, "%Y%m%d-%H%M%S")
+            select_ses = "S_"+select_ses
+
         if select_ses not in sessions:
-            x_it(1, "The specified session date-time does not exist.")
+            x_it(1, "No match for specified session criteria.")
+
     elif len(sessions) > 0:
         select_ses = sessions[-1]
     else:
         x_it(1, "No sessions available.")
+
     if diff and remap and select_ses != sessions[-1]:
         x_it(1, "Cannot use prior session for remap.")
 
@@ -2660,7 +2704,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "Wyng"
-prog_version          = "0.3.0wip"    ; prog_date = "20210513"
+prog_version          = "0.3.0wip"    ; prog_date = "20210514"
 format_version        = 1
 print("%s %s %s" % (prog_name, prog_version, prog_date))
 prog_name             = prog_name.lower()
