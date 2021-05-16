@@ -437,11 +437,12 @@ less local disk space when snapshots are a factor (implies '--sparse-write`).
 
 When used with the `send` command, data chunks from the new backup will be sent only if
 they don't already exist somewhere in the archive. If its a duplicate, the chunk will be
-linked instead of sent and stored, possibly saving time and disk space.
+linked instead of sent and stored, saving disk space and possibly time and bandwith.
 
 The tradeoff for deduplicating is longer startup time for Wyng, in addition to using more
-memory and CPU during backups. Using `--dedup` works best if you are backing-up multiple volumes
-that have a lot of the same content and/or you are backing-up over a slow Internet link.
+memory and CPU resources during backups. Using `--dedup` works best if you are backing-up
+multiple volumes that have a lot of the same content and/or you are backing-up over a slow
+Internet link.
 
 `--autoprune=(off | on | min | full)` (experimental)
 
@@ -450,8 +451,9 @@ automatically remove older backup sessions according to date criteria. When used
 specifically, the autopruning process will only be triggered if the destination filessytem is
 low on free space.
 
-The criteria are currently hard-coded to remove all sessions after 183 days,
-and after 64 days to thin-out the number of sessions down to a rate of 2 sessions every 7 days.
+The criteria are currently hard-coded to remove all sessions older than 366 days,
+and to thin-out the number of sessions older than 32 days down to a rate of 2 sessions
+every 7 days.
 In the future these parameters can be reconfigured by the user.
 
 Selectable modes are:
@@ -461,7 +463,7 @@ __off__ is the current default.
 __on__ removes more sessions than _min_ as space is needed, while trying to retain any/all older sessions
 whenever available storage space allows.
 
-__min__ removes sessions before the 366 day mark, but no thinning-out (64 days) is performed.
+__min__ removes sessions before the 366 day mark, but no thinning-out is performed.
 
 __full__ removes all sessions that are due to expire according to above criteria.
 

@@ -12,7 +12,7 @@ import sys, signal, os, stat, shutil, subprocess, time, datetime
 import re, mmap, bz2, zlib, gzip, tarfile, io, fcntl, tempfile
 import argparse, configparser, hashlib, functools, uuid
 import xml.etree.ElementTree    ; from itertools import islice
-# For deduplication tests:
+# For deduplication:
 import resource
 from array import array
 
@@ -67,12 +67,12 @@ class ArchiveSet:
             # - deduplication is in effect
             if allvols or self.in_process or options.from_arch or \
             (cp["volumes"][key] != "disable" and \
-            (len(options.volumes)==0 or key in options.volumes or options.dedup>1)):
+            (len(options.volumes)==0 or key in options.volumes or options.dedup)):
                 os.makedirs(pjoin(self.path,key), exist_ok=True)
                 # instantiate:
                 self.vols[key] = self.Volume(self, key, pjoin(self.path,key), self.vgname)
                 self.vols[key].enabled = cp["volumes"][key] != "disable"
-                if options.dedup > 1:   self.dedupsessions += self.vols[key].sessions.values()
+                if options.dedup:   self.dedupsessions += self.vols[key].sessions.values()
 
         # Create master session list sorted for deduplication
         self.dedupsessions.sort(key=lambda x: x.localtime, reverse=True)
@@ -249,7 +249,7 @@ class ArchiveSet:
             self.last = sname
             self.sesnames.append(sname)
             self.sessions[sname] = ns
-            if options.dedup > 1:    self.archive.dedupsessions.append(ns)
+            if options.dedup:    self.archive.dedupsessions.append(ns)
             #os.makedirs(pjoin(self.path, sname))
             return ns
 
@@ -997,7 +997,7 @@ def detect_dest_state(destsys):
 
                 # test write access and hardlinks
                 +"  && touch archive.dat"
-                +(" && ln -f archive.dat .hardlink" if options.dedup > 1 else "")
+                +(" && ln -f archive.dat .hardlink" if options.dedup else "")
 
                 # check free space and in_process status on remote
                 +"  && echo -n 'wyng_check_free ' && stat -f -c '%a %S' ."
@@ -1399,7 +1399,7 @@ def send_volume(datavol, localtime, ses_tags, send_all):
     bksession   = "S_"+localtime                ; sdir        = pjoin(datavol, bksession)
     prior_size  = vol.volsize()                 ; prior_ses   = vol.last
 
-    if dedup and len(vol.sessions):
+    if len(vol.sessions):
         # Our chunks are usually smaller than LVM's, so generate a full manifest to detect
         # significant amount of unchanged chunks that are flagged in the delta bmap.
         fullmanifest = open(merge_manifests(datavol), "r")
@@ -1418,12 +1418,12 @@ def send_volume(datavol, localtime, ses_tags, send_all):
 
     # Code from init_dedup_indexN() localized here for efficiency.
     dedup_idx     = dedup_db = None
-    if dedup == 5:
+    if dedup:
         hashtree, ht_ksize, hash_w, dataf, chtree, chdigits, ch_w, ses_w \
                   = aset.dedupindex
         chtree_max= 2**(chtree[0].itemsize*8)
         idxcount  = dataf.seek(0,2) // (ch_w+ses_w)    ; ddblank_ch = bytes(hash_w)
-    if dedup > 1:   ddsessions = aset.dedupsessions    ; ses_index = ddsessions.index(ses)
+        ddsessions = aset.dedupsessions                ; ses_index = ddsessions.index(ses)
 
     # Set current dir and make new session folder
     os.chdir(metadir+bkdir)
@@ -1528,7 +1528,7 @@ def send_volume(datavol, localtime, ses_tags, send_all):
                 print(hexhash, destfile, file=hashf)
 
                 # If chunk already in archive, link to it
-                if dedup == 5:
+                if dedup:
                     bhashb = bhash.digest()
                     i      = int(hexhash[:ht_ksize], 16)
                     pos    = hashtree[i].find(bhashb)     ; ddses = None
@@ -1618,10 +1618,6 @@ def send_volume(datavol, localtime, ses_tags, send_all):
 
 
 # Build deduplication hash index and list
-
-def init_dedup_index1(listfile=""):
-    return
-
 
 def init_dedup_index5(listfile=""):
 
@@ -1748,7 +1744,7 @@ def monitor_send(datavols, selected=[], monitor_only=True):
     if len(incrementals) > 0:
         get_lvm_deltas(incrementals)
 
-    if options.dedup > 1:
+    if options.dedup:
         init_dedup_index()
 
     if not monitor_only:
@@ -1835,7 +1831,7 @@ def prune_sessions(datavol, times):
             t1 = dt[1:]
             for sesname in sessions:
                 if t1 in volume.sessions[sesname].tags:
-                    if len(times) == 1:
+                    if len(times) == 1 and not options.allbefore:
                         taglist.append(sesname)
                     else:
                         t1 = sesname   ; break
@@ -1925,7 +1921,7 @@ def prune_sessions(datavol, times):
 # target_size (0 or MB int): Size cap for archive
 # oldest (date): date before which all sessions are pruning candidates
 # nthresh: min number of sessions to prune this time (0 = prune all candidates)
-# ndays_ago (int): number of days ago before which the thinning params are applied
+# thin_days (int): number of days ago before which the thinning params are applied
 # ndays & nsessions: a days/sessions ratio for amount of sessions left after thinning
 
 def autoprune(datavol, needed_space=0, apmode="off", include=[]):
@@ -1945,10 +1941,10 @@ def autoprune(datavol, needed_space=0, apmode="off", include=[]):
     vol       = aset.vols[datavol]
     if len(vol.sesnames) < 4:  return False
     sessions  = vol.sesnames[:-1]             ; marked  = 0
-    today     = dtdate.today()                ; oldest  = today-datetime.timedelta(days=183)
-    ndays_ago = datetime.timedelta(days=64)   ; ndays   = 7      ; nsessions = 2
+    today     = dtdate.today()                ; oldest  = today-datetime.timedelta(days=366)
+    thin_days = datetime.timedelta(days=32)   ; ndays   = 7      ; nsessions = 2
     startdate = to_date(sessions[0])          ; nthresh = 3 if apmode == "on" else 0
-    enddate   = min(to_date(sessions[-2]), today-ndays_ago)
+    enddate   = min(to_date(sessions[-2]), today-thin_days)
 
     # Make a 2d array of ordinal dates and populate with session id + flag
     apcal = { day: [] for day in range(dtdate(startdate.year,1,1).toordinal(),
@@ -2704,7 +2700,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "Wyng"
-prog_version          = "0.3.0wip"    ; prog_date = "20210514"
+prog_version          = "0.3.0wip"    ; prog_date = "20210516"
 format_version        = 1
 print("%s %s %s" % (prog_name, prog_version, prog_date))
 prog_name             = prog_name.lower()
@@ -2764,7 +2760,7 @@ parser.add_argument("--all-before", dest="allbefore", action="store_true", defau
 #parser.add_argument("--tarfile", action="store_true", dest="tarfile", default=False,
 #                    help="Store backup session as a tarfile")
 parser.add_argument("--session", help="YYYYMMDD-HHMMSS[,YYYYMMDD-HHMMSS]"
-                                 " select session date(s), singular or range.")
+                                 " select session date|tag, singular or range.")
 parser.add_argument("--autoprune", default="off", help="Automatic pruning")
 parser.add_argument("--from", dest="from_arch", default="",
                     help="Address+Path of other non-configured archive (receive, verify)")
@@ -2785,8 +2781,7 @@ parser.add_argument("--meta-dir", dest="metadir", default="", help="Use alternat
 parser.add_argument("--force", action="store_true", default=False, help="For arch-delete")
 parser.add_argument("--clean", action="store_true", default=False, help="Clean snapshots, metadata")
 parser.add_argument("--debug", action="store_true", default=False, help="Debug mode")
-parser.add_argument("--testing-dedup", dest="dedup", type=int, default=1,
-                    help="Test experimental deduplication (send)")
+parser.add_argument("--dedup", dest="dedup", type=int, default=0,  help="Data deduplication (send)")
 parser.add_argument("volumes", nargs="*")
 options = parser.parse_args()
 #subparser = parser.add_subparsers(help="sub-command help")
@@ -2823,7 +2818,7 @@ if "blake2b" in hashlib.algorithms_available:
 if options.from_arch and options.action not in ("receive","verify","list","arch-init"):
     x_it(1,"--from option can be used only with: receive, verify, list, arch-init")
 # Select dedup test algorithm.
-init_dedup_index = [None, init_dedup_index1, None, None, None, init_dedup_index5][options.dedup]
+init_dedup_index = [None, init_dedup_index5][options.dedup]
 monitor_only     = options.action == "monitor" # gather metadata without backing up
 
 # Get LVM listings
@@ -3017,17 +3012,8 @@ elif options.action == "arch-delete":
 
 
 elif options.action == "arch-deduplicate":
-    if options.dedup > 1:
-        dedup_existing()
-    else:
-        x_it(1,"Requires '--testing-dedup value greater than 1.")
-
-
-elif options.action   == "index-test":
-    init_dedup_index()
+    dedup_existing()
 
 
 cleanup()
-
-
 # END
