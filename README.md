@@ -28,7 +28,7 @@ untrusted data in guest filesystems to bolster container-based security.
 
 ### Status
 
-Release candidate with a range of features including:
+Public release v0.3 with a range of features including:
 
  - Incremental backups of Linux thin-provisioned LVM volumes
 
@@ -40,7 +40,9 @@ Release candidate with a range of features including:
 
  - Basic archive management such as add/delete volume and auto-pruning
 
- - Data deduplication (experimental)
+ - Data deduplication
+
+ - Marking and processing backup sessions with tags
 
 Data verification currently relies on hash tables being safely stored on the
 source admin system or encrypted volume. Integrated encryption and key-based
@@ -57,11 +59,11 @@ Before starting:
 * Thin-provisioning-tools, lvm2, and python >=3.5.4 must be present on the source system.
 
 * The destination system (if different from source) should also have python, plus
-a basic Unix command set *and* Unix filesystem.
+a basic Unix command set and Unix-like filesystem.
 
 * Volumes to be backed-up must reside in an LVM thin-provisioned pool.
 
-Wyng is currently distributed as a single python executable with no complex
+Wyng is currently distributed as a single Python executable with no complex
 supporting modules or other program files; it can be placed in '/usr/local/bin'
 or another place of your choosing.
 
@@ -120,6 +122,7 @@ Please note that dashed parameters are always placed before the command.
 | **arch-deduplicate**        | Deduplicate existing data in archive (experimental).
 | **version**                 | Print the Wyng version and exit.
 
+
 ### Parameters / Options summary
 
 | _Option_                      | _Description_
@@ -138,13 +141,12 @@ Please note that dashed parameters are always placed before the command.
 --compression          | (arch-init) Set compression type:level.
 --hashtype             | (arch-init) Set hash algorithm: _sha256_ or _blake2b_.
 --chunk-factor         | (arch-init) Set archive chunk size.
---testing-dedup=_N_    | Use deduplication algorithm for send (see Testing notes).
+--dedup=_N_            | Use deduplication for send (see Testing notes).
 --clean                | Perform garbage collection during arch-check.
 --meta-dir=_path_      | Use a different metadata dir than the default.
 --force                | Needed for arch-delete.
 -u, --unattended       | Don't prompt for interactive input.
 -t, --tag              | Use session tags (send, list).
-
 
 #### send
 
@@ -303,6 +305,22 @@ Renames a volume _'oldname'_ in the archive to _'newname'_. Note: This will rena
 archive volume, _not_ your source volume.
 
 
+#### arch-deduplicate
+
+De-duplicates the entire archive by removing repeating patterns. This can save space
+on the destination's drive while keeping the archived volumes intact.
+
+De-duplication can also be performed on an ongoing basis by using `--dedup=1` with `send`.
+
+
+```
+
+wyng arch-deduplicate
+
+
+```
+
+
 #### arch-init
 
 Initialize a new backup archive configuration...
@@ -325,6 +343,19 @@ Import a configuration from an existing archive...
 ```
 
 wyng --from=internal:/mountpoint arch-init
+
+
+```
+
+
+#### arch-delete
+
+Deletes the entire archive on the destination, and all data that was saved in it; also removes
+archive metadata from the source system. Use with caution!
+
+```
+
+wyng --force arch-delete
 
 
 ```
@@ -372,10 +403,18 @@ Note that _compression, hashtype_ and _chunk-factor_ cannot be changed for an ar
 
 ### Misc Options
 
-`--session=<datetime>[,<datetime>]`
+`--session=<date-time>[,<date-time>]` OR
+`--session=^<tag>[,^<tag>]`
 
-Session allows you to specify a datetime spec or in some cases a datetime range for the
-`receive`, `verify`, `diff`, `prune` and `arch-check` commands.
+Session allows you to specify a single date-time or tag spec for the`receive`, `verify`, `diff`,
+and `arch-check` commands. Using a tag selects the last session having that tag. When specifying
+a tag, it must be prefixed by a `^` carat.
+
+For `prune`, specifying
+a tag will have different effects: a single spec using a tag will remove only each individual session
+with that tag, whereas a tag in a dual (range) spec will define an inclusive range anchored at the first
+instance of the tag (when the tag is the first spec) or the last instance (when the tag is the
+second range spec). Also, date-times and tags may be used together in a range spec.
 
 `--sparse-write`
 
@@ -394,7 +433,17 @@ from the archive and written to the local volume. This results in reduced remote
 usage while receiving at the expense of some extra CPU usage on the local machine, and also uses
 less local disk space when snapshots are a factor (implies '--sparse-write`).
 
-`--autoprune[=off|on|min|full]` (experimental)
+`--dedup=(0|1)`
+
+When used with the `send` command, data chunks from the new backup will be sent only if
+they don't already exist somewhere in the archive. If its a duplicate, the chunk will be
+linked instead of sent and stored, possibly saving time and disk space.
+
+The tradeoff for deduplicating is longer startup time for Wyng, in addition to using more
+memory and CPU during backups. Using `--dedup` works best if you are backing-up multiple volumes
+that have a lot of the same content and/or you are backing-up over a slow Internet link.
+
+`--autoprune=(off | on | min | full)` (experimental)
 
 Autoprune may be used with either the `prune` or `send` commands and will cause Wyng to
 automatically remove older backup sessions according to date criteria. When used with `send`
@@ -412,19 +461,22 @@ __off__ is the current default.
 __on__ removes more sessions than _min_ as space is needed, while trying to retain any/all older sessions
 whenever available storage space allows.
 
-__min__ removes sessions before the 183 day mark, but no thinning-out (64 days) is performed.
+__min__ removes sessions before the 366 day mark, but no thinning-out (64 days) is performed.
 
 __full__ removes all sessions that are due to expire according to above criteria.
-
 
 `--tag`
 
 This will cause `send` to ask for tag(s) to be input, which will be applied to the new
 backup session; this currently doesn't work with `-u`. Also causes `list` to show tag
-information with each session.
+information.
 
 
 ### Tips
+
+* If the destination volume is not thoroughly trusted, its currently recommended
+to avoid backing up sensitive data to such a volume -- exercise caution
+and add encryption where necessary.
 
 * To reduce the size of incremental backups it may be helpful to remove cache
 files, if they exist in your source volume(s). Typically, the greatest cache space
