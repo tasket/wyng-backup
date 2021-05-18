@@ -164,8 +164,8 @@ class ArchiveSet:
             if exists(pjoin(path,"volinfo")):
                 with open(pjoin(path,"volinfo"), "r") as f:
                     for ln in f:
-                        vname, value = ln.strip().split(" = ")
-                        setattr(self, vname, value.strip())
+                        vname, value = ln.strip().split("=", maxsplit=1)
+                        setattr(self, vname.strip(), value.strip())
 
             if exists(pjoin(path,"volchanged")):
                 self.changed_bytes = int(open(pjoin(path,"volchanged"),"r").readlines()[0].strip())
@@ -320,7 +320,8 @@ class ArchiveSet:
                     with open(pjoin(path,"info"), "r") as sf:
                         for ln in sf:
                             if ln.strip() == "uuid =":  continue
-                            vname, value = ln.strip().split(" = ")
+                            vname, value = ln.split("=", maxsplit=1)
+                            vname = vname.strip()    ; value = value.strip()
                             if vname == "tag" and vname not in self.tags:
                                 self.tag_add(value.split()[0], value.split(maxsplit=1)[-1])
                                 continue
@@ -2617,24 +2618,25 @@ def show_list(selected_vols):
             vol = aset.vols[vname]   ; sname = vol.sesnames[-1][2:] if len(vol.sesnames) else " "
             if options.verbose:
                 print(fmt % ((aset.vols[vname].volsize() / 1024**3), vname, sname))
+                if vol.desc:   print("  desc:", vol.desc)
             else:
                 print(vname)
         return
 
     # Print list of sessions grouped by tag. First, organize by tag:
     if options.tag:
-        ltags = {}
+        print("\nTag Assignments")    ; ltags = {}
         for dv in selected_vols:
             vol = aset.vols[dv]
             for tag, tses in vol.tags.items():
-                tset = ( dv+"/"+x[2:] for x in tses )
+                tset = ( dv+" / "+x[2:] for x in tses )
                 if tag not in ltags:
                     ltags[tag] = list(tset)
                 else:
                     ltags[tag] += tset
         # Print result:
         for tag in sorted(ltags):
-            print(tag+":")
+            print("\n"+tag+":")
             for ses in sorted(ltags[tag]):   print(" ", ses)
         return
 
