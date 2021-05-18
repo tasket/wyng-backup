@@ -1741,7 +1741,7 @@ def monitor_send(datavols, selected=[], monitor_only=True):
             elif not re.match(alphanumsym, stag):
                 sys.stderr.write("Error: Allowed tag ID chars are "+alphanumsym+"\n")
             else:
-                ses_tags[stag] = tags[1].strip()[:comment_len]
+                ses_tags[stag] = "" if len(tags) == 1 else tags[1].strip()[:comment_len]
             if len(ses_tags) > 4:   break
         print(len(ses_tags), "tags total.")
 
