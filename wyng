@@ -285,17 +285,6 @@ class ArchiveSet:
             if remove and exists(pjoin(self.path, sname)):   shutil.rmtree(ses.path)
             return affected
 
-        def tag_add(self, tag, sesname):
-            if tag in self.tags:
-                self.tags[tag].add(sesname)
-            else:
-                self.tags[tag] = {sesname}
-
-        def tag_del(self, tag, sesname):
-            if tag in self.tags:
-                if sesname in self.tags[tag]:   self.tags[tag].remove(sesname)
-                if len(self.tags[tag]) == 0:    del(self.tags[tag])
-
 
         class Ses:
             def __init__(self, volume, name, path="", addtags={}):
@@ -322,8 +311,8 @@ class ArchiveSet:
                             if ln.strip() == "uuid =":  continue
                             vname, value = ln.split("=", maxsplit=1)
                             vname = vname.strip()    ; value = value.strip()
-                            if vname == "tag" and vname not in self.tags:
-                                self.tag_add(value.split()[0], value.split(maxsplit=1)[-1])
+                            if vname == "tag":
+                                self.tag_add(self.tag_parse(value))
                                 continue
 
                             setattr(self, vname, 
@@ -333,16 +322,28 @@ class ArchiveSet:
                         raise FileNotFoundError("ERROR: Manifest does not exist for "+name)
                     self.saved = True
 
-                for tag, tdesc in addtags.items():   self.tag_add(tag, tdesc)
+                for tag in addtags:   self.tag_add(tag)
 
 
-            def tag_add(self, tag, tdesc):
-                self.saved = False    ; voltags = self.volume.tags    ; tdesc = tdesc.strip()
-                self.tags[tag] = "" if tdesc == tag else tdesc
-                if tag in voltags:
-                    voltags[tag].add(self.name)
+            def tag_parse(self, tag, delim=" "):
+                parts = tag.strip().split(delim, maxsplit=1)    ; tag_id = parts[0].strip().lower()
+                result = tuple()
+                if len(tag_id) > tag_len:
+                    sys.stderr.write("Error: Max "+tag_len+" alphanumeric chars for tag ID.\n")
+                elif not re.match(alphanumsym, tag_id):
+                    sys.stderr.write("Error: Allowed tag ID chars are "+alphanumsym+"\n")
                 else:
-                    voltags[tag] = {self.name}
+                    result = (tag_id, "" if len(parts) == 1 else parts[1].strip())
+                return result
+
+            def tag_add(self, tag):
+                self.saved = False    ; voltags = self.volume.tags    ; tid = tag[0]
+                if tid not in self.tags:   self.tags[tid] = tag[1]
+                if tid in voltags:
+                    voltags[tid].add(self.name)
+                else:
+                    voltags[tid] = {self.name}
+                return True
 
             def tag_del(self, tag, sesname):
                 del(self.tags[tag])       ; voltags = self.volume.tags
@@ -1730,21 +1731,23 @@ def monitor_send(datavols, selected=[], monitor_only=True):
     if len(incrementals)+len(send_alls) == 0:
         x_it(0, "No new data.")
 
-    ses_tags = {}
-    if options.tag and not options.unattended and not monitor_only:
+    # Process session tags
+    ses_tags = []
+    if options.tag and options.tag == [""] and not options.unattended and not monitor_only:
         print("Enter tag info as 'tagID[, tag description]'. Blank to end input.")
         while True:
             ans = ask_input("[%d]: " % (len(ses_tags)+1)).strip()
             if not ans:   break
-            tags = ans.split(",", maxsplit=1)    ; stag = tags[0].strip().lower()
-            if len(stag) > tag_len or " " in stag:
-                sys.stderr.write("Error: Max "+tag_len+" alphanumeric chars for tag ID.\n")
-            elif not re.match(alphanumsym, stag):
-                sys.stderr.write("Error: Allowed tag ID chars are "+alphanumsym+"\n")
-            else:
-                ses_tags[stag] = "" if len(tags) == 1 else tags[1].strip()[:comment_len]
+            tag = aset.Volume.Ses.tag_parse(None, ans, delim=",")
+            if not tag:   continue
+            ses_tags.append(tag)
             if len(ses_tags) > 4:   break
         print(len(ses_tags), "tags total.")
+    elif options.tag and not monitor_only:
+        for tag_opt in options.tag:
+            tag = aset.Volume.Ses.tag_parse(None, tag_opt, delim=",")
+            if not tag:   raise ValueError("Invalid tag "+tag_opt)
+            ses_tags.append(tag)
 
     if len(incrementals) > 0:
         get_lvm_deltas(incrementals)
@@ -2607,6 +2610,23 @@ def delete_volume(dv):
 
 def show_list(selected_vols):
 
+    # Print list of sessions grouped by tag. First, organize by tag:
+    if options.tag:
+        print("\nTag Assignments")    ; ltags = {}
+        for dv in selected_vols if selected_vols else datavols:
+            vol = aset.vols[dv]
+            for tag, tses in vol.tags.items():
+                tset = ( dv+" / "+x[2:] for x in tses )
+                if tag not in ltags:
+                    ltags[tag] = list(tset)
+                else:
+                    ltags[tag] += tset
+        # Print result:
+        for tag in sorted(ltags):
+            print("\n"+tag+":")
+            for ses in sorted(ltags[tag]):   print(" ", ses)
+        return
+
     # Print list of volumes if no volume is selected.
     if not aset.vols:
         print("No volumes.")    ; return
@@ -2621,23 +2641,6 @@ def show_list(selected_vols):
                 if vol.desc:   print("  desc:", vol.desc)
             else:
                 print(vname)
-        return
-
-    # Print list of sessions grouped by tag. First, organize by tag:
-    if options.tag:
-        print("\nTag Assignments")    ; ltags = {}
-        for dv in selected_vols:
-            vol = aset.vols[dv]
-            for tag, tses in vol.tags.items():
-                tset = ( dv+" / "+x[2:] for x in tses )
-                if tag not in ltags:
-                    ltags[tag] = list(tset)
-                else:
-                    ltags[tag] += tset
-        # Print result:
-        for tag in sorted(ltags):
-            print("\n"+tag+":")
-            for ses in sorted(ltags[tag]):   print(" ", ses)
         return
 
     # Print list of sessions grouped by volume.
@@ -2735,7 +2738,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.3.0wip"    ; prog_date = "20210517"
+prog_version          = "0.3.0wip"    ; prog_date = "20210518"
 format_version        = 1
 
 # Disk block size:
@@ -2788,14 +2791,15 @@ parser.add_argument("action", choices=["send","monitor","add","delete","prune","
                     default="monitor", help="Action to take")
 parser.add_argument("-u", "--unattended", action="store_true", default=False,
                     help="Non-interactive, supress prompts")
-parser.add_argument("-t", "--tag", action="store_true", default=False,
-                    help="Add tags when sending")
 parser.add_argument("--all-before", dest="allbefore", action="store_true", default=False,
                     help="Select all sessions before --session date-time.")
-#parser.add_argument("--tarfile", action="store_true", dest="tarfile", default=False,
-#                    help="Store backup session as a tarfile")
-parser.add_argument("--session", help="YYYYMMDD-HHMMSS[,YYYYMMDD-HHMMSS]"
+parser.add_argument("--session", help="YYYYMMDD-HHMMSS[,YYYYMMDD-HHMMSS] or ^tag_id"
                                  " select session date|tag, singular or range.")
+parser.add_argument("--tag", action="append",
+                    help="tag_id[,description] Add tags when sending")
+parser.add_argument("--sx", action="append", help="YYYYMMDD-HHMMSS or ^tag_id"
+                                                  " exclude session by date|tag (prune)") 
+parser.add_argument("--vx", default="", help="Exclude volume(s)")
 parser.add_argument("--autoprune", default="off", help="Automatic pruning")
 parser.add_argument("--from", dest="from_arch", default="",
                     help="Address+Path of other non-configured archive (receive, verify)")
@@ -2810,8 +2814,6 @@ parser.add_argument("--compression", default="", help="Init: compression type:le
 parser.add_argument("--hashtype", default="", help="Init: hash function type")
 parser.add_argument("--chunk-factor", dest="chfactor", type=int,
                     help="Init: set chunk size to N*64kB")
-#parser.add_argument("--deltas", action="store_true", default=False,
-#                    help="Receive: differential mode")
 parser.add_argument("--meta-dir", dest="metadir", default="", help="Use alternate metadata path")
 parser.add_argument("--force", action="store_true", default=False, help="For arch-delete")
 parser.add_argument("--clean", action="store_true", default=False, help="Clean snapshots, metadata")
@@ -2928,10 +2930,11 @@ if aset.vgname in volgroups and options.action != "arch-check":
 
 
 # Check volume args against config
-datavols      = sorted(aset.vols.keys())
-selected_vols = options.volumes[:]
-for vol in options.volumes:
-    if vol not in datavols and options.action not in {"add","delete","rename"}:
+exclude_vols  = set(options.vx.split(","))
+datavols      = sorted(set(aset.vols.keys())  - exclude_vols)
+selected_vols = sorted(set(options.volumes[:]) - exclude_vols)
+for vol in selected_vols[:]:
+    if vol not in aset.vols and options.action not in {"add","delete","rename"}:
         print("Volume "+vol+" not configured; Skipping.")
         del(selected_vols[selected_vols.index(vol)])
 
