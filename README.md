@@ -119,7 +119,7 @@ Please note that dashed parameters are always placed before the command.
 | **arch-init**               | Initialize archive configuration.
 | **arch-check** _[volume_name]_    | Thorough check of archive data & metadata
 | **arch-delete**             | Remove data and metadata for all volumes.
-| **arch-deduplicate**        | Deduplicate existing data in archive (experimental).
+| **arch-deduplicate**        | Deduplicate existing data in archive.
 | **version**                 | Print the Wyng version and exit.
 
 
@@ -127,7 +127,8 @@ Please note that dashed parameters are always placed before the command.
 
 | _Option_                      | _Description_
 |-------------------------------|--------------
---session=_date-time[,date-time]_ | Select a session or session range by date-time (receive, verify, prune).
+--session=_date-time[,date-time]_ | Select a session or session range by date-time or tag (receive, verify, prune).
+--keep=_date-time_     | Specify date-time or tag of sessions to keep (prune).
 --all-before           | Select all sessions before the specified _--session date-time_ (prune).
 --autoprune=off        | Automatic pruning by calendar date. (experimental)
 --save-to=_path_       | Save volume to _path_ (receive).
@@ -144,9 +145,12 @@ Please note that dashed parameters are always placed before the command.
 --dedup=_N_            | Use deduplication for send (see Testing notes).
 --clean                | Perform garbage collection during arch-check.
 --meta-dir=_path_      | Use a different metadata dir than the default.
+--volex=_volname[,*]_  | Exclude volumes (send, monitor, list, prune).
 --force                | Needed for arch-delete.
+--verbose              | Increase details.
+--quiet                | 
 -u, --unattended       | Don't prompt for interactive input.
--t, --tag              | Use session tags (send, list).
+--tag=tagname[,desc]   | Use session tags (send, list).
 
 #### send
 
@@ -239,6 +243,9 @@ to prune all sessions prior to that time.
 If volume names aren't specified, `prune` will operate across all
 enabled volumes.
 
+The `--keep` option can accept a single date-time or a tag in the form `^tagID`.
+Matching sessions will be excluded from pruning and autopruning.
+
 
 #### monitor
 
@@ -315,7 +322,7 @@ De-duplication can also be performed on an ongoing basis by using `--dedup=1` wi
 
 ```
 
-wyng arch-deduplicate
+wyng --dedup=1 arch-deduplicate
 
 
 ```
@@ -416,6 +423,11 @@ with that tag, whereas a tag in a dual (range) spec will define an inclusive ran
 instance of the tag (when the tag is the first spec) or the last instance (when the tag is the
 second range spec). Also, date-times and tags may be used together in a range spec.
 
+`--volex=<volume>[,volume,*]`
+
+Exclude one or more volumes from processing. May be used with commands that operate on multiple
+volumes in a single invocation, such as `send`.
+
 `--sparse-write`
 
 Used with `receive`, this option does _not_ prevent Wyng from overwriting existing local volumes!
@@ -444,7 +456,7 @@ memory and CPU resources during backups. Using `--dedup` works best if you are b
 multiple volumes that have a lot of the same content and/or you are backing-up over a slow
 Internet link.
 
-`--autoprune=(off | on | min | full)` (experimental)
+`--autoprune=(off | on | min | full)` (_experimental_)
 
 Autoprune may be used with either the `prune` or `send` commands and will cause Wyng to
 automatically remove older backup sessions according to date criteria. When used with `send`

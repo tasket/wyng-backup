@@ -332,6 +332,8 @@ class ArchiveSet:
                     sys.stderr.write("Error: Max "+tag_len+" alphanumeric chars for tag ID.\n")
                 elif not re.match(alphanumsym, tag_id):
                     sys.stderr.write("Error: Allowed tag ID chars are "+alphanumsym+"\n")
+                elif tag_id == "all":
+                    sys.stderr.write("Error: tag 'all' is reserved.")
                 else:
                     result = (tag_id, "" if len(parts) == 1 else parts[1].strip())
                 return result
@@ -1816,79 +1818,48 @@ def rotate_snapshots(vol, rotate=True):
 # merge starting with newest dirs and working backwards. Target of merge is
 # timewise the next session dir after the pruned dirs.
 # Specify data volume and one or two member list with start [end] date-time
-# in YYYYMMDD-HHMMSS format.
+# in YYYYMMDD-HHMMSS or ^tagname format.
 
 def prune_sessions(datavol, times):
 
     volume = aset.vols[datavol]    ; sessions = volume.sesnames
-    t1 = t2 = ""                   ; taglist, to_prune  = [], []
+    t1, t2 = "", ""                ; to_prune  = []
 
-    if len(sessions) < 2:
-        print("  No extra sessions to prune.")
-        return
+    if len(sessions) < 2:    print("  No extra sessions to prune.")    ; return
 
     # Validate date-time params
-    for pos, dt in enumerate(times):
-        if dt[0] != "^":
-            if dt[:2] != "S_":   times[pos] = "S_"+dt.strip()
-            datetime.datetime.strptime(dt[2:], "%Y%m%d-%H%M%S")
+    for pos, dt in enumerate(times[:]):
+        if not dt[0].startswith("^"):
+            if not dt.startswith("S_"):   times[pos] = "S_"+dt.strip()
+            datetime.datetime.strptime(times[pos][2:], "%Y%m%d-%H%M%S")
         elif dt[1:] not in volume.tags:
-            print(" No match for", dt)
-            return
+            print(" No match for", dt)    ; return
         elif pos == 0:
-            t1 = dt[1:]
             for sesname in sessions:
-                if t1 in volume.sessions[sesname].tags:
+                if dt[1:] in volume.sessions[sesname].tags:
                     if len(times) == 1 and not options.allbefore:
-                        taglist.append(sesname)
+                        to_prune.append(sesname)
                     else:
                         t1 = sesname   ; break
         elif pos == 1:
-            t2 = dt[1:]
             for sesname in reversed(sessions):
-                if t2 in volume.sessions[sesname].tags:   t2 = sesname   ; break
-
-    # taglist may contain a discontinuous range of sessions. Detect ranges and
-    # send back through prune_sessions() as date-times.
-    if taglist:
-        seslist = sessions[:] + ["END"]
-        for sesname in seslist:
-            if sesname in taglist:
-                to_prune.append(sesname)
-            else:
-                if to_prune:  print(" ", "  ".join(to_prune))
-                if len(to_prune) > 1:
-                    prune_sessions(datavol, [to_prune[0], to_prune[-1]])
-                elif len(to_prune) == 1:
-                    prune_sessions(datavol, to_prune)
-                to_prune.clear()
-        return
-
+                if dt[1:] in volume.sessions[sesname].tags:   t2 = sesname   ; break
 
     # t1 alone should be a specific session date-time,
     # t1 and t2 together are a date-time range.
+    if options.allbefore:   t1 = sessions[0]    ; t2 = times[0]
     if not t1:   t1 = times[0]
-    if len(times) > 1:
-        if options.allbefore:  x_it(1, "Error: --all-before cannot be used with range.")
-        if not t2:   t2 = times[1]
+    if not t2 and len(times) > 1:
+        t2 = times[1]
         if t2 <= t1:  x_it(1, "Error: Second date-time must be later than first.")
-    else:
-        t2 = ""
 
-    #print("\nPruning Volume :", datavol)
-
-    # Find specific sessions to prune;
-    # Use contiguous ranges.
-    if options.allbefore:
-        for ses in sessions:
-            if ses >= t1:
-                break
-            to_prune.append(ses)
+    # Find specific sessions to prune in contiguous range
+    if to_prune:
+        pass
 
     elif t2 == "":
         # find single session
-        if t1 in sessions:
-            to_prune.append(t1)
+        if t1 in sessions:   to_prune.append(t1)
 
     else:
         # find sessions in a date-time range
@@ -1897,16 +1868,12 @@ def prune_sessions(datavol, times):
             start = sessions.index(t1)
         else:
             for ses in sessions:
-                if ses > t1:
-                    start = sessions.index(ses)
-                    break
+                if ses > t1:   start = sessions.index(ses)    ; break
         if t2 in sessions:
             end = sessions.index(t2)+1
         else:
             for ses in reversed(sessions):
-                if ses < t2:
-                    end = sessions.index(ses)+1
-                    break
+                if ses < t2:   end = sessions.index(ses)+1    ; break
         to_prune = sessions[start:end]
 
     if len(to_prune) and to_prune[-1] == sessions[-1]:
@@ -1916,23 +1883,17 @@ def prune_sessions(datavol, times):
         print("  No selections in this date-time range.")
         return
 
-    # Determine target session where data will be merged.
-    target_s = sessions[sessions.index(to_prune[-1]) + 1]
-
-    if options.autoprune.lower()=="off":
-        merge_sessions(datavol, to_prune, target_s, clear_sources=True)
-    else:
-        autoprune(datavol, apmode=options.autoprune, include=to_prune)
+    autoprune(datavol, apmode=options.autoprune, include=set(to_prune))
 
 
-# Likely parameters for autoprune:
-# target_size (0 or MB int): Size cap for archive
+# Parameters / vars for autoprune:
 # oldest (date): date before which all sessions are pruning candidates
-# nthresh: min number of sessions to prune this time (0 = prune all candidates)
 # thin_days (int): number of days ago before which the thinning params are applied
 # ndays & nsessions: a days/sessions ratio for amount of sessions left after thinning
+# nthresh: min number of sessions to prune this time (0 = prune all candidates)
+# target_size (0 or MB int): User-selected size cap for archive (future)
 
-def autoprune(datavol, needed_space=0, apmode="off", include=[]):
+def autoprune(datavol, needed_space=0, apmode="off", include=set()):
     global dest_free
 
     def get_dest_free(): ## Enh: add sanitize
@@ -1940,35 +1901,45 @@ def autoprune(datavol, needed_space=0, apmode="off", include=[]):
             if ln.startswith("wyng_check_free"):  dest_free = int(ln.split()[1])
         return dest_free
 
-    apmode = apmode.lower()
-    if apmode not in ("on","min","full"):  return False
     dtdate = datetime.date
     def to_date(sesdate):
         return dtdate(int(sesdate[2:6]),int(sesdate[6:8]),int(sesdate[8:10]))
 
     vol       = aset.vols[datavol]
-    if len(vol.sesnames) < 4:  return False
+    if len(vol.sesnames) < 2:   return False
+    apmode    = apmode.lower()                ; exclude = set()
     sessions  = vol.sesnames[:-1]             ; marked  = 0
     today     = dtdate.today()                ; oldest  = today-datetime.timedelta(days=366)
     thin_days = datetime.timedelta(days=32)   ; ndays   = 7      ; nsessions = 2
     startdate = to_date(sessions[0])          ; nthresh = 3 if apmode == "on" else 0
-    enddate   = min(to_date(sessions[-2]), today-thin_days)
+    enddate   = min(to_date(sessions[-2]), today-thin_days) if len(sessions) > 2 else None
 
     # Make a 2d array of ordinal dates and populate with session id + flag
     apcal = { day: [] for day in range(dtdate(startdate.year,1,1).toordinal(),
                                        to_date(sessions[-1]).toordinal()+ndays) }
     for ses in sessions:  apcal[to_date(ses).toordinal()].append([ses, True])
 
+    # Build set of excluded sessions
+    for sx in options.keep:
+        if not sx.startswith("^"):
+            datetime.datetime.strptime(sx, "%Y%m%d-%H%M%S")    ; exclude.add("S_"+sx)
+        else:
+            if sx[1:] == "all":
+                exclude += {x.name for x in vol.sessions if x.tags}
+            else:
+                exclude += {x.name for x in vol.sessions if sx[1:] in x.tags}
+    include -= exclude
+
     # Mark all sessions prior to oldest date setting, plus include list
     for ses in sessions:
         sdate = to_date(ses)
-        if sdate <= oldest or ses in include:
+        if (apmode != "off" and sdate <= oldest) or ses in include:
             for dses in apcal[sdate.toordinal()]:
-                if dses[0] == ses:
+                if dses[0] == ses and ses not in exclude:
                     dses[1] = False    ; vol.sessions[ses].toggle = False
 
     # Mark sessions for thinning-out according to ndays + nsessions
-    if needed_space or apmode != "min":
+    if apmode != "off" and (needed_space or apmode != "min") and enddate:
         for year in range(startdate.year, enddate.year+1):
             for span in range(dtdate(year,1,1).toordinal(),
                             min(dtdate(year,12,31), enddate).toordinal(), ndays):
@@ -1980,42 +1951,45 @@ def autoprune(datavol, needed_space=0, apmode="off", include=[]):
                     offset += (ndays//nsessions)+1    ; offset %= min(ndays, len(dlist))
                     for dses in apcal[span+bigday]:
                         if dses[1]:
-                            dses[1] = False    ; dlist[bigday] -= 1
-                            vol.sessions[dses[0]].toggle = False
+                            # always decr bigday, but don't toggle if session is excluded
+                            dlist[bigday] -= 1     #### ; print("_",end="") ####
+                            dses[1] = vol.sessions[dses[0]].toggle = dses[0] in exclude
                             break
 
     # Find contiguous marked ranges and merge/prune them. Repeat until free >= needed space.
-    factor = 1
+    factor = 1    ; sessions.append("End")
     while True:
-        to_prune = []    ; removed_ct = 0
+        to_prune = []    ; removed_ct = 0    ; skipped = False
         for ses in sessions:
             if ses is None:   continue
-            if vol.sessions[ses].toggle:
+            if ses == "End" or vol.sessions[ses].toggle :
                 if to_prune:
+                    # prioritize ranges that overlap with requested includes
+                    if include and not (set(to_prune) & include):
+                        #print("#", end="") ####
+                        to_prune.clear()    ; skipped = True    ; continue
+
                     target_s = vol.sesnames[vol.sesnames.index(to_prune[-1]) + 1]
                     merge_sessions(datavol, to_prune, target_s, clear_sources=True)
+
                     for i in to_prune:   sessions[sessions.index(i)] = None
-                    removed_ct += len(to_prune);   to_prune.clear()
-                    if nthresh and removed_ct >= nthresh*factor:  break # for ses
+                    include -= set(to_prune)    ; removed_ct += len(to_prune);   to_prune.clear()
+                    if not include and nthresh and removed_ct >= nthresh*factor:  break # for ses
             else:
+                #print(".", end="") ####
                 to_prune.append(ses)
 
         if removed_ct:
-            print("Removed", removed_ct)
+            print(" Removed", removed_ct)
             dest_free = get_dest_free()    ; os.remove(tmpdir+"/merge.log")
 
+        if skipped and apmode != "off":   continue # while
         if removed_ct == 0 or nthresh == 0 or needed_space <= dest_free:
             break # while
         elif factor > 4:
             nthresh = 0
         else:
             factor += 2
-
-    # If needed_space loop above quit before processing 'include' range, then process it now.
-    if include and include[0] in sessions:
-        target_s = vol.sesnames[vol.sesnames.index(include[-1]) + 1]
-        merge_sessions(datavol, include, target_s, clear_sources=True)
-        print("Removed", len(include))    ; dest_free = get_dest_free()
 
     return True
 
@@ -2616,7 +2590,8 @@ def show_list(selected_vols):
         for dv in selected_vols if selected_vols else datavols:
             vol = aset.vols[dv]
             for tag, tses in vol.tags.items():
-                tset = ( dv+" / "+x[2:] for x in tses )
+                #tset = ( dv+" / "+x[2:] for x in tses )
+                tset = ( (dv, x[2:], vol.sessions[x].tags[tag] ) for x in tses )
                 if tag not in ltags:
                     ltags[tag] = list(tset)
                 else:
@@ -2738,7 +2713,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.3.0wip"    ; prog_date = "20210518"
+prog_version          = "0.3.0wip"    ; prog_date = "20210519"
 format_version        = 1
 
 # Disk block size:
@@ -2797,9 +2772,9 @@ parser.add_argument("--session", help="YYYYMMDD-HHMMSS[,YYYYMMDD-HHMMSS] or ^tag
                                  " select session date|tag, singular or range.")
 parser.add_argument("--tag", action="append",
                     help="tag_id[,description] Add tags when sending")
-parser.add_argument("--sx", action="append", help="YYYYMMDD-HHMMSS or ^tag_id"
-                                                  " exclude session by date|tag (prune)") 
-parser.add_argument("--vx", default="", help="Exclude volume(s)")
+parser.add_argument("--keep", action="append", default=[],
+                    help="YYYYMMDD-HHMMSS or ^tag_id exclude session by date|tag (prune)") 
+parser.add_argument("--volex", default="", help="Exclude volume(s)")
 parser.add_argument("--autoprune", default="off", help="Automatic pruning")
 parser.add_argument("--from", dest="from_arch", default="",
                     help="Address+Path of other non-configured archive (receive, verify)")
@@ -2829,6 +2804,7 @@ options = parser.parse_args()
 #prs_prune = subparser.add_parser("prune",help="prune help")
 
 # Set stdout to devnull if --quiet is specified
+assert not (options.quiet and options.verbose)
 if options.quiet and options.action != "list":
     sys.stdout = open(os.devnull, "w")
 
@@ -2930,7 +2906,7 @@ if aset.vgname in volgroups and options.action != "arch-check":
 
 
 # Check volume args against config
-exclude_vols  = set(options.vx.split(","))
+exclude_vols  = set(options.volex.split(","))
 datavols      = sorted(set(aset.vols.keys())  - exclude_vols)
 selected_vols = sorted(set(options.volumes[:]) - exclude_vols)
 for vol in selected_vols[:]:
