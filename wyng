@@ -160,8 +160,8 @@ class ArchiveSet:
             if exists(pjoin(path,"volinfo")):
                 with open(pjoin(path,"volinfo"), "r") as f:
                     for ln in f:
-                        vname, value = ln.strip().split(" = ")
-                        setattr(self, vname, value)
+                        vname, value = ln.strip().split(" =")
+                        setattr(self, vname, value.strip())
 
             if exists(pjoin(path,"volchanged")):
                 self.changed_bytes = int(open(pjoin(path,"volchanged"),"r").readlines()[0].strip())
@@ -305,9 +305,9 @@ class ArchiveSet:
                     with open(pjoin(path,"info"), "r") as sf:
                         for ln in sf:
                             if ln.strip() == "uuid =":  continue
-                            vname, value = ln.strip().split(" = ")
+                            vname, value = ln.strip().split(" =")
                             setattr(self, vname, 
-                                int(value) if vname in attr_int else value)
+                                int(value) if vname in attr_int else value.strip())
                     self.saved = True
 
             def save_info(self, fname="info"):
@@ -1541,7 +1541,7 @@ def send_volume(datavol, localtime, send_all):
             # Advance addr, except when minibmap is zero len.
             if minibmap or send_all:  addr += chunksize
 
-    print("\r  100% ", ("%8.1fM   |  %s" % (bcount/1000000, datavol)),
+    print("\r  100% ", ("%8.1fM    |  %s" % (bcount/1000000, datavol)),
           ("\n  (reduced %0.1fM)" % (ddbytes/1000000)) if ddbytes and options.debug else "",
           end="")
 
@@ -2130,7 +2130,7 @@ def compare_files(pathlist=[], volumes=[], sessions=[], clear=True):
     if clear and exists(cmp_list):  os.remove(cmp_list)
     realvols  = [x for x in volumes if len(x.sessions) and not x.meta_checked]
     realses   = [x for x in sessions if not x.meta_checked]
-    if len(volumes)+len(sessions)+len(pathlist) == 0:   return True
+    if len(volumes)+len(sessions)+len(pathlist) == 0:   return False
 
     with open(cmp_list, "a") as flist:
         for pth in pathlist:
@@ -2619,7 +2619,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "Wyng"
-prog_version          = "0.2.0rc9"    ; prog_date = "20210511"
+prog_version          = "0.2.0rc10"    ; prog_date = "20210521"
 format_version        = 1
 print("%s %s %s" % (prog_name, prog_version, prog_date))
 prog_name             = prog_name.lower()
