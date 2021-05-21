@@ -1213,7 +1213,6 @@ def prepare_snapshots(datavols):
                 continue
 
         # Reclaim deltamap from interrupted session.
-        # Future: Expand recovery to start send-resume
         if exists(mapfile+"-tmp"):  os.rename(mapfile+"-tmp", mapfile)
 
         # Make deltamap or initial snapshot if necessary. Try to recover paired state
@@ -1226,7 +1225,13 @@ def prepare_snapshots(datavols):
 
             if not lv_exists(vgname, snap1vol) and lv_exists(vgname, snap2vol) \
             and vol.last in l_vols[snap2vol].tags and "arch-"+aset.uuid in l_vols[snap2vol].tags:
+                # Recover interrupted snapshot rotation
                 lv_rename(vgname, snap2vol, snap1vol)
+
+            if lv_exists(vgname, snap1vol) and exists(mapfile) \
+            and os.stat(mapfile).st_blocks == 0 and "delta" in l_vols[snap1vol].tags:
+                # Handle inadvertant mapfile reset
+                lv_remove(vgname, snap1vol)    ; print("  Removed mis-matched delta", snap1vol)
 
             if lv_exists(vgname, snap1vol) and not exists(mapfile) \
             and vol.last in l_vols[snap1vol].tags and "delta" not in l_vols[snap1vol].tags \
@@ -2180,7 +2185,7 @@ def compare_files(pathlist=[], volumes=[], sessions=[], clear=True):
     if clear and exists(cmp_list):  os.remove(cmp_list)
     realvols  = [x for x in volumes if len(x.sessions) and not x.meta_checked]
     realses   = [x for x in sessions if not x.meta_checked]
-    if len(volumes)+len(sessions)+len(pathlist) == 0:   return True
+    if len(volumes)+len(sessions)+len(pathlist) == 0:   return False
 
     with open(cmp_list, "a") as flist:
         for pth in pathlist:
@@ -2713,7 +2718,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.3.0wip"    ; prog_date = "20210519"
+prog_version          = "0.3.0wip"    ; prog_date = "20210521"
 format_version        = 1
 
 # Disk block size:
