@@ -12,9 +12,7 @@ import sys, signal, os, stat, shutil, subprocess, time, datetime
 import re, mmap, bz2, zlib, gzip, tarfile, io, fcntl, tempfile
 import argparse, configparser, hashlib, functools, uuid
 import xml.etree.ElementTree    ; from itertools import islice
-# For deduplication:
-import resource
-from array import array
+from array import array         ; import resource
 
 
 # ArchiveSet manages configuration and configured volume info
@@ -98,7 +96,7 @@ class ArchiveSet:
 
     def add_volume(self, datavol):
         if datavol in self.conf["volumes"]:
-            x_it(1, datavol+" is already configured.")
+            x_it(0, datavol+" is already configured.")
 
         namecheck = self.Volume.volname_check(datavol)
         if namecheck:   x_it(1, namecheck)
@@ -636,10 +634,13 @@ def arch_check(vol_list=None, startup=False):
             check_manifest_sequence(volname, mset)
 
         # Check hashes of each session individually
-        print("Checking digests...")
+        print("Checking data...")
         for sesname in reversed(vol.sesnames):
             ses = vol.sessions[sesname]    ; manifest = ses.path+"/manifest"
-            if options.session and options.session < ses.localtime:   continue # Enh: use seq
+            if options.session \
+            and (options.session.lower() == "newest" and sesname != vol.sesnames[-1]) \
+            or options.session < ses.localtime:
+                continue # Enh: use seq
             if attended:   print("  Session %s... " % sesname, end="", flush=True)
 
             # FixCheck for stray entries here
@@ -1219,7 +1220,6 @@ def prepare_snapshots(datavols):
         # by comparing snapshot UUIDs; a match means remap is unnecessary.
         if len(vol.sessions):
             if lv_exists(vgname, snap1vol) and vol.last not in l_vols[snap1vol].tags \
-            and "S_" in " ".join(l_vols[snap1vol].tags) \
             and l_vols[snap1vol].lv_uuid != vol.sessions[vol.last].uuid:
                 lv_remove(vgname, snap1vol)    ; print("  Removed mis-matched snapshot", snap1vol)
 
@@ -2718,7 +2718,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.3.0wip"    ; prog_date = "20210521"
+prog_version          = "0.3.0beta"    ; prog_date = "20210527"
 format_version        = 1
 
 # Disk block size:
