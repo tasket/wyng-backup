@@ -42,11 +42,11 @@ Public release v0.3 with a range of features including:
 
  - Data deduplication
 
- - Marking and processing backup sessions with tags
+ - Marking and selecting snapshots with user-defined tags
 
 Data verification currently relies on hash tables being safely stored on the
 source admin system or encrypted volume. Integrated encryption and key-based
-verification are not yet implemented (see notes below for encryption methods).
+verification are not yet implemented (see notes below for ways to add encryption).
 
 Wyng is released under a GPL license and comes with no warranties expressed or implied.
 
@@ -353,6 +353,20 @@ wyng --from=internal:/mountpoint arch-init
 
 
 ```
+
+#### arch-check
+
+Intensive check of archive integrity, reading each session completely starting with
+the newest and working back to the oldest. This differs from `verify` which first bulids a complete
+index for the volume and then checks only/all data referenced in the index.
+
+Using `--session=newest` provides a 'verify the last session' function (useful after an incremental
+backup). Otherwise, supplying a date-time will make `arch-check` start the check from that point and
+then continue working toward the oldest session. Session ranges are not yet supported.
+
+Depending on how `arch-check` is used, the verification process can be shorter _or much longer_
+than using `verify` as the latter is always the size of a volume snapshot. The longest, most
+complete form `arch-check` is to supply no parameters, which checks all sessions in all volumes.
 
 
 #### arch-delete
