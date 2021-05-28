@@ -96,10 +96,11 @@ class ArchiveSet:
 
     def add_volume(self, datavol):
         if datavol in self.conf["volumes"]:
-            x_it(0, datavol+" is already configured.")
+            print(datavol+" is already configured.")    ; return True
 
         namecheck = self.Volume.volname_check(datavol)
-        if namecheck:   x_it(1, namecheck)
+        if namecheck:
+            sys.stderr.write(namecheck+"\n")   ; error_cache.append(datavol)  ; return False
 
         if lv_exists(self.vgname, datavol+".tick") \
         and "arch-"+self.uuid not in volgroups[self.vgname].lvs[datavol+".tick"].tags:
@@ -108,7 +109,9 @@ class ArchiveSet:
         self.conf["volumes"][datavol] = "enable"
         self.save_conf()
         vol = self.vols[datavol] = self.Volume(self,datavol, pjoin(self.path,datavol), self.vgname)
-        vol.save_volinfo()
+        vol.save_volinfo()    ; print("Volume", datavol, "added to archive config.")
+        return True
+
 
     def delete_volume(self, datavol):
         if datavol in self.conf["volumes"]:   del(self.conf["volumes"][datavol])
@@ -136,7 +139,6 @@ class ArchiveSet:
 
     class Volume:
         def __init__(self, archive, name, path, vgname):
-            debug        = options.debug
             self.name    = name
             self.archive = archive
             self.path    = path
@@ -171,13 +173,13 @@ class ArchiveSet:
             # load sessions as reverse-linked list, starting with the last;
             # store as dict and sequential list of session names
             if debug:  print("\nVOLUME",self.name, self.first, self.last)
-            sprev = self.last if self.last else "none"
-            while sprev != "none":
+            sprev = self.last if self.last else "None"
+            while sprev != "None":
                 if debug:  print(sprev, end="  ")
                 # instantiate:
                 s = self.sessions[sprev] = self.Ses(self, sprev, path+"/"+sprev)
                 sprev = s.previous    ; self.sesnames.insert(0, s.name)
-                if sprev == "none" and self.first != s.name:
+                if sprev == "None" and self.first != s.name:
                     raise ValueError("PREVIOUS MISMATCH: %s/%s, EXPECTED %s" 
                                      % (self.name, s.name, self.first))
 
@@ -217,6 +219,7 @@ class ArchiveSet:
             return (volume_size // self.archive.chunksize // 8) + 1
 
         def save_volinfo(self, fname="volinfo", prune=False):
+            os.makedirs(self.path, exist_ok=True)
             with open(pjoin(self.path,fname), "w") as f:
                 print("format_ver =", format_version, file=f)
                 print("uuid =", self.uuid if self.uuid else str(uuid.uuid4()), file=f)
@@ -258,7 +261,7 @@ class ArchiveSet:
 
         def delete_session(self, sname, remove=True, force=False):
             ses     = self.sessions[sname]
-            index   = self.sesnames.index(sname)    ; affected = "none"
+            index   = self.sesnames.index(sname)    ; affected = None
             if sname == self.last and ses.saved and not force:
                 raise ValueError("Cannot delete last session")
 
@@ -277,8 +280,8 @@ class ArchiveSet:
                 affected = self.sesnames[index]
                 self.sessions[affected].previous = ses.previous
 
-            self.first = self.sesnames[0] if len(self.sesnames) else "none"
-            self.last  = self.sesnames[-1] if len(self.sesnames) else "none"
+            self.first = self.sesnames[0] if len(self.sesnames) else "None"
+            self.last  = self.sesnames[-1] if len(self.sesnames) else "None"
 
             if remove and exists(pjoin(self.path, sname)):   shutil.rmtree(ses.path)
             return affected
@@ -293,12 +296,12 @@ class ArchiveSet:
                 self.toggle   = True
                 self.meta_checked = False
                 # persisted:
-                self.uuid     = "none"
+                self.uuid     = None
                 self.localtime= None
                 self.volsize  = None
                 self.format   = None
                 self.sequence = None
-                self.previous = "none"
+                self.previous = "None"
                 self.tags     = {}
                 attr_str      = ("localtime","format","previous","uuid")
                 attr_int      = ("volsize","sequence")
@@ -309,6 +312,7 @@ class ArchiveSet:
                             if ln.strip() == "uuid =":  continue
                             vname, value = ln.split("=", maxsplit=1)
                             vname = vname.strip()    ; value = value.strip()
+                            if value == "none":   value = "None"
                             if vname == "tag":
                                 self.tag_add(self.tag_parse(value))
                                 continue
@@ -2629,6 +2633,7 @@ def show_list(selected_vols):
     cols = max(4, min(10, int(ttycols)//17))
     for dv in selected_vols:
         print("\nSessions for volume '%s':\n" % dv)
+        if not aset.vols[dv].sessions:   print("None.")    ; continue
         vol = aset.vols[dv]    ; lmonth = vol.sesnames[0][2:8]    ; slist = []
 
         # Blank at end of 'sesnames' is a terminator that doesn't match any month value.
@@ -2703,7 +2708,7 @@ def x_it(code, text):
 
 
 def cleanup():
-    if not options.debug:
+    if not debug:
         shutil.rmtree(big_tmpdir, ignore_errors=True)
         for f in (big_tmpdir, tmpdir, tmpdir+"-rpc", tmpdir+"-old"):
             shutil.rmtree(f, ignore_errors=True)
@@ -2718,8 +2723,8 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.3.0beta"    ; prog_date = "20210527"
-format_version        = 1
+prog_version          = "0.3.0beta"     ; prog_date = "20210527"
+format_version        = 1               ; debug     = False
 
 # Disk block size:
 bs                    = 512
@@ -2809,7 +2814,7 @@ options = parser.parse_args()
 #prs_prune = subparser.add_parser("prune",help="prune help")
 
 # Set stdout to devnull if --quiet is specified
-assert not (options.quiet and options.verbose)
+debug = options.debug    ; assert not (options.quiet and (options.verbose or debug))
 if options.quiet and options.action != "list":
     sys.stdout = open(os.devnull, "w")
 
@@ -2985,10 +2990,11 @@ elif options.action == "list":
 
 elif options.action == "add":
     if len(options.volumes) < 1:
-        x_it(1, "A volume name is required for 'add' command.")
+        x_it(1, "Volume name(s) required for 'add'.")
 
-    aset.add_volume(options.volumes[0])
-    print("Volume", options.volumes[0], "added to archive config.")
+    for vol in options.volumes:
+        if not lv_exists(aset.vgname, vol):   print("Warning:", vol, "does not exist.")
+        aset.add_volume(vol)
 
 
 elif options.action == "rename":
