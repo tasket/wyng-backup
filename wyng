@@ -14,6 +14,11 @@ import argparse, configparser, hashlib, functools, uuid
 import xml.etree.ElementTree    ; from itertools import islice
 from array import array         ; import resource
 
+try:
+    import zstd, warnings
+except:
+    zstd = None
+
 
 # ArchiveSet manages configuration and configured volume info
 
@@ -28,7 +33,7 @@ class ArchiveSet:
         self.in_process  = get_in_process(self.path)
         # persisted:
         self.chunksize   = bkchunksize
-        self.compression = "zlib"
+        self.compression = "zstd" if zstd else "zlib"
         self.compr_level = str(compressors[self.compression][1])
         self.hashtype    = "blake2b" if "blake2b" in hash_funcs else "sha256"
         self.vgname      = None
@@ -54,6 +59,9 @@ class ArchiveSet:
         for name in cp["var"].keys():
             setattr(self, name, int(cp["var"][name]) \
                                 if name in self.a_ints else cp["var"][name])
+
+        # Fix: Remove filterwarnings when upstream fixes their code...
+        if self.compression == "zstd":   warnings.filterwarnings("ignore", category=DeprecationWarning)
 
         # load volume metadata objects
         for key in cp["volumes"]:
@@ -153,8 +161,8 @@ class ArchiveSet:
             # persisted:
             self.format_ver = "0"
             self.uuid    = None
-            self.first   = None
-            self.last    = None
+            self.first   = "None"
+            self.last    = "None"
             self.desc    = ""
             self.que_meta_update = "false"
             # other:
@@ -173,7 +181,7 @@ class ArchiveSet:
             # load sessions as reverse-linked list, starting with the last;
             # store as dict and sequential list of session names
             if debug:  print("\nVOLUME",self.name, self.first, self.last)
-            sprev = self.last if self.last else "None"
+            sprev = self.last ### if self.last else "None"
             while sprev != "None":
                 if debug:  print(sprev, end="  ")
                 # instantiate:
@@ -245,7 +253,7 @@ class ArchiveSet:
         def new_session(self, sname, addtags={}):
             ns = self.Ses(self, sname, addtags=addtags)
             ns.path = pjoin(self.path, sname)
-            if self.first is None:
+            if self.first == "None":
                 ns.sequence = 0
                 self.first = sname
             else:
@@ -615,7 +623,7 @@ def arch_check(vol_list=None, startup=False):
             aset.vols[volname] = ArchiveSet.Volume(aset, volname,aset.path+"/"+volname,aset.vgname)
 
         vol = aset.vols[volname]
-        if not startup or options.debug:   print("Checking volume", volname, flush=True)
+        if not startup or options.debug:   print("\nChecking volume", volname, flush=True)
 
         # Remove session tmp dirs
         for sdir in os.scandir(vol.path):
@@ -630,7 +638,7 @@ def arch_check(vol_list=None, startup=False):
             x_it(1, "Error: Local and archive metadata differ.")
 
         # Check index sequencing in first and combined manifests
-        print("Checking index sequence...")
+        print("  Checking index sequence...")
         mset = []
         for ses in vol.sesnames:
             # print(ses, "size =", vol.sessions[ses].volsize)
@@ -638,12 +646,12 @@ def arch_check(vol_list=None, startup=False):
             check_manifest_sequence(volname, mset)
 
         # Check hashes of each session individually
-        print("Checking data...")
+        print("  Checking data...")
         for sesname in reversed(vol.sesnames):
-            ses = vol.sessions[sesname]    ; manifest = ses.path+"/manifest"
+            ses = vol.sessions[sesname]    ; manifest = ses.path+"/manifest"    ; bcount = 0
             if options.session \
-            and (options.session.lower() == "newest" and sesname != vol.sesnames[-1]) \
-            or options.session < ses.localtime:
+            and ((options.session.lower() == "newest" and sesname != vol.sesnames[-1]) \
+            or options.session < ses.localtime):
                 continue # Enh: use seq
             if attended:   print("  Session %s... " % sesname, end="", flush=True)
 
@@ -675,7 +683,7 @@ def arch_check(vol_list=None, startup=False):
                         raise BufferError("Bad chunk size %d for %s" % (untrusted_size, mfline))
 
                     # Size is OK.
-                    size = untrusted_size
+                    size = untrusted_size    ; bcount += size
                     # Read chunk buffer
                     untrusted_buf = getses.stdout.read(size)
                     rc  = getses.poll()
@@ -690,7 +698,7 @@ def arch_check(vol_list=None, startup=False):
                         print(mfline)
                         raise ValueError("Bad hash "+fname+" :: "+gethash(untrusted_buf).hexdigest())
 
-            if attended:   print("OK")
+            if attended:   print(bcount, "bytes OK")
 
 
 def check_manifest_sequence(datavol, sesnames):
@@ -981,8 +989,10 @@ def detect_dest_state(destsys):
     global dest_run_map
     dest_run_map     = {"internal": [CP.sh],
                         "ssh":      [CP.ssh] + ssh_opts + [destsys],
-                        "qubes":    [CP.qvm_run, "-p", destsys],
-                        "qubes-ssh":[CP.qvm_run, "-p", destsys.split(":")[0]]
+                        "qubes":    [CP.qvm_run, "--no-color-stderr", "--no-color-output",
+                                     "-p", destsys],
+                        "qubes-ssh":[CP.qvm_run, "--no-color-stderr", "--no-color-output",
+                                     "-p", destsys.split(":")[0]]
                         }
 
     dest_in_proc = False    ; dest_free = None    ; online = False
@@ -1001,7 +1011,7 @@ def detect_dest_state(destsys):
 
         # Fix: get OSTYPE env variable
         cmd = ["mountpoint -q '"+aset.destmountpoint
-                +"' && mkdir -p '"+aset.destmountpoint+"/"+aset.destdir+topdir
+                +"' && mkdir -p '"+aset.destmountpoint+"/"+aset.destdir+topdir+"/"+aset.name
                 +"' && cd '"+aset.destmountpoint+"/"+aset.destdir+topdir+"'"
 
                 # send helper program to remote dest
@@ -1161,7 +1171,7 @@ def dest_run_args(dest_type, commands, trap=False):
         remotetmp = os.path.basename(tmpf.name)
 
     if dest_type in {"qubes","qubes-ssh"}:
-        do_exec([[CP.qvm_run, "-p",
+        do_exec([[CP.qvm_run, "--no-color-stderr", "--no-color-output", "-p",
                   (destsys if dest_type == "qubes" else destsys.split(":")[0]),
                   CP.mkdir+" -p "+tmpdir+"-rpc"
                   +" && "+CP.cat+" >"+pjoin(tmpdir+"-rpc",remotetmp)
@@ -1451,7 +1461,11 @@ def send_volume(datavol, localtime, ses_tags, send_all):
     addrsplit = -address_split[1]
     lchunk_addr = vol.last_chunk_addr(snap2size)
 
-    compress = compressors[aset.compression][0].compress    ; compresslevel = int(aset.compr_level)
+    compresslevel = int(aset.compr_level)
+    if aset.compression == "zstd":
+        compress = lambda data, level: compressors["zstd"][0].ZSTD_compress(data, level, 2)
+    else:
+        compress = compressors[aset.compression][0].compress
 
     # Use tar to stream files to destination
     stream_started = False
@@ -2703,7 +2717,7 @@ def ask_input(text):
 # Exit with simple message
 def x_it(code, text):
     sys.stderr.write(text+"\n")
-    cleanup()
+    if tmpdir:   cleanup()
     sys.exit(code)
 
 
@@ -2723,8 +2737,8 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.3.0beta"     ; prog_date = "20210527"
-format_version        = 1               ; debug     = False
+prog_version          = "0.3.0beta2"    ; prog_date = "20210528"
+format_version        = 2               ; debug     = False       ; tmpdir = None
 
 # Disk block size:
 bs                    = 512
@@ -2842,6 +2856,7 @@ os.makedirs(big_tmpdir, exist_ok=True)
 signal_handlers  = {}    ; signals_caught = []    ; error_cache = []
 
 compressors      = {"zlib": (zlib, 4), "bz2": (bz2, 9)}
+if zstd:    compressors["zstd"] = (zstd, 3)
 
 hash_funcs       = {"sha256": hashlib.sha256}
 if "blake2b" in hashlib.algorithms_available:
@@ -2859,6 +2874,8 @@ volgroups, l_vols= {}, {}    ; get_lvm_vgs()
 
 # Create an ArchiveSet object with get_configs() and set global vars pertaining
 # to the destination.
+# Enh: Use separate dest class so aset can be inst after detect_dest_state()
+#      and/or move detect call to aset init.
 destsys          = desttype  = dest_run_map  = dest_online  = dest_in_process  = dest_free  = None
 aset             = get_configs()
 destsys, desttype= detect_internal_state()
