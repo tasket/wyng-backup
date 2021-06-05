@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
 
 # wyng-extract.sh  -  Simple disk image extractor for Wyng archives.
-#  Copyright Christopher Laprise 2018-2020 / tasket@protonmail.com
+#  Copyright Christopher Laprise 2018-2021 / tasket@protonmail.com
 #  Licensed under GNU General Public License v3. See file 'LICENSE'.
 
 
 set -eo pipefail
 LC_ALL=C
 
-echo "Wyng archive extractor, V0.2.4 20200907"
+echo "Wyng archive extractor, V0.3.0 20210605"
 
-formatver=1
 hashw=64;  addrw=17;  delimw=1;  uniqw=$(( hashw + delimw + addrw ))
 
 while getopts "so:lt:cd" opt; do
@@ -58,10 +57,13 @@ rm -rf $tmpdir  &&  mkdir $tmpdir
 
 ( cd "$voldir";  curdir=`pwd`
 
-  if ! grep -q '^format_ver = '$formatver'$' volinfo; then
-    echo "Error: Did not find a compatible format."
-    exit 1
-  fi
+  # Check that format version is 1 or 2
+  arch_ver=`grep -q '^format_ver =' volinfo | awk '{print $3}'`
+  case $arch_ver in
+    1|2)  format_ver=$arch_ver;;
+    *)    echo "Error: Did not find a compatible format.";  exit 1;;
+  esac
+
   echo "Getting metadata for volume $volname."
   ln=`grep -E '^last =' volinfo`;   read one two s_last <<<"$ln"
   cp volinfo $tmpdir;  sed -E '/\[volumes/q' ../archive.ini >$tmpdir/archive.ini
@@ -112,6 +114,7 @@ if [ -n "$opt_list" ]; then exit 0; fi
   echo "Volume size = $volsize bytes."
 
   case $compr in
+    zstd)  DECOMPRESS="zstdcat";    COMPRESS="zstd -T2 -$compr_level";;
     zlib)  DECOMPRESS="unpigz -cz"; COMPRESS="pigz -z -$compr_level";;
     bz2)   DECOMPRESS="bzcat";      COMPRESS="bzip2 -$compr_level";;
   esac
@@ -149,10 +152,8 @@ if [ -n "$opt_list" ]; then exit 0; fi
       cd CHK
 
       # Compress chunk files
-      find . -name '*[0-9][0-2]'  |  xargs -r $COMPRESS  ||  touch ../cmprfail  &
-      find . -name '*[0-9][3-5]'  |  xargs -r $COMPRESS  ||  touch ../cmprfail  &
-      find . -name '*[0-9][6-8]'  |  xargs -r $COMPRESS  ||  touch ../cmprfail  &
-      find . -name '*[0-9]9'   |  xargs -r $COMPRESS  ||  touch ../cmprfail  &
+      find . -name '*[0-9][0-4]'  |  xargs -r $COMPRESS  ||  touch ../cmprfail  &
+      find . -name '*[0-9][5-9]'  |  xargs -r $COMPRESS  ||  touch ../cmprfail  &
       wait
       if [ -e ../cmprfail ]; then
         echo "Compression error."; exit 1
