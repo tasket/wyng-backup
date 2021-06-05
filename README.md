@@ -56,10 +56,12 @@ Requirements & Setup
 
 Before starting:
 
-* Thin-provisioning-tools, lvm2, and python >=3.5.4 must be present on the source system.
+* Thin-provisioning-tools, lvm2, and python >=3.5.4 must be present on the source system. For top
+performance, at least python 3.6 plus the `python3-zstd` package should be installed before
+creating an archive.
 
 * The destination system (if different from source) should also have python, plus
-a basic Unix command set and Unix-like filesystem.
+a basic Unix command set and filesystem (i.e. a typical Linux or BSD system).
 
 * Volumes to be backed-up must reside in an LVM thin-provisioned pool.
 
@@ -67,15 +69,15 @@ Wyng is currently distributed as a single Python executable with no complex
 supporting modules or other program files; it can be placed in '/usr/local/bin'
 or another place of your choosing.
 
-Settings are initialized with `wyng <args> arch-init`:
+Settings are initialized with `wyng arch-init`:
 
 ```
 
-wyng --local=vg/pool --dest=ssh://me@exmaple.com/mnt/bkdrive arch-init
+wyng arch-init --local=vg/pool --dest=ssh://me@exmaple.com/mnt/bkdrive
 
 ...or...
 
-wyng --local=vg/pool --dest=internal:/ --subdir=home/user arch-init
+wyng arch-init --local=vg/pool --dest=internal:/ --subdir=home/user
 
 wyng add my_big_volume
 
@@ -142,8 +144,8 @@ Please note that dashed parameters are always placed before the command.
 --compression          | (arch-init) Set compression type:level.
 --hashtype             | (arch-init) Set hash algorithm: _sha256_ or _blake2b_.
 --chunk-factor         | (arch-init) Set archive chunk size.
---dedup=_N_            | Use deduplication for send (see Testing notes).
---clean                | Perform garbage collection during arch-check.
+--dedup                | Use deduplication for send (see notes).
+--clean                | Perform garbage collection (arch-check) or medata removal (delete).
 --meta-dir=_path_      | Use a different metadata dir than the default.
 --volex=_volname[,*]_  | Exclude volumes (send, monitor, list, prune).
 --force                | Needed for arch-delete.
@@ -300,6 +302,17 @@ Removes a volume's wyng-managed snapshots, config and metadata from the source s
 all of its *data* from the destination archive (everything deleted except the source
 volume). Use with caution!
 
+An alternate form of `delete` will remove all Wyng archive-related metadata (incl. snapshots) from the
+local system without affecting the archive on the destination:
+
+```
+
+wyng delete --clean
+
+```
+
+Alternately, using `delete --clean --all` will remove all Wyng metadata from the local system, including
+snapshots from any Wyng archive (not just the currently configured archive).
 
 #### rename
 ```
@@ -408,11 +421,13 @@ Note: You can override the archive's LVM settings by specifying `--local`.
 `--subdir` In conjunction with `--dest` or `--from`, allows you to specify a subdirectory
 below the mountpoint.
 
-`--compression=zlib:4` accepts the form `type` or `type:level`. The two types available are
-the default `zlib` and `bz2`.
+`--compression=zstd:3` accepts the form `type` or `type:level`. The three types available are
+the default `zstd`, plus `zlib` and `bz2`. Note that Wyng will only default to `zstd` when the
+'python3-zstd' package is installed; otherwise it will fall back to the less capable `zlib`.
 
-`--hashtype=sha256` accepts a value of either _'sha256'_ (the default) or _'blake2b'_.
-The digest size used for _'blake2b'_ is 256 bits.
+`--hashtype=blake2b` accepts a value of either _'sha256'_ or _'blake2b'_ (the default).
+The digest size used for blake2b is 256 bits. Note that with Python 3.5 the hashtype will
+fall back to sha256 as blake2b was introduced in Python 3.6.
 
 `--chunk-factor=1` sets the pre-compression data chunk size used within the destination archive.
 Accepted range is an integer exponent from '1' to '6', resulting in a chunk size of 64kB for
@@ -459,7 +474,7 @@ from the archive and written to the local volume. This results in reduced remote
 usage while receiving at the expense of some extra CPU usage on the local machine, and also uses
 less local disk space when snapshots are a factor (implies '--sparse-write`).
 
-`--dedup=(0|1)`
+`--dedup`
 
 When used with the `send` command, data chunks from the new backup will be sent only if
 they don't already exist somewhere in the archive. If its a duplicate, the chunk will be

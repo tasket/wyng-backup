@@ -402,9 +402,10 @@ class Lvm_VolGroup:
         self.lvs   = {}
         self.poolnames = set()
         self.gc_procs = []
+        self.clean = options.clean
 
     def __del__(self):
-        if options.clean:
+        if self.clean:
             for p in self.gc_procs:   p.wait()
 
 
@@ -577,7 +578,7 @@ def arch_init(aset):
             compression = options.compression.strip()
             compr_level = str(compressors[compression][1])
         compression = compression.strip()   ; compr_level = compr_level.strip()
-        if compression not in compressors.keys() or not compr_level.isdecimal():
+        if compression not in compressors.keys() or not is_num(compr_level):
             x_it(1, "Invalid compression spec.")
         aset.compression = compression      ; aset.compr_level = compr_level
 
@@ -1461,11 +1462,7 @@ def send_volume(datavol, localtime, ses_tags, send_all):
     addrsplit = -address_split[1]
     lchunk_addr = vol.last_chunk_addr(snap2size)
 
-    compresslevel = int(aset.compr_level)
-    if aset.compression == "zstd":
-        compress = lambda data, level: compressors["zstd"][0].ZSTD_compress(data, level, 2)
-    else:
-        compress = compressors[aset.compression][0].compress
+    compresslevel = int(aset.compr_level)    ; compress = compressors[aset.compression][2]
 
     # Use tar to stream files to destination
     stream_started = False
@@ -2253,8 +2250,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     vgname      = aset.vgname                     ; zeros     = bytes(chunksize)
     vol         = aset.vols[datavol]              ; snap1vol  = datavol+".tick"
     gethash     = hash_funcs[aset.hashtype]       ; sessions  = vol.sesnames
+    compress    = compressors[aset.compression][2]  ; compresslevel = int(aset.compr_level)
     decompress  = compressors[aset.compression][0].decompress
-    compress = compressors[aset.compression][0].compress    ; compresslevel = int(aset.compr_level)
 
 
     if diff or verify_only:
@@ -2605,6 +2602,20 @@ def delete_volume(dv):
     return
 
 
+# Remove Wyng metadata from local system
+
+def remove_local_metadata(archive):
+    for vg in volgroups.values():
+        for lv in list(vg.lvs.values()):
+            if lv.lv_name.endswith((".tick",".tock")) and "wyng" in lv.tags \
+            and (not archive or "arch-"+archive.uuid in lv.tags):
+                lv_remove(vg.name, lv.lv_name, check=True)
+
+    # Remove metadata dir(s)
+    shutil.rmtree(archive.path if archive else metadir+topdir,
+                  ignore_errors=True)
+
+
 def show_list(selected_vols):
 
     # Print list of sessions grouped by tag. First, organize by tag:
@@ -2690,6 +2701,15 @@ def show_mem_stats():
     print("  Current: vsize %d, rsize %d" % (vsz/1000,rss/1000))
 
 
+def is_num(val):
+    try:
+        float(val)
+    except:
+        return False
+    else:
+        return True
+
+
 def catch_signals(action="do"):
     if action is not None and len(signal_handlers):   print("Already catching")   ; return
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGQUIT, signal.SIGABRT, signal.SIGALRM,
@@ -2737,7 +2757,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.3.0beta2"    ; prog_date = "20210528"
+prog_version          = "0.3.0rc1"      ; prog_date = "20210605"
 format_version        = 2               ; debug     = False       ; tmpdir = None
 
 # Disk block size:
@@ -2786,12 +2806,13 @@ except IOError:
 parser = argparse.ArgumentParser(description="")
 parser.add_argument("action", choices=["send","monitor","add","delete","prune","receive",
                     "verify","diff","list","version","rename","arch-init","arch-delete",
-                    "arch-deduplicate","arch-check","index-test","test"],
+                    "arch-deduplicate","arch-check"],
                     default="monitor", help="Action to take")
 parser.add_argument("-u", "--unattended", action="store_true", default=False,
                     help="Non-interactive, supress prompts")
 parser.add_argument("--all-before", dest="allbefore", action="store_true", default=False,
                     help="Select all sessions before --session date-time.")
+parser.add_argument("--all", action="store_true", default=False)
 parser.add_argument("--session", help="YYYYMMDD-HHMMSS[,YYYYMMDD-HHMMSS] or ^tag_id"
                                  " select session date|tag, singular or range.")
 parser.add_argument("--tag", action="append",
@@ -2819,7 +2840,8 @@ parser.add_argument("--clean", action="store_true", default=False, help="Clean s
 parser.add_argument("--debug", action="store_true", default=False, help="Debug mode")
 parser.add_argument("--quiet", action="store_true", default=False)
 parser.add_argument("--verbose", action="store_true", default=False)
-parser.add_argument("--dedup", dest="dedup", type=int, default=0,  help="Data deduplication (send)")
+parser.add_argument("--dedup", "-d", action="store_true", default=False,
+                    help="Data deduplication (send)")
 parser.add_argument("--volume-desc", dest="voldesc", default="",
                     help="Set volume description (add, rename, send)")
 parser.add_argument("volumes", nargs="*")
@@ -2855,8 +2877,8 @@ os.makedirs(big_tmpdir, exist_ok=True)
 
 signal_handlers  = {}    ; signals_caught = []    ; error_cache = []
 
-compressors      = {"zlib": (zlib, 4), "bz2": (bz2, 9)}
-if zstd:    compressors["zstd"] = (zstd, 3)
+compressors      = {"zlib": (zlib, 4, zlib.compress), "bz2": (bz2, 9, bz2.compress)}
+if zstd:    compressors["zstd"] = (zstd, 3, lambda data, lvl: zstd.compress(data, lvl, 2))
 
 hash_funcs       = {"sha256": hashlib.sha256}
 if "blake2b" in hashlib.algorithms_available:
@@ -2886,7 +2908,8 @@ destcd           = " cd '"+destpath+"'"
 
 # Check online status for certain commands.
 if not dest_online and (options.remap or options.from_arch \
-                    or options.action not in local_actions): ## and destsys is not None:
+                    or options.action not in local_actions) \
+                    and not (options.action == "delete" and options.clean):
     x_it(1, "Destination not ready to receive commands.")
 
 if options.from_arch:
@@ -3020,7 +3043,19 @@ elif options.action == "rename":
 
 
 elif options.action == "delete":
-    delete_volume(selected_vols[0])
+    if options.clean:
+        print("Remove local Wyng metadata from system for path",
+              metadir+topdir if options.all else aset.path)
+        if not options.unattended:
+            ans = ask_input("Are you sure? [y/N]: ")
+            if ans.lower() not in {"y","yes"}:
+                x_it(0,"")
+        elif not options.force:
+            x_it(1, "Ignoring --clean without --force.")
+        remove_local_metadata(None if options.all else aset)
+
+    else:
+        delete_volume(selected_vols[0])
 
 
 elif options.action == "arch-init":
@@ -3045,14 +3080,8 @@ elif options.action == "arch-delete":
     # Remove metadata and snapshots
     for dv in list(aset.vols):   aset.delete_volume(dv)
 
-    # Remove any stray snapshots associated with archive
-    for vg in volgroups.values():
-        for lv in vg.lvs.values():
-            if "wyng" in lv.tags and "arch-"+aset.uuid in lv.tags:
-                lv_remove(vg.name, lv.lv_name, check=True)
-
-    # Remove metadata dir
-    shutil.rmtree(aset.path, ignore_errors=True)
+    # Remove local metadata and stray snapshots associated with archive
+    remove_local_metadata(aset)
 
     # Remove from destination
     print("\nDeleting entire archive...")
