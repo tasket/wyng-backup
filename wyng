@@ -12,9 +12,12 @@ import sys, signal, os, stat, shutil, subprocess, time, datetime
 import re, mmap, bz2, zlib, gzip, tarfile, io, fcntl, tempfile
 import argparse, configparser, hashlib, functools, uuid
 import xml.etree.ElementTree    ; from itertools import islice
-# For deduplication tests:
-import resource
-from array import array
+from array import array         ; import resource
+
+try:
+    import zstd, warnings
+except:
+    zstd = None
 
 
 # ArchiveSet manages configuration and configured volume info
@@ -30,7 +33,7 @@ class ArchiveSet:
         self.in_process  = get_in_process(self.path)
         # persisted:
         self.chunksize   = bkchunksize
-        self.compression = "zlib"
+        self.compression = "zstd" if zstd else "zlib"
         self.compr_level = str(compressors[self.compression][1])
         self.hashtype    = "blake2b" if "blake2b" in hash_funcs else "sha256"
         self.vgname      = None
@@ -57,6 +60,9 @@ class ArchiveSet:
             setattr(self, name, int(cp["var"][name]) \
                                 if name in self.a_ints else cp["var"][name])
 
+        # Fix: Remove filterwarnings when upstream fixes their code...
+        if self.compression == "zstd":   warnings.filterwarnings("ignore", category=DeprecationWarning)
+
         # load volume metadata objects
         for key in cp["volumes"]:
             # conditions when a volume must be loaded:
@@ -67,12 +73,12 @@ class ArchiveSet:
             # - deduplication is in effect
             if allvols or self.in_process or options.from_arch or \
             (cp["volumes"][key] != "disable" and \
-            (len(options.volumes)==0 or key in options.volumes or options.dedup>1)):
+            (len(options.volumes)==0 or key in options.volumes or options.dedup)):
                 os.makedirs(pjoin(self.path,key), exist_ok=True)
                 # instantiate:
                 self.vols[key] = self.Volume(self, key, pjoin(self.path,key), self.vgname)
                 self.vols[key].enabled = cp["volumes"][key] != "disable"
-                if options.dedup > 1:   self.dedupsessions += self.vols[key].sessions.values()
+                if options.dedup:   self.dedupsessions += self.vols[key].sessions.values()
 
         # Create master session list sorted for deduplication
         self.dedupsessions.sort(key=lambda x: x.localtime, reverse=True)
@@ -98,17 +104,22 @@ class ArchiveSet:
 
     def add_volume(self, datavol):
         if datavol in self.conf["volumes"]:
-            x_it(1, datavol+" is already configured.")
+            print(datavol+" is already configured.")    ; return True
 
-        if not self.Volume.volname_check(datavol):
-            x_it(1, "Exiting.")
+        namecheck = self.Volume.volname_check(datavol)
+        if namecheck:
+            sys.stderr.write(namecheck+"\n")   ; error_cache.append(datavol)  ; return False
 
         if lv_exists(self.vgname, datavol+".tick") \
         and "arch-"+self.uuid not in volgroups[self.vgname].lvs[datavol+".tick"].tags:
-            print("Warning: Volume '%s' is already tracked by a Wyng snapshot from a" % datavol,
-                  "different archive!")
+            sys.stderr.write("Warning: Volume '%s' is already tracked"
+                             "by a Wyng snapshot from a different archive!\n" % datavol)
         self.conf["volumes"][datavol] = "enable"
         self.save_conf()
+        vol = self.vols[datavol] = self.Volume(self,datavol, pjoin(self.path,datavol), self.vgname)
+        vol.save_volinfo()    ; print("Volume", datavol, "added to archive config.")
+        return True
+
 
     def delete_volume(self, datavol):
         if datavol in self.conf["volumes"]:   del(self.conf["volumes"][datavol])
@@ -120,10 +131,11 @@ class ArchiveSet:
 
     def rename_volume(self, datavol, newname, confname=""):
         if newname in self.conf["volumes"] or newname in os.listdir(self.path) \
-        or not self.Volume.volname_check(newname):
+        or self.Volume.volname_check(newname):
             return False
 
-        if datavol in self.conf["volumes"]:
+        if datavol in self.conf["volumes"] and datavol in self.vols:
+            self.vols[datavol].save_volinfo()
             self.conf["volumes"][newname] = self.conf["volumes"][datavol]
             del(self.conf["volumes"][datavol])    ; self.save_conf(fname=confname)
         else:
@@ -135,23 +147,23 @@ class ArchiveSet:
 
     class Volume:
         def __init__(self, archive, name, path, vgname):
-            debug        = options.debug
             self.name    = name
             self.archive = archive
             self.path    = path
             self.vgname  = vgname
-            self.present = lv_exists(vgname, name)
             self.enabled = False
             self.error   = False
             self.mapfile = path+"/deltamap"
             self.sessions= {}
             self.sesnames= []
+            self.tags    = {}
             self.meta_checked = False
             # persisted:
             self.format_ver = "0"
             self.uuid    = None
-            self.first   = None
-            self.last    = None
+            self.first   = "None"
+            self.last    = "None"
+            self.desc    = ""
             self.que_meta_update = "false"
             # other:
             self.changed_bytes = 0
@@ -160,8 +172,8 @@ class ArchiveSet:
             if exists(pjoin(path,"volinfo")):
                 with open(pjoin(path,"volinfo"), "r") as f:
                     for ln in f:
-                        vname, value = ln.strip().split(" =")
-                        setattr(self, vname, value.strip())
+                        vname, value = ln.strip().split("=", maxsplit=1)
+                        setattr(self, vname.strip(), value.strip())
 
             if exists(pjoin(path,"volchanged")):
                 self.changed_bytes = int(open(pjoin(path,"volchanged"),"r").readlines()[0].strip())
@@ -169,17 +181,15 @@ class ArchiveSet:
             # load sessions as reverse-linked list, starting with the last;
             # store as dict and sequential list of session names
             if debug:  print("\nVOLUME",self.name, self.first, self.last)
-            sprev = self.last if self.last else "none"
-            while sprev != "none":
+            sprev = self.last ### if self.last else "None"
+            while sprev != "None":
                 if debug:  print(sprev, end="  ")
                 # instantiate:
                 s = self.sessions[sprev] = self.Ses(self, sprev, path+"/"+sprev)
                 sprev = s.previous    ; self.sesnames.insert(0, s.name)
-                if sprev == "none" and self.first != s.name:
+                if sprev == "None" and self.first != s.name:
                     raise ValueError("PREVIOUS MISMATCH: %s/%s, EXPECTED %s" 
                                      % (self.name, s.name, self.first))
-                if not s.present:
-                    raise FileNotFoundError("ERROR: Manifest does not exist for "+name)
 
             if int(self.format_ver) > format_version:
                 raise ValueError("Archive format ver = "+self.format_ver+
@@ -189,17 +199,15 @@ class ArchiveSet:
 
 
         def volname_check(vname):
-            check = re.compile("^[a-zA-Z0-9\+\._-]+$")
+            check = re.compile(alphanumsym)
             if check.match(vname) is None:
-                print("Only characters A-Z 0-9 . + _ - are allowed in volume names.")
-                return False
+                return "Only characters A-Z 0-9 . + _ - are allowed in volume names."
             if vname in (".",".."):
-                print("Bad volume name.")
-                return False
-            if len(vname) > 112:
-                print("Volume name must be 112 characters or less.")
-                return False
-            return True
+                return "Bad volume name."
+            if len(vname) > volname_len:
+                return "Volume name must be %d characters or less." % volname_len
+
+            return "" # OK
 
         def volsize(self):
             return self.sessions[self.last].volsize if self.sessions else 0
@@ -218,12 +226,16 @@ class ArchiveSet:
                 volume_size = self.volsize()
             return (volume_size // self.archive.chunksize // 8) + 1
 
-        def save_volinfo(self, fname="volinfo"):
+        def save_volinfo(self, fname="volinfo", prune=False):
+            os.makedirs(self.path, exist_ok=True)
             with open(pjoin(self.path,fname), "w") as f:
                 print("format_ver =", format_version, file=f)
                 print("uuid =", self.uuid if self.uuid else str(uuid.uuid4()), file=f)
                 print("first =", self.first, file=f)
                 print("last =", self.last, file=f)
+
+                if not prune:   self.desc = options.voldesc.strip()[:comment_len]
+                print("desc =", self.desc, file=f)
                 print("que_meta_update =", self.que_meta_update, file=f)
                 f.flush()    ; os.fsync(f.fileno())
 
@@ -238,10 +250,10 @@ class ArchiveSet:
                     print(self.changed_bytes, file=f)
                     f.flush()    ; os.fsync(f.fileno())
 
-        def new_session(self, sname):
-            ns = self.Ses(self, sname)
+        def new_session(self, sname, addtags={}):
+            ns = self.Ses(self, sname, addtags=addtags)
             ns.path = pjoin(self.path, sname)
-            if self.first is None:
+            if self.first == "None":
                 ns.sequence = 0
                 self.first = sname
             else:
@@ -251,16 +263,17 @@ class ArchiveSet:
             self.last = sname
             self.sesnames.append(sname)
             self.sessions[sname] = ns
-            if options.dedup > 1:    self.archive.dedupsessions.append(ns)
+            if options.dedup:    self.archive.dedupsessions.append(ns)
             #os.makedirs(pjoin(self.path, sname))
             return ns
 
         def delete_session(self, sname, remove=True, force=False):
             ses     = self.sessions[sname]
-            index   = self.sesnames.index(sname)    ; affected = "none"
+            index   = self.sesnames.index(sname)    ; affected = None
             if sname == self.last and ses.saved and not force:
                 raise ValueError("Cannot delete last session")
 
+            for tag in ses.tags:   self.tag_del(tag, sname)
             del(self.sesnames[index], self.sessions[sname])
 
             if self.archive.dedupsessions:
@@ -275,29 +288,29 @@ class ArchiveSet:
                 affected = self.sesnames[index]
                 self.sessions[affected].previous = ses.previous
 
-            self.first = self.sesnames[0] if len(self.sesnames) else "none"
-            self.last  = self.sesnames[-1] if len(self.sesnames) else "none"
+            self.first = self.sesnames[0] if len(self.sesnames) else "None"
+            self.last  = self.sesnames[-1] if len(self.sesnames) else "None"
 
             if remove and exists(pjoin(self.path, sname)):   shutil.rmtree(ses.path)
             return affected
 
 
         class Ses:
-            def __init__(self, volume, name, path=""):
+            def __init__(self, volume, name, path="", addtags={}):
                 self.name     = name
                 self.path     = path
-                self.present  = exists(pjoin(path,"manifest"))
                 self.saved    = False
                 self.volume   = volume
                 self.toggle   = True
                 self.meta_checked = False
                 # persisted:
-                self.uuid     = "none"
+                self.uuid     = None
                 self.localtime= None
                 self.volsize  = None
                 self.format   = None
                 self.sequence = None
-                self.previous = "none"
+                self.previous = "None"
+                self.tags     = {}
                 attr_str      = ("localtime","format","previous","uuid")
                 attr_int      = ("volsize","sequence")
 
@@ -305,10 +318,50 @@ class ArchiveSet:
                     with open(pjoin(path,"info"), "r") as sf:
                         for ln in sf:
                             if ln.strip() == "uuid =":  continue
-                            vname, value = ln.strip().split(" =")
+                            vname, value = ln.split("=", maxsplit=1)
+                            vname = vname.strip()    ; value = value.strip()
+                            if value == "none":   value = "None"
+                            if vname == "tag":
+                                self.tag_add(self.tag_parse(value))
+                                continue
+
                             setattr(self, vname, 
-                                int(value) if vname in attr_int else value.strip())
+                                int(value) if vname in attr_int else value)
+
+                    if not exists(pjoin(path,"manifest")):
+                        raise FileNotFoundError("ERROR: Manifest does not exist for "+name)
                     self.saved = True
+
+                for tag in addtags:   self.tag_add(tag)
+
+
+            def tag_parse(self, tag, delim=" "):
+                parts = tag.strip().split(delim, maxsplit=1)    ; tag_id = parts[0].strip().lower()
+                result = tuple()
+                if len(tag_id) > tag_len:
+                    sys.stderr.write("Error: Max "+tag_len+" alphanumeric chars for tag ID.\n")
+                elif not re.match(alphanumsym, tag_id):
+                    sys.stderr.write("Error: Allowed tag ID chars are "+alphanumsym+"\n")
+                elif tag_id == "all":
+                    sys.stderr.write("Error: tag 'all' is reserved.")
+                else:
+                    result = (tag_id, "" if len(parts) == 1 else parts[1].strip())
+                return result
+
+            def tag_add(self, tag):
+                self.saved = False    ; voltags = self.volume.tags    ; tid = tag[0]
+                if tid not in self.tags:   self.tags[tid] = tag[1]
+                if tid in voltags:
+                    voltags[tid].add(self.name)
+                else:
+                    voltags[tid] = {self.name}
+                return True
+
+            def tag_del(self, tag, sesname):
+                del(self.tags[tag])       ; voltags = self.volume.tags
+                if tag in voltags:
+                    if sesname in voltags[tag]:   voltags[tag].remove(self.name)
+                    if len(voltags[tag]) == 0:    del(voltags[tag])
 
             def save_info(self, fname="info"):
                 if not self.path:
@@ -321,23 +374,11 @@ class ArchiveSet:
                     print("format =",    self.format, file=f)
                     print("sequence =",  self.sequence, file=f)
                     print("previous =",  self.previous, file=f)
+                    for tkey, tdesc in self.tags.items():
+                        print("tag =",   tkey, tdesc, file=f)
                     f.flush()    ; os.fsync(f.fileno())
 
-
-class Destination:
-    def __init__(self, dtype):
-        self.dtype       = dtype
-        self.free_space  = None
-
-    def check_free_dest(self): ## Do we need this??
-        do_exec([dest_run_args(desttype, ["stat -f -c '%a %S' " + aset.destmountpoint]),
-                    # sanitize remote output:
-                    ["cat","-v"],  ["head","--bytes=128000"]
-                ], out=tmpdir+"/check_free")
-
-        one, two = open(tmpdir+"/check_free","r").readlines[0].split()
-        self.free_space = int(one) * int(two)
-        return self.free_space
+# END ArchiveSet, Volume, Ses
 
 
 # Define absolute paths of commands
@@ -361,9 +402,10 @@ class Lvm_VolGroup:
         self.lvs   = {}
         self.poolnames = set()
         self.gc_procs = []
+        self.clean = options.clean
 
     def __del__(self):
-        if options.clean:
+        if self.clean:
             for p in self.gc_procs:   p.wait()
 
 
@@ -536,7 +578,7 @@ def arch_init(aset):
             compression = options.compression.strip()
             compr_level = str(compressors[compression][1])
         compression = compression.strip()   ; compr_level = compr_level.strip()
-        if compression not in compressors.keys() or not compr_level.isdecimal():
+        if compression not in compressors.keys() or not is_num(compr_level):
             x_it(1, "Invalid compression spec.")
         aset.compression = compression      ; aset.compr_level = compr_level
 
@@ -582,7 +624,7 @@ def arch_check(vol_list=None, startup=False):
             aset.vols[volname] = ArchiveSet.Volume(aset, volname,aset.path+"/"+volname,aset.vgname)
 
         vol = aset.vols[volname]
-        if not startup or options.debug:   print("Checking volume", volname, flush=True)
+        if not startup or options.debug:   print("\nChecking volume", volname, flush=True)
 
         # Remove session tmp dirs
         for sdir in os.scandir(vol.path):
@@ -597,7 +639,7 @@ def arch_check(vol_list=None, startup=False):
             x_it(1, "Error: Local and archive metadata differ.")
 
         # Check index sequencing in first and combined manifests
-        print("Checking index sequence...")
+        print("  Checking index sequence...")
         mset = []
         for ses in vol.sesnames:
             # print(ses, "size =", vol.sessions[ses].volsize)
@@ -605,10 +647,13 @@ def arch_check(vol_list=None, startup=False):
             check_manifest_sequence(volname, mset)
 
         # Check hashes of each session individually
-        print("Checking digests...")
+        print("  Checking data...")
         for sesname in reversed(vol.sesnames):
-            ses = vol.sessions[sesname]    ; manifest = ses.path+"/manifest"
-            if options.session and options.session < ses.localtime:   continue # Enh: use seq
+            ses = vol.sessions[sesname]    ; manifest = ses.path+"/manifest"    ; bcount = 0
+            if options.session \
+            and ((options.session.lower() == "newest" and sesname != vol.sesnames[-1]) \
+            or options.session < ses.localtime):
+                continue # Enh: use seq
             if attended:   print("  Session %s... " % sesname, end="", flush=True)
 
             # FixCheck for stray entries here
@@ -639,7 +684,7 @@ def arch_check(vol_list=None, startup=False):
                         raise BufferError("Bad chunk size %d for %s" % (untrusted_size, mfline))
 
                     # Size is OK.
-                    size = untrusted_size
+                    size = untrusted_size    ; bcount += size
                     # Read chunk buffer
                     untrusted_buf = getses.stdout.read(size)
                     rc  = getses.poll()
@@ -654,7 +699,7 @@ def arch_check(vol_list=None, startup=False):
                         print(mfline)
                         raise ValueError("Bad hash "+fname+" :: "+gethash(untrusted_buf).hexdigest())
 
-            if attended:   print("OK")
+            if attended:   print(bcount, "bytes OK")
 
 
 def check_manifest_sequence(datavol, sesnames):
@@ -707,7 +752,7 @@ def get_configs_remote():
     if not options.unattended:
         print("\nMetadata will be read from the archive;"
               "\nPlease check that the archive is in a trusted, secure condition!")
-        ans = input("Proceed? [y/N] ")
+        ans = ask_input("Proceed? [y/N] ")
         if ans.lower() not in ("y","yes"):
             x_it(0,"Stopped.")
 
@@ -918,8 +963,6 @@ elif cmd == "dedup":
 elif cmd == "rename":
     catch_signals()    ; oldname = sys.argv[2]    ; newname = sys.argv[3]    ; replaced = False
     if exists(oldname) and exists(newname):   sys.exit(50)
-    with open("archive.ini.tmp","wb") as conf:
-        for ln in sys.stdin.buffer:   conf.write(ln)
     if exists(oldname):   replace(oldname, newname)   ; replaced = True
     replace("archive.ini.tmp", "archive.ini")    ; fssync(".")
     if not replaced:   sys.exit(40)
@@ -947,8 +990,10 @@ def detect_dest_state(destsys):
     global dest_run_map
     dest_run_map     = {"internal": [CP.sh],
                         "ssh":      [CP.ssh] + ssh_opts + [destsys],
-                        "qubes":    [CP.qvm_run, "-p", destsys],
-                        "qubes-ssh":[CP.qvm_run, "-p", destsys.split(":")[0]]
+                        "qubes":    [CP.qvm_run, "--no-color-stderr", "--no-color-output",
+                                     "-p", destsys],
+                        "qubes-ssh":[CP.qvm_run, "--no-color-stderr", "--no-color-output",
+                                     "-p", destsys.split(":")[0]]
                         }
 
     dest_in_proc = False    ; dest_free = None    ; online = False
@@ -967,7 +1012,7 @@ def detect_dest_state(destsys):
 
         # Fix: get OSTYPE env variable
         cmd = ["mountpoint -q '"+aset.destmountpoint
-                +"' && mkdir -p '"+aset.destmountpoint+"/"+aset.destdir+topdir
+                +"' && mkdir -p '"+aset.destmountpoint+"/"+aset.destdir+topdir+"/"+aset.name
                 +"' && cd '"+aset.destmountpoint+"/"+aset.destdir+topdir+"'"
 
                 # send helper program to remote dest
@@ -976,7 +1021,7 @@ def detect_dest_state(destsys):
 
                 # test write access and hardlinks
                 +"  && touch archive.dat"
-                +(" && ln -f archive.dat .hardlink" if options.dedup > 1 else "")
+                +(" && ln -f archive.dat .hardlink" if options.dedup else "")
 
                 # check free space and in_process status on remote
                 +"  && echo -n 'wyng_check_free ' && stat -f -c '%a %S' ."
@@ -1127,7 +1172,7 @@ def dest_run_args(dest_type, commands, trap=False):
         remotetmp = os.path.basename(tmpf.name)
 
     if dest_type in {"qubes","qubes-ssh"}:
-        do_exec([[CP.qvm_run, "-p",
+        do_exec([[CP.qvm_run, "--no-color-stderr", "--no-color-output", "-p",
                   (destsys if dest_type == "qubes" else destsys.split(":")[0]),
                   CP.mkdir+" -p "+tmpdir+"-rpc"
                   +" && "+CP.cat+" >"+pjoin(tmpdir+"-rpc",remotetmp)
@@ -1184,20 +1229,24 @@ def prepare_snapshots(datavols):
                 continue
 
         # Reclaim deltamap from interrupted session.
-        # Future: Expand recovery to start send-resume
         if exists(mapfile+"-tmp"):  os.rename(mapfile+"-tmp", mapfile)
 
         # Make deltamap or initial snapshot if necessary. Try to recover paired state
         # by comparing snapshot UUIDs; a match means remap is unnecessary.
         if len(vol.sessions):
             if lv_exists(vgname, snap1vol) and vol.last not in l_vols[snap1vol].tags \
-            and "S_" in " ".join(l_vols[snap1vol].tags) \
             and l_vols[snap1vol].lv_uuid != vol.sessions[vol.last].uuid:
                 lv_remove(vgname, snap1vol)    ; print("  Removed mis-matched snapshot", snap1vol)
 
             if not lv_exists(vgname, snap1vol) and lv_exists(vgname, snap2vol) \
             and vol.last in l_vols[snap2vol].tags and "arch-"+aset.uuid in l_vols[snap2vol].tags:
+                # Recover interrupted snapshot rotation
                 lv_rename(vgname, snap2vol, snap1vol)
+
+            if lv_exists(vgname, snap1vol) and exists(mapfile) \
+            and os.stat(mapfile).st_blocks == 0 and "delta" in l_vols[snap1vol].tags:
+                # Handle inadvertant mapfile reset
+                lv_remove(vgname, snap1vol)    ; print("  Removed mis-matched delta", snap1vol)
 
             if lv_exists(vgname, snap1vol) and not exists(mapfile) \
             and vol.last in l_vols[snap1vol].tags and "delta" not in l_vols[snap1vol].tags \
@@ -1261,7 +1310,7 @@ def get_lvm_deltas(datavols):
                         ]
                 do_exec(cmds,  out=tmpdir+"/delta."+datavol)
         except Exception as e:
-            print("ERROR running thin_delta process.")
+            sys.stderr.write("ERROR running thin_delta process.\n")
             raise e
         finally:
             lvm_meta_snapshot(aset, "release", pool=apool)
@@ -1311,7 +1360,7 @@ def update_delta_digest(datavol):
             blocklen   = int(delta.get("length")) * dblocksize
             blockend   = min(blockbegin+blocklen, snap_ceiling)
             if delta.tag in ("different", "right_only"):
-                isnew = 1 ##dnewblocks += blockend - blockbegin
+                isnew = 1
             elif delta.tag == "left_only":
                 isnew = 0    ; dfreedblocks += blockend - blockbegin
             else: # superfluous tag
@@ -1369,8 +1418,7 @@ def manifest_to_deltamap(datavol, manifest, mapsize):
 # marked chunks will be sent unconditionally, '1' means a chunk won't be sent if its marked
 # but same content, and '>= 2' will check w the archive-wide index and link it if matched.
 
-def send_volume(datavol, localtime, send_all):
-    global dest_free
+def send_volume(datavol, localtime, ses_tags, send_all):
 
     vol         = aset.vols[datavol]            ; dedup       = options.dedup
     snap2vol    = vol.name + ".tock"            ; snap2size   = l_vols[snap2vol].lv_size
@@ -1379,7 +1427,7 @@ def send_volume(datavol, localtime, send_all):
     bksession   = "S_"+localtime                ; sdir        = pjoin(datavol, bksession)
     prior_size  = vol.volsize()                 ; prior_ses   = vol.last
 
-    if dedup and len(vol.sessions):
+    if len(vol.sessions):
         # Our chunks are usually smaller than LVM's, so generate a full manifest to detect
         # significant amount of unchanged chunks that are flagged in the delta bmap.
         fullmanifest = open(merge_manifests(datavol), "r")
@@ -1388,7 +1436,7 @@ def send_volume(datavol, localtime, send_all):
         fullmanifest = None
     fman_hash     = fman_fname = ""
 
-    ses = vol.new_session(bksession)
+    ses = vol.new_session(bksession, addtags=ses_tags)
     ses.localtime = localtime
     ses.uuid      = l_vols[snap2vol].lv_uuid
     ses.trans_id  = l_vols[datavol].transaction_id
@@ -1398,12 +1446,12 @@ def send_volume(datavol, localtime, send_all):
 
     # Code from init_dedup_indexN() localized here for efficiency.
     dedup_idx     = dedup_db = None
-    if dedup == 5:
+    if dedup:
         hashtree, ht_ksize, hash_w, dataf, chtree, chdigits, ch_w, ses_w \
                   = aset.dedupindex
         chtree_max= 2**(chtree[0].itemsize*8)
         idxcount  = dataf.seek(0,2) // (ch_w+ses_w)    ; ddblank_ch = bytes(hash_w)
-    if dedup > 1:   ddsessions = aset.dedupsessions    ; ses_index = ddsessions.index(ses)
+        ddsessions = aset.dedupsessions                ; ses_index = ddsessions.index(ses)
 
     # Set current dir and make new session folder
     os.chdir(metadir+bkdir)
@@ -1414,7 +1462,7 @@ def send_volume(datavol, localtime, send_all):
     addrsplit = -address_split[1]
     lchunk_addr = vol.last_chunk_addr(snap2size)
 
-    compress = compressors[aset.compression][0].compress    ; compresslevel = int(aset.compr_level)
+    compresslevel = int(aset.compr_level)    ; compress = compressors[aset.compression][2]
 
     # Use tar to stream files to destination
     stream_started = False
@@ -1508,7 +1556,7 @@ def send_volume(datavol, localtime, send_all):
                 print(hexhash, destfile, file=hashf)
 
                 # If chunk already in archive, link to it
-                if dedup == 5:
+                if dedup:
                     bhashb = bhash.digest()
                     i      = int(hexhash[:ht_ksize], 16)
                     pos    = hashtree[i].find(bhashb)     ; ddses = None
@@ -1541,7 +1589,7 @@ def send_volume(datavol, localtime, send_all):
             # Advance addr, except when minibmap is zero len.
             if minibmap or send_all:  addr += chunksize
 
-    print("\r  100% ", ("%8.1fM    |  %s" % (bcount/1000000, datavol)),
+    print("\r  100% ", ("%8.1fM  |  %s" % (bcount/1000000, datavol)),
           ("\n  (reduced %0.1fM)" % (ddbytes/1000000)) if ddbytes and options.debug else "",
           end="")
 
@@ -1592,18 +1640,12 @@ def send_volume(datavol, localtime, send_all):
     rotate_snapshots(vol, rotate=True)
     init_deltamap(vol, vol.mapfile, vol.mapsize())
     catch_signals(None)
-
     if dedup and options.debug:   show_mem_stats()
 
-    dest_free -= int(bcount + (bcount * 0.05))
     return stream_started + (bcount//bs)
 
 
 # Build deduplication hash index and list
-
-def init_dedup_index1(listfile=""):
-    return
-
 
 def init_dedup_index5(listfile=""):
 
@@ -1692,7 +1734,9 @@ def dedup_existing():
 # Controls flow of monitor and send_volume procedures:
 
 def monitor_send(datavols, selected=[], monitor_only=True):
-    for prg in (CP.lvm, CP.blkdiscard, CP.dmsetup, CP.thin_delta ):
+    global dest_free
+
+    for prg in (CP.lvm, CP.dmsetup, CP.thin_delta ):
         if not shutil.which(prg):  raise RuntimeError("Required command not found: "+prg)
 
     localtime = time.strftime("%Y%m%d-%H%M%S")
@@ -1709,6 +1753,24 @@ def monitor_send(datavols, selected=[], monitor_only=True):
     if len(incrementals)+len(send_alls) == 0:
         x_it(0, "No new data.")
 
+    # Process session tags
+    ses_tags = []
+    if options.tag and options.tag == [""] and not options.unattended and not monitor_only:
+        print("Enter tag info as 'tagID[, tag description]'. Blank to end input.")
+        while True:
+            ans = ask_input("[%d]: " % (len(ses_tags)+1)).strip()
+            if not ans:   break
+            tag = aset.Volume.Ses.tag_parse(None, ans, delim=",")
+            if not tag:   continue
+            ses_tags.append(tag)
+            if len(ses_tags) > 4:   break
+        print(len(ses_tags), "tags total.")
+    elif options.tag and not monitor_only:
+        for tag_opt in options.tag:
+            tag = aset.Volume.Ses.tag_parse(None, tag_opt, delim=",")
+            if not tag:   raise ValueError("Invalid tag "+tag_opt)
+            ses_tags.append(tag)
+
     if len(incrementals) > 0:
         get_lvm_deltas(incrementals)
 
@@ -1716,7 +1778,8 @@ def monitor_send(datavols, selected=[], monitor_only=True):
         init_dedup_index()
 
     if not monitor_only:
-        cmpvols = [x for x in aset.vols.values() if x.name in incrementals | send_alls and x.sessions]
+        cmpvols = [x for x in aset.vols.values()
+                         if x.name in incrementals | send_alls and x.sessions]
         cmpses  = [v.sessions[v.sesnames[-1]] for v in cmpvols]
         if compare_files(volumes=cmpvols, sessions=cmpses):
             x_it(1, "Error: Local and archive metadata differ.")
@@ -1741,7 +1804,8 @@ def monitor_send(datavols, selected=[], monitor_only=True):
                     error_cache.append(datavol)
                     continue
 
-            dnew = send_volume(datavol, localtime, send_all=datavol in send_alls)
+            dnew       = send_volume(datavol, localtime, ses_tags, send_all=datavol in send_alls)
+            dest_free -= int(dnew + (dnew * 0.05))
 
         else:
             rotate_snapshots(vol, rotate=False)
@@ -1774,61 +1838,62 @@ def rotate_snapshots(vol, rotate=True):
 # merge starting with newest dirs and working backwards. Target of merge is
 # timewise the next session dir after the pruned dirs.
 # Specify data volume and one or two member list with start [end] date-time
-# in YYYYMMDD-HHMMSS format.
+# in YYYYMMDD-HHMMSS or ^tagname format.
 
 def prune_sessions(datavol, times):
 
+    volume = aset.vols[datavol]    ; sessions = volume.sesnames
+    t1, t2 = "", ""                ; to_prune  = []
+
+    if len(sessions) < 2:    print("  No extra sessions to prune.")    ; return
+
     # Validate date-time params
-    for dt in times:
-        datetime.datetime.strptime(dt, "%Y%m%d-%H%M%S")
+    for pos, dt in enumerate(times[:]):
+        if not dt[0].startswith("^"):
+            if not dt.startswith("S_"):   times[pos] = "S_"+dt.strip()
+            datetime.datetime.strptime(times[pos][2:], "%Y%m%d-%H%M%S")
+        elif dt[1:] not in volume.tags:
+            print(" No match for", dt)    ; return
+        elif pos == 0:
+            for sesname in sessions:
+                if dt[1:] in volume.sessions[sesname].tags:
+                    if len(times) == 1 and not options.allbefore:
+                        to_prune.append(sesname)
+                    else:
+                        t1 = sesname   ; break
+        elif pos == 1:
+            for sesname in reversed(sessions):
+                if dt[1:] in volume.sessions[sesname].tags:   t2 = sesname   ; break
 
     # t1 alone should be a specific session date-time,
     # t1 and t2 together are a date-time range.
-    t1 = "S_"+times[0].strip()
-    if len(times) > 1:
-        if options.allbefore:  x_it(1, "Error: --all-before cannot be used with range.")
-        t2 = "S_"+times[1].strip()
+    if options.allbefore:   t1 = sessions[0]    ; t2 = times[0]
+    if not t1:   t1 = times[0]
+    if not t2 and len(times) > 1:
+        t2 = times[1]
         if t2 <= t1:  x_it(1, "Error: Second date-time must be later than first.")
-    else:
-        t2 = ""
 
-    print("\nPruning Volume :", datavol)
-
-    volume = aset.vols[datavol]
-    sessions = volume.sesnames
-    if len(sessions) < 2:
-        print("  No extra sessions to prune.")
-        return
-
-    # Find specific sessions to prune;
-    # Use contiguous ranges.
-    to_prune = []
-    if options.allbefore:
-        for ses in sessions:
-            if ses >= t1:
-                break
-            to_prune.append(ses)
+    # Find specific sessions to prune in contiguous range
+    if to_prune:
+        pass
 
     elif t2 == "":
-        if t1 in sessions:
-            to_prune.append(t1)
+        # find single session
+        if t1 in sessions:   to_prune.append(t1)
 
     else:
+        # find sessions in a date-time range
         start = len(sessions)   ; end = 0
         if t1 in sessions:
             start = sessions.index(t1)
         else:
             for ses in sessions:
-                if ses > t1:
-                    start = sessions.index(ses)
-                    break
+                if ses > t1:   start = sessions.index(ses)    ; break
         if t2 in sessions:
             end = sessions.index(t2)+1
         else:
             for ses in reversed(sessions):
-                if ses < t2:
-                    end = sessions.index(ses)+1
-                    break
+                if ses < t2:   end = sessions.index(ses)+1    ; break
         to_prune = sessions[start:end]
 
     if len(to_prune) and to_prune[-1] == sessions[-1]:
@@ -1838,59 +1903,63 @@ def prune_sessions(datavol, times):
         print("  No selections in this date-time range.")
         return
 
-    # Determine target session where data will be merged.
-    target_s = sessions[sessions.index(to_prune[-1]) + 1]
-
-    if options.autoprune.lower()=="off":
-        merge_sessions(datavol, to_prune, target_s, clear_sources=True)
-    else:
-        autoprune(datavol, apmode=options.autoprune, include=to_prune)
+    autoprune(datavol, apmode=options.autoprune, include=set(to_prune))
 
 
-# Likely parameters for autoprune:
-# target_size (0 or MB int): Size cap for archive
+# Parameters / vars for autoprune:
 # oldest (date): date before which all sessions are pruning candidates
-# nthresh: min number of sessions to prune this time (0 = prune all candidates)
-# ndays_ago (int): number of days ago before which the thinning params are applied
+# thin_days (int): number of days ago before which the thinning params are applied
 # ndays & nsessions: a days/sessions ratio for amount of sessions left after thinning
+# nthresh: min number of sessions to prune this time (0 = prune all candidates)
+# target_size (0 or MB int): User-selected size cap for archive (future)
 
-def autoprune(datavol, needed_space=0, apmode="off", include=[]):
+def autoprune(datavol, needed_space=0, apmode="off", include=set()):
     global dest_free
 
-    def get_dest_free():
+    def get_dest_free(): ## Enh: add sanitize
         for ln in open(tmpdir+"/merge.log","r").readlines():
             if ln.startswith("wyng_check_free"):  dest_free = int(ln.split()[1])
         return dest_free
 
-    apmode = apmode.lower()
-    if apmode not in ("on","min","full"):  return False
     dtdate = datetime.date
     def to_date(sesdate):
         return dtdate(int(sesdate[2:6]),int(sesdate[6:8]),int(sesdate[8:10]))
 
     vol       = aset.vols[datavol]
-    if len(vol.sesnames) < 4:  return False
+    if len(vol.sesnames) < 2:   return False
+    apmode    = apmode.lower()                ; exclude = set()
     sessions  = vol.sesnames[:-1]             ; marked  = 0
-    today     = dtdate.today()                ; oldest  = today-datetime.timedelta(days=183)
-    ndays_ago = datetime.timedelta(days=64)   ; ndays   = 7      ; nsessions = 2
+    today     = dtdate.today()                ; oldest  = today-datetime.timedelta(days=366)
+    thin_days = datetime.timedelta(days=32)   ; ndays   = 7      ; nsessions = 2
     startdate = to_date(sessions[0])          ; nthresh = 3 if apmode == "on" else 0
-    enddate   = min(to_date(sessions[-2]), today-ndays_ago)
+    enddate   = min(to_date(sessions[-2]), today-thin_days) if len(sessions) > 2 else None
 
     # Make a 2d array of ordinal dates and populate with session id + flag
     apcal = { day: [] for day in range(dtdate(startdate.year,1,1).toordinal(),
                                        to_date(sessions[-1]).toordinal()+ndays) }
     for ses in sessions:  apcal[to_date(ses).toordinal()].append([ses, True])
 
+    # Build set of excluded sessions
+    for sx in options.keep:
+        if not sx.startswith("^"):
+            datetime.datetime.strptime(sx, "%Y%m%d-%H%M%S")    ; exclude.add("S_"+sx)
+        else:
+            if sx[1:] == "all":
+                exclude += {x.name for x in vol.sessions if x.tags}
+            else:
+                exclude += {x.name for x in vol.sessions if sx[1:] in x.tags}
+    include -= exclude
+
     # Mark all sessions prior to oldest date setting, plus include list
     for ses in sessions:
         sdate = to_date(ses)
-        if sdate <= oldest or ses in include:
+        if (apmode != "off" and sdate <= oldest) or ses in include:
             for dses in apcal[sdate.toordinal()]:
-                if dses[0] == ses:
+                if dses[0] == ses and ses not in exclude:
                     dses[1] = False    ; vol.sessions[ses].toggle = False
 
     # Mark sessions for thinning-out according to ndays + nsessions
-    if needed_space or apmode != "min":
+    if apmode != "off" and (needed_space or apmode != "min") and enddate:
         for year in range(startdate.year, enddate.year+1):
             for span in range(dtdate(year,1,1).toordinal(),
                             min(dtdate(year,12,31), enddate).toordinal(), ndays):
@@ -1902,43 +1971,45 @@ def autoprune(datavol, needed_space=0, apmode="off", include=[]):
                     offset += (ndays//nsessions)+1    ; offset %= min(ndays, len(dlist))
                     for dses in apcal[span+bigday]:
                         if dses[1]:
-                            dses[1] = False    ; dlist[bigday] -= 1
-                            vol.sessions[dses[0]].toggle = False
+                            # always decr bigday, but don't toggle if session is excluded
+                            dlist[bigday] -= 1     #### ; print("_",end="") ####
+                            dses[1] = vol.sessions[dses[0]].toggle = dses[0] in exclude
                             break
 
     # Find contiguous marked ranges and merge/prune them. Repeat until free >= needed space.
-    factor = 1
+    factor = 1    ; sessions.append("End")
     while True:
-        to_prune = []    ; removed_ct = 0
+        to_prune = []    ; removed_ct = 0    ; skipped = False
         for ses in sessions:
             if ses is None:   continue
-            if vol.sessions[ses].toggle:
+            if ses == "End" or vol.sessions[ses].toggle :
                 if to_prune:
-                    #print("\n", to_prune) ####
+                    # prioritize ranges that overlap with requested includes
+                    if include and not (set(to_prune) & include):
+                        #print("#", end="") ####
+                        to_prune.clear()    ; skipped = True    ; continue
+
                     target_s = vol.sesnames[vol.sesnames.index(to_prune[-1]) + 1]
                     merge_sessions(datavol, to_prune, target_s, clear_sources=True)
+
                     for i in to_prune:   sessions[sessions.index(i)] = None
-                    removed_ct += len(to_prune);   to_prune.clear()
-                    if nthresh and removed_ct >= nthresh*factor:  break # for ses
+                    include -= set(to_prune)    ; removed_ct += len(to_prune);   to_prune.clear()
+                    if not include and nthresh and removed_ct >= nthresh*factor:  break # for ses
             else:
+                #print(".", end="") ####
                 to_prune.append(ses)
 
         if removed_ct:
-            print("Removed", removed_ct)
+            print(" Removed", removed_ct)
             dest_free = get_dest_free()    ; os.remove(tmpdir+"/merge.log")
 
+        if skipped and apmode != "off":   continue # while
         if removed_ct == 0 or nthresh == 0 or needed_space <= dest_free:
             break # while
         elif factor > 4:
             nthresh = 0
         else:
             factor += 2
-
-    # If needed_space loop above quit before processing 'include' range, then process it now.
-    if include and include[0] in sessions:
-        target_s = vol.sesnames[vol.sesnames.index(include[-1]) + 1]
-        merge_sessions(datavol, include, target_s, clear_sources=True)
-        print("Removed", len(include))    ; dest_free = get_dest_free()
 
     return True
 
@@ -2061,7 +2132,8 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
         #print("Removing %d" % len(sources), end="...", flush=True)
 
     if not resume:
-        volume.sessions[target].save_info("info.tmp")  ; volume.save_volinfo("volinfo.tmp")
+        volume.sessions[target].save_info("info.tmp")
+        volume.save_volinfo("volinfo.tmp", prune=True)
 
         # Set archive in_process state to "merge"
         set_in_process(["merge", datavol, str(clear_sources), target, sources],
@@ -2116,8 +2188,6 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
         x_it(1, "Error: Local and dest metadata differ.")
 
     for ses in sources:  shutil.rmtree(volume.path+"/"+ses, ignore_errors=True)
-
-    ##print("done.")
 
 
 # Compare files between local and dest archive, using hashes.
@@ -2180,8 +2250,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     vgname      = aset.vgname                     ; zeros     = bytes(chunksize)
     vol         = aset.vols[datavol]              ; snap1vol  = datavol+".tick"
     gethash     = hash_funcs[aset.hashtype]       ; sessions  = vol.sesnames
+    compress    = compressors[aset.compression][2]  ; compresslevel = int(aset.compr_level)
     decompress  = compressors[aset.compression][0].decompress
-    compress = compressors[aset.compression][0].compress    ; compresslevel = int(aset.compr_level)
 
 
     if diff or verify_only:
@@ -2195,14 +2265,25 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
     # Set the session to retrieve
     if select_ses:
-        datetime.datetime.strptime(select_ses, "%Y%m%d-%H%M%S")
-        select_ses = "S_"+select_ses
+        if select_ses[0] == "^":
+            # match tag to session id
+            tag = select_ses[1:]
+            if tag in vol.tags:
+                select_ses = sorted(vol.tags[tag])[-1]
+                print("Matched tag to", select_ses)
+        else:
+            # validate date-time input
+            datetime.datetime.strptime(select_ses, "%Y%m%d-%H%M%S")
+            select_ses = "S_"+select_ses
+
         if select_ses not in sessions:
-            x_it(1, "The specified session date-time does not exist.")
+            x_it(1, "No match for specified session criteria.")
+
     elif len(sessions) > 0:
         select_ses = sessions[-1]
     else:
         x_it(1, "No sessions available.")
+
     if diff and remap and select_ses != sessions[-1]:
         x_it(1, "Cannot use prior session for remap.")
 
@@ -2211,7 +2292,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     if save_path and exists(save_path) and attended:
         print("\n!! This will", "overwrite" if sparse_write else "erase all",
               "existing data in",save_path,"!!")
-        ans = input("   Are you sure? [y/N]: ")
+        ans = ask_input("   Are you sure? [y/N]: ")
         if ans.lower() not in {"y","yes"}:
             x_it(0,"")
 
@@ -2456,15 +2537,17 @@ def rename_volume(oldname, newname):
     for prg in (CP.lvm, CP.blkdiscard):
         if not shutil.which(prg):  raise RuntimeError("Required command not found: "+prg)
 
+    os.chdir(aset.path)    ; volume   = aset.vols[oldname]
     confname = os.path.basename(aset.confpath)    ; was_in_process = aset.in_process is not None
     if not aset.rename_volume(oldname, newname, confname=confname+".tmp"):
         x_it(1, "Error: Cannot rename '%s' to '%s'." % (oldname,newname))
 
+    do_exec[[CP.tar, "-czf", tmpdir+"/rename.tgz", confname+".tmp", oldname+"/volinfo"]]
     catch_signals()
     if not aset.in_process:   set_in_process(["rename", oldname, newname])
-    rc = dest_run([ destcd + bkdir + " && python3 "
+    rc = dest_run([ destcd + bkdir + " && tar -xzf - && python3 "
                    +tmpdir+("-rpc/dest_helper.py rename '%s' '%s'" % (oldname, newname)) ],
-                    infile=aset.confpath+".tmp", check=False, trap=True)
+                    infile=tmpdir+"/rename.tgz", check=False, trap=True)
 
     if rc == 50:
         set_in_process(None)
@@ -2500,7 +2583,7 @@ def delete_volume(dv):
         print("Warning! Delete will remove ALL metadata AND archived data",
               "for volume", dv)
 
-        ans = input("Are you sure? [y/N]: ")
+        ans = ask_input("Are you sure? [y/N]: ")
         if ans.lower() not in {"y","yes"}:
             x_it(0,"")
 
@@ -2519,7 +2602,40 @@ def delete_volume(dv):
     return
 
 
+# Remove Wyng metadata from local system
+
+def remove_local_metadata(archive):
+    for vg in volgroups.values():
+        for lv in list(vg.lvs.values()):
+            if lv.lv_name.endswith((".tick",".tock")) and "wyng" in lv.tags \
+            and (not archive or "arch-"+archive.uuid in lv.tags):
+                lv_remove(vg.name, lv.lv_name, check=True)
+
+    # Remove metadata dir(s)
+    shutil.rmtree(archive.path if archive else metadir+topdir,
+                  ignore_errors=True)
+
+
 def show_list(selected_vols):
+
+    # Print list of sessions grouped by tag. First, organize by tag:
+    if options.tag:
+        print("\nTag Assignments")    ; ltags = {}
+        for dv in selected_vols if selected_vols else datavols:
+            vol = aset.vols[dv]
+            for tag, tses in vol.tags.items():
+                #tset = ( dv+" / "+x[2:] for x in tses )
+                tset = ( (dv, x[2:], vol.sessions[x].tags[tag] ) for x in tses )
+                if tag not in ltags:
+                    ltags[tag] = list(tset)
+                else:
+                    ltags[tag] += tset
+        # Print result:
+        for tag in sorted(ltags):
+            print("\n"+tag+":")
+            for ses in sorted(ltags[tag]):   print(" ", ses)
+        return
+
     # Print list of volumes if no volume is selected.
     if not aset.vols:
         print("No volumes.")    ; return
@@ -2527,30 +2643,38 @@ def show_list(selected_vols):
         print("\nConfigured Volumes [%s/%s]\n" % (aset.vgname, aset.poolname))
         maxwidth = max(len(x.name) for x in aset.vols.values())
         fmt    = "%7.1f GB  %-" + str(maxwidth+5) + "s  %s"
-        for name in sorted(x.name for x in aset.vols.values()):
-            vol = aset.vols[name]   ; ses = vol.sesnames[-1][2:] if len(vol.sesnames) else " "
-            print(fmt % ((aset.vols[name].volsize() / 1024**3), name, ses))
+        for vname in sorted(x.name for x in aset.vols.values()):
+            vol = aset.vols[vname]   ; sname = vol.sesnames[-1][2:] if len(vol.sesnames) else " "
+            if options.verbose:
+                print(fmt % ((aset.vols[vname].volsize() / 1024**3), vname, sname))
+                if vol.desc:   print("  desc:", vol.desc)
+            else:
+                print(vname)
         return
 
-    # Print list of sessions for selected volume(s).
+    # Print list of sessions grouped by volume.
     # Get the terminal column width and set cols to number of list columns.
     ttycols = os.popen('stty size', 'r').read().split()[1]
     cols = max(4, min(10, int(ttycols)//17))
     for dv in selected_vols:
         print("\nSessions for volume '%s':\n" % dv)
+        if not aset.vols[dv].sessions:   print("None.")    ; continue
         vol = aset.vols[dv]    ; lmonth = vol.sesnames[0][2:8]    ; slist = []
 
         # Blank at end of 'sesnames' is a terminator that doesn't match any month value.
-        for ses in vol.sesnames + [""]:
-            month = ses[2:8]
-            if options.unattended:
+        for sname in vol.sesnames + [""]:
+            month = sname[2:8]    ; ses = vol.sessions[sname] if sname else None
+            if options.unattended or options.verbose:
                 # plain listing
-                print(ses[2:])
+                print(sname[2:])
+                if ses and options.verbose:
+                    for tag in sorted(ses.tags.items()):
+                        print(" tag:", tag[0]+(", "+tag[1] if tag[1] else ""))
                 continue
 
             if month == lmonth:
                 # group sessions by month
-                slist.append(ses)
+                slist.append(sname)
             else:
                 # print the month listing: 'rows' is adjusted to carry the remainder on
                 # additional lines. 'extra' and 'steps' are used to eliminate ragged
@@ -2566,7 +2690,7 @@ def show_list(selected_vols):
                 print()
 
                 # start new month list
-                lmonth = month    ; slist = [ses]
+                lmonth = month    ; slist = [sname]
 
 
 def show_mem_stats():
@@ -2575,6 +2699,15 @@ def show_mem_stats():
         (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * resource.getpagesize() // 1024//1024)
         )
     print("  Current: vsize %d, rsize %d" % (vsz/1000,rss/1000))
+
+
+def is_num(val):
+    try:
+        float(val)
+    except:
+        return False
+    else:
+        return True
 
 
 def catch_signals(action="do"):
@@ -2592,19 +2725,24 @@ def catch_signals(action="do"):
 
 
 def handle_signal(signum, frame):
-    print("*** Caught signal", signum)
+    sys.stderr.write(" *** Caught signal "+signum)
     if signum not in signals_caught:   signals_caught.append(signum)
+
+
+def ask_input(text):
+    sys.stderr.write(text)
+    return input()
 
 
 # Exit with simple message
 def x_it(code, text):
     sys.stderr.write(text+"\n")
-    cleanup()
+    if tmpdir:   cleanup()
     sys.exit(code)
 
 
 def cleanup():
-    if not options.debug:
+    if not debug:
         shutil.rmtree(big_tmpdir, ignore_errors=True)
         for f in (big_tmpdir, tmpdir, tmpdir+"-rpc", tmpdir+"-old"):
             shutil.rmtree(f, ignore_errors=True)
@@ -2618,11 +2756,9 @@ def cleanup():
 ##  MAIN  #########################################################################################
 
 # Constants / Globals
-prog_name             = "Wyng"
-prog_version          = "0.2.0rc10"    ; prog_date = "20210521"
-format_version        = 1
-print("%s %s %s" % (prog_name, prog_version, prog_date))
-prog_name             = prog_name.lower()
+prog_name             = "wyng"
+prog_version          = "0.3.0rc1"      ; prog_date = "20210605"
+format_version        = 2               ; debug     = False       ; tmpdir = None
 
 # Disk block size:
 bs                    = 512
@@ -2646,7 +2782,9 @@ ssh_opts              = ["-x", "-o", "ControlPath=~/.ssh/controlsocket-%r@%h-%p"
 
 local_actions         = ("index-test","monitor","list","version","add")
 
-pjoin     = os.path.join    ; exists = os.path.exists
+comment_len = 100             ; tag_len = 25
+volname_len = 112             ; alphanumsym = "^[a-zA-Z0-9\+\._-]+$"
+pjoin       = os.path.join    ; exists = os.path.exists
 
 
 if sys.hexversion < 0x3050000:
@@ -2668,16 +2806,20 @@ except IOError:
 parser = argparse.ArgumentParser(description="")
 parser.add_argument("action", choices=["send","monitor","add","delete","prune","receive",
                     "verify","diff","list","version","rename","arch-init","arch-delete",
-                    "arch-deduplicate","arch-check","index-test","test"],
+                    "arch-deduplicate","arch-check"],
                     default="monitor", help="Action to take")
 parser.add_argument("-u", "--unattended", action="store_true", default=False,
                     help="Non-interactive, supress prompts")
 parser.add_argument("--all-before", dest="allbefore", action="store_true", default=False,
                     help="Select all sessions before --session date-time.")
-#parser.add_argument("--tarfile", action="store_true", dest="tarfile", default=False,
-#                    help="Store backup session as a tarfile")
-parser.add_argument("--session", help="YYYYMMDD-HHMMSS[,YYYYMMDD-HHMMSS]"
-                                 " select session date(s), singular or range.")
+parser.add_argument("--all", action="store_true", default=False)
+parser.add_argument("--session", help="YYYYMMDD-HHMMSS[,YYYYMMDD-HHMMSS] or ^tag_id"
+                                 " select session date|tag, singular or range.")
+parser.add_argument("--tag", action="append",
+                    help="tag_id[,description] Add tags when sending")
+parser.add_argument("--keep", action="append", default=[],
+                    help="YYYYMMDD-HHMMSS or ^tag_id exclude session by date|tag (prune)") 
+parser.add_argument("--volex", default="", help="Exclude volume(s)")
 parser.add_argument("--autoprune", default="off", help="Automatic pruning")
 parser.add_argument("--from", dest="from_arch", default="",
                     help="Address+Path of other non-configured archive (receive, verify)")
@@ -2692,18 +2834,28 @@ parser.add_argument("--compression", default="", help="Init: compression type:le
 parser.add_argument("--hashtype", default="", help="Init: hash function type")
 parser.add_argument("--chunk-factor", dest="chfactor", type=int,
                     help="Init: set chunk size to N*64kB")
-#parser.add_argument("--deltas", action="store_true", default=False,
-#                    help="Receive: differential mode")
 parser.add_argument("--meta-dir", dest="metadir", default="", help="Use alternate metadata path")
+parser.add_argument("--force", action="store_true", default=False, help="For arch-delete")
 parser.add_argument("--clean", action="store_true", default=False, help="Clean snapshots, metadata")
 parser.add_argument("--debug", action="store_true", default=False, help="Debug mode")
-parser.add_argument("--testing-dedup", dest="dedup", type=int, default=1,
-                    help="Test experimental deduplication (send)")
+parser.add_argument("--quiet", action="store_true", default=False)
+parser.add_argument("--verbose", action="store_true", default=False)
+parser.add_argument("--dedup", "-d", action="store_true", default=False,
+                    help="Data deduplication (send)")
+parser.add_argument("--volume-desc", dest="voldesc", default="",
+                    help="Set volume description (add, rename, send)")
 parser.add_argument("volumes", nargs="*")
 options = parser.parse_args()
 #subparser = parser.add_subparsers(help="sub-command help")
 #prs_prune = subparser.add_parser("prune",help="prune help")
 
+# Set stdout to devnull if --quiet is specified
+debug = options.debug    ; assert not (options.quiet and (options.verbose or debug))
+if options.quiet and options.action != "list":
+    sys.stdout = open(os.devnull, "w")
+
+
+print("%s %s %s" % (prog_name.capitalize(), prog_version, prog_date))
 
 
 # Setup tmp and metadata dirs
@@ -2725,7 +2877,8 @@ os.makedirs(big_tmpdir, exist_ok=True)
 
 signal_handlers  = {}    ; signals_caught = []    ; error_cache = []
 
-compressors      = {"zlib": (zlib, 4), "bz2": (bz2, 9)}
+compressors      = {"zlib": (zlib, 4, zlib.compress), "bz2": (bz2, 9, bz2.compress)}
+if zstd:    compressors["zstd"] = (zstd, 3, lambda data, lvl: zstd.compress(data, lvl, 2))
 
 hash_funcs       = {"sha256": hashlib.sha256}
 if "blake2b" in hashlib.algorithms_available:
@@ -2735,7 +2888,7 @@ if "blake2b" in hashlib.algorithms_available:
 if options.from_arch and options.action not in ("receive","verify","list","arch-init"):
     x_it(1,"--from option can be used only with: receive, verify, list, arch-init")
 # Select dedup test algorithm.
-init_dedup_index = [None, init_dedup_index1, None, None, None, init_dedup_index5][options.dedup]
+init_dedup_index = [None, init_dedup_index5][options.dedup]
 monitor_only     = options.action == "monitor" # gather metadata without backing up
 
 # Get LVM listings
@@ -2743,6 +2896,8 @@ volgroups, l_vols= {}, {}    ; get_lvm_vgs()
 
 # Create an ArchiveSet object with get_configs() and set global vars pertaining
 # to the destination.
+# Enh: Use separate dest class so aset can be inst after detect_dest_state()
+#      and/or move detect call to aset init.
 destsys          = desttype  = dest_run_map  = dest_online  = dest_in_process  = dest_free  = None
 aset             = get_configs()
 destsys, desttype= detect_internal_state()
@@ -2753,7 +2908,8 @@ destcd           = " cd '"+destpath+"'"
 
 # Check online status for certain commands.
 if not dest_online and (options.remap or options.from_arch \
-                    or options.action not in local_actions): ## and destsys is not None:
+                    or options.action not in local_actions) \
+                    and not (options.action == "delete" and options.clean):
     x_it(1, "Destination not ready to receive commands.")
 
 if options.from_arch:
@@ -2800,10 +2956,11 @@ if aset.vgname in volgroups and options.action != "arch-check":
 
 
 # Check volume args against config
-datavols      = sorted(aset.vols.keys())
-selected_vols = options.volumes[:]
-for vol in options.volumes:
-    if vol not in datavols and options.action not in {"add","delete","rename"}:
+exclude_vols  = set(options.volex.split(","))
+datavols      = sorted(set(aset.vols.keys())  - exclude_vols)
+selected_vols = sorted(set(options.volumes[:]) - exclude_vols)
+for vol in selected_vols[:]:
+    if vol not in aset.vols and options.action not in {"add","delete","rename"}:
         print("Volume "+vol+" not configured; Skipping.")
         del(selected_vols[selected_vols.index(vol)])
 
@@ -2829,7 +2986,7 @@ elif options.action == "prune":
 
     if not options.unattended and len(dvs):
         print("This operation will delete session(s) from the archive;")
-        ans = input("Are you sure? [y/N]: ")
+        ans = ask_input("Are you sure? [y/N]: ").strip()
         if ans.lower() not in {"y","yes"}:
             x_it(0,"")
 
@@ -2873,10 +3030,11 @@ elif options.action == "list":
 
 elif options.action == "add":
     if len(options.volumes) < 1:
-        x_it(1, "A volume name is required for 'add' command.")
+        x_it(1, "Volume name(s) required for 'add'.")
 
-    aset.add_volume(options.volumes[0])
-    print("Volume", options.volumes[0], "added to archive config.")
+    for vol in options.volumes:
+        if not lv_exists(aset.vgname, vol):   print("Warning:", vol, "does not exist.")
+        aset.add_volume(vol)
 
 
 elif options.action == "rename":
@@ -2885,7 +3043,19 @@ elif options.action == "rename":
 
 
 elif options.action == "delete":
-    delete_volume(selected_vols[0])
+    if options.clean:
+        print("Remove local Wyng metadata from system for path",
+              metadir+topdir if options.all else aset.path)
+        if not options.unattended:
+            ans = ask_input("Are you sure? [y/N]: ")
+            if ans.lower() not in {"y","yes"}:
+                x_it(0,"")
+        elif not options.force:
+            x_it(1, "Ignoring --clean without --force.")
+        remove_local_metadata(None if options.all else aset)
+
+    else:
+        delete_volume(selected_vols[0])
 
 
 elif options.action == "arch-init":
@@ -2898,23 +3068,20 @@ elif options.action == "arch-check":
 
 
 elif options.action == "arch-delete":
-    print("Warning! Wipe-all will remove ALL metadata AND archived data!")
+    print("Deleting ALL metadata AND archived data!")
 
-    ans = input("Are you sure? [y/N]: ")
-    if ans.lower() not in {"y","yes"}:
-        x_it(0,"")
+    if not options.unattended and not options.force:
+        ans = ask_input("Are you sure? [y/N]: ")
+        if ans.lower() not in {"y","yes"}:
+            x_it(0,"")
+    elif options.unattended and not options.force:
+        x_it(1,"Error: --force required to delete entire archive.")
 
     # Remove metadata and snapshots
     for dv in list(aset.vols):   aset.delete_volume(dv)
 
-    # Remove any stray snapshots associated with archive
-    for vg in volgroups.values():
-        for lv in vg.lvs.values():
-            if "wyng" in lv.tags and "arch-"+aset.uuid in lv.tags:
-                lv_remove(vg.name, lv.lv_name, check=True)
-
-    # Remove metadata dir
-    shutil.rmtree(aset.path, ignore_errors=True)
+    # Remove local metadata and stray snapshots associated with archive
+    remove_local_metadata(aset)
 
     # Remove from destination
     print("\nDeleting entire archive...")
@@ -2926,17 +3093,8 @@ elif options.action == "arch-delete":
 
 
 elif options.action == "arch-deduplicate":
-    if options.dedup > 1:
-        dedup_existing()
-    else:
-        x_it(1,"Requires '--testing-dedup value greater than 1.")
-
-
-elif options.action   == "index-test":
-    init_dedup_index()
+    dedup_existing()
 
 
 cleanup()
-
-
 # END

@@ -1,4 +1,4 @@
-_<h1 align="center">wyng</h1>_
+_<h1 align="center">Wyng</h1>_
 <p align="center">
 Fast incremental backups for logical volumes.
 </p>
@@ -28,7 +28,7 @@ untrusted data in guest filesystems to bolster container-based security.
 
 ### Status
 
-Release candidate with a range of features including:
+Public release v0.3 with a range of features including:
 
  - Incremental backups of Linux thin-provisioned LVM volumes
 
@@ -38,13 +38,15 @@ Release candidate with a range of features including:
 
  - Fast pruning of old backup sessions
 
- - Basic archive management such as add and delete volume
+ - Basic archive management such as add/delete volume and auto-pruning
 
- - Data deduplication (experimental)
+ - Data deduplication
+
+ - Marking and selecting snapshots with user-defined tags
 
 Data verification currently relies on hash tables being safely stored on the
 source admin system or encrypted volume. Integrated encryption and key-based
-verification are not yet implemented.
+verification are not yet implemented (see notes below for ways to add encryption).
 
 Wyng is released under a GPL license and comes with no warranties expressed or implied.
 
@@ -54,26 +56,28 @@ Requirements & Setup
 
 Before starting:
 
-* Thin-provisioning-tools, lvm2, and python >=3.5.4 must be present on the source system.
+* Thin-provisioning-tools, lvm2, and python >=3.5.4 must be present on the source system. For top
+performance, at least python 3.6 plus the `python3-zstd` package should be installed before
+creating an archive.
 
 * The destination system (if different from source) should also have python, plus
-a basic Unix command set *and* Unix filesystem.
+a basic Unix command set and filesystem (i.e. a typical Linux or BSD system).
 
 * Volumes to be backed-up must reside in an LVM thin-provisioned pool.
 
-Wyng is currently distributed as a single python executable with no complex
+Wyng is currently distributed as a single Python executable with no complex
 supporting modules or other program files; it can be placed in '/usr/local/bin'
 or another place of your choosing.
 
-Settings are initialized with `wyng <args> arch-init`:
+Settings are initialized with `wyng arch-init`:
 
 ```
 
-wyng --local=vg/pool --dest=ssh://me@exmaple.com/mnt/bkdrive arch-init
+wyng arch-init --local=vg/pool --dest=ssh://me@exmaple.com/mnt/bkdrive
 
 ...or...
 
-wyng --local=vg/pool --dest=internal:/ --subdir=home/user arch-init
+wyng arch-init --local=vg/pool --dest=internal:/ --subdir=home/user
 
 wyng add my_big_volume
 
@@ -117,14 +121,16 @@ Please note that dashed parameters are always placed before the command.
 | **arch-init**               | Initialize archive configuration.
 | **arch-check** _[volume_name]_    | Thorough check of archive data & metadata
 | **arch-delete**             | Remove data and metadata for all volumes.
-| **arch-deduplicate**        | Deduplicate existing data in archive (experimental).
+| **arch-deduplicate**        | Deduplicate existing data in archive.
+| **version**                 | Print the Wyng version and exit.
+
 
 ### Parameters / Options summary
 
 | _Option_                      | _Description_
 |-------------------------------|--------------
--u, --unattended       | Don't prompt for interactive input.
---session=_date-time[,date-time]_ | Select a session or session range by date-time (receive, verify, prune).
+--session=_date-time[,date-time]_ | Select a session or session range by date-time or tag (receive, verify, prune).
+--keep=_date-time_     | Specify date-time or tag of sessions to keep (prune).
 --all-before           | Select all sessions before the specified _--session date-time_ (prune).
 --autoprune=off        | Automatic pruning by calendar date. (experimental)
 --save-to=_path_       | Save volume to _path_ (receive).
@@ -138,10 +144,15 @@ Please note that dashed parameters are always placed before the command.
 --compression          | (arch-init) Set compression type:level.
 --hashtype             | (arch-init) Set hash algorithm: _sha256_ or _blake2b_.
 --chunk-factor         | (arch-init) Set archive chunk size.
---testing-dedup=_N_    | Use deduplication algorithm for send (see Testing notes).
---clean                | Perform garbage collection during arch-check.
+--dedup                | Use deduplication for send (see notes).
+--clean                | Perform garbage collection (arch-check) or medata removal (delete).
 --meta-dir=_path_      | Use a different metadata dir than the default.
-
+--volex=_volname[,*]_  | Exclude volumes (send, monitor, list, prune).
+--force                | Needed for arch-delete.
+--verbose              | Increase details.
+--quiet                | 
+-u, --unattended       | Don't prompt for interactive input.
+--tag=tagname[,desc]   | Use session tags (send, list).
 
 #### send
 
@@ -234,6 +245,9 @@ to prune all sessions prior to that time.
 If volume names aren't specified, `prune` will operate across all
 enabled volumes.
 
+The `--keep` option can accept a single date-time or a tag in the form `^tagID`.
+Matching sessions will be excluded from pruning and autopruning.
+
 
 #### monitor
 
@@ -288,6 +302,17 @@ Removes a volume's wyng-managed snapshots, config and metadata from the source s
 all of its *data* from the destination archive (everything deleted except the source
 volume). Use with caution!
 
+An alternate form of `delete` will remove all Wyng archive-related metadata (incl. snapshots) from the
+local system without affecting the archive on the destination:
+
+```
+
+wyng delete --clean
+
+```
+
+Alternately, using `delete --clean --all` will remove all Wyng metadata from the local system, including
+snapshots from any Wyng archive (not just the currently configured archive).
 
 #### rename
 ```
@@ -298,6 +323,22 @@ wyng rename oldname newname
 
 Renames a volume _'oldname'_ in the archive to _'newname'_. Note: This will rename only the
 archive volume, _not_ your source volume.
+
+
+#### arch-deduplicate
+
+De-duplicates the entire archive by removing repeating patterns. This can save space
+on the destination's drive while keeping the archived volumes intact.
+
+De-duplication can also be performed on an ongoing basis by using `--dedup=1` with `send`.
+
+
+```
+
+wyng --dedup=1 arch-deduplicate
+
+
+```
 
 
 #### arch-init
@@ -322,6 +363,33 @@ Import a configuration from an existing archive...
 ```
 
 wyng --from=internal:/mountpoint arch-init
+
+
+```
+
+#### arch-check
+
+Intensive check of archive integrity, reading each session completely starting with
+the newest and working back to the oldest. This differs from `verify` which first bulids a complete
+index for the volume and then checks only/all data referenced in the index.
+
+Using `--session=newest` provides a 'verify the last session' function (useful after an incremental
+backup). Otherwise, supplying a date-time will make `arch-check` start the check from that point and
+then continue working toward the oldest session. Session ranges are not yet supported.
+
+Depending on how `arch-check` is used, the verification process can be shorter _or much longer_
+than using `verify` as the latter is always the size of a volume snapshot. The longest, most
+complete form `arch-check` is to supply no parameters, which checks all sessions in all volumes.
+
+
+#### arch-delete
+
+Deletes the entire archive on the destination, and all data that was saved in it; also removes
+archive metadata from the source system. Use with caution!
+
+```
+
+wyng --force arch-delete
 
 
 ```
@@ -353,11 +421,13 @@ Note: You can override the archive's LVM settings by specifying `--local`.
 `--subdir` In conjunction with `--dest` or `--from`, allows you to specify a subdirectory
 below the mountpoint.
 
-`--compression=zlib:4` accepts the form `type` or `type:level`. The two types available are
-the default `zlib` and `bz2`.
+`--compression=zstd:3` accepts the form `type` or `type:level`. The three types available are
+the default `zstd`, plus `zlib` and `bz2`. Note that Wyng will only default to `zstd` when the
+'python3-zstd' package is installed; otherwise it will fall back to the less capable `zlib`.
 
-`--hashtype=sha256` accepts a value of either _'sha256'_ (the default) or _'blake2b'_.
-The digest size used for _'blake2b'_ is 256 bits.
+`--hashtype=blake2b` accepts a value of either _'sha256'_ or _'blake2b'_ (the default).
+The digest size used for blake2b is 256 bits. Note that with Python 3.5 the hashtype will
+fall back to sha256 as blake2b was introduced in Python 3.6.
 
 `--chunk-factor=1` sets the pre-compression data chunk size used within the destination archive.
 Accepted range is an integer exponent from '1' to '6', resulting in a chunk size of 64kB for
@@ -369,10 +439,23 @@ Note that _compression, hashtype_ and _chunk-factor_ cannot be changed for an ar
 
 ### Misc Options
 
-`--session=<datetime>[,<datetime>]`
+`--session=<date-time>[,<date-time>]` OR
+`--session=^<tag>[,^<tag>]`
 
-Session allows you to specify a datetime spec or in some cases a datetime range for the
-`receive`, `verify`, `diff`, `prune` and `arch-check` commands.
+Session allows you to specify a single date-time or tag spec for the`receive`, `verify`, `diff`,
+and `arch-check` commands. Using a tag selects the last session having that tag. When specifying
+a tag, it must be prefixed by a `^` carat.
+
+For `prune`, specifying
+a tag will have different effects: a single spec using a tag will remove only each individual session
+with that tag, whereas a tag in a dual (range) spec will define an inclusive range anchored at the first
+instance of the tag (when the tag is the first spec) or the last instance (when the tag is the
+second range spec). Also, date-times and tags may be used together in a range spec.
+
+`--volex=<volume>[,volume,*]`
+
+Exclude one or more volumes from processing. May be used with commands that operate on multiple
+volumes in a single invocation, such as `send`.
 
 `--sparse-write`
 
@@ -391,27 +474,45 @@ from the archive and written to the local volume. This results in reduced remote
 usage while receiving at the expense of some extra CPU usage on the local machine, and also uses
 less local disk space when snapshots are a factor (implies '--sparse-write`).
 
-`--autoprune[=off|on|min|full]` (experimental)
+`--dedup`
+
+When used with the `send` command, data chunks from the new backup will be sent only if
+they don't already exist somewhere in the archive. If its a duplicate, the chunk will be
+linked instead of sent and stored, saving disk space and possibly time and bandwith.
+
+The tradeoff for deduplicating is longer startup time for Wyng, in addition to using more
+memory and CPU resources during backups. Using `--dedup` works best if you are backing-up
+multiple volumes that have a lot of the same content and/or you are backing-up over a slow
+Internet link.
+
+`--autoprune=(off | on | min | full)` (_experimental_)
 
 Autoprune may be used with either the `prune` or `send` commands and will cause Wyng to
 automatically remove older backup sessions according to date criteria. When used with `send`
 specifically, the autopruning process will only be triggered if the destination filessytem is
 low on free space.
 
-The criteria are currently hard-coded to remove all sessions after 183 days,
-and after 64 days to thin-out the number of sessions down to a rate of 2 sessions every 7 days.
+The criteria are currently hard-coded to remove all sessions older than 366 days,
+and to thin-out the number of sessions older than 32 days down to a rate of 2 sessions
+every 7 days.
 In the future these parameters can be reconfigured by the user.
 
 Selectable modes are:
 
 __off__ is the current default.
 
-__on__ removes more sessions as space is needed, while trying to retain any/all older sessions
+__on__ removes more sessions than _min_ as space is needed, while trying to retain any/all older sessions
 whenever available storage space allows.
+
+__min__ removes sessions before the 366 day mark, but no thinning-out is performed.
 
 __full__ removes all sessions that are due to expire according to above criteria.
 
-__min__ removes sessions before the 183 day mark, but no thinning-out (64 days) is performed.
+`--tag`
+
+This will cause `send` to ask for tag(s) to be input, which will be applied to the new
+backup session; this currently doesn't work with `-u`. Also causes `list` to show tag
+information.
 
 
 ### Tips
@@ -421,7 +522,7 @@ to avoid backing up sensitive data to such a volume -- exercise caution
 and add encryption where necessary.
 
 * To reduce the size of incremental backups it may be helpful to remove cache
-files, if they exist in your volume(s). Typically, the greatest cache space
+files, if they exist in your source volume(s). Typically, the greatest cache space
 consumption comes from web browsers, so
 volumes holding paths like /home/user/.cache can impacted by this, depending
 on the amount and type of browser use associated with the volume. Three possible
