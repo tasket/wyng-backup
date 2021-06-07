@@ -330,12 +330,12 @@ archive volume, _not_ your source volume.
 De-duplicates the entire archive by removing repeating patterns. This can save space
 on the destination's drive while keeping the archived volumes intact.
 
-De-duplication can also be performed on an ongoing basis by using `--dedup=1` with `send`.
+De-duplication can also be performed on an ongoing basis by using `--dedup` with `send`.
 
 
 ```
 
-wyng --dedup=1 arch-deduplicate
+wyng --dedup arch-deduplicate
 
 
 ```
@@ -437,7 +437,7 @@ that will store volumes larger than about 100GB.
 
 Note that _compression, hashtype_ and _chunk-factor_ cannot be changed for an archive once it is initialized.
 
-### Misc Options
+### Options
 
 `--session=<date-time>[,<date-time>]` OR
 `--session=^<tag>[,^<tag>]`
@@ -508,11 +508,12 @@ __min__ removes sessions before the 366 day mark, but no thinning-out is perform
 
 __full__ removes all sessions that are due to expire according to above criteria.
 
-`--tag`
+`--tag=<tagname[,description]>`
 
-This will cause `send` to ask for tag(s) to be input, which will be applied to the new
-backup session; this currently doesn't work with `-u`. Also causes `list` to show tag
-information.
+With `send`, attach a tagname of your choosing to the new backup session/snapshot; this may be
+repeated on the command line to add multiple tags. Specifying an empty '' tag will cause Wyng
+to ask for one or more tags to be manually input; this also causes `list` to display tag
+information when listing sessions.
 
 
 ### Tips
