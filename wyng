@@ -61,7 +61,8 @@ class ArchiveSet:
                                 if name in self.a_ints else cp["var"][name])
 
         # Fix: Remove filterwarnings when upstream fixes their code...
-        if self.compression == "zstd":   warnings.filterwarnings("ignore", category=DeprecationWarning)
+        if zstd and self.compression == "zstd":
+            warnings.filterwarnings("ignore", category=DeprecationWarning)
 
         # load volume metadata objects
         for key in cp["volumes"]:
@@ -785,8 +786,8 @@ def get_configs_remote():
         if not lv_exists(vgname, poolname):
             print("Warning: LV pool '%s' does not exist." % poolname)
         new_aset.vgname   = vgname    ; new_aset.poolname = poolname
+        lvm_meta_snapshot(new_aset, "release")
 
-    lvm_meta_snapshot(new_aset, "release")
     new_aset.save_conf()
     return new_aset
 
@@ -2449,7 +2450,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         if untrusted_size > chunksize + (chunksize // 64) or untrusted_size < 1:
             raise BufferError("Bad chunk size %d for %s" % (untrusted_size, mfline))
 
-        # Size is OK.
+        ##  Size is OK  ##
         size = untrusted_size
 
         # Read chunk buffer
@@ -2469,19 +2470,21 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             print(mfline)
             raise ValueError("Bad hash "+faddr+" :: "+gethash(untrusted_buf).hexdigest())
 
+        ##  Buffer is OK  ##
+
         if verify_only:   continue
+        buf = untrusted_buf
 
         # Proceed with decompress.
-        untrusted_decomp = decompress(untrusted_buf)
-        if len(untrusted_decomp) != chunksize and addr < lchunk_addr:
+        decomp = decompress(buf)
+        if len(decomp) != chunksize and addr < lchunk_addr:
             print(mfline)
-            raise BufferError("Decompressed to %d bytes." % len(untrusted_decomp))
-        if addr == lchunk_addr and len(untrusted_decomp) != volsize - lchunk_addr:
+            raise BufferError("Decompressed to %d bytes." % len(decomp))
+        if addr == lchunk_addr and len(decomp) != volsize - lchunk_addr:
             print(mfline)
-            raise BufferError("Decompressed to %d bytes." % len(untrusted_decomp))
+            raise BufferError("Decompressed to %d bytes." % len(decomp))
 
-        # Buffer is OK...
-        buf = untrusted_decomp    ; bcount += len(buf)
+        buf = decomp    ; bcount += len(buf)
 
         if save_path:
             volf_seek(addr)
