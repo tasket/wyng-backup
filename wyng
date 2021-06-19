@@ -19,6 +19,13 @@ try:
 except:
     zstd = None
 
+try:
+    from Cryptodome.Cipher import AES as Cipher_AES
+    from Cryptodome.Random import get_random_bytes
+    import Cryptodome.Util.Padding
+except:
+    Cipher_AES = None
+
 
 # ArchiveSet manages configuration and configured volume info
 
@@ -42,6 +49,7 @@ class ArchiveSet:
         self.destdir     = "."
         self.destmountpoint = None
         self.uuid        = None
+        self.key         = ""
 
         # parser for the .ini formatted configuration
         self.conf = cp   = configparser.ConfigParser()
@@ -97,6 +105,7 @@ class ArchiveSet:
         c['destdir']     = self.destdir
         c['destmountpoint'] = self.destmountpoint
         c['uuid']        = self.uuid if self.uuid else str(uuid.uuid4())
+        c['key']         = self.key
         confdir  = os.path.dirname(self.confpath)   ; os.makedirs(confdir, exist_ok=True)
         confname = fname if fname else os.path.basename(self.confpath)
         with open(confdir+"/"+confname, "w") as f:
@@ -567,10 +576,17 @@ def arch_init(aset):
     if options.from_arch:
         return
 
+    if options.encrypt in crypto_ciphers:
+        aset.key = get_random_bytes(crypto_key_bits//8).hex()
+
+    print("Encryption =", "aes-256-cbc" if aset.key else "off")
+
     if options.hashtype:
         if options.hashtype not in hash_funcs:
             x_it(1, "Hash function '"+options.hashtype+"' is not available on this system.")
         aset.hashtype = options.hashtype
+
+    print("Hashing =", aset.hashtype)
 
     if options.compression:
         if ":" in options.compression:
@@ -583,6 +599,8 @@ def arch_init(aset):
             x_it(1, "Invalid compression spec.")
         aset.compression = compression      ; aset.compr_level = compr_level
 
+    print("Compression = %s:%s" % (aset.compression, aset.compr_level))
+
     if options.chfactor:
         # accepts an exponent from 1 to 6
         if not ( 0 < options.chfactor < 7 ):
@@ -591,8 +609,6 @@ def arch_init(aset):
         if aset.chunksize > 256 * 1024:
             print("Large chunk size set:", aset.chunksize)
 
-    print("Compression = %s:%s" % (aset.compression, aset.compr_level))
-    print("Hashing =", aset.hashtype)
     aset.save_conf()
 
 
@@ -1467,6 +1483,15 @@ def send_volume(datavol, localtime, ses_tags, send_all):
 
     compresslevel = int(aset.compr_level)    ; compress = compressors[aset.compression][2]
 
+
+    if Cipher_AES and aset.key:
+        ci_key = bytes.fromhex(aset.key)    ; ci_blk_sz = Cipher_AES.block_size
+        get_rnd = get_random_bytes          ; ci_pad    = Cryptodome.Util.Padding.pad
+        ci_mode = Cipher_AES.MODE_CBC       ; ci_new    = Cipher_AES.new
+    else:
+        ci_mode = None
+
+
     # Use tar to stream files to destination
     stream_started = False
     untar_cmd = [destcd + " && mkdir -p ."+bkdir
@@ -1542,6 +1567,16 @@ def send_volume(datavol, localtime, ses_tags, send_all):
 
                 # Skip when current and prior chunks are the same
                 if fman_hash == hexhash:  continue
+
+
+                # Encrypt the data chunk
+                # Note: The default random IV generating mode is used.
+                # A random 'bolster' block is added as a prefix to the plaintext buffer;
+                # This might be enhanced by using a counter instead of rnd.
+                if ci_mode:
+                    cipher = ci_new(ci_key, ci_mode)
+                    buf    = cipher.iv + cipher.encrypt(ci_pad(get_rnd(ci_blk_sz) + buf, ci_blk_sz))
+
 
                 # Start tar stream
                 if not stream_started:
@@ -2257,6 +2292,14 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     decompress  = compressors[aset.compression][0].decompress
 
 
+    if Cipher_AES and aset.key:
+        ci_key  = bytes.fromhex(aset.key)    ; ci_blk_sz = Cipher_AES.block_size
+        iv_sz   = 16                         ; ci_unpad  = Cryptodome.Util.Padding.unpad
+        ci_mode = Cipher_AES.MODE_CBC        ; ci_new    = Cipher_AES.new
+    else:
+        ci_mode = None
+
+
     if diff or verify_only:
         save_path = ""
     elif not save_path:
@@ -2464,6 +2507,17 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                 dump.write(untrusted_buf)
             print(mfline)
             raise BufferError("Got %d bytes, expected %d" % (len(untrusted_buf), size))
+
+
+        # Decrypt the data chunk
+        if ci_mode:
+            iv = untrusted_buf[:iv_sz]
+            cipher = ci_new(ci_key, ci_mode, iv)
+            untrusted_buf = ci_unpad(cipher.decrypt(untrusted_buf[iv_sz:]), ci_blk_sz)[ci_blk_sz:]
+            size = len(untrusted_buf)    ; assert size > 0
+
+
+        # Validate data chunk
         if cksum != gethash(untrusted_buf).hexdigest():
             with open(tmpdir+"/bufdump", "wb") as dump:
                 dump.write(untrusted_buf)
@@ -2762,7 +2816,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.3.0wip"      ; prog_date = "20210611"
+prog_version          = "0.4.0wip"      ; prog_date = "2021xxxx"
 format_version        = 2               ; debug     = False       ; tmpdir = None
 
 # Disk block size:
@@ -2792,8 +2846,8 @@ volname_len = 112             ; alphanumsym = "^[a-zA-Z0-9\+\._-]+$"
 pjoin       = os.path.join    ; exists = os.path.exists
 
 
-if sys.hexversion < 0x3050000:
-    x_it(1, "Python ver. 3.5 or greater required.")
+if sys.hexversion < 0x3080000:
+    x_it(1, "Python ver. 3.8 or greater required.")
 
 # Root user required
 if os.getuid() > 0:
@@ -2806,6 +2860,7 @@ try:
     fcntl.lockf(lockf, fcntl.LOCK_EX|fcntl.LOCK_NB)
 except IOError:
     x_it(1, "ERROR: "+prog_name+" is already running.")
+
 
 # Parse Arguments:
 parser = argparse.ArgumentParser(description="")
@@ -2835,6 +2890,7 @@ parser.add_argument("--remap", action="store_true", default=False, help="Remap s
 parser.add_argument("--local", default="",    help="Init: LVM vg/pool containing source volumes")
 parser.add_argument("--dest", default="",     help="Init: type:location of archive")
 parser.add_argument("--subdir", default="",   help="Init: optional subdir for --dest")
+parser.add_argument("--encrypt", default="aes-256-cbc", help="Init: compression type:level")
 parser.add_argument("--compression", default="", help="Init: compression type:level")
 parser.add_argument("--hashtype", default="", help="Init: hash function type")
 parser.add_argument("--chunk-factor", dest="chfactor", type=int,
@@ -2865,7 +2921,7 @@ if not options.quiet:   print("%s %s %s" % (prog_name.capitalize(), prog_version
 
 # Setup tmp and metadata dirs
 metadir     = options.metadir if options.metadir else "/var/lib"
-topdir      = "/"+prog_name+".backup"
+topdir      = "/"+prog_name+".backup040" ####
 tmpdir      = "/tmp/"+prog_name
 big_tmpdir  = metadir+topdir+"/.tmp"
 
@@ -2883,12 +2939,14 @@ os.makedirs(big_tmpdir, exist_ok=True)
 signal_handlers  = {}    ; signals_caught = []    ; error_cache = []
 
 # Dict of compressors in the form: (library, default_compress_level, compress_func)
-compressors      = {"zlib": (zlib, 4, zlib.compress), "bz2": (bz2, 9, bz2.compress)}
-if zstd:    compressors["zstd"] = (zstd, 7, lambda data, lvl: zstd.compress(data, lvl, 2))
+compressors      =    {"zlib":   (zlib, 4, zlib.compress),
+                       "bz2" :   (bz2,  9, bz2.compress)}
+if zstd:   compressors["zstd"] = (zstd, 7, lambda data, lvl: zstd.compress(data, lvl, 2))
 
-hash_funcs       = {"sha256": hashlib.sha256}
-if "blake2b" in hashlib.algorithms_available:
-    hash_funcs["blake2b"] = functools.partial(hashlib.blake2b, digest_size=hash_bits//8)
+hash_funcs       =    {"sha256" : hashlib.sha256,
+                       "blake2b": functools.partial(hashlib.blake2b, digest_size=hash_bits//8)}
+
+crypto_key_bits  =    256    ; crypto_ciphers  =  {"aes-256-cbc"}
 
 # Check --from usage (access other/unconfigured archive).
 if options.from_arch and options.action not in ("receive","verify","list","arch-init"):
