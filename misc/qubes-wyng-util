@@ -96,6 +96,7 @@ elif sys.argv[1].lower() == "meta-recover":
     ## session ID matching the restored VM session ID.
 
     raise NotImplementedError()
+
     def find_domain(domains, target):
         result = None
         for domain in domains:
@@ -104,7 +105,7 @@ elif sys.argv[1].lower() == "meta-recover":
 
         return result
 
-    qubes     = sys.argv[2:]
+    qubes     = sys.argv[2:]    ; #live_qubes= Get list of current qube names
     if not qubes:   raise ValueError("Must supply a list of Qubes VMs to restore settings.")
 
     if not os.path.exists(mvolpath):   raise RuntimeError(mvolpath+" not found.")
@@ -116,11 +117,14 @@ elif sys.argv[1].lower() == "meta-recover":
     #for d in ("appvms","vm-templates"):
         #shutil.copytree("/mnt/"+mvolname+"/"+d, qubesvar+d, dirs_exist_ok=True)
 
+    stop_qubes = list(set(qubes) & set(live_qubes))
+    subprocess.run(["qvm-shutdown", "--force", "--wait", "--timeout=20"] + stop_qubes, check=True)
+    subprocess.run(["qvm-kill"] + stop_qubes, check=True)
+    ##catch_signals()
     subprocess.run(["systemctl", "stop", "qubesd"], check=True)
     shutil.copyfile(qubesvar+qubesxml, qubesvar+qubesxml+"-bak")
     bak_tree  = xml.etree.ElementTree("/mnt/"+mvolname+"/"+qubesxml).getroot().find("domains")
     live_tree = xml.etree.ElementTree(qubesvar + qubesxml).getroot().find("domains")
-    #live_qubes= Get list of current qube names
 
     for qube in qubes:
         bak_domain = find_domain(bak_tree, qube)
@@ -128,10 +132,12 @@ elif sys.argv[1].lower() == "meta-recover":
             live_domain = find_domain(live_tree, qube)
 
             # pcode:
-            # assert bak_domain[templatevm] in live_qubes
-            # assert bak_domain[netvm] in live_qubes
-            # if live_domain:   live_tree.remove(live_domain)
-            # if bak_domain["qid"] in live_tree_qids:  change_qid
+            # assert bak_domain[templatevm] in live_qubes+receiving_qubes
+            # assert bak_domain[netvm] in live_qubes+receiving_qubes
+            # if live_domain:
+            #   bak_domain.qid = live_tree.qid    ; live_tree.remove(live_domain)
+            # elif bak_domain.qid in live_tree_qids:
+            #   bak_domain.change_qid
             # live_tree.append(bak_domain)
             # live_tree.save()
 

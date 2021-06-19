@@ -590,6 +590,8 @@ def arch_init(aset):
         if aset.chunksize > 256 * 1024:
             print("Large chunk size set:", aset.chunksize)
 
+    print("Compression = %s:%s" % (aset.compression, aset.compr_level))
+    print("Hashing =", aset.hashtype)
     aset.save_conf()
 
 
@@ -1380,9 +1382,9 @@ def update_delta_digest(datavol):
             for pos in range(markall_pos, bmap_size):  bmap_mm[pos] = 0xff
             dnewchunks += (bmap_size - markall_pos) * 8
 
-        bmapf.flush()    ; os.fsync(bmapf.fileno())
+        map_updated = dnewchunks+dfreedblocks > 0
+        if map_updated:   bmapf.flush()    ; os.fsync(bmapf.fileno())
 
-    map_updated = dnewchunks+dfreedblocks > 0
     catch_signals()
     if monitor_only:
         rotate_snapshots(vol, rotate=map_updated)
@@ -2757,7 +2759,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.3.0rc1"      ; prog_date = "20210605"
+prog_version          = "0.3.0wip"      ; prog_date = "20210611"
 format_version        = 2               ; debug     = False       ; tmpdir = None
 
 # Disk block size:
@@ -2855,7 +2857,7 @@ if options.quiet and options.action != "list":
     sys.stdout = open(os.devnull, "w")
 
 
-print("%s %s %s" % (prog_name.capitalize(), prog_version, prog_date))
+if not options.quiet:   print("%s %s %s" % (prog_name.capitalize(), prog_version, prog_date))
 
 
 # Setup tmp and metadata dirs
@@ -2877,8 +2879,9 @@ os.makedirs(big_tmpdir, exist_ok=True)
 
 signal_handlers  = {}    ; signals_caught = []    ; error_cache = []
 
+# Dict of compressors in the form: (library, default_compress_level, compress_func)
 compressors      = {"zlib": (zlib, 4, zlib.compress), "bz2": (bz2, 9, bz2.compress)}
-if zstd:    compressors["zstd"] = (zstd, 3, lambda data, lvl: zstd.compress(data, lvl, 2))
+if zstd:    compressors["zstd"] = (zstd, 7, lambda data, lvl: zstd.compress(data, lvl, 2))
 
 hash_funcs       = {"sha256": hashlib.sha256}
 if "blake2b" in hashlib.algorithms_available:

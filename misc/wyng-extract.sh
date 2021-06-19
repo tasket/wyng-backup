@@ -84,7 +84,9 @@ rm -rf $tmpdir  &&  mkdir $tmpdir
 
   # List sessions and exit.
   if [ -n "$opt_list" ]; then
-    for ses in $sesnames; do echo ${ses:2}; done
+    for ses in $sesnames; do
+      echo ${ses:2};  sed -n 's|^tag |  tag |;T;p' $ses/info
+    done
     exit 0
   fi
 
