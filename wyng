@@ -2762,7 +2762,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.3.0wip"      ; prog_date = "20210622"
+prog_version          = "0.3.0rc2"      ; prog_date = "20210622"
 format_version        = 2               ; debug     = False       ; tmpdir = None
 
 # Disk block size:
