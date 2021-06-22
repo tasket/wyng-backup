@@ -274,7 +274,7 @@ class ArchiveSet:
             if sname == self.last and ses.saved and not force:
                 raise ValueError("Cannot delete last session")
 
-            for tag in ses.tags:   self.tag_del(tag, sname)
+            for tag in list(ses.tags.keys()):   self.sessions[sname].tag_del(tag)
             del(self.sesnames[index], self.sessions[sname])
 
             if self.archive.dedupsessions:
@@ -358,10 +358,10 @@ class ArchiveSet:
                     voltags[tid] = {self.name}
                 return True
 
-            def tag_del(self, tag, sesname):
+            def tag_del(self, tag):
                 del(self.tags[tag])       ; voltags = self.volume.tags
                 if tag in voltags:
-                    if sesname in voltags[tag]:   voltags[tag].remove(self.name)
+                    if self.name in voltags[tag]:   voltags[tag].remove(self.name)
                     if len(voltags[tag]) == 0:    del(voltags[tag])
 
             def save_info(self, fname="info"):
@@ -2762,7 +2762,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.3.0wip"      ; prog_date = "20210611"
+prog_version          = "0.3.0wip"      ; prog_date = "20210622"
 format_version        = 2               ; debug     = False       ; tmpdir = None
 
 # Disk block size:
