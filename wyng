@@ -1486,12 +1486,12 @@ def send_volume(datavol, localtime, ses_tags, send_all):
     compresslevel = int(aset.compr_level)    ; compress = compressors[aset.compression][2]
 
 
-    if Cipher_AES and aset.key:
+    if aset.key:
         ci_key = bytes.fromhex(aset.key)    ; ci_blk_sz = Cipher_AES.block_size
         get_rnd = get_random_bytes          ; ci_pad    = Cryptodome.Util.Padding.pad
         ci_mode = Cipher_AES.MODE_CBC       ; ci_new    = Cipher_AES.new
     else:
-        ci_mode = None
+        ci_key  = None                      ; ci_blk_sz = 16
 
 
     # Use tar to stream files to destination
@@ -1564,21 +1564,12 @@ def send_volume(datavol, localtime, ses_tags, send_all):
                     continue
 
                 # Compress chunk and hash it
-                buf    = compress(buf, compresslevel)
+                buf    = compress(buf, compresslevel)    ; buf_mod = (len(buf)+1) % ci_blk_sz
+                buf    = buf_mod.to_bytes(length=1,byteorder="little") + buf
                 bhash  = gethash(buf)   ; hexhash = bhash.hexdigest()
 
                 # Skip when current and prior chunks are the same
                 if fman_hash == hexhash:  continue
-
-
-                # Encrypt the data chunk
-                # Note: The default random IV generating mode is used.
-                # A random 'bolster' block is added as a prefix to the plaintext buffer;
-                # This might be enhanced by using a counter instead of rnd.
-                if ci_mode:
-                    cipher = ci_new(ci_key, ci_mode)
-                    buf    = cipher.iv + cipher.encrypt(ci_pad(get_rnd(ci_blk_sz) + buf, ci_blk_sz))
-
 
                 # Start tar stream
                 if not stream_started:
@@ -1622,6 +1613,15 @@ def send_volume(datavol, localtime, ses_tags, send_all):
                     ddbytes += len(buf)
                     tarf_addfile(tarinfo=tar_info)
                 else:
+                    # Encrypt the data chunk
+                    # Note: The default random IV generating mode is used.
+                    # A random 'bolster' block is added as a prefix to the plaintext buffer;
+                    # This might be enhanced by using a counter instead of rnd.
+                    if ci_key:
+                        cipher = ci_new(ci_key, ci_mode)
+                        buf    = cipher.iv + cipher.encrypt(
+                                     get_rnd(ci_blk_sz) + buf + get_rnd(ci_blk_sz-buf_mod))
+
                     tar_info.size = len(buf)
                     tarf_addfile(tarinfo=tar_info, fileobj=BytesIO(buf))
                     bcount += len(buf)
@@ -2295,12 +2295,12 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     compare_digest = hmac.compare_digest
 
 
-    if Cipher_AES and aset.key:
+    if aset.key:
         ci_key  = bytes.fromhex(aset.key)    ; ci_blk_sz = Cipher_AES.block_size
         iv_sz   = 16                         ; ci_unpad  = Cryptodome.Util.Padding.unpad
         ci_mode = Cipher_AES.MODE_CBC        ; ci_new    = Cipher_AES.new
     else:
-        ci_mode = None
+        ci_key  = None
 
 
     if diff or verify_only:
@@ -2513,11 +2513,12 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
 
         # Decrypt the data chunk
-        if ci_mode:
+        if ci_key:
             iv = untrusted_buf[:iv_sz]
             cipher = ci_new(ci_key, ci_mode, iv)
-            untrusted_buf = ci_unpad(cipher.decrypt(untrusted_buf[iv_sz:]), ci_blk_sz)[ci_blk_sz:]
-            size = len(untrusted_buf)    ; assert size > 0
+            untrusted_buf =   cipher.decrypt(untrusted_buf[iv_sz:])[ci_blk_sz:]
+            untr_buf_mod  =   untrusted_buf[0]    ; assert 0 <= untr_buf_mod < ci_blk_sz
+            untrusted_buf =   untrusted_buf[:-(ci_blk_sz-untr_buf_mod)]
 
 
         # Validate data chunk
@@ -2530,7 +2531,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         ##  Buffer is OK  ##
 
         if verify_only:   continue
-        buf = untrusted_buf
+
+        buf = untrusted_buf[1:]
 
         # Proceed with decompress.
         decomp = decompress(buf)
@@ -2560,7 +2562,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     if rc is not None and rc != 0:
         raise RuntimeError("Error code from getvol process: "+str(rc))
 
-    if not sparse and addr+len(decompress(untrusted_buf)) != volsize:
+    if not sparse and addr+len(decompress(untrusted_buf[1:])) != volsize:
         raise ValueError("Received range %d does not match volume size %d."
                             % (addr+len(decompress(untrusted_buf)), volsize))
     print("100.00%")
