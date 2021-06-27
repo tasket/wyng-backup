@@ -50,6 +50,7 @@ class ArchiveSet:
         self.destmountpoint = None
         self.uuid        = None
         self.key         = ""
+        self.cipher      = ""
 
         # parser for the .ini formatted configuration
         self.conf = cp   = configparser.ConfigParser()
@@ -106,6 +107,7 @@ class ArchiveSet:
         c['destmountpoint'] = self.destmountpoint
         c['uuid']        = self.uuid if self.uuid else str(uuid.uuid4())
         c['key']         = self.key
+        c['cipher']      = self.cipher
         confdir  = os.path.dirname(self.confpath)   ; os.makedirs(confdir, exist_ok=True)
         confname = fname if fname else os.path.basename(self.confpath)
         with open(confdir+"/"+confname, "w") as f:
@@ -388,7 +390,75 @@ class ArchiveSet:
                         print("tag =",   tkey, tdesc, file=f)
                     f.flush()    ; os.fsync(f.fileno())
 
-# END ArchiveSet, Volume, Ses
+# END class ArchiveSet, Volume, Ses
+
+
+# DataCryptography(): Handle crypto functions and state for volume data
+
+class DataCryptography():
+
+    crypto_key_bits  =  256    ; crypto_ciphers  =  {"aes-256-siv", "aes-256-cbc"}
+
+    def __init__(self, ci_type, key=None):
+        self.get_rnd = get_random_bytes
+        self.ci_type = ci_type
+
+        if ci_type == "aes-256-cbc":
+            self.key     = key if key else self.get_rnd(self.crypto_key_bits//8)
+            self.iv_sz   = 16
+            self.blk_sz  = Cipher_AES.block_size   ; self.ps_mask = self.blk_sz-1
+            self.mode    = Cipher_AES.MODE_CBC     ; self.AES_new = Cipher_AES.new
+            self.encrypt = self._enc_aes_256_cbc_rndpad
+            self.decrypt = self._dec_aes_256_cbc_rndpad
+
+        elif ci_type == "aes-256-siv":
+            self.key     = key if key else self.get_rnd(2*self.crypto_key_bits//8)
+            self.blk_sz  = Cipher_AES.block_size
+            self.nonce_sz= 16                      ; self.tag_sz  = 16
+            self.mode    = Cipher_AES.MODE_SIV     ; self.AES_new = Cipher_AES.new
+            self.encrypt = self._enc_aes_256_siv
+            self.decrypt = self._dec_aes_256_siv
+
+
+    # Encrypt aes-256-cbc:
+    # A random 'bolster' block is added as a prefix to the plaintext buffer;
+    # This might be enhanced by using a counter instead of rnd.
+    # A random padding is also used and 'buf' must be prefixed by len % blk_sz (1 byte)
+    def _enc_aes_256_cbc_rndpad(self, buf):
+        #### ADD UNIQUE IV
+        blk_sz = self.blk_sz
+        cipher = self.AES_new(self.key, self.mode)
+        pad_sz = blk_sz-(len(buf)%blk_sz) & self.ps_mask # buf[0]
+        if pad_sz:   buf += self.get_rnd(pad_sz)
+
+        buf    = cipher.encrypt( self.get_rnd(blk_sz)
+                                + buf ) + pad_sz.to_bytes(length=1, byteorder="little")
+        return cipher.iv + buf
+
+    # Decrypt aes-256-cbc:
+    def _dec_aes_256_cbc_rndpad(self, untrusted_buf):
+        iv = untrusted_buf[:self.iv_sz]    ; blk_sz = self.blk_sz
+        pad_sz = untrusted_buf[-1] & self.ps_mask
+
+        cipher = self.AES_new(self.key, self.mode, iv)
+        untrusted_buf = cipher.decrypt(untrusted_buf[self.iv_sz:-1])
+
+        return  untrusted_buf[blk_sz: -pad_sz if pad_sz else None]
+
+    # Encrypt aes-256-siv:
+    def _enc_aes_256_siv(self, buf):
+        #### ADD UNIQUE IV
+        nonce  = self.get_rnd(self.nonce_sz)
+        cipher = self.AES_new(self.key, self.mode, nonce=nonce)
+        buf, ci_tag = cipher.encrypt_and_digest(buf)
+        return  nonce + ci_tag + buf
+
+    # Decrypt aes-256-siv:
+    def _dec_aes_256_siv(self, untrusted_buf):
+        nonce  = untrusted_buf[:self.nonce_sz]    ; buf_start = self.nonce_sz+self.tag_sz
+        ci_tag = untrusted_buf[self.nonce_sz:buf_start]
+        cipher = self.AES_new(self.key, self.mode, nonce)
+        return cipher.decrypt_and_verify(untrusted_buf[buf_start:], ci_tag)
 
 
 # Define absolute paths of commands
@@ -576,10 +646,13 @@ def arch_init(aset):
     if options.from_arch:
         return
 
-    if options.encrypt in crypto_ciphers:
-        aset.key = get_random_bytes(crypto_key_bits//8).hex()
+    if options.encrypt.lower() in DataCryptography.crypto_ciphers:
+        aset.cipher = options.encrypt.lower()
+        aset.key    = DataCryptography(aset.cipher).key.hex()
+    else:
+        aset.cipher = "off"
 
-    print("Encryption =", "aes-256-cbc" if aset.key else "off")
+    print("Encryption =", aset.cipher)
 
     if options.hashtype:
         if options.hashtype not in hash_funcs:
@@ -619,6 +692,11 @@ def arch_check(vol_list=None, startup=False):
     attended = not options.unattended      ; stray_dirs= []
     compare_digest = hmac.compare_digest
 
+    if aset.key:
+        crypto_key = bytes.fromhex(aset.key)
+        decrypt    = DataCryptography(aset.cipher, key=crypto_key).decrypt
+    else:
+        crypto_key = None
 
     if not vol_list:   vol_list = [x.name for x in os.scandir(aset.path) if x.is_dir()]
 
@@ -715,6 +793,13 @@ def arch_check(vol_list=None, startup=False):
                         with open(tmpdir+"/bufdump", "wb") as dump:   dump.write(untrusted_buf)
                         print(mfline)
                         raise BufferError("Got %d bytes, expected %d" % (len(untrusted_buf), size))
+
+                    # Decrypt the data chunk
+                    # Validation MUST be next step!
+                    if crypto_key:
+                        untrusted_buf = decrypt(untrusted_buf)
+
+                    # Validate data
                     if not compare_digest(cksum, gethash(untrusted_buf).hexdigest()):
                         with open(tmpdir+"/bufdump", "wb") as dump:   dump.write(untrusted_buf)
                         print(mfline)
@@ -1487,11 +1572,11 @@ def send_volume(datavol, localtime, ses_tags, send_all):
 
 
     if aset.key:
-        ci_key = bytes.fromhex(aset.key)    ; ci_blk_sz = Cipher_AES.block_size
-        get_rnd = get_random_bytes          ; ci_pad    = Cryptodome.Util.Padding.pad
-        ci_mode = Cipher_AES.MODE_CBC       ; ci_new    = Cipher_AES.new
+        crypto_key = bytes.fromhex(aset.key)
+        crypto     = DataCryptography(aset.cipher, key=crypto_key)
+        encrypt    = crypto.encrypt    # ; crypto_blk_sz = crypto.blk_sz
     else:
-        ci_key  = None                      ; ci_blk_sz = 16
+        crypto_key = None
 
 
     # Use tar to stream files to destination
@@ -1564,8 +1649,7 @@ def send_volume(datavol, localtime, ses_tags, send_all):
                     continue
 
                 # Compress chunk and hash it
-                buf    = compress(buf, compresslevel)    ; buf_mod = (len(buf)+1) % ci_blk_sz
-                buf    = buf_mod.to_bytes(length=1,byteorder="little") + buf
+                buf    = compress(buf, compresslevel)
                 bhash  = gethash(buf)   ; hexhash = bhash.hexdigest()
 
                 # Skip when current and prior chunks are the same
@@ -1612,16 +1696,13 @@ def send_volume(datavol, localtime, ses_tags, send_all):
                             ddchx)
                     ddbytes += len(buf)
                     tarf_addfile(tarinfo=tar_info)
+
                 else:
                     # Encrypt the data chunk
-                    # Note: The default random IV generating mode is used.
-                    # A random 'bolster' block is added as a prefix to the plaintext buffer;
-                    # This might be enhanced by using a counter instead of rnd.
-                    if ci_key:
-                        cipher = ci_new(ci_key, ci_mode)
-                        buf    = cipher.iv + cipher.encrypt(
-                                     get_rnd(ci_blk_sz) + buf + get_rnd(ci_blk_sz-buf_mod))
+                    if crypto_key:
+                        buf = encrypt(buf)
 
+                    # Send data chunk to the archive
                     tar_info.size = len(buf)
                     tarf_addfile(tarinfo=tar_info, fileobj=BytesIO(buf))
                     bcount += len(buf)
@@ -2296,11 +2377,10 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
 
     if aset.key:
-        ci_key  = bytes.fromhex(aset.key)    ; ci_blk_sz = Cipher_AES.block_size
-        iv_sz   = 16                         ; ci_unpad  = Cryptodome.Util.Padding.unpad
-        ci_mode = Cipher_AES.MODE_CBC        ; ci_new    = Cipher_AES.new
+        crypto_key = bytes.fromhex(aset.key)
+        decrypt    = DataCryptography(aset.cipher, key=crypto_key).decrypt
     else:
-        ci_key  = None
+        crypto_key  = None
 
 
     if diff or verify_only:
@@ -2513,12 +2593,9 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
 
         # Decrypt the data chunk
-        if ci_key:
-            iv = untrusted_buf[:iv_sz]
-            cipher = ci_new(ci_key, ci_mode, iv)
-            untrusted_buf =   cipher.decrypt(untrusted_buf[iv_sz:])[ci_blk_sz:]
-            untr_buf_mod  =   untrusted_buf[0]    ; assert 0 <= untr_buf_mod < ci_blk_sz
-            untrusted_buf =   untrusted_buf[:-(ci_blk_sz-untr_buf_mod)]
+        # Validation MUST be next step!
+        if crypto_key:
+            untrusted_buf = decrypt(untrusted_buf)
 
 
         # Validate data chunk
@@ -2532,7 +2609,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
         if verify_only:   continue
 
-        buf = untrusted_buf[1:]
+        buf = untrusted_buf
 
         # Proceed with decompress.
         decomp = decompress(buf)
@@ -2562,7 +2639,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     if rc is not None and rc != 0:
         raise RuntimeError("Error code from getvol process: "+str(rc))
 
-    if not sparse and addr+len(decompress(untrusted_buf[1:])) != volsize:
+    if not sparse and addr+len(decompress(untrusted_buf)) != volsize:
         raise ValueError("Received range %d does not match volume size %d."
                             % (addr+len(decompress(untrusted_buf)), volsize))
     print("100.00%")
@@ -2895,7 +2972,7 @@ parser.add_argument("--remap", action="store_true", default=False, help="Remap s
 parser.add_argument("--local", default="",    help="Init: LVM vg/pool containing source volumes")
 parser.add_argument("--dest", default="",     help="Init: type:location of archive")
 parser.add_argument("--subdir", default="",   help="Init: optional subdir for --dest")
-parser.add_argument("--encrypt", default="aes-256-cbc", help="Init: compression type:level")
+parser.add_argument("--encrypt", default="aes-256-siv", help="Init: compression type:level")
 parser.add_argument("--compression", default="", help="Init: compression type:level")
 parser.add_argument("--hashtype", default="", help="Init: hash function type")
 parser.add_argument("--chunk-factor", dest="chfactor", type=int,
@@ -2950,8 +3027,6 @@ if zstd:   compressors["zstd"] = (zstd, 7, lambda data, lvl: zstd.compress(data,
 
 hash_funcs       =    {"sha256" : hashlib.sha256,
                        "blake2b": functools.partial(hashlib.blake2b, digest_size=hash_bits//8)}
-
-crypto_key_bits  =    256    ; crypto_ciphers  =  {"aes-256-cbc"}
 
 # Check --from usage (access other/unconfigured archive).
 if options.from_arch and options.action not in ("receive","verify","list","arch-init"):
