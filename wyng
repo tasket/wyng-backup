@@ -21,6 +21,7 @@ except:
 
 try:
     from Cryptodome.Cipher import AES as Cipher_AES
+    from Cryptodome.Cipher import ChaCha20 as Cipher_ChaCha20
     from Cryptodome.Random import get_random_bytes
     import Cryptodome.Util.Padding
 except:
@@ -397,7 +398,7 @@ class ArchiveSet:
 
 class DataCryptography():
 
-    crypto_key_bits  =  256    ; crypto_ciphers  =  {"aes-256-siv", "aes-256-cbc"}
+    crypto_key_bits  =  256    ; crypto_ciphers  =  {"aes-256-siv", "aes-256-cbc", "xchacha20"}
 
     def __init__(self, ci_type, key=None):
         self.get_rnd = get_random_bytes
@@ -413,11 +414,17 @@ class DataCryptography():
 
         elif ci_type == "aes-256-siv":
             self.key     = key if key else self.get_rnd(2*self.crypto_key_bits//8)
-            self.blk_sz  = Cipher_AES.block_size
-            self.nonce_sz= 16                      ; self.tag_sz  = 16
+            self.nonce_sz= 12                      ; self.tag_sz  = 16
             self.mode    = Cipher_AES.MODE_SIV     ; self.AES_new = Cipher_AES.new
             self.encrypt = self._enc_aes_256_siv
             self.decrypt = self._dec_aes_256_siv
+
+        elif ci_type == "xchacha20":
+            self.key     = key if key else self.get_rnd(self.crypto_key_bits//8)
+            self.nonce_sz= 24                      ; self.tag_sz  = 16
+            self.ChaCha20_new = Cipher_ChaCha20.new
+            self.encrypt = self._enc_chacha20
+            self.decrypt = self._dec_chacha20
 
 
     # Encrypt aes-256-cbc:
@@ -428,11 +435,11 @@ class DataCryptography():
         #### ADD UNIQUE IV
         blk_sz = self.blk_sz
         cipher = self.AES_new(self.key, self.mode)
-        pad_sz = blk_sz-(len(buf)%blk_sz) & self.ps_mask # buf[0]
+        pad_sz = blk_sz-(len(buf)%blk_sz) & self.ps_mask
         if pad_sz:   buf += self.get_rnd(pad_sz)
 
         buf    = cipher.encrypt( self.get_rnd(blk_sz)
-                                + buf ) + pad_sz.to_bytes(length=1, byteorder="little")
+                                + buf ) + pad_sz.to_bytes(1,"big")
         return cipher.iv + buf
 
     # Decrypt aes-256-cbc:
@@ -459,6 +466,20 @@ class DataCryptography():
         ci_tag = untrusted_buf[self.nonce_sz:buf_start]
         cipher = self.AES_new(self.key, self.mode, nonce)
         return cipher.decrypt_and_verify(untrusted_buf[buf_start:], ci_tag)
+
+    # Encrypt [X]ChaCha20:
+    def _enc_chacha20(self, buf):
+        #### ADD UNIQUE IV
+        nonce  = self.get_rnd(self.nonce_sz)
+        cipher = self.ChaCha20_new(key=self.key, nonce=nonce)
+        buf    = cipher.encrypt(buf)
+        return  nonce + buf
+
+    # Decrypt [X]ChaCha20:
+    def _dec_chacha20(self, untrusted_buf):
+        nonce  = untrusted_buf[:self.nonce_sz]
+        cipher = self.ChaCha20_new(key=self.key, nonce=nonce)
+        return cipher.decrypt(untrusted_buf[self.nonce_sz:])
 
 
 # Define absolute paths of commands
