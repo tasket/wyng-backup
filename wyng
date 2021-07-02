@@ -728,7 +728,7 @@ def get_configs():
 
     if options.from_arch:
         # Prepare a temporary metadata dir and init aset with it
-        tmpmeta = tmpdir+"/var"    ; os.makedirs(tmpmeta+bkdir)
+        tmpmeta = big_tmpdir+"/var"    ; os.makedirs(tmpmeta+bkdir)
         aset    = ArchiveSet(aname, tmpmeta+topdir)
         arch_init(aset)
     else:
@@ -759,19 +759,18 @@ def get_configs_remote():
         if ans.lower() not in ("y","yes"):
             x_it(0,"Stopped.")
 
-    dest_run([destcd + bkdir +"  && "+CP.python+" "+tmpdir+"-rpc/dest_helper.py get-configs "
-              +(options.volumes[0] if len(options.volumes)>0 else "")
-             ], out=tmpdir+"/metadata.tgz")
+    do_exec([dest_run_args(desttype, [destcd + bkdir
+                    +" && "+CP.python+" "+tmpdir+"-rpc/dest_helper.py get-configs "
+                    +(options.volumes[0] if len(options.volumes)>0 and not make_local else "")]),
+             [CP.tar, "-xzf", "-"]], cwd=aset.path)
 
-    do_exec([[CP.tar,"-xzf",tmpdir+"/metadata.tgz"]], cwd=aset.path)
     if not exists(aset.path+"/archive.ini"):
         x_it(1,"Failed to retrieve remote configuration: No info.")
 
     if make_local:
-        if exists(metadir+bkdir):
-            os.replace(metadir+bkdir,
-                       metadir+topdir+"/wyng.old/"+aset.name+"--"+time.strftime("%m%d-%H%M%S"))
-        shutil.copytree(aset.path, metadir+bkdir)
+        if exists(metadir+bkdir):   shutil.rmtree(metadir+bkdir)
+        # Assumes aset.path is same fs as metadir! See get_configs().
+        os.rename(aset.path, metadir+bkdir)
         new_path = metadir+topdir
     else:
         new_path = os.path.dirname(aset.path)
@@ -2762,7 +2761,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.3.0rc2"      ; prog_date = "20210622"
+prog_version          = "0.3.0wip"      ; prog_date = "20210702"
 format_version        = 2               ; debug     = False       ; tmpdir = None
 
 # Disk block size:
