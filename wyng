@@ -1483,7 +1483,7 @@ def send_volume(datavol, localtime, ses_tags, send_all):
 
         # Show progress in increments determined by 1000/checkpt_pct
         # where '200' results in five updates i.e. in unattended mode.
-        checkpt = checkpt_pct = 335 if options.unattended else 1
+        checkpt = checkpt_pct = 335 if options.quiet else 20
         addr    = percent = 0
 
         # Feed delta bmap to inner loop in pieces segmented by large zero delimeter.
@@ -2246,9 +2246,9 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             return 0
 
     verify_only = options.action == "verify"      ; remap     = options.remap
-    attended    = not options.unattended          ; debug     = options.debug
+    attended    = not options.unattended          ; verbose   = not options.quiet
     sparse      = options.sparse                  ; chunksize = aset.chunksize
-    sparse_write= options.sparse_write or sparse
+    sparse_write= options.sparse_write or sparse  ; debug     = options.debug
     vgname      = aset.vgname                     ; zeros     = bytes(chunksize)
     vol         = aset.vols[datavol]              ; snap1vol  = datavol+".tick"
     gethash     = hash_funcs[aset.hashtype]       ; sessions  = vol.sesnames
@@ -2421,7 +2421,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         if addr >= lchunk_addr:   break
         cksum, faddr, ses = mfline.split()    ; addr = int(faddr[1:], 16)
 
-        if attended:   print("%.2f%%" % (addr/volsize*100), end="\x0d")
+        if verbose:   print("%.2f%%" % (addr/volsize*100), end="\x0d")
 
         # Process zeros quickly
         if cksum.strip() == "0":
@@ -2856,6 +2856,7 @@ options = parser.parse_args()
 # Set stdout to devnull if --quiet is specified
 debug = options.debug    ; assert not (options.quiet and (options.verbose or debug))
 if options.quiet and options.action != "list":
+    options.unattended = True
     sys.stdout = open(os.devnull, "w")
 
 
