@@ -631,7 +631,7 @@ def arch_check(vol_list=None, startup=False):
 
         # Remove session tmp dirs
         for sdir in os.scandir(vol.path):
-            if sdir.name.startswith("S_") and sdir.name.endswith("-tmp"):
+            if sdir.name.startswith("S_") and sdir.name.endswith("-tmp") and dest_writable:
                 if options.debug:   print("Removing partial session dir '%s'" % sdir.name)
                 dest_run([destcd+bkdir + " && rm -rf " + volname+"/"+sdir.name])
                 shutil.rmtree(vol.path+"/"+sdir.name, ignore_errors=True)
@@ -998,7 +998,8 @@ def detect_dest_state(destsys):
                                      "-p", destsys.split(":")[0]]
                         }
 
-    dest_in_proc = False    ; dest_free = None    ; online = False
+    dest_in_proc  = False   ; dest_free = None    ; online = False
+    dest_writable = True
 
     if (options.action not in local_actions and destsys is not None) \
         or options.remap or options.from_arch:
@@ -1022,7 +1023,7 @@ def detect_dest_state(destsys):
                 +"  && cat >"+tmpdir+"-rpc/dest_helper.py"
 
                 # test write access and hardlinks
-                +"  && touch archive.dat"
+                +"  && touch archive.dat || echo 'wyng_read_only'"
                 +(" && ln -f archive.dat .hardlink" if options.dedup else "")
 
                 # check free space and in_process status on remote
@@ -1033,7 +1034,7 @@ def detect_dest_state(destsys):
         try:
             do_exec([dest_run_args(desttype, cmd),
                      # sanitize remote output:
-                     ["cat","-v"],  ["tail","--bytes=8000"]
+                     ["cat","-v"],  ["tail","--bytes=2000"]
                     ],
                     out=tmpdir+"/dest-state.log", infile=tmpdir+"/rpc/dest_helper.py")
             online = True
@@ -1047,8 +1048,10 @@ def detect_dest_state(destsys):
                     dest_in_proc = True
                 elif ln.startswith("wyng_check_free"):
                     parts = ln.split()    ; dest_free = int(parts[1]) * int(parts[2])
+                elif ln.startswith("wyng_read_only"):
+                    dest_writable = False
 
-    return dest_free is not None, dest_free, dest_in_proc
+    return dest_free is not None, dest_free, dest_in_proc, dest_writable
 
 
 # Set or clear state for the archive as 'in_process' in case of interruption during write.
@@ -2761,7 +2764,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.3.0wip"      ; prog_date = "20210702"
+prog_version          = "0.3.0wip"      ; prog_date = "20210709"
 format_version        = 2               ; debug     = False       ; tmpdir = None
 
 # Disk block size:
@@ -2784,7 +2787,9 @@ url_types             = ("ssh://", "qubes-ssh://", "qubes://", "internal:")
 ssh_opts              = ["-x", "-o", "ControlPath=~/.ssh/controlsocket-%r@%h-%p",
                          "-o", "ControlMaster=auto", "-o", "ControlPersist=60"]
 
-local_actions         = ("index-test","monitor","list","version","add")
+local_actions         = ("monitor","list","version","add")
+write_actions         = ("send","prune","delete","rename","arch-delete","arch-deduplicate")
+dest_actions          = ("receive","verify","diff","arch-check","arch-init") + write_actions
 
 comment_len = 100             ; tag_len = 25
 volname_len = 112             ; alphanumsym = "^[a-zA-Z0-9\+\._-]+$"
@@ -2808,10 +2813,7 @@ except IOError:
 
 # Parse Arguments:
 parser = argparse.ArgumentParser(description="")
-parser.add_argument("action", choices=["send","monitor","add","delete","prune","receive",
-                    "verify","diff","list","version","rename","arch-init","arch-delete",
-                    "arch-deduplicate","arch-check"],
-                    default="monitor", help="Action to take")
+parser.add_argument("action", choices=local_actions+dest_actions, help="Action to take")
 parser.add_argument("-u", "--unattended", action="store_true", default=False,
                     help="Non-interactive, supress prompts")
 parser.add_argument("--all-before", dest="allbefore", action="store_true", default=False,
@@ -2859,8 +2861,9 @@ if options.quiet and options.action != "list":
     options.unattended = True
     sys.stdout = open(os.devnull, "w")
 
-
 if not options.quiet:   print("%s %s %s" % (prog_name.capitalize(), prog_version, prog_date))
+
+if options.action not in ("send", "arch-deduplicate"):   options.dedup = False
 
 
 # Setup tmp and metadata dirs
@@ -2904,15 +2907,18 @@ volgroups, l_vols= {}, {}    ; get_lvm_vgs()
 # to the destination.
 # Enh: Use separate dest class so aset can be inst after detect_dest_state()
 #      and/or move detect call to aset init.
-destsys          = desttype  = dest_run_map  = dest_online  = dest_in_process  = dest_free  = None
+destsys = desttype = dest_run_map = dest_online = dest_in_process = dest_free = dest_writable= None
 aset             = get_configs()
 destsys, desttype= detect_internal_state()
-dest_online, dest_free, dest_in_process  = detect_dest_state(destsys)
+dest_online, dest_free, dest_in_process, dest_writable  = detect_dest_state(destsys)
 bkdir            = topdir+"/"+aset.name
 destpath         = os.path.normpath(pjoin(aset.destmountpoint,aset.destdir))
 destcd           = " cd '"+destpath+"'"
 
 # Check online status for certain commands.
+if not dest_writable and options.action in write_actions and not options.from_arch \
+                    and not (options.action == "delete" and options.clean):
+    x_it(1, "Destination not writable.")
 if not dest_online and (options.remap or options.from_arch \
                     or options.action not in local_actions) \
                     and not (options.action == "delete" and options.clean):
