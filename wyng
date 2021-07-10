@@ -978,7 +978,7 @@ elif cmd == "get-configs":
                     for f in ("info","manifest"):   print(volname+"/"+ses.name+"/"+f, file=tarlstf)
         if exists("in_process"):  print("in_process", file=tarlstf)
     p = subprocess.check_call(["tar","-czf","-","--no-recursion","--verbatim-files-from",
-    "--files-from="+tmpdir+"/tar.lst","archive.ini"], stderr=subprocess.DEVNULL)
+    "--files-from="+tmpdir+"/tar.lst","archive.ini"])
     '''
     with open(tmpdir +"/rpc/dest_helper.py", "wb") as progf:
         progf.write(bytes(dest_program, encoding="UTF=8"))
@@ -2764,7 +2764,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.3.0wip"      ; prog_date = "20210709"
+prog_version          = "0.3.0wip"      ; prog_date = "20210710"
 format_version        = 2               ; debug     = False       ; tmpdir = None
 
 # Disk block size:
