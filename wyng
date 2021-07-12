@@ -39,6 +39,7 @@ class ArchiveSet:
         self.dedupindex  = {}
         self.dedupsessions = []
         self.in_process  = get_in_process(self.path)
+        self.keyfile     = "key.dat"
         # persisted:
         self.chunksize   = bkchunksize
         self.compression = "zstd" if zstd else "zlib"
@@ -50,8 +51,6 @@ class ArchiveSet:
         self.destdir     = "."
         self.destmountpoint = None
         self.uuid        = None
-        self.key         = ""
-        self.cipher      = ""
 
         # parser for the .ini formatted configuration
         self.conf = cp   = configparser.ConfigParser()
@@ -111,9 +110,12 @@ class ArchiveSet:
         c['cipher']      = self.cipher
         confdir  = os.path.dirname(self.confpath)   ; os.makedirs(confdir, exist_ok=True)
         confname = fname if fname else os.path.basename(self.confpath)
-        with open(confdir+"/"+confname, "w") as f:
+
+        with io.StringIO() as f:
             self.conf.write(f)
-            f.flush()    ; os.fsync(f.fileno())
+            buf = bytes(f.getvalue(), encoding="UTF-8")
+        if self.meta_key:   buf = crypto.encrypt(buf)
+        with open(confdir+"/"+confname, "wb") as fsave:   fsave.write(buf)
 
     def add_volume(self, datavol):
         if datavol in self.conf["volumes"]:
@@ -400,12 +402,14 @@ class DataCryptography():
 
     crypto_key_bits  =  256    ; crypto_ciphers  =  {"aes-256-siv", "aes-256-cbc", "xchacha20"}
 
-    def __init__(self, ci_type, key=None):
+    def __init__(self, ci_type, keyfile, key=None, passphrase=None):
         self.get_rnd = get_random_bytes
         self.ci_type = ci_type
+        self.counter = None
 
         if ci_type == "aes-256-cbc":
-            self.key     = key if key else self.get_rnd(self.crypto_key_bits//8)
+            self.key_sz  = crypto_key_bits//8      ; self.max_count = 2**48-1 # <--check
+            #self.key     = key if key else self.get_rnd(self.crypto_key_bits//8)
             self.iv_sz   = 16
             self.blk_sz  = Cipher_AES.block_size   ; self.ps_mask = self.blk_sz-1
             self.mode    = Cipher_AES.MODE_CBC     ; self.AES_new = Cipher_AES.new
@@ -413,18 +417,25 @@ class DataCryptography():
             self.decrypt = self._dec_aes_256_cbc_rndpad
 
         elif ci_type == "aes-256-siv":
-            self.key     = key if key else self.get_rnd(2*self.crypto_key_bits//8)
+            self.key_sz  = 2*crypto_key_bits//8    ; self.max_count = 2**48-1
+            #self.key     = key if key else self.get_rnd(2*self.crypto_key_bits//8)
             self.nonce_sz= 12                      ; self.tag_sz  = 16
             self.mode    = Cipher_AES.MODE_SIV     ; self.AES_new = Cipher_AES.new
             self.encrypt = self._enc_aes_256_siv
             self.decrypt = self._dec_aes_256_siv
 
         elif ci_type == "xchacha20":
-            self.key     = key if key else self.get_rnd(self.crypto_key_bits//8)
+            self.key_sz  = crypto_key_bits//8      ; self.max_count = 2**128-1
+            #self.key     = key if key else self.get_rnd(self.crypto_key_bits//8)
             self.nonce_sz= 24                      ; self.tag_sz  = 16
             self.ChaCha20_new = Cipher_ChaCha20.new
             self.encrypt = self._enc_chacha20
             self.decrypt = self._dec_chacha20
+
+        if not key and exists(keyfile):
+            with open(keyfile,"rb") as kf:
+                self.counter = kf.read(8)
+                self.key     = kf.read(self.key_sz)
 
 
     # Encrypt aes-256-cbc:
@@ -668,6 +679,14 @@ def arch_init(aset):
         return
 
     if options.encrypt.lower() in DataCryptography.crypto_ciphers:
+        if options.unattended:   x_it(1, "Enter passphrase interactively.")
+
+        # Security Enh: Possibly use mmap+mlock to store passphrase/key values,
+        #               and wipe them from RAM after use.
+        passphrase  = bytearray(getpass.getpass("Enter passphrase: "), encoding="UTF-8")
+        passphrase2 = bytearray(getpass.getpass("Re-enter passphrase: "), encoding="UTF-8")
+        if passphrase != passphrase2:   x_it(1, "Entries do not match.")
+
         aset.cipher = options.encrypt.lower()
         aset.key    = DataCryptography(aset.cipher).key.hex()
     else:
@@ -852,7 +871,7 @@ def get_configs():
 
     if options.from_arch:
         # Prepare a temporary metadata dir and init aset with it
-        tmpmeta = tmpdir+"/var"    ; os.makedirs(tmpmeta+bkdir)
+        tmpmeta = big_tmpdir+"/var"    ; os.makedirs(tmpmeta+bkdir)
         aset    = ArchiveSet(aname, tmpmeta+topdir)
         arch_init(aset)
     else:
@@ -883,19 +902,18 @@ def get_configs_remote():
         if ans.lower() not in ("y","yes"):
             x_it(0,"Stopped.")
 
-    dest_run([destcd + bkdir +"  && "+CP.python+" "+tmpdir+"-rpc/dest_helper.py get-configs "
-              +(options.volumes[0] if len(options.volumes)>0 else "")
-             ], out=tmpdir+"/metadata.tgz")
+    do_exec([dest_run_args(desttype, [destcd + bkdir
+                    +" && "+CP.python+" "+tmpdir+"-rpc/dest_helper.py get-configs "
+                    +(options.volumes[0] if len(options.volumes)>0 and not make_local else "")]),
+             [CP.tar, "-xzf", "-"]], cwd=aset.path)
 
-    do_exec([[CP.tar,"-xzf",tmpdir+"/metadata.tgz"]], cwd=aset.path)
     if not exists(aset.path+"/archive.ini"):
         x_it(1,"Failed to retrieve remote configuration: No info.")
 
     if make_local:
-        if exists(metadir+bkdir):
-            os.replace(metadir+bkdir,
-                       metadir+topdir+"/wyng.old/"+aset.name+"--"+time.strftime("%m%d-%H%M%S"))
-        shutil.copytree(aset.path, metadir+bkdir)
+        if exists(metadir+bkdir):   shutil.rmtree(metadir+bkdir)
+        # Assumes aset.path is same fs as metadir! See get_configs().
+        os.rename(aset.path, metadir+bkdir)
         new_path = metadir+topdir
     else:
         new_path = os.path.dirname(aset.path)
@@ -1103,7 +1121,7 @@ elif cmd == "get-configs":
                     for f in ("info","manifest"):   print(volname+"/"+ses.name+"/"+f, file=tarlstf)
         if exists("in_process"):  print("in_process", file=tarlstf)
     p = subprocess.check_call(["tar","-czf","-","--no-recursion","--verbatim-files-from",
-    "--files-from="+tmpdir+"/tar.lst","archive.ini"], stderr=subprocess.DEVNULL)
+    "--files-from="+tmpdir+"/tar.lst","archive.ini"])
     '''
     with open(tmpdir +"/rpc/dest_helper.py", "wb") as progf:
         progf.write(bytes(dest_program, encoding="UTF=8"))
@@ -1123,7 +1141,8 @@ def detect_dest_state(destsys):
                                      "-p", destsys.split(":")[0]]
                         }
 
-    dest_in_proc = False    ; dest_free = None    ; online = False
+    dest_in_proc  = False    ; dest_free = None    ; online = False
+    dest_writable = True
 
     if (options.action not in local_actions and destsys is not None) \
         or options.remap or options.from_arch:
@@ -1147,7 +1166,7 @@ def detect_dest_state(destsys):
                 +"  && cat >"+tmpdir+"-rpc/dest_helper.py"
 
                 # test write access and hardlinks
-                +"  && touch archive.dat"
+                +"  && touch archive.dat || echo 'wyng_read_only'"
                 +(" && ln -f archive.dat .hardlink" if options.dedup else "")
 
                 # check free space and in_process status on remote
@@ -1158,7 +1177,7 @@ def detect_dest_state(destsys):
         try:
             do_exec([dest_run_args(desttype, cmd),
                      # sanitize remote output:
-                     ["cat","-v"],  ["tail","--bytes=8000"]
+                     ["cat","-v"],  ["tail","--bytes=2000"]
                     ],
                     out=tmpdir+"/dest-state.log", infile=tmpdir+"/rpc/dest_helper.py")
             online = True
@@ -1172,8 +1191,10 @@ def detect_dest_state(destsys):
                     dest_in_proc = True
                 elif ln.startswith("wyng_check_free"):
                     parts = ln.split()    ; dest_free = int(parts[1]) * int(parts[2])
+                elif ln.startswith("wyng_read_only"):
+                    dest_writable = False
 
-    return dest_free is not None, dest_free, dest_in_proc
+    return dest_free is not None, dest_free, dest_in_proc, dest_writable
 
 
 # Set or clear state for the archive as 'in_process' in case of interruption during write.
@@ -1617,7 +1638,7 @@ def send_volume(datavol, localtime, ses_tags, send_all):
 
         # Show progress in increments determined by 1000/checkpt_pct
         # where '200' results in five updates i.e. in unattended mode.
-        checkpt = checkpt_pct = 335 if options.unattended else 1
+        checkpt = checkpt_pct = 335 if options.quiet else 20
         addr    = percent = 0
 
         # Feed delta bmap to inner loop in pieces segmented by large zero delimeter.
@@ -2386,9 +2407,9 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             return 0
 
     verify_only = options.action == "verify"      ; remap     = options.remap
-    attended    = not options.unattended          ; debug     = options.debug
+    attended    = not options.unattended          ; verbose   = not options.quiet
     sparse      = options.sparse                  ; chunksize = aset.chunksize
-    sparse_write= options.sparse_write or sparse
+    sparse_write= options.sparse_write or sparse  ; debug     = options.debug
     vgname      = aset.vgname                     ; zeros     = bytes(chunksize)
     vol         = aset.vols[datavol]              ; snap1vol  = datavol+".tick"
     gethash     = hash_funcs[aset.hashtype]       ; sessions  = vol.sesnames
@@ -2569,7 +2590,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         if addr >= lchunk_addr:   break
         cksum, faddr, ses = mfline.split()    ; addr = int(faddr[1:], 16)
 
-        if attended:   print("%.2f%%" % (addr/volsize*100), end="\x0d")
+        if verbose:   print("%.2f%%" % (addr/volsize*100), end="\x0d")
 
         # Process zeros quickly
         if cksum.strip() == "0":
@@ -2942,7 +2963,9 @@ url_types             = ("ssh://", "qubes-ssh://", "qubes://", "internal:")
 ssh_opts              = ["-x", "-o", "ControlPath=~/.ssh/controlsocket-%r@%h-%p",
                          "-o", "ControlMaster=auto", "-o", "ControlPersist=60"]
 
-local_actions         = ("index-test","monitor","list","version","add")
+local_actions         = ("monitor","list","version","add")
+write_actions         = ("send","prune","delete","rename","arch-delete","arch-deduplicate")
+dest_actions          = ("receive","verify","diff","arch-check","arch-init") + write_actions
 
 comment_len = 100             ; tag_len = 25
 volname_len = 112             ; alphanumsym = "^[a-zA-Z0-9\+\._-]+$"
@@ -2967,10 +2990,7 @@ except IOError:
 
 # Parse Arguments:
 parser = argparse.ArgumentParser(description="")
-parser.add_argument("action", choices=["send","monitor","add","delete","prune","receive",
-                    "verify","diff","list","version","rename","arch-init","arch-delete",
-                    "arch-deduplicate","arch-check"],
-                    default="monitor", help="Action to take")
+parser.add_argument("action", choices=local_actions+dest_actions, help="Action to take")
 parser.add_argument("-u", "--unattended", action="store_true", default=False,
                     help="Non-interactive, supress prompts")
 parser.add_argument("--all-before", dest="allbefore", action="store_true", default=False,
@@ -3016,10 +3036,13 @@ options = parser.parse_args()
 # Set stdout to devnull if --quiet is specified
 debug = options.debug    ; assert not (options.quiet and (options.verbose or debug))
 if options.quiet and options.action != "list":
+    options.unattended = True
     sys.stdout = open(os.devnull, "w")
 
 
 if not options.quiet:   print("%s %s %s" % (prog_name.capitalize(), prog_version, prog_date))
+
+if options.action not in ("send", "arch-deduplicate"):   options.dedup = False
 
 
 # Setup tmp and metadata dirs
@@ -3063,15 +3086,18 @@ volgroups, l_vols= {}, {}    ; get_lvm_vgs()
 # to the destination.
 # Enh: Use separate dest class so aset can be inst after detect_dest_state()
 #      and/or move detect call to aset init.
-destsys          = desttype  = dest_run_map  = dest_online  = dest_in_process  = dest_free  = None
+destsys = desttype = dest_run_map = dest_online = dest_in_process = dest_free = dest_writable= None
 aset             = get_configs()
 destsys, desttype= detect_internal_state()
-dest_online, dest_free, dest_in_process  = detect_dest_state(destsys)
+dest_online, dest_free, dest_in_process, dest_writable  = detect_dest_state(destsys)
 bkdir            = topdir+"/"+aset.name
 destpath         = os.path.normpath(pjoin(aset.destmountpoint,aset.destdir))
 destcd           = " cd '"+destpath+"'"
 
 # Check online status for certain commands.
+if not dest_writable and options.action in write_actions and not options.from_arch \
+                    and not (options.action == "delete" and options.clean):
+    x_it(1, "Destination not writable.")
 if not dest_online and (options.remap or options.from_arch \
                     or options.action not in local_actions) \
                     and not (options.action == "delete" and options.clean):
