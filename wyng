@@ -11,6 +11,7 @@
 import sys, signal, os, stat, shutil, subprocess, time, datetime
 import re, mmap, bz2, zlib, gzip, tarfile, io, fcntl, tempfile
 import argparse, configparser, hashlib, hmac, functools, uuid
+import getpass
 import xml.etree.ElementTree    ; from itertools import islice
 from array import array         ; import resource
 
@@ -31,7 +32,7 @@ except:
 # ArchiveSet manages configuration and configured volume info
 
 class ArchiveSet:
-    def __init__(self, name, top, allvols=False):
+    def __init__(self, name, top, crypto_type=None, allvols=False):
         self.name        = name
         self.path        = pjoin(top,name)
         self.confpath    = pjoin(self.path,"archive.ini")
@@ -39,7 +40,8 @@ class ArchiveSet:
         self.dedupindex  = {}
         self.dedupsessions = []
         self.in_process  = get_in_process(self.path)
-        self.keyfile     = "key.dat"
+        self.crypto      = None
+        self.datacrypto  = None
         # persisted:
         self.chunksize   = bkchunksize
         self.compression = "zstd" if zstd else "zlib"
@@ -51,6 +53,7 @@ class ArchiveSet:
         self.destdir     = "."
         self.destmountpoint = None
         self.uuid        = None
+        self.data_cipher = None
 
         # parser for the .ini formatted configuration
         self.conf = cp   = configparser.ConfigParser()
@@ -63,11 +66,22 @@ class ArchiveSet:
             self.uuid = str(uuid.uuid4())
             return
 
-        cp.read(self.confpath)
+        # init metadata crypto
+        if exists(self.path+"/metakey.dat"):
+            self.crypto = DataCryptography("aes-256-siv", self.path+"/metakey.dat")
+
+        # read attributes from archive.ini file
+        with open(self.confpath, "rb") as f:   buf = f.read(64*1024)
+        if self.crypto:   buf = self.crypto.decrypt(buf)
+        cp.read_string(gzip.decompress(buf).decode("UTF-8"))
         self.a_ints      = {"chunksize"}
         for name in cp["var"].keys():
             setattr(self, name, int(cp["var"][name]) \
                                 if name in self.a_ints else cp["var"][name])
+
+        # init data crypto
+        if self.crypto:
+            self.datacrypto = DataCryptography(self.data_cipher, self.path+"/datakey.dat")
 
         # Fix: Remove filterwarnings when upstream fixes their code...
         if zstd and self.compression == "zstd":
@@ -106,15 +120,14 @@ class ArchiveSet:
         c['destdir']     = self.destdir
         c['destmountpoint'] = self.destmountpoint
         c['uuid']        = self.uuid if self.uuid else str(uuid.uuid4())
-        c['key']         = self.key
-        c['cipher']      = self.cipher
+        c['data_cipher'] = self.data_cipher
         confdir  = os.path.dirname(self.confpath)   ; os.makedirs(confdir, exist_ok=True)
         confname = fname if fname else os.path.basename(self.confpath)
 
         with io.StringIO() as f:
-            self.conf.write(f)
-            buf = bytes(f.getvalue(), encoding="UTF-8")
-        if self.meta_key:   buf = crypto.encrypt(buf)
+            self.conf.write(f)    ; f.flush()
+            buf = gzip.compress(f.getvalue().encode("UTF-8"), 3)
+        if self.crypto:   buf = self.crypto.encrypt(buf)
         with open(confdir+"/"+confname, "wb") as fsave:   fsave.write(buf)
 
     def add_volume(self, datavol):
@@ -185,7 +198,9 @@ class ArchiveSet:
 
             # load volume info
             if exists(pjoin(path,"volinfo")):
-                with open(pjoin(path,"volinfo"), "r") as f:
+                with open(pjoin(path,"volinfo"), "rb") as f:   buf = f.read(64*1024)
+                if self.archive.crypto:   buf = self.archive.crypto.decrypt(buf)
+                with io.StringIO(gzip.decompress(buf).decode("UTF-8")) as f:
                     for ln in f:
                         vname, value = ln.strip().split("=", maxsplit=1)
                         setattr(self, vname.strip(), value.strip())
@@ -243,15 +258,19 @@ class ArchiveSet:
 
         def save_volinfo(self, fname="volinfo", prune=False):
             os.makedirs(self.path, exist_ok=True)
-            with open(pjoin(self.path,fname), "w") as f:
+            with io.StringIO() as f:
                 print("format_ver =", format_version, file=f)
                 print("uuid =", self.uuid if self.uuid else str(uuid.uuid4()), file=f)
                 print("first =", self.first, file=f)
                 print("last =", self.last, file=f)
-
                 if not prune:   self.desc = options.voldesc.strip()[:comment_len]
                 print("desc =", self.desc, file=f)
                 print("que_meta_update =", self.que_meta_update, file=f)
+                buf = gzip.compress(f.getvalue().encode("UTF-8"), 3)
+
+            if self.archive.crypto:   buf = self.archive.crypto.encrypt(buf)
+            with open(pjoin(self.path,fname), "wb") as f:
+                f.write(buf)
                 f.flush()    ; os.fsync(f.fileno())
 
         def changed_bytes_add(self, amount, reset=False, save=False):
@@ -330,7 +349,9 @@ class ArchiveSet:
                 attr_int      = ("volsize","sequence")
 
                 if path:
-                    with open(pjoin(path,"info"), "r") as sf:
+                    with open(pjoin(path,"info"), "rb") as sf:   buf = sf.read(64*1024)
+                    if self.volume.archive.crypto:   buf = self.volume.archive.crypto.decrypt(buf)
+                    with io.StringIO(gzip.decompress(buf).decode("UTF-8")) as sf:
                         for ln in sf:
                             if ln.strip() == "uuid =":  continue
                             vname, value = ln.split("=", maxsplit=1)
@@ -379,10 +400,9 @@ class ArchiveSet:
                     if len(voltags[tag]) == 0:    del(voltags[tag])
 
             def save_info(self, fname="info"):
-                if not self.path:
-                    raise ValueError("Path not set for save_info")
+                assert self.path
                 self.saved = True
-                with open(pjoin(self.path,fname), "w") as f:
+                with io.StringIO() as f:
                     print("uuid =",      self.uuid, file=f)
                     print("localtime =", self.localtime, file=f)
                     print("volsize =",   self.volsize, file=f)
@@ -391,6 +411,11 @@ class ArchiveSet:
                     print("previous =",  self.previous, file=f)
                     for tkey, tdesc in self.tags.items():
                         print("tag =",   tkey, tdesc, file=f)
+                    buf = gzip.compress(f.getvalue().encode("UTF-8"), 3)
+
+                if self.volume.archive.crypto:   buf = self.volume.archive.crypto.encrypt(buf)
+                with open(pjoin(self.path,fname), "wb") as f:
+                    f.write(buf)
                     f.flush()    ; os.fsync(f.fileno())
 
 # END class ArchiveSet, Volume, Ses
@@ -400,16 +425,17 @@ class ArchiveSet:
 
 class DataCryptography():
 
-    crypto_key_bits  =  256    ; crypto_ciphers  =  {"aes-256-siv", "aes-256-cbc", "xchacha20"}
+    crypto_key_bits = 256    ; crypto_ciphers = {"aes-256-siv", "aes-256-cbc", "xchacha20"}
 
-    def __init__(self, ci_type, keyfile, key=None, passphrase=None):
+    def __init__(self, ci_type, keyfile, passphrase=None):
         self.get_rnd = get_random_bytes
-        self.ci_type = ci_type
+        self.ci_type = ci_type   ; assert ci_type in self.crypto_ciphers
+        self.keyfile = keyfile
+        self.key     = None      ; kbits = self.crypto_key_bits
         self.counter = None
 
         if ci_type == "aes-256-cbc":
-            self.key_sz  = crypto_key_bits//8      ; self.max_count = 2**48-1 # <--check
-            #self.key     = key if key else self.get_rnd(self.crypto_key_bits//8)
+            self.key_sz  = kbits//8                ; self.max_count = 2**48-1 # <--check
             self.iv_sz   = 16
             self.blk_sz  = Cipher_AES.block_size   ; self.ps_mask = self.blk_sz-1
             self.mode    = Cipher_AES.MODE_CBC     ; self.AES_new = Cipher_AES.new
@@ -417,25 +443,34 @@ class DataCryptography():
             self.decrypt = self._dec_aes_256_cbc_rndpad
 
         elif ci_type == "aes-256-siv":
-            self.key_sz  = 2*crypto_key_bits//8    ; self.max_count = 2**48-1
-            #self.key     = key if key else self.get_rnd(2*self.crypto_key_bits//8)
+            self.key_sz  = 2*kbits//8              ; self.max_count = 2**48-1
             self.nonce_sz= 12                      ; self.tag_sz  = 16
             self.mode    = Cipher_AES.MODE_SIV     ; self.AES_new = Cipher_AES.new
             self.encrypt = self._enc_aes_256_siv
             self.decrypt = self._dec_aes_256_siv
 
         elif ci_type == "xchacha20":
-            self.key_sz  = crypto_key_bits//8      ; self.max_count = 2**128-1
-            #self.key     = key if key else self.get_rnd(self.crypto_key_bits//8)
+            self.key_sz  = kbits//8                ; self.max_count = 2**128-1
             self.nonce_sz= 24                      ; self.tag_sz  = 16
             self.ChaCha20_new = Cipher_ChaCha20.new
             self.encrypt = self._enc_chacha20
             self.decrypt = self._dec_chacha20
 
-        if not key and exists(keyfile):
+        # Load counter and key
+        if exists(keyfile):
             with open(keyfile,"rb") as kf:
                 self.counter = kf.read(8)
-                self.key     = kf.read(self.key_sz)
+                self.key     = kf.read(self.key_sz)   ; assert len(self.key) == self.key_sz
+                #### DECODE W PASSPHRASE HERE
+
+
+    # Key file binary format: counter=8B, key=key_sz
+    def new_key(self):
+        self.key = self.get_rnd(self.key_sz)    ; self.counter = 0
+        #assert not exists(self.keyfile)
+        #### ENCODE W PASSPHRASE HERE
+        with open(self.keyfile,"wb") as kf:
+            kf.write(bytes(8) + self.key)
 
 
     # Encrypt aes-256-cbc:
@@ -678,7 +713,10 @@ def arch_init(aset):
     if options.from_arch:
         return
 
-    if options.encrypt.lower() in DataCryptography.crypto_ciphers:
+    os.makedirs(aset.path, exist_ok=True)
+
+    aset.data_cipher = options.encrypt.lower()
+    if aset.data_cipher in DataCryptography.crypto_ciphers:
         if options.unattended:   x_it(1, "Enter passphrase interactively.")
 
         # Security Enh: Possibly use mmap+mlock to store passphrase/key values,
@@ -687,19 +725,23 @@ def arch_init(aset):
         passphrase2 = bytearray(getpass.getpass("Re-enter passphrase: "), encoding="UTF-8")
         if passphrase != passphrase2:   x_it(1, "Entries do not match.")
 
-        aset.cipher = options.encrypt.lower()
-        aset.key    = DataCryptography(aset.cipher).key.hex()
-    else:
-        aset.cipher = "off"
+        aset.datacrypto = DataCryptography(aset.data_cipher, aset.path+"/datakey.dat",
+                                           passphrase=passphrase)
+        aset.crypto = DataCryptography("aes-256-siv", aset.path+"/metakey.dat",
+                                       passphrase=passphrase)
+        aset.crypto.new_key()    ; aset.datacrypto.new_key()
 
-    print("Encryption =", aset.cipher)
+    elif aset.data_cipher != "off":
+        raise ValueError("Unknown cipher.")
+
+    print(); print("Encryption    =", aset.data_cipher)
 
     if options.hashtype:
         if options.hashtype not in hash_funcs:
             x_it(1, "Hash function '"+options.hashtype+"' is not available on this system.")
         aset.hashtype = options.hashtype
 
-    print("Hashing =", aset.hashtype)
+    print("Hashing       =", aset.hashtype)
 
     if options.compression:
         if ":" in options.compression:
@@ -712,7 +754,7 @@ def arch_init(aset):
             x_it(1, "Invalid compression spec.")
         aset.compression = compression      ; aset.compr_level = compr_level
 
-    print("Compression = %s:%s" % (aset.compression, aset.compr_level))
+    print("Compression   = %s:%s" % (aset.compression, aset.compr_level))
 
     if options.chfactor:
         # accepts an exponent from 1 to 6
@@ -732,11 +774,7 @@ def arch_check(vol_list=None, startup=False):
     attended = not options.unattended      ; stray_dirs= []
     compare_digest = hmac.compare_digest
 
-    if aset.key:
-        crypto_key = bytes.fromhex(aset.key)
-        decrypt    = DataCryptography(aset.cipher, key=crypto_key).decrypt
-    else:
-        crypto_key = None
+    decrypt  = aset.datacrypto.decrypt if aset.datacrypto else None
 
     if not vol_list:   vol_list = [x.name for x in os.scandir(aset.path) if x.is_dir()]
 
@@ -836,7 +874,7 @@ def arch_check(vol_list=None, startup=False):
 
                     # Decrypt the data chunk
                     # Validation MUST be next step!
-                    if crypto_key:
+                    if decrypt:
                         untrusted_buf = decrypt(untrusted_buf)
 
                     # Validate data
@@ -1613,12 +1651,11 @@ def send_volume(datavol, localtime, ses_tags, send_all):
     compresslevel = int(aset.compr_level)    ; compress = compressors[aset.compression][2]
 
 
-    if aset.key:
-        crypto_key = bytes.fromhex(aset.key)
-        crypto     = DataCryptography(aset.cipher, key=crypto_key)
-        encrypt    = crypto.encrypt    # ; crypto_blk_sz = crypto.blk_sz
+    if aset.datacrypto:
+        crypto  = True
+        encrypt = aset.datacrypto.encrypt
     else:
-        crypto_key = None
+        crypto  = False
 
 
     # Use tar to stream files to destination
@@ -1741,7 +1778,7 @@ def send_volume(datavol, localtime, ses_tags, send_all):
 
                 else:
                     # Encrypt the data chunk
-                    if crypto_key:
+                    if crypto:
                         buf = encrypt(buf)
 
                     # Send data chunk to the archive
@@ -2415,14 +2452,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     gethash     = hash_funcs[aset.hashtype]       ; sessions  = vol.sesnames
     compress    = compressors[aset.compression][2]  ; compresslevel = int(aset.compr_level)
     decompress  = compressors[aset.compression][0].decompress
+    decrypt     = aset.datacrypto.decrypt if aset.datacrypto else None
     compare_digest = hmac.compare_digest
-
-
-    if aset.key:
-        crypto_key = bytes.fromhex(aset.key)
-        decrypt    = DataCryptography(aset.cipher, key=crypto_key).decrypt
-    else:
-        crypto_key  = None
 
 
     if diff or verify_only:
@@ -2636,9 +2667,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
         # Decrypt the data chunk
         # Validation MUST be next step!
-        if crypto_key:
+        if decrypt:
             untrusted_buf = decrypt(untrusted_buf)
-
 
         # Validate data chunk
         if not compare_digest(cksum, gethash(untrusted_buf).hexdigest()):
