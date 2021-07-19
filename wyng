@@ -606,11 +606,9 @@ def arch_check(vol_list=None, startup=False):
 
     # Remove orphan snapshots
     for lv in list(l_vols.values()):
-        if "wyng" in lv.tags and lv.lv_name.endswith((".tick",".tock")) \
-        and "arch-"+aset.uuid in lv.tags:
+        if "wyng" in lv.tags and lv.lv_name.endswith((".tick",".tock")):
             basename = lv.lv_name[:-5]
-            if basename not in aset.conf["volumes"] \
-            or (options.clean and basename not in l_vols.keys()):
+            if options.clean and basename not in l_vols.keys():
                 print("Removing orphan snapshot:", lv.lv_name)
                 lv_remove(lv.vg_name, lv.lv_name, check=True, sync=True)
 
@@ -1270,8 +1268,7 @@ def prepare_snapshots(datavols):
                 print("  Pairing snapshot for", datavol)
                 complete_vols.add(datavol)
             else:
-                if not monitor_only:   error_cache.append(datavol)
-                print("  Skipping %s; No snapshot." % datavol)    ; continue
+                print("  Skipping %s; No paired snapshot." % datavol)    ; continue
 
         # Make fresh snap2vol
         lv_remove(vgname, snap2vol)
@@ -1332,9 +1329,8 @@ def update_delta_digest(datavol):
 
     vol         = aset.vols[datavol]         ; chunksize  = aset.chunksize
     snap1vol    = vol.name + ".tick"         ; snap2vol   = vol.name + ".tock"
-
-    if len(vol.sessions) == 0 or not lv_exists(aset.vgname, snap1vol):   return 0, 0
-    snap1size   = l_vols[snap1vol].lv_size    ; snap2size = l_vols[snap2vol].lv_size
+    snap1size   = l_vols[snap1vol].lv_size   ; snap2size = l_vols[snap2vol].lv_size
+    assert len(vol.sessions) and exists(vol.mapfile)
 
     # Put deltamap into a temporary state
     os.rename(vol.mapfile, vol.mapfile+"-tmp")
@@ -1419,9 +1415,9 @@ def manifest_to_deltamap(datavol, manifest, mapsize):
 # finishes a full session, the volume will have a blank deltamap and .tick snapshot to
 # track changes. After an incremental send, snapshots are rotated and the deltamap is reset.
 #
-# The 'dedup' deduplication level also represents a range of modes, where '0' means that all
-# marked chunks will be sent unconditionally, '1' means a chunk won't be sent if its marked
-# but same content, and '>= 2' will check w the archive-wide index and link it if matched.
+# Returns (int, int) representing an estimate of bytes sent and chunks freed.
+# Bytes sent will always be >0 if nonzero chunks were added to the manifest.
+# A result of (0, 0) means no change was detected or sent.
 
 def send_volume(datavol, localtime, ses_tags, send_all):
 
@@ -1463,7 +1459,7 @@ def send_volume(datavol, localtime, ses_tags, send_all):
     os.makedirs(sdir+"-tmp")
 
     zeros     = bytes(chunksize)
-    bcount    = ddbytes = 0
+    bcount    = freed = ddbytes = 0
     addrsplit = -address_split[1]
     lchunk_addr = vol.last_chunk_addr(snap2size)
 
@@ -1535,7 +1531,7 @@ def send_volume(datavol, localtime, ses_tags, send_all):
 
                 # Compress & write only non-empty chunks
                 if buf == zeros:
-                    if fman_hash != "0":  print("0", destfile, file=hashf)
+                    if fman_hash != "0":  print("0", destfile, file=hashf)   ; freed += 1
                     continue
 
                 # Compress chunk and hash it
@@ -1600,7 +1596,7 @@ def send_volume(datavol, localtime, ses_tags, send_all):
 
     # Send session info, end stream and cleanup
     if fullmanifest:   fullmanifest.close()
-    if stream_started:
+    if stream_started or freed:
         # Save session info
         ses.save_info()
         for session in vol.sessions.values() if vol.que_meta_update == "true" else [ses]:
@@ -1647,7 +1643,7 @@ def send_volume(datavol, localtime, ses_tags, send_all):
     catch_signals(None)
     if dedup and options.debug:   show_mem_stats()
 
-    return stream_started + (bcount//bs)
+    return stream_started + bcount, freed
 
 
 # Build deduplication hash index and list
@@ -1796,10 +1792,10 @@ def monitor_send(datavols, selected=[], monitor_only=True):
         vol = aset.vols[datavol]    ; dnew = dfreed = 0
         print(" ", "Scan" if monitor_only else "Send", "volume      | ", datavol, flush=True,end="")
 
-        dnew, dfreed = update_delta_digest(datavol)
+        if datavol in incrementals:   dnew, dfreed = update_delta_digest(datavol)
         if monitor_only:   continue
 
-        if datavol in send_alls or os.stat(vol.mapfile+"-tmp").st_blocks > 0:
+        if datavol in send_alls or dnew+dfreed > 0:
             if vol.changed_bytes > dest_free:
                 # Enh: add loop here for all volumes, implement a 'forced' mode
                 autoprune(datavol, needed_space=vol.changed_bytes, apmode=options.autoprune)
@@ -1809,8 +1805,8 @@ def monitor_send(datavols, selected=[], monitor_only=True):
                     error_cache.append(datavol)
                     continue
 
-            dnew       = send_volume(datavol, localtime, ses_tags, send_all=datavol in send_alls)
-            dest_free -= int(dnew + (dnew * 0.05))
+            dnew, dfreed = send_volume(datavol, localtime, ses_tags, send_all=datavol in send_alls)
+            dest_free   -= int(dnew + (dnew * 0.05))
 
         else:
             rotate_snapshots(vol, rotate=False)
