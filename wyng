@@ -192,7 +192,7 @@ class ArchiveSet:
             self.first   = "None"
             self.last    = "None"
             self.desc    = ""
-            self.que_meta_update = "false"
+            self.que_meta_update = "false" ####
             # other:
             self.changed_bytes = 0
 
@@ -205,13 +205,19 @@ class ArchiveSet:
                         vname, value = ln.strip().split("=", maxsplit=1)
                         setattr(self, vname.strip(), value.strip())
 
+            if int(self.format_ver) > format_version:
+                raise ValueError("Archive format ver = "+self.format_ver+
+                                 ". Expected = "+format_version)
+            elif self.format_ver == "0":
+                raise ValueError("No format_version; Alpha archive?")
+
             if exists(pjoin(path,"volchanged")):
                 self.changed_bytes = int(open(pjoin(path,"volchanged"),"r").readlines()[0].strip())
 
             # load sessions as reverse-linked list, starting with the last;
             # store as dict and sequential list of session names
             if debug:  print("\nVOLUME",self.name, self.first, self.last)
-            sprev = self.last ### if self.last else "None"
+            sprev = self.last
             while sprev != "None":
                 if debug:  print(sprev, end="  ")
                 # instantiate:
@@ -220,12 +226,6 @@ class ArchiveSet:
                 if sprev == "None" and self.first != s.name:
                     raise ValueError("PREVIOUS MISMATCH: %s/%s, EXPECTED %s" 
                                      % (self.name, s.name, self.first))
-
-            if int(self.format_ver) > format_version:
-                raise ValueError("Archive format ver = "+self.format_ver+
-                                 ". Expected = "+format_version)
-            elif len(self.sessions) and self.format_ver == "0":
-                raise ValueError("No format_version; Alpha archive?")
 
 
         def volname_check(vname):
@@ -344,9 +344,10 @@ class ArchiveSet:
                 self.format   = None
                 self.sequence = None
                 self.previous = "None"
+                self.manifesth= None
                 self.tags     = {}
-                attr_str      = ("localtime","format","previous","uuid")
-                attr_int      = ("volsize","sequence")
+                self.attr_str = attr_str  = ("localtime","format","previous","uuid","manifesth")
+                self.attr_int = attr_int  = ("volsize","sequence")
 
                 if path:
                     with open(pjoin(path,"info"), "rb") as sf:   buf = sf.read(64*1024)
@@ -403,12 +404,8 @@ class ArchiveSet:
                 assert self.path
                 self.saved = True
                 with io.StringIO() as f:
-                    print("uuid =",      self.uuid, file=f)
-                    print("localtime =", self.localtime, file=f)
-                    print("volsize =",   self.volsize, file=f)
-                    print("format =",    self.format, file=f)
-                    print("sequence =",  self.sequence, file=f)
-                    print("previous =",  self.previous, file=f)
+                    for attr in self.attr_str+self.attr_int:
+                        print(attr, "=", getattr(self, attr), file=f)
                     for tkey, tdesc in self.tags.items():
                         print("tag =",   tkey, tdesc, file=f)
                     buf = gzip.compress(f.getvalue().encode("UTF-8"), 3)
@@ -780,11 +777,9 @@ def arch_check(vol_list=None, startup=False):
 
     # Remove orphan snapshots
     for lv in list(l_vols.values()):
-        if "wyng" in lv.tags and lv.lv_name.endswith((".tick",".tock")) \
-        and "arch-"+aset.uuid in lv.tags:
+        if "wyng" in lv.tags and lv.lv_name.endswith((".tick",".tock")):
             basename = lv.lv_name[:-5]
-            if basename not in aset.conf["volumes"] \
-            or (options.clean and basename not in l_vols.keys()):
+            if options.clean and basename not in l_vols.keys():
                 print("Removing orphan snapshot:", lv.lv_name)
                 lv_remove(lv.vg_name, lv.lv_name, check=True, sync=True)
 
@@ -1451,8 +1446,7 @@ def prepare_snapshots(datavols):
                 print("  Pairing snapshot for", datavol)
                 complete_vols.add(datavol)
             else:
-                if not monitor_only:   error_cache.append(datavol)
-                print("  Skipping %s; No snapshot." % datavol)    ; continue
+                print("  Skipping %s; No paired snapshot." % datavol)    ; continue
 
         # Make fresh snap2vol
         lv_remove(vgname, snap2vol)
@@ -1513,9 +1507,8 @@ def update_delta_digest(datavol):
 
     vol         = aset.vols[datavol]         ; chunksize  = aset.chunksize
     snap1vol    = vol.name + ".tick"         ; snap2vol   = vol.name + ".tock"
-
-    if len(vol.sessions) == 0 or not lv_exists(aset.vgname, snap1vol):   return 0, 0
-    snap1size   = l_vols[snap1vol].lv_size    ; snap2size = l_vols[snap2vol].lv_size
+    snap1size   = l_vols[snap1vol].lv_size   ; snap2size = l_vols[snap2vol].lv_size
+    assert len(vol.sessions) and exists(vol.mapfile)
 
     # Put deltamap into a temporary state
     os.rename(vol.mapfile, vol.mapfile+"-tmp")
@@ -1600,9 +1593,9 @@ def manifest_to_deltamap(datavol, manifest, mapsize):
 # finishes a full session, the volume will have a blank deltamap and .tick snapshot to
 # track changes. After an incremental send, snapshots are rotated and the deltamap is reset.
 #
-# The 'dedup' deduplication level also represents a range of modes, where '0' means that all
-# marked chunks will be sent unconditionally, '1' means a chunk won't be sent if its marked
-# but same content, and '>= 2' will check w the archive-wide index and link it if matched.
+# Returns (int, int) representing an estimate of bytes sent and chunks freed.
+# Bytes sent will always be >0 if nonzero chunks were added to the manifest.
+# A result of (0, 0) means no change was detected or sent.
 
 def send_volume(datavol, localtime, ses_tags, send_all):
 
@@ -1680,13 +1673,13 @@ def send_volume(datavol, localtime, ses_tags, send_all):
 
         # Feed delta bmap to inner loop in pieces segmented by large zero delimeter.
         # This allows skipping most areas when changes are few.
-        zdelim  = bytes(64)    ; minibmap = None    ; bmap_list = []
+        zdelim  = bytes(64)    ; zdlen = len(zdelim)*8    ; minibmap = None    ; bmap_list = []
 
         while addr < snap2size:
             if len(bmap_list):
                 # At boundary inside list, so use islice to jump ahead here.
-                if fullmanifest:  list(islice(fullmanifest, len(zdelim)*8))
-                addr += chunksize*len(zdelim)*8
+                if fullmanifest:  list(islice(fullmanifest, zdlen))
+                addr += chunksize*zdlen
                 minibmap = bmap_list.pop(0)
             elif not send_all:
                 # Get more: split(zdelim) shows where large unmodified zones exist.
@@ -1724,15 +1717,15 @@ def send_volume(datavol, localtime, ses_tags, send_all):
 
                 # Compress & write only non-empty chunks
                 if buf == zeros:
-                    if fman_hash != "0":  print("0", destfile, file=hashf)
-                    continue
+                    if fman_hash == "0":   continue
+                    hexhash = "0"
+                else:
+                    # Compress chunk and hash it
+                    buf    = compress(buf, compresslevel)
+                    bhash  = gethash(buf)   ; hexhash = bhash.hexdigest()
 
-                # Compress chunk and hash it
-                buf    = compress(buf, compresslevel)
-                bhash  = gethash(buf)   ; hexhash = bhash.hexdigest()
-
-                # Skip when current and prior chunks are the same
-                if fman_hash == hexhash:  continue
+                    # Skip when current and prior chunks are the same
+                    if fman_hash == hexhash:  continue
 
                 # Start tar stream
                 if not stream_started:
@@ -1745,9 +1738,12 @@ def send_volume(datavol, localtime, ses_tags, send_all):
                     tar_info = TarInfo(sdir+"-tmp")    ; tar_info.type = tarfile.DIRTYPE
                     tarf_addfile(tarinfo=tar_info)
 
+                # Add entry to new manifest
+                print(hexhash, destfile, file=hashf)
+                if hexhash == "0":   continue
+
                 # Add buffer to stream
                 tar_info = TarInfo("%s-tmp/%s/%s" % (sdir, destfile[1:addrsplit], destfile))
-                print(hexhash, destfile, file=hashf)
 
                 # If chunk already in archive, link to it
                 if dedup:
@@ -1842,7 +1838,7 @@ def send_volume(datavol, localtime, ses_tags, send_all):
     catch_signals(None)
     if dedup and options.debug:   show_mem_stats()
 
-    return stream_started + (bcount//bs)
+    return stream_started + bcount
 
 
 # Build deduplication hash index and list
@@ -1991,10 +1987,10 @@ def monitor_send(datavols, selected=[], monitor_only=True):
         vol = aset.vols[datavol]    ; dnew = dfreed = 0
         print(" ", "Scan" if monitor_only else "Send", "volume      | ", datavol, flush=True,end="")
 
-        dnew, dfreed = update_delta_digest(datavol)
+        if datavol in incrementals:   dnew, dfreed = update_delta_digest(datavol)
         if monitor_only:   continue
 
-        if datavol in send_alls or os.stat(vol.mapfile+"-tmp").st_blocks > 0:
+        if datavol in send_alls or dnew+dfreed > 0:
             if vol.changed_bytes > dest_free:
                 # Enh: add loop here for all volumes, implement a 'forced' mode
                 autoprune(datavol, needed_space=vol.changed_bytes, apmode=options.autoprune)
@@ -2005,13 +2001,13 @@ def monitor_send(datavols, selected=[], monitor_only=True):
                     continue
 
             dnew       = send_volume(datavol, localtime, ses_tags, send_all=datavol in send_alls)
-            dest_free -= int(dnew + (dnew * 0.05))
+            dest_free -= int(dnew + (dnew * 0.05))    ; dfreed = 0
 
         else:
             rotate_snapshots(vol, rotate=False)
             os.rename(vol.mapfile+"-tmp", vol.mapfile)
 
-        print("\r" if dnew+dfreed else "\r  No changes   ", flush=True)
+        print("\r" if dnew else "\r  No changes   ", flush=True)
 
 
 def init_deltamap(vol, bmfile, bmsize):
@@ -2296,7 +2292,8 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
         do_exec([[CP.sort, "-umd", "-k2,2", "--batch-size=64"] + manifests],
                 out="manifest.one", cwd=m_tmp)
         do_exec([[CP.sort, "-umd", "-k2,2", "manifest.one",
-                pjoin(volume.path, merge_target, "manifest")]], out="manifest.two", cwd=m_tmp)
+                pjoin(volume.path, merge_target, "manifest")]],
+                out="manifest.two", cwd=m_tmp)
         # Make final manifest without extra column.
         do_exec([[CP.awk, "$2<="+lc_filter+" {print $1, $2}", m_tmp+"/manifest.two"]],
                 out=target+"/manifest.tmp")
