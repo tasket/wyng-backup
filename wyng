@@ -1531,15 +1531,15 @@ def send_volume(datavol, localtime, ses_tags, send_all):
 
                 # Compress & write only non-empty chunks
                 if buf == zeros:
-                    if fman_hash != "0":  print("0", destfile, file=hashf)   ; freed += 1
-                    continue
+                    if fman_hash == "0":   continue
+                    hexhash = "0"   ; freed += 1
+                else:
+                    # Compress chunk and hash it
+                    buf    = compress(buf, compresslevel)
+                    bhash  = gethash(buf)   ; hexhash = bhash.hexdigest()
 
-                # Compress chunk and hash it
-                buf    = compress(buf, compresslevel)
-                bhash  = gethash(buf)   ; hexhash = bhash.hexdigest()
-
-                # Skip when current and prior chunks are the same
-                if fman_hash == hexhash:  continue
+                    # Skip when current and prior chunks are the same
+                    if fman_hash == hexhash:  continue
 
                 # Start tar stream
                 if not stream_started:
@@ -1552,9 +1552,12 @@ def send_volume(datavol, localtime, ses_tags, send_all):
                     tar_info = TarInfo(sdir+"-tmp")    ; tar_info.type = tarfile.DIRTYPE
                     tarf_addfile(tarinfo=tar_info)
 
+                # Add entry to new manifest
+                print(hexhash, destfile, file=hashf)
+                if hexhash == "0":   continue
+
                 # Add buffer to stream
                 tar_info = TarInfo("%s-tmp/%s/%s" % (sdir, destfile[1:addrsplit], destfile))
-                print(hexhash, destfile, file=hashf)
 
                 # If chunk already in archive, link to it
                 if dedup:
