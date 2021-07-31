@@ -11,12 +11,12 @@
 import sys, signal, os, stat, shutil, subprocess, time, datetime
 import re, mmap, bz2, zlib, gzip, tarfile, io, fcntl, tempfile
 import argparse, configparser, hashlib, hmac, functools, uuid
-import getpass
+import getpass, warnings
 import xml.etree.ElementTree    ; from itertools import islice
 from array import array         ; import resource
 
 try:
-    import zstd, warnings
+    import zstd
 except:
     zstd = None
 
@@ -32,15 +32,16 @@ except:
 # ArchiveSet manages configuration and configured volume info
 
 class ArchiveSet:
-    def __init__(self, name, top, crypto_type=None, allvols=False):
+    def __init__(self, name, top, crypto_type=None, allvols=False, children=True):
         self.name        = name
         self.path        = pjoin(top,name)
         self.confpath    = pjoin(self.path,"archive.ini")
+        ##self.cache_dir   = "/var/cache" + topdir + "/" + name
         self.vols        = {}
         self.dedupindex  = {}
         self.dedupsessions = []
         self.in_process  = get_in_process(self.path)
-        self.crypto      = None
+        self.mcrypto     = None
         self.datacrypto  = None
         # persisted:
         self.chunksize   = bkchunksize
@@ -53,6 +54,7 @@ class ArchiveSet:
         self.destdir     = "."
         self.destmountpoint = None
         self.uuid        = None
+        self.updated_at  = None
         self.data_cipher = None
 
         # parser for the .ini formatted configuration
@@ -68,11 +70,11 @@ class ArchiveSet:
 
         # init metadata crypto
         if exists(self.path+"/metakey.dat"):
-            self.crypto = DataCryptography("aes-256-siv", self.path+"/metakey.dat")
+            self.mcrypto = DataCryptography("aes-256-siv", self.path+"/metakey.dat")
 
         # read attributes from archive.ini file
         with open(self.confpath, "rb") as f:   buf = f.read(64*1024)
-        if self.crypto:   buf = self.crypto.decrypt(buf)
+        if self.mcrypto:   buf = self.mcrypto.decrypt(buf)
         cp.read_string(gzip.decompress(buf).decode("UTF-8"))
         self.a_ints      = {"chunksize"}
         for name in cp["var"].keys():
@@ -80,7 +82,7 @@ class ArchiveSet:
                                 if name in self.a_ints else cp["var"][name])
 
         # init data crypto
-        if self.crypto:
+        if self.mcrypto:
             self.datacrypto = DataCryptography(self.data_cipher, self.path+"/datakey.dat")
 
         # Fix: Remove filterwarnings when upstream fixes their code...
@@ -88,6 +90,7 @@ class ArchiveSet:
             warnings.filterwarnings("ignore", category=DeprecationWarning)
 
         # load volume metadata objects
+        if not children:   return
         for key in cp["volumes"]:
             # conditions when a volume must be loaded:
             # - allvols flag is set
@@ -127,7 +130,7 @@ class ArchiveSet:
         with io.StringIO() as f:
             self.conf.write(f)    ; f.flush()
             buf = gzip.compress(f.getvalue().encode("UTF-8"), 3)
-        if self.crypto:   buf = self.crypto.encrypt(buf)
+        if self.mcrypto:   buf = self.mcrypto.encrypt(buf)
         with open(confdir+"/"+confname, "wb") as fsave:   fsave.write(buf)
 
     def add_volume(self, datavol):
@@ -172,6 +175,34 @@ class ArchiveSet:
 
         return True
 
+    def encode_file(self, fname, dest=None, get_digest=True, compress=True):
+        # Enh: optimize memory use
+        mcrypto = self.mcrypto
+        gethash = hash_funcs[self.hashtype]    ; digest = None
+        destname= dest if dest else fname+(".gz" if compress else "")
+
+        with  open(fname,"r+b") as inf,   mmap.mmap(inf.fileno(), 0) as inmap, \
+              memoryview(inmap) as inmv:
+            mbuf = gzip.compress(inmv) if compress else inmv
+            if get_digest:   digest = gethash(mbuf).hexdigest()
+            if mcrypto:      mbuf = mcrypto.encrypt(mbuf)
+            open(destname,"wb").write(mbuf)
+
+        return digest
+
+    def decode_file(self, fname, dest=None, digest=None, max_sz=16000000):
+        # Enh: optimize memory use
+        destname= dest if dest else (fname[:-3] if fname.endswith(".gz") else fname)
+        gethash = hash_funcs[self.hashtype]
+        mcrypto = self.mcrypto         ; buf_start = mcrypto.buf_start if mcrypto else 0
+
+        with  open(fname,"r+b") as inf,   mmap.mmap(inf.fileno(), 0) as inmap, \
+              memoryview(inmap) as inmv:
+            assert buf_start < len(inmv) <= max_sz ## Fix: move to get_configs_remote()
+            mbuf = mcrypto.decrypt(inmv) if mcrypto else inmv
+            assert hmac.compare_digest(digest, gethash(mbuf).hexdigest())
+            open(destname,"wb").write(gzip.decompress(mbuf))
+
 
     class Volume:
         def __init__(self, archive, name, path, vgname):
@@ -182,6 +213,7 @@ class ArchiveSet:
             self.enabled = False
             self.error   = False
             self.mapfile = path+"/deltamap"
+            self.hashval = None
             self.sessions= {}
             self.sesnames= []
             self.tags    = {}
@@ -199,7 +231,7 @@ class ArchiveSet:
             # load volume info
             if exists(pjoin(path,"volinfo")):
                 with open(pjoin(path,"volinfo"), "rb") as f:   buf = f.read(64*1024)
-                if self.archive.crypto:   buf = self.archive.crypto.decrypt(buf)
+                if self.archive.mcrypto:   buf = self.archive.mcrypto.decrypt(buf)
                 with io.StringIO(gzip.decompress(buf).decode("UTF-8")) as f:
                     for ln in f:
                         vname, value = ln.strip().split("=", maxsplit=1)
@@ -208,7 +240,7 @@ class ArchiveSet:
             if int(self.format_ver) > format_version:
                 raise ValueError("Archive format ver = "+self.format_ver+
                                  ". Expected = "+format_version)
-            elif self.format_ver == "0":
+            elif self.format_ver == "0" and len(self.sessions):
                 raise ValueError("No format_version; Alpha archive?")
 
             if exists(pjoin(path,"volchanged")):
@@ -267,11 +299,13 @@ class ArchiveSet:
                 print("desc =", self.desc, file=f)
                 print("que_meta_update =", self.que_meta_update, file=f)
                 buf = gzip.compress(f.getvalue().encode("UTF-8"), 3)
+                #### Save session ids, hashes here
 
-            if self.archive.crypto:   buf = self.archive.crypto.encrypt(buf)
+            if self.archive.mcrypto:   buf = self.archive.mcrypto.encrypt(buf)
             with open(pjoin(self.path,fname), "wb") as f:
                 f.write(buf)
                 f.flush()    ; os.fsync(f.fileno())
+            self.archive.save_conf()
 
         def changed_bytes_add(self, amount, reset=False, save=False):
             if reset:
@@ -328,30 +362,40 @@ class ArchiveSet:
             if remove and exists(pjoin(self.path, sname)):   shutil.rmtree(ses.path)
             return affected
 
+        def decode_manifests(self, sesnames, force=False):
+            for ses in (self.sessions[x] for x in sesnames):
+                if not ses.mfready or force:
+                    ses.mfready = True
+                    self.archive.decode_file(ses.path+"/manifest.gz",
+                                             digest=ses.manifesthash, max_sz=ses.manifest_max)
+
 
         class Ses:
+            attr_str  = ("localtime","previous","uuid","manifesthash")
+            attr_int  = ("volsize","sequence")
+
             def __init__(self, volume, name, path="", addtags={}):
+                self.volume   = volume
                 self.name     = name
                 self.path     = path
                 self.saved    = False
-                self.volume   = volume
                 self.toggle   = True
-                self.meta_checked = False
+                self.hashval  = None
+                self.meta_checked = False ####
+                self.mfready  = exists(path+"/manifest")
+                self.gethash  = hash_funcs[self.volume.archive.hashtype]
                 # persisted:
                 self.uuid     = None
                 self.localtime= None
                 self.volsize  = None
-                self.format   = None
                 self.sequence = None
                 self.previous = "None"
-                self.manifesth= None
                 self.tags     = {}
-                self.attr_str = attr_str  = ("localtime","format","previous","uuid","manifesth")
-                self.attr_int = attr_int  = ("volsize","sequence")
+                self.manifesthash = None
 
                 if path:
-                    with open(pjoin(path,"info"), "rb") as sf:   buf = sf.read(64*1024)
-                    if self.volume.archive.crypto:   buf = self.volume.archive.crypto.decrypt(buf)
+                    with open(pjoin(path,"info"), "rb") as sf:   buf = sf.read(64*1024) ####
+                    if self.volume.archive.mcrypto:   buf = self.volume.archive.mcrypto.decrypt(buf)
                     with io.StringIO(gzip.decompress(buf).decode("UTF-8")) as sf:
                         for ln in sf:
                             if ln.strip() == "uuid =":  continue
@@ -363,11 +407,13 @@ class ArchiveSet:
                                 continue
 
                             setattr(self, vname, 
-                                int(value) if vname in attr_int else value)
+                                int(value) if vname in self.attr_int else value)
 
-                    if not exists(pjoin(path,"manifest")):
+                    if not exists(pjoin(path,"manifest.gz")):
                         raise FileNotFoundError("ERROR: Manifest does not exist for "+name)
                     self.saved = True
+                    self.manifest_max = self.volsize // self.volume.archive.chunksize \
+                                        * ((256//4) + 20)
 
                 for tag in addtags:   self.tag_add(tag)
 
@@ -402,18 +448,21 @@ class ArchiveSet:
 
             def save_info(self, fname="info"):
                 assert self.path
-                self.saved = True
+                self.updated = True
+                self.manifesthash = self.volume.archive.encode_file(self.path+"/manifest")
                 with io.StringIO() as f:
                     for attr in self.attr_str+self.attr_int:
                         print(attr, "=", getattr(self, attr), file=f)
                     for tkey, tdesc in self.tags.items():
                         print("tag =",   tkey, tdesc, file=f)
-                    buf = gzip.compress(f.getvalue().encode("UTF-8"), 3)
+                    buf = gzip.compress(f.getvalue().encode("UTF-8"), 6)
+                    self.hashval = self.gethash(buf)
 
-                if self.volume.archive.crypto:   buf = self.volume.archive.crypto.encrypt(buf)
+                if self.volume.archive.mcrypto:   buf = self.volume.archive.mcrypto.encrypt(buf)
                 with open(pjoin(self.path,fname), "wb") as f:
                     f.write(buf)
                     f.flush()    ; os.fsync(f.fileno())
+                self.volume.save_volinfo()  #### FIX: handle -tmp extension
 
 # END class ArchiveSet, Volume, Ses
 
@@ -433,7 +482,7 @@ class DataCryptography():
 
         if ci_type == "aes-256-cbc":
             self.key_sz  = kbits//8                ; self.max_count = 2**48-1 # <--check
-            self.iv_sz   = 16
+            self.iv_sz   = 16                      ; self.buf_start = self.iv_sz
             self.blk_sz  = Cipher_AES.block_size   ; self.ps_mask = self.blk_sz-1
             self.mode    = Cipher_AES.MODE_CBC     ; self.AES_new = Cipher_AES.new
             self.encrypt = self._enc_aes_256_cbc_rndpad
@@ -442,13 +491,14 @@ class DataCryptography():
         elif ci_type == "aes-256-siv":
             self.key_sz  = 2*kbits//8              ; self.max_count = 2**48-1
             self.nonce_sz= 12                      ; self.tag_sz  = 16
+            self.buf_start = self.nonce_sz+self.tag_sz
             self.mode    = Cipher_AES.MODE_SIV     ; self.AES_new = Cipher_AES.new
             self.encrypt = self._enc_aes_256_siv
             self.decrypt = self._dec_aes_256_siv
 
         elif ci_type == "xchacha20":
             self.key_sz  = kbits//8                ; self.max_count = 2**128-1
-            self.nonce_sz= 24                      ; self.tag_sz  = 16
+            self.nonce_sz= 24                      ; self.buf_start = self.nonce_sz
             self.ChaCha20_new = Cipher_ChaCha20.new
             self.encrypt = self._enc_chacha20
             self.decrypt = self._dec_chacha20
@@ -505,10 +555,10 @@ class DataCryptography():
 
     # Decrypt aes-256-siv:
     def _dec_aes_256_siv(self, untrusted_buf):
-        nonce  = untrusted_buf[:self.nonce_sz]    ; buf_start = self.nonce_sz+self.tag_sz
-        ci_tag = untrusted_buf[self.nonce_sz:buf_start]
+        nonce  = untrusted_buf[:self.nonce_sz]
+        ci_tag = untrusted_buf[self.nonce_sz:self.buf_start]
         cipher = self.AES_new(self.key, self.mode, nonce)
-        return cipher.decrypt_and_verify(untrusted_buf[buf_start:], ci_tag)
+        return cipher.decrypt_and_verify(untrusted_buf[self.buf_start:], ci_tag)
 
     # Encrypt [X]ChaCha20:
     def _enc_chacha20(self, buf):
@@ -724,9 +774,9 @@ def arch_init(aset):
 
         aset.datacrypto = DataCryptography(aset.data_cipher, aset.path+"/datakey.dat",
                                            passphrase=passphrase)
-        aset.crypto = DataCryptography("aes-256-siv", aset.path+"/metakey.dat",
-                                       passphrase=passphrase)
-        aset.crypto.new_key()    ; aset.datacrypto.new_key()
+        aset.mcrypto    = DataCryptography("aes-256-siv", aset.path+"/metakey.dat",
+                                           passphrase=passphrase)
+        aset.mcrypto.new_key()    ; aset.datacrypto.new_key()
 
     elif aset.data_cipher != "off":
         raise ValueError("Unknown cipher.")
@@ -935,6 +985,9 @@ def get_configs_remote():
         if ans.lower() not in ("y","yes"):
             x_it(0,"Stopped.")
 
+
+    ####  FIX: Switch to non-tar retreival  #################
+
     do_exec([dest_run_args(desttype, [destcd + bkdir
                     +" && "+CP.python+" "+tmpdir+"-rpc/dest_helper.py get-configs "
                     +(options.volumes[0] if len(options.volumes)>0 and not make_local else "")]),
@@ -1053,8 +1106,8 @@ def helper_merge():
                 raise RuntimeError("Merge: Init could not complete; Aborting merge.")
         else:
             print("Merge: Initialization.")
-            for f in (target+"/info", target+"/manifest", "volinfo"):
-                if not exists(f+".tmp"):  raise FileNotFoundError(f)
+            for f in (target+"/info", target+"/manifest.gz", "volinfo"):
+                if not exists(f):  raise FileNotFoundError(f)
             for ex in ("","-init"):  shutil.rmtree("merge"+ex, ignore_errors=True)
             os.makedirs("merge-init")   ; replace(merge_target, "merge-init/"+merge_target)
             for src in src_list:   replace(src, "merge-init/"+src)
@@ -1085,11 +1138,11 @@ def helper_merge():
 def helper_merge_finalize():
     try:
         print("Merge: Finalize target")
-        os.chdir("merge")  #  CD                 ; open("CHECK-start-finalize","w").close()
-        for f in ("/info", "/manifest"):
-            if not resume or exists(target+f+".tmp"):  replace(target+f+".tmp", merge_target+f)
-        os.chdir("..")     #  CD
-        if not resume or exists("volinfo.tmp"):    replace("volinfo.tmp", "volinfo")
+        ##os.chdir("merge")  #  CD                 ; open("CHECK-start-finalize","w").close()
+        ##for f in ("/info", "/manifest"):
+        ##    if not resume or exists(target+f+".tmp"):  replace(target+f+".tmp", merge_target+f)
+        ##os.chdir("..")     #  CD
+        ##if not resume or exists("volinfo.tmp"):    replace("volinfo.tmp", "volinfo")
         if not resume or not exists(target):       replace("merge/"+merge_target, target)
         if not exists(target):   raise FileNotFoundError(target)
         fssync(".")
@@ -1620,7 +1673,6 @@ def send_volume(datavol, localtime, ses_tags, send_all):
     ses.uuid      = l_vols[snap2vol].lv_uuid
     ses.trans_id  = l_vols[datavol].transaction_id
     ses.volsize   = snap2size
-    ses.format    = "folders"
     ses.path      = vol.path+"/"+bksession+"-tmp"
 
     # Code from init_dedup_indexN() localized here for efficiency.
@@ -1660,7 +1712,7 @@ def send_volume(datavol, localtime, ses_tags, send_all):
 
     # Open source volume and its delta bitmap as r, session manifest as w.
     with open(pjoin("/dev",aset.vgname,snap2vol),"rb", buffering=chunksize) as vf, \
-         open(sdir+"-tmp/manifest", "w") as hashf,             \
+         open(sdir+"-tmp/manifest", "wt") as hashf,                                \
          open("/dev/zero" if send_all else vol.mapfile+"-tmp","rb") as bmapf:
 
         vf_seek = vf.seek; vf_read = vf.read
@@ -1794,12 +1846,9 @@ def send_volume(datavol, localtime, ses_tags, send_all):
     if stream_started:
         # Save session info
         ses.save_info()
-        for session in vol.sessions.values() if vol.que_meta_update == "true" else [ses]:
-            tarf.add(pjoin(vol.name, os.path.basename(session.path)))
-        vol.que_meta_update = "false"    #; vol.changed_bytes = 0
-        vol.save_volinfo("volinfo-tmp")
-        tarf.add(datavol+"/volinfo-tmp")
-        tarf.add(os.path.basename(aset.confpath))
+        tarf.add(pjoin(datavol, ses.name+"-tmp", "manifest.gz"))
+        tarf.add(pjoin(datavol, ses.name+"-tmp", "info"))
+        tarf.add(datavol+"/volinfo")        ; tarf.add(os.path.basename(aset.confpath))
 
         #print("Ending tar process ", end="")
         tarf.close()    ; untar.stdin.close()
@@ -1815,18 +1864,19 @@ def send_volume(datavol, localtime, ses_tags, send_all):
         if retcode != 0:
             raise RuntimeError("tar transport failure code %d" % retcode)
 
-        if ses.volsize != prior_size:   check_manifest_sequence(datavol, vol.sesnames)
+        if ses.volsize != prior_size and len(vol.sessions) > 1:
+            check_manifest_sequence(datavol, vol.sesnames)
 
         # Finalize on VM/remote
         catch_signals()
         dest_run([ destcd + bkdir
                  +" && mv -fT "+sdir+"-tmp "+sdir
-                 +" && mv -f "+datavol+"/volinfo-tmp "+datavol+"/volinfo"
+                 ##+" && mv -f "+datavol+"/volinfo-tmp "+datavol+"/volinfo"
                  +" && { sync -f . || sync; }"], trap=True)
 
         # Local finalize
         ses.path = ses.path.rsplit("-tmp",maxsplit=1)[0]   ; os.replace(ses.path+"-tmp", ses.path)
-        os.replace(vol.path+"/volinfo-tmp", vol.path+"/volinfo")
+        ##os.replace(vol.path+"/volinfo-tmp", vol.path+"/volinfo")
         fssync(vol.path)
 
     else:
@@ -2001,7 +2051,7 @@ def monitor_send(datavols, selected=[], monitor_only=True):
                     continue
 
             dnew       = send_volume(datavol, localtime, ses_tags, send_all=datavol in send_alls)
-            dest_free -= int(dnew + (dnew * 0.05))    ; dfreed = 0
+            dest_free -= int(dnew + (dnew * 0.05))
 
         else:
             rotate_snapshots(vol, rotate=False)
@@ -2218,8 +2268,10 @@ def merge_manifests(datavol, msessions=None, mtarget=None, addcol=False):
     volume    = aset.vols[datavol]
     msessions = volume.sesnames if not msessions else msessions
     sespaths  = [ os.path.basename(volume.sessions[x].path) for x in msessions ]
-    tmp = big_tmpdir if volume.volsize() > 128000000000 else tmpdir
+    tmp       = big_tmpdir if volume.volsize() > 128000000000 else tmpdir
     outfile   = tmp+"/manifest.mrg"     ; slist  = []
+
+    volume.decode_manifests(msessions)
     for suffix in ("/manifest\x00", "\x00"):
         with tempfile.NamedTemporaryFile(dir=tmp, delete=False) as tmpf:
             tmpf.write(bytes(suffix.join(reversed(sespaths)), encoding="UTF-8"))
@@ -2267,9 +2319,6 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
     os.chdir(volume.path)
 
     if not resume:
-        for ses in sources + [target]:
-            if volume.sessions[ses].format == "tar":
-                x_it(1, "Cannot merge range containing tarfile session.")
         volsize    = volume.sessions[target].volsize
         vol_shrank = volsize < max(x.volsize for x in volume.sessions.values()
                                     if x.name in sources)
@@ -2329,18 +2378,20 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
         #print("Removing %d" % len(sources), end="...", flush=True)
 
     if not resume:
-        volume.sessions[target].save_info("info.tmp")
-        volume.save_volinfo("volinfo.tmp", prune=True)
+        volume.sessions[target].save_info()
+        ##volume.save_volinfo("volinfo.tmp", prune=True)
 
         # Set archive in_process state to "merge"
         set_in_process(["merge", datavol, str(clear_sources), target, sources],
                        tmp=True, dest=False)
 
         # Send new metadata and process lists to dest
-        do_exec([[CP.tar, "-cf", "-", "../in_process.tmp", "volinfo.tmp", "merge.lst.gz", target],
+        do_exec([[CP.tar, "-cf", "-", "../archive.ini", "../in_process.tmp", "volinfo",
+                                        "merge.lst.gz", target+"/info", target+"/manifest.gz"],
                  dest_run_args(desttype, [destcd + bkdir+"/"+datavol + " && tar -xmf -"
                                           +" && { sync -f . || sync; }"
                                           +" && mv in_process.tmp ../in_process"
+                                          +" && mv archive.ini .."
                                           ])
                 ])
         os.replace("../in_process.tmp", "../in_process")
@@ -2355,10 +2406,10 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
     if retcode == 50:
         # Initialization didn't complete, so abort
         set_in_process(None)
-        for f in ("merge.lst.gz","volinfo.tmp",target+"/info.tmp"):
+        for f in ("merge.lst.gz"):  ##,"volinfo.tmp",target+"/info.tmp"):
             if exists(f):  os.remove(f)
         dest_run([destcd + bkdir+"/"+datavol
-                  +" && rm -rf merge merge-init merge.lst.gz volinfo.tmp"], check=False)
+                  +" && rm -rf merge merge-init merge.lst.gz"], check=False)
         x_it(retcode, "Error: Merge could not initialize!")
     elif retcode != 0:
         x_it(retcode, "Error: Remote exited!")
@@ -2373,9 +2424,9 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
             )
 
     # Local finalize
-    if exists("volinfo.tmp"):  os.replace("volinfo.tmp", "volinfo")
-    for f in ("/info","/manifest"):
-        if exists(target+f+".tmp"):  os.replace(target+f+".tmp", target+f)
+    ##if exists("volinfo.tmp"):  os.replace("volinfo.tmp", "volinfo")
+    ##for f in ("/info","/manifest"):
+    ##    if exists(target+f+".tmp"):  os.replace(target+f+".tmp", target+f)
 
     set_in_process(None, dest=False)    ; os.remove("merge.lst.gz")
     catch_signals(None)
@@ -2407,7 +2458,7 @@ def compare_files(pathlist=[], volumes=[], sessions=[], clear=True):
             v.meta_checked = True    ; print(v.name+"/volinfo", file=flist)
         for s in realses:
             s.meta_checked = True
-            for sf in ("info","manifest"):   print(pjoin(s.volume.name,s.name,sf), file=flist)
+            for sf in ("info","manifest.gz"):   print(pjoin(s.volume.name,s.name,sf), file=flist)
 
     do_exec([[CP.xargs, CP.sha256sum]], cwd=aset.path,
             infile=cmp_list, out=tmpdir+"/compare-hashes.local")
@@ -2504,9 +2555,6 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     for ses in sessions:
         incl_ses.append(vol.sessions[ses])
 
-        if vol.sessions[ses].format == "tar":
-            raise NotImplementedError("Receive from tarfile not yet implemented: "+ses)
-
         if ses == select_ses:  break
 
     # compare metadata hashes
@@ -2530,7 +2578,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                 [CP.gzip, "-c", "-4"
                 ],
                 dest_run_args(desttype, ["cat >"+tmpdir+"-rpc/dest.lst.gz"]),
-            ]
+            ]   # Enh: replace list with range
         do_exec(cmds)
 
     # Prepare save volume
@@ -2968,7 +3016,7 @@ def cleanup():
 # Constants / Globals
 prog_name             = "wyng"
 prog_version          = "0.4.0wip"      ; prog_date = "2021xxxx"
-format_version        = 2               ; debug     = False       ; tmpdir = None
+format_version        = 3               ; debug     = False       ; tmpdir = None
 
 # Disk block size:
 bs                    = 512
