@@ -176,13 +176,12 @@ class ArchiveSet:
         return True
 
     def b64hash(self, buf):
-        h = hash_funcs[self.archive.hashtype](buf).digest()
-        return base64.b64encode(h).encode("UTF-8")
+        h = hash_funcs[self.hashtype](buf).digest()
+        return base64.b64encode(h).decode("UTF-8")
 
     def encode_file(self, fname, dest=None, get_digest=True, compress=True):
         # Enh: optimize memory use
-        mcrypto = self.mcrypto
-        gethash = hash_funcs[self.hashtype]    ; digest = None
+        mcrypto = self.mcrypto    ; digest = None
         destname= dest if dest else fname+(".z" if compress else "")
 
         with  open(fname,"r+b") as inf,   mmap.mmap(inf.fileno(), 0) as inmap, \
@@ -201,7 +200,6 @@ class ArchiveSet:
     def decode_file(self, fname, dest=None, digest=None, max_sz=16000000):
         # Enh: optimize memory use
         destname= dest if dest else (fname[:-2] if fname.endswith(".z") else fname)
-        gethash = hash_funcs[self.hashtype]
         mcrypto = self.mcrypto         ; buf_start = mcrypto.buf_start if mcrypto else 0
 
         with  open(fname,"r+b") as inf,   mmap.mmap(inf.fileno(), 0) as inmap, \
@@ -464,7 +462,7 @@ class ArchiveSet:
                         print("tag =",   tkey, tdesc, file=f)
                     buf = self.archive.compress(f.getvalue().encode("UTF-8"),
                                                 int(self.archive.compr_level))
-                    self.hashval = self.volume.gethash(buf)
+                    self.hashval = self.archive.b64hash(buf)
 
                 if self.archive.mcrypto:   buf = self.archive.mcrypto.encrypt(buf)
                 with open(pjoin(self.path,fname+ext), "wb") as f:
