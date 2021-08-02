@@ -44,6 +44,7 @@ class ArchiveSet:
         self.mcrypto     = None
         self.datacrypto  = None
         # persisted:
+        #### ADD Update Time ###
         self.chunksize   = bkchunksize
         self.compression = "zstd" if zstd else "zlib"
         self.compr_level = str(compressors[self.compression][1])
@@ -111,7 +112,7 @@ class ArchiveSet:
         self.dedupsessions.sort(key=lambda x: x.localtime, reverse=True)
 
 
-    def save_conf(self, fname=""):
+    def save_conf(self, ext=""):
         c = self.conf['var']
         c['chunksize']   = str(self.chunksize)
         c['compression'] = self.compression
@@ -125,13 +126,13 @@ class ArchiveSet:
         c['uuid']        = self.uuid if self.uuid else str(uuid.uuid4())
         c['data_cipher'] = self.data_cipher
         confdir  = os.path.dirname(self.confpath)   ; os.makedirs(confdir, exist_ok=True)
-        confname = fname if fname else os.path.basename(self.confpath)
+        confname = os.path.basename(self.confpath)
 
         with io.StringIO() as f:
             self.conf.write(f)    ; f.flush()
             buf = gzip.compress(f.getvalue().encode("UTF-8"), 3)
         if self.mcrypto:   buf = self.mcrypto.encrypt(buf)
-        with open(confdir+"/"+confname, "wb") as fsave:   fsave.write(buf)
+        with open(confdir+"/"+confname+ext, "wb") as fsave:   fsave.write(buf)
 
     def add_volume(self, datavol):
         if datavol in self.conf["volumes"]:
@@ -288,24 +289,24 @@ class ArchiveSet:
                 volume_size = self.volsize()
             return (volume_size // self.archive.chunksize // 8) + 1
 
-        def save_volinfo(self, fname="volinfo", prune=False):
-            os.makedirs(self.path, exist_ok=True)
+        def save_volinfo(self, ext=""):
+            os.makedirs(self.path, exist_ok=True)   ; fname = "volinfo"
             with io.StringIO() as f:
                 print("format_ver =", format_version, file=f)
                 print("uuid =", self.uuid if self.uuid else str(uuid.uuid4()), file=f)
                 print("first =", self.first, file=f)
                 print("last =", self.last, file=f)
-                if not prune:   self.desc = options.voldesc.strip()[:comment_len]
+             ####   if not prune:   self.desc = options.voldesc.strip()[:comment_len]
                 print("desc =", self.desc, file=f)
                 print("que_meta_update =", self.que_meta_update, file=f)
                 buf = gzip.compress(f.getvalue().encode("UTF-8"), 3)
                 #### Save session ids, hashes here
 
             if self.archive.mcrypto:   buf = self.archive.mcrypto.encrypt(buf)
-            with open(pjoin(self.path,fname), "wb") as f:
+            with open(pjoin(self.path,fname+ext), "wb") as f:
                 f.write(buf)
                 f.flush()    ; os.fsync(f.fileno())
-            self.archive.save_conf()
+            self.archive.save_conf(ext)
 
         def changed_bytes_add(self, amount, reset=False, save=False):
             if reset:
@@ -446,10 +447,11 @@ class ArchiveSet:
                     if self.name in voltags[tag]:   voltags[tag].remove(self.name)
                     if len(voltags[tag]) == 0:    del(voltags[tag])
 
-            def save_info(self, fname="info"):
-                assert self.path
+            def save_info(self, ext=""):
+                assert self.path   ; fname = "info"
                 self.updated = True
-                self.manifesthash = self.volume.archive.encode_file(self.path+"/manifest")
+                self.manifesthash = self.volume.archive.encode_file(self.path+"/manifest"+ext,
+                                                                    dest=self.path+"/manifest.gz"+ext)
                 with io.StringIO() as f:
                     for attr in self.attr_str+self.attr_int:
                         print(attr, "=", getattr(self, attr), file=f)
@@ -459,10 +461,10 @@ class ArchiveSet:
                     self.hashval = self.gethash(buf)
 
                 if self.volume.archive.mcrypto:   buf = self.volume.archive.mcrypto.encrypt(buf)
-                with open(pjoin(self.path,fname), "wb") as f:
+                with open(pjoin(self.path,fname+ext), "wb") as f:
                     f.write(buf)
                     f.flush()    ; os.fsync(f.fileno())
-                self.volume.save_volinfo()  #### FIX: handle -tmp extension
+                self.volume.save_volinfo(ext)
 
 # END class ArchiveSet, Volume, Ses
 
@@ -1106,8 +1108,8 @@ def helper_merge():
                 raise RuntimeError("Merge: Init could not complete; Aborting merge.")
         else:
             print("Merge: Initialization.")
-            for f in (target+"/info", target+"/manifest.gz", "volinfo"):
-                if not exists(f):  raise FileNotFoundError(f)
+            for f in (target+"/info", target+"/manifest.gz", "volinfo", "archive.ini"):
+                if not exists(f+".tmp"):  raise FileNotFoundError(f)
             for ex in ("","-init"):  shutil.rmtree("merge"+ex, ignore_errors=True)
             os.makedirs("merge-init")   ; replace(merge_target, "merge-init/"+merge_target)
             for src in src_list:   replace(src, "merge-init/"+src)
@@ -1138,12 +1140,13 @@ def helper_merge():
 def helper_merge_finalize():
     try:
         print("Merge: Finalize target")
-        ##os.chdir("merge")  #  CD                 ; open("CHECK-start-finalize","w").close()
-        ##for f in ("/info", "/manifest"):
-        ##    if not resume or exists(target+f+".tmp"):  replace(target+f+".tmp", merge_target+f)
-        ##os.chdir("..")     #  CD
-        ##if not resume or exists("volinfo.tmp"):    replace("volinfo.tmp", "volinfo")
-        if not resume or not exists(target):       replace("merge/"+merge_target, target)
+        os.chdir("merge")  #  CD                 ; open("CHECK-start-finalize","w").close()
+        for f in ("/info", "/manifest.gz"):
+            if not resume or exists(target+f+".tmp"):  replace(target+f+".tmp", merge_target+f)
+        os.chdir("..")     #  CD
+        if not resume or not exists(target):         replace("merge/"+merge_target, target)
+        if not resume or exists("volinfo.tmp"):      replace("volinfo.tmp", "volinfo")
+        if not resume or exists("archive.ini.tmp"):  replace("archive.ini.tmp", "../archive.ini")
         if not exists(target):   raise FileNotFoundError(target)
         fssync(".")
     except Exception as err:
@@ -2378,20 +2381,18 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
         #print("Removing %d" % len(sources), end="...", flush=True)
 
     if not resume:
-        volume.sessions[target].save_info()
-        ##volume.save_volinfo("volinfo.tmp", prune=True)
+        volume.sessions[target].save_info(".tmp")
 
         # Set archive in_process state to "merge"
         set_in_process(["merge", datavol, str(clear_sources), target, sources],
                        tmp=True, dest=False)
 
         # Send new metadata and process lists to dest
-        do_exec([[CP.tar, "-cf", "-", "../archive.ini", "../in_process.tmp", "volinfo",
-                                        "merge.lst.gz", target+"/info", target+"/manifest.gz"],
+        do_exec([[CP.tar, "-cf", "-", "../archive.ini.tmp", "../in_process.tmp", "volinfo.tmp",
+                              "merge.lst.gz", target+"/info.tmp", target+"/manifest.gz.tmp"],
                  dest_run_args(desttype, [destcd + bkdir+"/"+datavol + " && tar -xmf -"
                                           +" && { sync -f . || sync; }"
                                           +" && mv in_process.tmp ../in_process"
-                                          +" && mv archive.ini .."
                                           ])
                 ])
         os.replace("../in_process.tmp", "../in_process")
@@ -2406,7 +2407,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
     if retcode == 50:
         # Initialization didn't complete, so abort
         set_in_process(None)
-        for f in ("merge.lst.gz"):  ##,"volinfo.tmp",target+"/info.tmp"):
+        for f in ("merge.lst.gz","volinfo.tmp",target+"/info.tmp"):
             if exists(f):  os.remove(f)
         dest_run([destcd + bkdir+"/"+datavol
                   +" && rm -rf merge merge-init merge.lst.gz"], check=False)
@@ -2424,9 +2425,9 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
             )
 
     # Local finalize
-    ##if exists("volinfo.tmp"):  os.replace("volinfo.tmp", "volinfo")
-    ##for f in ("/info","/manifest"):
-    ##    if exists(target+f+".tmp"):  os.replace(target+f+".tmp", target+f)
+    for f in (target+"/info", target+"/manifest.gz", target+"/manifest",
+              "volinfo", "../archive.ini"):
+        if exists(f+".tmp"):  os.replace(f+".tmp", f)
 
     set_in_process(None, dest=False)    ; os.remove("merge.lst.gz")
     catch_signals(None)
