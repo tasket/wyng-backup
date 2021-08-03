@@ -128,7 +128,7 @@ if [ -n "$opt_list" ]; then exit 0; fi
 
   case $hashtype in
     sha256)   HASH_CHECK="sha256sum";;
-    blake2b)  HASH_CHECK="b2sum";;
+    blake2b)  HASH_CHECK="b2sum -l $(( hashw * 4 ))";;
   esac
 
   # Parse manifest fields: 1=digest, 2=first fname segment, 3=second fname seg, 4=session
