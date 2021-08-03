@@ -8,7 +8,7 @@
 set -eo pipefail
 LC_ALL=C
 
-echo "Wyng archive extractor, V0.3.0 20210605"
+echo "Wyng archive extractor, V0.3.x 20210802"
 
 hashw=64;  addrw=17;  delimw=1;  uniqw=$(( hashw + delimw + addrw ))
 
@@ -26,8 +26,7 @@ done
 shift $(( OPTIND - 1 ))
 
 if [ -n "$outopt" ]; then
-  ## outvol=`readlink -f "$outopt"`
-  outvol="$outopt"
+  outvol=`realpath "$outopt"`
 elif [ -z "$opt_check" ] && [ -z "$opt_list" ]; then
   opterr=1
 fi
@@ -52,13 +51,14 @@ if [ ! -e "$voldir" ]; then
 fi
 
 tmpdir=/tmp/wyng-extract
-rm -rf $tmpdir  &&  mkdir $tmpdir
+if [ -e $tmpdir ]; then mv $tmpdir $tmpdir.old; fi
+rm -rf $tmpdir $tmpdir.old  &&  mkdir $tmpdir
 
 
 ( cd "$voldir";  curdir=`pwd`
 
   # Check that format version is 1 or 2
-  arch_ver=`grep -q '^format_ver =' volinfo | awk '{print $3}'`
+  arch_ver=`grep '^format_ver =' volinfo | awk '{print $3}'`
   case $arch_ver in
     1|2)  format_ver=$arch_ver;;
     *)    echo "Error: Did not find a compatible format.";  exit 1;;
@@ -71,7 +71,7 @@ rm -rf $tmpdir  &&  mkdir $tmpdir
   # Add session column to manifests and create symlinks using sequence number.
   if [ -z "$sestag" ]; then sestag=${s_last:2}; fi
   session=$s_last
-  while [ ! "$session" = 'none' ]; do
+  while [ ! ${session,,} = 'none' ]; do
     ln=`grep '^previous =' $session/info`;  read one two s_prev <<<"$ln"
     if [ -z "$sesnames" ] && [ ! "${session:2}" = "$sestag" ]; then session=$s_prev;  continue; fi
 
@@ -129,7 +129,6 @@ if [ -n "$opt_list" ]; then exit 0; fi
   # Parse manifest fields: 1=digest, 2=first fname segment, 3=second fname seg, 4=session
   mregex='^(\S+)\s+x(\S{9})(\S+)\s+(S_\S+)'
 
-
   # Hash local volume for sparse mode:
   # Creates a complete 'manifest' from a local volume
   # which is then compared vs Wyng archive manifests.
@@ -144,6 +143,13 @@ if [ -n "$opt_list" ]; then exit 0; fi
     if [ "$compr" = "zlib" ]; then
       echo "Error: Sparse mode not yet supported with zlib compression."
       exit 1
+    fi
+
+    # Make local vol correct size for comparison
+    if [ ! -b "$outvol" ]; then
+      truncate --size $volsize "$outvol"
+    elif lvm lvdisplay "$outvol" >/dev/null; then
+      lvm lvresize -L ${volsize}B "$outvol" 2>/dev/null
     fi
 
     for ((i=0; i<volsize; i=i+megachunksize)); do
@@ -216,11 +222,11 @@ if [ -n "$opt_list" ]; then exit 0; fi
 
   # Set local volume to correct size.
   if [ ! -b "$outvol" ]; then
-    if [ -z "$opt_sparse" ]; then rm "$outvol"; fi
+    if [ -z "$opt_sparse" ]; then rm -f "$outvol"; fi
     truncate --size $volsize "$outvol"
-  elif lvdisplay "$outvol" >/dev/null; then
+  elif lvm lvdisplay "$outvol" >/dev/null; then
     if [ -z "$opt_sparse" ]; then blkdiscard "$outvol"; fi
-    lvresize -L ${volsize}B "$outvol" 2>/dev/null || true
+    lvm lvresize -L ${volsize}B "$outvol" 2>/dev/null || true
   fi
   if [ ! -e "$outvol" ]; then
     echo "Error: Output/save path does not exist!"
@@ -239,4 +245,4 @@ if [ -n "$opt_list" ]; then exit 0; fi
 
 echo
 echo "OK"
-#rm -r $tmpdir
+rm -r $tmpdir
