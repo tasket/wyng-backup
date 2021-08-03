@@ -32,8 +32,13 @@ elif [ -z "$opt_check" ] && [ -z "$opt_list" ]; then
 fi
 if [ -n "$opterr" ] || [ -z "$1" ] || [ -z "$2" ]; then
   echo 'Usage: wyng-extract.sh -l <wyng-dir-path> [volume-name]'
+  echo '          List volume details.'
+  echo
   echo '       wyng-extract.sh -c <wyng-dir-path> <volume-name>'
+  echo '          Check volume intergrity.'
+  echo
   echo '       wyng-extract.sh [-t session/tag] [-s] -o <save-path> <wyng-dir-path> <volume-name>'
+  echo '          Extract and save volume. Use -s for sparse mode, -t to select session.'
   exit 1
 fi
 
