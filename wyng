@@ -79,6 +79,7 @@ class ArchiveSet:
         # read attributes from archive.ini file
         with open(self.confpath, "rb") as f:   buf = f.read(self.max_conf_sz)
         if self.mcrypto:   buf = self.mcrypto.decrypt(buf)
+        if options.debug:   print(gzip.decompress(buf).decode("UTF-8"))
         cp.read_string(gzip.decompress(buf).decode("UTF-8"))
         self.a_ints      = {"chunksize"}
         for name in cp["var"].keys():
@@ -101,8 +102,8 @@ class ArchiveSet:
             # - volume specified on command line
             # - no volumes specified (hence all)
             # - deduplication is in effect
-            if children and allvols or self.in_process or options.from_arch or \
-            (len(options.volumes)==0 or key in options.volumes or options.dedup):
+            if children and (allvols or self.in_process or options.from_arch or \
+            (len(options.volumes)==0 or key in options.volumes or options.dedup)):
                 os.makedirs(pjoin(self.path,key), exist_ok=True)
                 # instantiate:
                 self.vols[key] = self.Volume(self, key, value, pjoin(self.path,key), self.vgname)
@@ -125,7 +126,6 @@ class ArchiveSet:
         c['destmountpoint'] = self.destmountpoint
         c['uuid']        = self.uuid if self.uuid else str(uuid.uuid4())
         c['data_cipher'] = self.data_cipher
-        self.conf['volumes'] = { x.name: x.hashval for x in self.vols.values() }
 
         confdir  = os.path.dirname(self.confpath)   ; os.makedirs(confdir, exist_ok=True)
         confname = os.path.basename(self.confpath)
@@ -137,7 +137,7 @@ class ArchiveSet:
         with open(confdir+"/"+confname+ext, "wb") as fsave:   fsave.write(buf)
 
     def add_volume(self, datavol, ext=""):
-        if len(self.vols) >= self.max_volumes:   x_it(1, "Too many volumes")
+        if len(self.conf["volumes"]) >= self.max_volumes:   x_it(1, "Too many volumes")
         if datavol in self.conf["volumes"]:
             print(datavol+" is already configured.")    ; return True
 
@@ -150,11 +150,9 @@ class ArchiveSet:
             sys.stderr.write("Warning: Volume '%s' is already tracked"
                              "by a Wyng snapshot from a different archive!\n" % datavol)
 
-        vol = self.vols[datavol] = self.Volume(self, datavol, None,
-                                               pjoin(self.path,datavol), self.vgname)
-        vol.save_volinfo(ext)    ; print("Volume", datavol, "added to archive config.")
+        self.conf["volumes"][datavol] = "0"
+        self.save_conf(ext)    ; print("Volume", datavol, "added to archive config.")
         return True
-
 
     def delete_volume(self, datavol):
         if datavol in self.conf["volumes"]:   del(self.conf["volumes"][datavol])
@@ -165,14 +163,16 @@ class ArchiveSet:
         for ext in {".tick",".tock"}:          lv_remove(self.vgname, datavol+ext, check=True)
 
     def rename_volume(self, datavol, newname, ext=""):
-        if newname in self.conf["volumes"] or newname in os.listdir(self.path) \
-        or self.Volume.volname_check(newname):
+        vol = self.vols[datavol]
+        if newname in self.conf["volumes"] or self.Volume.volname_check(newname):
             return False
 
         if datavol in self.conf["volumes"] and datavol in self.vols:
-            self.vols[datavol].save_volinfo()
             self.conf["volumes"][newname] = self.conf["volumes"][datavol]
-            del(self.conf["volumes"][datavol])    ; self.save_conf(ext)
+            self.vols[newname] = vol    ; vol.name = newname
+            del(self.vols[datavol], self.conf["volumes"][datavol])    ; self.save_conf(ext)
+            shutil.rmtree(self.path+"/"+newname+ext, ignore_errors=True)
+            if exists(vol.path):   os.replace(vol.path, self.path+"/"+newname+ext)
         else:
             print("Config for %s not present." % datavol)
             return False
@@ -223,16 +223,14 @@ class ArchiveSet:
             self.enabled = True     ####
             self.error   = False
             self.mapfile = path+"/deltamap"
-            self.hashval = hashval
             self.sessions= {}
             self.sesnames= []
             self.tags    = {}
             self.meta_checked = False
+            self.first   = self.last = "None"
             # persisted:
             self.format_ver = "0"    #### move to archive
             self.last_uuid= None     #### implement
-            self.first   = "None"    #### move to non-persisted or remove
-            self.last    = "None"
             self.desc    = ""
             # other:
             self.changed_bytes = 0
@@ -240,7 +238,7 @@ class ArchiveSet:
             self.max_volinfosz= (self.archive.mhash_sz+self.Ses.sesname_sz+10) + 1000
 
             # load volume info
-            if exists(pjoin(path,"volinfo")) and hashval:
+            if path and hashval != "0":
                 with open(pjoin(path,"volinfo"), "rb") as f:
                     fsize = f.seek(0,2)   ; f.seek(0)
                     if fsize > self.max_volinfosz:   raise ValueError("volinfo too large")
@@ -253,12 +251,13 @@ class ArchiveSet:
                         vname = vname.strip()    ; value = value.strip()
                         if vname.startswith("S_"):
                             self.sessions[vname] = self.Ses(self, vname, value, path+"/"+vname)
-                        setattr(self, vname, value)
+                        else:
+                            setattr(self, vname, value)
 
             # session name list sorted by sequence field
-            if self.sessions:
-                seslist = list(self.sessions.values())    ; seslist.sort(key=lambda x: x.sequence)
-                self.sesnames = [y.name for y in seslist]
+            seslist = list(self.sessions.values())    ; seslist.sort(key=lambda x: x.sequence)
+            self.sesnames = sesnames = [y.name for y in seslist]
+            if sesnames:   self.first = sesnames[0]   ; self.last = sesnames[-1]
 
             if int(self.format_ver) > format_version:
                 raise ValueError("Archive format ver = "+self.format_ver+
@@ -303,8 +302,6 @@ class ArchiveSet:
             with io.StringIO() as f:
                 print("format_ver =", format_version, file=f)
                 print("last_uuid =", self.last_uuid, file=f)
-                print("first =", self.first, file=f)
-                print("last =", self.last, file=f)
              ####   if not prune:   self.desc = options.voldesc.strip()[:comment_len]
                 print("desc =", self.desc, file=f)
                 for ses in self.sessions.values():
@@ -312,7 +309,7 @@ class ArchiveSet:
 
                 buf = self.archive.compress(f.getvalue().encode("UTF-8"),
                                             int(self.archive.compr_level))
-                self.hashval = self.archive.b64hash(buf)
+                self.archive.conf["volumes"][self.name] = self.archive.b64hash(buf)
 
             if self.archive.mcrypto:   buf = self.archive.mcrypto.encrypt(buf)
             with open(pjoin(self.path,fname+ext), "wb") as f:
@@ -332,7 +329,7 @@ class ArchiveSet:
                     f.flush()    ; os.fsync(f.fileno())
 
         def new_session(self, sname, addtags={}):
-            ns = self.Ses(self, sname, None, addtags=addtags)
+            ns = self.Ses(self, sname, "0", addtags=addtags)
             ns.path = pjoin(self.path, sname)
             if self.first == "None":
                 ns.sequence = 0
@@ -406,7 +403,7 @@ class ArchiveSet:
                 self.tags     = {}
                 self.manifesthash = None
 
-                if path:
+                if path and hashval != "0":
                     with open(pjoin(path,"info"), "rb") as sf:
                         fsize = sf.seek(0,2)   ; sf.seek(0)
                         if fsize > self.volume.max_infosz:   raise ValueError("info too large")
@@ -876,7 +873,7 @@ def arch_check(vol_list=None, startup=False):
             x_it(1, "Error: Local and archive metadata differ.")
 
         # Check index sequencing in first and combined manifests
-        print("  Checking index sequence...")
+        print("  index sequence...")
         mset = []
         for ses in vol.sesnames:
             # print(ses, "size =", vol.sessions[ses].volsize)
@@ -884,14 +881,14 @@ def arch_check(vol_list=None, startup=False):
             check_manifest_sequence(volname, mset)
 
         # Check hashes of each session individually
-        print("  Checking data...")
+        print("  data:")
         for sesname in reversed(vol.sesnames):
             ses = vol.sessions[sesname]    ; manifest = ses.path+"/manifest"    ; bcount = 0
             if options.session \
             and ((options.session.lower() == "newest" and sesname != vol.sesnames[-1]) \
             or options.session < ses.localtime):
                 continue # Enh: use seq
-            if attended:   print("  Session %s... " % sesname, end="", flush=True)
+            if attended:   print("   Session %s... " % sesname, end="", flush=True)
 
             # FixCheck for stray entries here
             cmd1 = [[CP.sed, "-E", "/^0\s/ d; "
@@ -964,26 +961,27 @@ def check_manifest_sequence(datavol, sesnames):
 
 # Get global configuration settings:
 
-def get_configs():
+def get_configs(opts):
     aname = "default"    ; bkdir = topdir + "/" + aname
+    load_children = opts.action not in ("arch-delete","delete","add")
 
-    if options.from_arch:
+    if opts.from_arch:
         # Prepare a temporary metadata dir and init aset with it
         tmpmeta = big_tmpdir+"/var"    ; os.makedirs(tmpmeta+bkdir)
         aset    = ArchiveSet(aname, tmpmeta+topdir)
         arch_init(aset)
     else:
-        aset    = ArchiveSet(aname, metadir+topdir)
+        aset    = ArchiveSet(aname, metadir+topdir, children=load_children)
 
     if aset.vgname:   lvm_meta_snapshot(aset, "release")
 
-    if options.from_arch:
+    if opts.from_arch:
         return aset
 
-    if options.action == "arch-init" and not aset.destmountpoint:
+    if opts.action == "arch-init" and not aset.destmountpoint:
         arch_init(aset)
         x_it(0, "Done.")
-    elif options.action == "arch-init":
+    elif opts.action == "arch-init":
         x_it(1, "Archive already initialized for "+aset.name)
     if not aset.destmountpoint:
         x_it(1,"Configuration not found.")
@@ -1209,10 +1207,11 @@ elif cmd == "dedup":
     print(ddcount, "reduced.")
 elif cmd == "rename":
     catch_signals()    ; oldname = sys.argv[2]    ; newname = sys.argv[3]    ; replaced = False
-    if exists(oldname) and exists(newname):   sys.exit(50)
+    if exists(oldname) and exists(newname):   shutil.rmtree(newname)
     if exists(oldname):   replace(oldname, newname)   ; replaced = True
+    if not replaced and exists(newname):   sys.exit(40)
     replace("archive.ini.tmp", "archive.ini")    ; fssync(".")
-    if not replaced:   sys.exit(40)
+    if not replaced:   sys.exit(41)
 elif cmd == "get-configs":
     with open(tmpdir+"/tar.lst","w") as tarlstf:
         vols = [sys.argv[2]] if len(sys.argv)>2 else [x.name for x in os.scandir() if x.is_dir()]
@@ -2814,22 +2813,20 @@ def rename_volume(oldname, newname):
     if not aset.rename_volume(oldname, newname, ext=".tmp"):
         x_it(1, "Error: Cannot rename '%s' to '%s'." % (oldname,newname))
 
-    do_exec([[CP.tar, "-czf", tmpdir+"/rename.tgz", confname+".tmp", oldname+"/volinfo"]])
     catch_signals()
     if not aset.in_process:   set_in_process(["rename", oldname, newname])
-    rc = dest_run([ destcd + bkdir + " && tar -xzf - && python3 "
-                   +tmpdir+("-rpc/dest_helper.py rename '%s' '%s'" % (oldname, newname)) ],
-                    infile=tmpdir+"/rename.tgz", check=False, trap=True)
+    if volume.sessions:
+        rc = dest_run([ destcd + bkdir + " && cat >archive.ini.tmp && python3 "
+                    +tmpdir+("-rpc/dest_helper.py rename '%s' '%s'" % (oldname, newname)) ],
+                        infile=aset.confpath+".tmp", check=False, trap=True)
+        if rc not in (0, 40):
+            raise RuntimeError("Destination exit code "+str(rc))
+    else:
+        rc = dest_run([ destcd + bkdir + " && cat >archive.ini"],
+                        infile=aset.confpath+".tmp", trap=True)
 
-    if rc == 50:
-        set_in_process(None)
-        raise RuntimeError("'%s' already exists in destination!")
-
-    if rc not in (0, 40):
-        raise RuntimeError("Destination exit code "+str(rc))
-
-    if oldname in os.listdir(aset.path):
-        os.replace(aset.path+"/"+oldname, aset.path+"/"+newname)
+    if newname+".tmp" in os.listdir(aset.path):
+        os.replace(aset.path+"/"+newname+".tmp", aset.path+"/"+newname)
     os.replace(aset.confpath+".tmp", aset.confpath)
     set_in_process(None)    ; catch_signals(None)
 
@@ -2838,7 +2835,7 @@ def rename_volume(oldname, newname):
         if lv_exists(vg, oldname+ext):   lv_rename(vg, oldname+ext, newname+ext)
 
     full_aset = ArchiveSet(aset.name, metadir+topdir, allvols=True)
-    if rc != 40 and len(full_aset.vols[newname].sessions) \
+    if len(full_aset.vols[newname].sessions) \
     and compare_files(pathlist=[confname], volumes=[full_aset.vols[newname]]):
         x_it(1, "Error: Local and archive metadata differ.")
 
@@ -2850,7 +2847,7 @@ def add_volume(datavol):
     aset.add_volume(datavol, ext=".tmp")
 
     catch_signals()
-    dest_run([[ destcd + bkdir + " && cat >archive.ini"]], infile=aset.confpath+".tmp")
+    dest_run([ destcd + bkdir + " && cat >archive.ini"], infile=aset.confpath+".tmp")
     os.replace(aset.confpath+".tmp", aset.confpath)
     catch_signals(None)
 
@@ -3185,7 +3182,7 @@ volgroups, l_vols= {}, {}    ; get_lvm_vgs()
 # Enh: Use separate dest class so aset can be inst after detect_dest_state()
 #      and/or move detect call to aset init.
 destsys = desttype = dest_run_map = dest_online = dest_in_process = dest_free = dest_writable= None
-aset             = get_configs()
+aset             = get_configs(options)
 destsys, desttype= detect_internal_state()
 dest_online, dest_free, dest_in_process, dest_writable  = detect_dest_state(destsys)
 bkdir            = topdir+"/"+aset.name
@@ -3213,16 +3210,19 @@ if aset.vgname in volgroups:   l_vols = volgroups[aset.vgname].lvs
 # Functions supported here must not internally use global variable inputs that are unique to
 # a runtime invocation (i.e. the 'options' objects), or they must test such variables
 # in conjunction with aset.in_process.
-if aset.in_process and dest_online and not options.from_arch \
-    and options.action != "arch-init":
-    if exists(aset.path+"/in_process_retry"):
-        x_it(1, "Interrupted process already retried; Exiting.")
-    open(aset.path+"/in_process_retry","w").close()
+elif aset.in_process and dest_online and not options.from_arch \
+    and options.action not in ("arch-init","arch-delete","list"):
 
-    if options.action == "delete" and aset.in_process[1] == options.volumes[0]:
-        # user is currently deleting the in_process volume
+    if (options.action == "delete" and aset.in_process[1] == options.volumes[0]) \
+        or (options.clean and options.force):
+        # user is currently deleting the in_process volume or using --clean --force
         set_in_process(None)
-    elif aset.in_process[0] in ("delete","merge","rename"):
+    elif aset.in_process:
+        open(aset.path+"/in_process_retry","w").close()
+    elif exists(aset.path+"/in_process_retry"):
+        x_it(1, "Interrupted process already retried; Exiting.")
+
+    if aset.in_process and aset.in_process[0] in ("delete","merge","rename"):
         print("Completing prior operation in progress:", " ".join(aset.in_process[0:2]))
 
         if aset.in_process[0] == "delete":
@@ -3233,9 +3233,6 @@ if aset.in_process and dest_online and not options.from_arch \
             merge_sessions(aset.in_process[1], aset.in_process[4].split("/"),
                         aset.in_process[3], clear_sources=bool(aset.in_process[2]))
 
-    else:
-        print("Unknown prior operation in progress:", aset.in_process[0:2])
-        x_it(1,"Exiting.")
 elif dest_in_process:
     x_it(1, "Archive locked in_process without local indicator. Exiting.")
 
