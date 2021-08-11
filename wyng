@@ -34,18 +34,19 @@ except:
 # ArchiveSet manages configuration and configured volume info
 
 class ArchiveSet:
-    mhash_sz    = 44     ; max_volumes = 4096
+    confname    = "archive.ini"
+    mhash_sz    = 44                ; max_volumes = 4096
 
     def __init__(self, name, top, crypto_type=None, allvols=False, children=True):
         self.name        = name
         self.path        = pjoin(top,name)
-        self.confpath    = pjoin(self.path,"archive.ini")
+        self.confpath    = pjoin(self.path, self.confname)
         self.vols        = {}
         self.dedupindex  = {}
         self.dedupsessions = []
-        self.in_process  = get_in_process(self.path)
         self.mcrypto     = None
         self.datacrypto  = None
+        self.raw_hashval = None
         self.max_conf_sz = (volname_len+comment_len+self.mhash_sz+25) * self.max_volumes + 1000
         # persisted:
         self.chunksize   = bkchunksize
@@ -60,15 +61,15 @@ class ArchiveSet:
         self.uuid        = None
         self.updated_at  = None    #### IMPLEMENT
         self.data_cipher = None
+        self.in_process  = []
 
         # parser for the .ini formatted configuration
         self.conf = cp   = configparser.ConfigParser()
         cp.optionxform   = lambda option: option
-        cp["var"]        = {}
-        cp["volumes"]    = {}
+        cp["var"], cp["volumes"], cp["in_process"]  =  {},{},{}
 
         # halt configuration if this is a new or temp config
-        if not exists(self.confpath):
+        if not exists(self.confpath):       #### Add test for ""/None
             self.uuid = str(uuid.uuid4())
             return
 
@@ -78,13 +79,14 @@ class ArchiveSet:
 
         # read attributes from archive.ini file
         with open(self.confpath, "rb") as f:   buf = f.read(self.max_conf_sz)
+        self.raw_hashval = hashlib.sha256(buf).hexdigest()
         if self.mcrypto:   buf = self.mcrypto.decrypt(buf)
         if options.debug:   print(gzip.decompress(buf).decode("UTF-8"))
         cp.read_string(gzip.decompress(buf).decode("UTF-8"))
         self.a_ints      = {"chunksize"}
-        for name in cp["var"].keys():
-            setattr(self, name, int(cp["var"][name]) \
-                                if name in self.a_ints else cp["var"][name])
+        for key, value in cp["var"].items():
+            setattr(self, key, int(value) if key in self.a_ints else value)
+        self.in_process  = [ ln for ln in cp["in_process"].values() ]
 
         # init data crypto
         if self.mcrypto:                      #### IMPLEMENT DERIVATION
@@ -104,7 +106,6 @@ class ArchiveSet:
             # - deduplication is in effect
             if children and (allvols or self.in_process or options.from_arch or \
             (len(options.volumes)==0 or key in options.volumes or options.dedup)):
-                os.makedirs(pjoin(self.path,key), exist_ok=True)
                 # instantiate:
                 self.vols[key] = self.Volume(self, vid, key, hashval,
                                              pjoin(self.path,vid), self.vgname)
@@ -127,15 +128,25 @@ class ArchiveSet:
         c['destmountpoint'] = self.destmountpoint
         c['uuid']        = self.uuid if self.uuid else str(uuid.uuid4())
         c['data_cipher'] = self.data_cipher
+        self.conf['in_process'] = { x: ln if type(ln) is str else ":|".join(ln)
+                                          for x,ln in enumerate(self.in_process) }
 
-        confdir  = os.path.dirname(self.confpath)   ; os.makedirs(confdir, exist_ok=True)
-        confname = os.path.basename(self.confpath)
-
+        os.makedirs(self.path, exist_ok=True)
         with io.StringIO() as f:
             self.conf.write(f)    ; f.flush()
             buf = gzip.compress(f.getvalue().encode("UTF-8"), 4)
         if self.mcrypto:   buf = self.mcrypto.encrypt(buf)
-        with open(confdir+"/"+confname+ext, "wb") as fsave:   fsave.write(buf)
+        with open(self.confpath+ext, "wb") as fsave:   fsave.write(buf)
+
+    # Set or clear state for the archive as 'in_process' in case of interruption during write.
+    # Format is list containing strings or list of strings. For latter, ':|' is the delimiter.
+    def set_in_process(self, outer_list, tmp=False, dest=True):
+        fssync(aset.path)
+        self.in_process = [] if outer_list is None else outer_list
+        self.save_conf(".tmp" if tmp else "")
+
+        #if not tmp:   os.replace(self.confpath+".tmp", self.confpath)
+        if dest:      update_dest(pathlist=[self.confname], ext=".tmp" if tmp else "")
 
     def add_volume(self, datavol, ext=""):
         if len(self.conf["volumes"]) >= self.max_volumes:   x_it(1, "Too many volumes")
@@ -178,7 +189,8 @@ class ArchiveSet:
         if datavol in self.conf["volumes"] and datavol in self.vols:
             self.conf["volumes"][newname] = self.conf["volumes"][datavol]
             self.vols[newname] = vol    ; vol.name = newname
-            del(self.vols[datavol], self.conf["volumes"][datavol])    ; self.save_conf(ext)
+            del(self.vols[datavol], self.conf["volumes"][datavol])
+            self.save_conf(ext)
         else:
             print("Config for %s not present." % datavol)
             return False
@@ -848,6 +860,7 @@ def arch_check(vol_list=None, startup=False):
 
     # Check volume contents at various levels (dirs, metadata, content)
     for volname in vol_list if dest_online else []:
+        if volname not in aset.vols:   continue
 
         # Handle disabled volumes and stray dirs
         #if startup and volname not in aset.vols:   continue
@@ -965,17 +978,13 @@ def get_configs(opts):
 
     if opts.from_arch:
         # Prepare a temporary metadata dir and init aset with it
-        tmpmeta = big_tmpdir+"/var"    ; os.makedirs(tmpmeta+bkdir)
-        aset    = ArchiveSet(aname, tmpmeta+topdir)
-        arch_init(aset)
+        tmpmeta   = big_tmpdir+"/var"    ; os.makedirs(tmpmeta+bkdir)
+        aset_from = ArchiveSet(aname, tmpmeta+topdir)
+        arch_init(aset_from)
+        return aset_from
     else:
         aset    = ArchiveSet(aname, metadir+topdir, children=load_children)
-
-    if aset.vgname:   lvm_meta_snapshot(aset, "release")
-
-    if opts.from_arch:
-        return aset
-
+ 
     if opts.action == "arch-init" and not aset.destmountpoint:
         arch_init(aset)
         x_it(0, "Done.")
@@ -1200,6 +1209,7 @@ elif cmd == "dedup":
                     if exists(dest+"-lnk"):   remove(dest+"-lnk")
                     print(err)   ; raise err
     print(ddcount, "reduced.")
+
 #REFACTOR
 elif cmd == "get-configs":
     with open(tmpdir+"/tar.lst","w") as tarlstf:
@@ -1209,7 +1219,6 @@ elif cmd == "get-configs":
             for ses in os.scandir(volname):
                 if ses.is_dir() and ses.name.startswith("S_") and not ses.name.endswith("-tmp"):
                     for f in ("info","manifest"):   print(volname+"/"+ses.name+"/"+f, file=tarlstf)
-        if exists("in_process"):  print("in_process", file=tarlstf)
     p = subprocess.check_call(["tar","-czf","-","--no-recursion","--verbatim-files-from",
     "--files-from="+tmpdir+"/tar.lst","archive.ini"])
     '''
@@ -1232,7 +1241,7 @@ def detect_dest_state(destsys):
                         }
 
     dest_in_proc  = False    ; dest_free = None    ; online = False
-    dest_writable = True
+    dest_writable = True     ; ini_hash  = "none"
 
     if (options.action not in local_actions and destsys is not None) \
         or options.remap or options.from_arch:
@@ -1246,10 +1255,9 @@ def detect_dest_state(destsys):
                   ]
             do_exec([cmd])
 
-        # Fix: get OSTYPE env variable
+        rdir = "'"+aset.destmountpoint+"/"+aset.destdir+topdir+"/"+aset.name+"'"
         cmd = ["mountpoint -q '"+aset.destmountpoint
-                +"' && mkdir -p '"+aset.destmountpoint+"/"+aset.destdir+topdir+"/"+aset.name
-                +"' && cd '"+aset.destmountpoint+"/"+aset.destdir+topdir+"'"
+                +"' && mkdir -p "+rdir+" && cd "+rdir
 
                 # send helper program to remote dest
                 +"  && rm -rf "+tmpdir+"-rpc  &&  mkdir -p "+tmpdir+"-rpc"
@@ -1259,10 +1267,10 @@ def detect_dest_state(destsys):
                 +"  && touch archive.dat || echo 'wyng_read_only'"
                 +(" && ln -f archive.dat .hardlink" if options.dedup else "")
 
-                # check free space and in_process status on remote
+                # check free space and archive.ini status on remote
                 +"  && echo -n 'wyng_check_free ' && stat -f -c '%a %S' ."
-                +"  && { if [ -e "+aset.name+"/in_process ]; then"
-                +"  echo 'wyng_in_process'; fi }"
+                +"  && echo -n 'wyng_archive_ini '"
+                +"  && { if [ -e archive.ini ]; then sha256sum archive.ini; else echo none; fi }"
                 ]
         try:
             do_exec([dest_run_args(desttype, cmd),
@@ -1277,79 +1285,45 @@ def detect_dest_state(destsys):
     if online:
         with open(tmpdir+"/dest-state.log","r") as logf:
             for ln in logf:
-                if ln.startswith("wyng_in_process"):
-                    dest_in_proc = True
+                if ln.startswith("wyng_archive_ini"):
+                    ini_hash = ln.split()[1]
                 elif ln.startswith("wyng_check_free"):
                     parts = ln.split()    ; dest_free = int(parts[1]) * int(parts[2])
                 elif ln.startswith("wyng_read_only"):
                     dest_writable = False
 
-    return dest_free is not None, dest_free, dest_in_proc, dest_writable
-
-
-# Set or clear state for the archive as 'in_process' in case of interruption during write.
-# Format is list containing strings or list of strings. For latter, '/' is the delimiter.
-
-def set_in_process(outer_list, tmp=False, dest=True):
-    fssync(aset.path)
-
-    if outer_list is None:
-        if dest:  dest_run([destcd + bkdir + " && rm -f in_process"])
-        for ext in ("", ".tmp", "_retry"):
-            if exists(aset.path+"/in_process"+ext):  os.remove(aset.path+"/in_process"+ext)
-        aset.in_process = None
-        return
-
-    with open(aset.path+"/in_process.tmp", "w") as ipf:
-        for ln in outer_list:
-            print(ln if type(ln) is str else "/".join(ln), file=ipf)
-
-    if dest:
-        dest_run([destcd + bkdir +" && cat >in_process.tmp"
-                                +(" && mv in_process.tmp in_process") if not tmp else ""
-                                 +" && { sync -f . || sync; }"],
-                infile=aset.path+"/in_process.tmp")
-    if not tmp:
-        os.rename(aset.path+"/in_process.tmp", aset.path+"/in_process")
-
-    aset.in_process = outer_list
-
-
-def get_in_process(archpath=""):
-    outer_list = []
-    if not archpath: archpath = aset.path
-    if exists(archpath+"/in_process"):
-        with open(archpath+"/in_process", "r") as ipf:
-            for ln in ipf:   outer_list.append(ln.strip())
-
-            #self.in_process = [x.strip() for x in ipf]
-    return outer_list if len(outer_list) else None
+    return dest_free is not None, dest_free, dest_writable, ini_hash
 
 
 # Run system commands with pipes, without shell:
 # 'commands' is a list of lists, each element a command line.
 # If multiple command lines, then they are piped together.
 # 'out' redirects the last command output to a file; append mode can be
-# selected by beginning 'out' path with '>>'.
+# selected by beginning 'out' path with '>>'. 'inlines' can be a list-like collection of strings
+# to be used as input instead of 'infile'.
 # List of commands may include 'None' instead of a child list; these will be ignored.
 
-def do_exec(commands, cwd=None, check=True, out="", infile="", text=False):
+def do_exec(commands, cwd=None, check=True, out="", infile="", inlines=[], text=False):
     ftype   = "t" if text else "b"
-    outmode = "a" if out.startswith(">>") else "w"
-    out = out.lstrip(">>")
-    if cwd and out and out[0] != "/":
-        out = pjoin(cwd,out)
-    if cwd and infile and infile[0] != "/":
-        infile = pjoin(cwd,infile)
+    outmode = "a" if out.startswith(">>") else "w"    ; out = out.lstrip(">>")
+    if cwd and out and out[0] != "/":   out = pjoin(cwd,out)
     outfunc = gzip.open if out.endswith(".gz") else open
-    infunc  = gzip.open if infile.endswith(".gz") else open
-    outf = outfunc(out, outmode+ftype) if out else subprocess.DEVNULL
-    inf  = infunc(infile, "r"+ftype) if infile else subprocess.DEVNULL
+    outf    = outfunc(out, outmode+ftype) if out else subprocess.DEVNULL
+    #### if type(outf) != int:  print("@ ", outf.name) ####
+
+    if inlines:
+        inf = subprocess.PIPE  #io.StringIO("\n".join(inlines)+"\n")
+    else:
+        if cwd and infile and infile[0] != "/":   infile = pjoin(cwd,infile)
+        infunc  = gzip.open if infile.endswith(".gz") else open
+        inf     = infunc(infile, "r"+ftype) if infile else subprocess.DEVNULL
+
     errf = open(tmpdir+"/err.log", "a")  ; print("--+--", file=errf)
     commands = [x for x in commands if x is not None]
 
     # Start each command, linking them via pipes
     procs = []
+    #### print("##", cwd, os.getcwd());  print(commands) ####
     for i, clist in enumerate(commands):
         p = subprocess.Popen(clist, cwd=cwd, stdin=inf if i==0 else procs[i-1].stdout,
                              stdout=outf if i==len(commands)-1 else subprocess.PIPE,
@@ -1357,6 +1331,7 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", text=False):
         if len(procs):  procs[-1].stdout.close()
         procs.append(p)
 
+    if inlines:   procs[0].communicate(("\n".join(inlines)+"\n").encode("UTF-8"))
     # Monitor and control processes
     while True:
         err = None    ; finish = timeout = False
@@ -1388,12 +1363,12 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", text=False):
 
 # Run system commands on destination
 
-def dest_run(commands, dest_type=None, infile="", out="", check=True, trap=False):
+def dest_run(commands, dest_type=None, infile="", inlines=None, out="", check=True, trap=False):
     if dest_type is None:
         dest_type = desttype
 
     cmd = dest_run_args(dest_type, commands, trap=trap)
-    return do_exec([cmd], infile=infile, out=out, check=check)
+    return do_exec([cmd], infile=infile, inlines=inlines, out=out, check=check)
 
 
 # Build command lists that can be shunted to remote systems.
@@ -1431,6 +1406,23 @@ def dest_run_args(dest_type, commands, trap=False):
     ret = dest_run_map[dest_type] + add_cmd
     #print("CMD",ret)
     return ret
+
+
+def update_dest(pathlist=[], volumes=[], sessions=[], ext="", dcd="", lcd="", delete=False):
+    update_list =  pathlist + [x.vid+"/volinfo" for x in volumes] \
+                            + [x.volume.vid+"/"+x.name+"/info" for x in sessions] \
+                            + [x.volume.vid+"/"+x.name+"/manifest.z" for x in sessions]
+    dcd  = destcd+bkdir + (" && cd '"+dcd+"'" if dcd else "")
+    if not lcd:   lcd = aset.path
+
+    if delete:
+        assert not ext;  dest_run([dcd + " && xargs rm -f"], inlines=update_list)
+        return
+
+    do_exec([[CP.tar,"-cf","-","--no-recursion","--verbatim-files-from","--files-from", "-"],
+             dest_run_args(desttype,  [dcd + " && tar -xf -"]
+                                    + [" && mv '"+x+ext+"' '"+x+"'" for x in update_list if ext])
+            ], inlines=[x+ext for x in update_list], cwd=lcd)
 
 
 # Prepare snapshots and check consistency with metadata.
@@ -1850,9 +1842,8 @@ def send_volume(datavol, localtime, ses_tags, send_all):
     if stream_started:
         # Save session info
         ses.save_info()
-        tarf.add(pjoin(sdir+"-tmp", "manifest.z"))
-        tarf.add(pjoin(sdir+"-tmp", "info"))
-        tarf.add(vol.vid+"/volinfo")        ; tarf.add(os.path.basename(aset.confpath))
+        tarf.add(pjoin(sdir+"-tmp", "manifest.z"))    ; tarf.add(pjoin(sdir+"-tmp", "info"))
+        tarf.add(vol.vid+"/volinfo")                  ; tarf.add(aset.confname)
 
         #print("Ending tar process ", end="")
         tarf.close()    ; untar.stdin.close()
@@ -1875,12 +1866,10 @@ def send_volume(datavol, localtime, ses_tags, send_all):
         catch_signals()
         dest_run([ destcd + bkdir
                  +" && mv -fT "+sdir+"-tmp "+sdir
-                 ##+" && mv -f "+datavol+"/volinfo-tmp "+datavol+"/volinfo"
                  +" && { sync -f . || sync; }"], trap=True)
 
         # Local finalize
         ses.path = ses.path.rsplit("-tmp",maxsplit=1)[0]   ; os.replace(ses.path+"-tmp", ses.path)
-        ##os.replace(vol.path+"/volinfo-tmp", vol.path+"/volinfo")
         fssync(vol.path)
 
     else:
@@ -2308,8 +2297,9 @@ def merge_manifests(datavol, msessions=None, mtarget=None, addcol=False):
 # target. Caution: clear_sources is destructive.
 
 def merge_sessions(datavol, sources, target, clear_sources=False):
+    global aset
 
-    volume     = aset.vols[datavol]    ; resume = aset.in_process is not None
+    volume     = aset.vols[datavol]    ; resume = bool(aset.in_process)
     chdigits   = max_address.bit_length() // 4 # 4bits per digit
     chformat   = "x%0"+str(chdigits)+"x"
     m_tmp      = tmpdir if volume.volsize() < 128000000000 else big_tmpdir
@@ -2375,28 +2365,23 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
 
         do_exec([[CP.gzip, "-f", "merge.lst"]])
 
-    # Update info records
+    if not resume:
+        # Set archive in_process state to "merge"
+        aset.set_in_process(["merge", datavol, str(clear_sources), target, sources],
+                            tmp=False, dest=False)
+
+    # Update & send new metadata and process lists to dest
     if clear_sources:
         for ses in sources:
             if ses in volume.sessions:   volume.delete_session(ses, remove=False)
-        #print("Removing %d" % len(sources), end="...", flush=True)
 
     if not resume:
+        aset.in_process = []
         volume.sessions[target].save_info(".tmp")
-
-        # Set archive in_process state to "merge"
-        set_in_process(["merge", datavol, str(clear_sources), target, sources],
-                       tmp=True, dest=False)
-
-        # Send new metadata and process lists to dest
-        do_exec([[CP.tar, "-cf", "-", "../archive.ini.tmp", "../in_process.tmp", "volinfo.tmp",
+        do_exec([[CP.tar, "-cf", "-", "../archive.ini", "../archive.ini.tmp", "volinfo.tmp",
                               "merge.lst.gz", target+"/info.tmp", target+"/manifest.z.tmp"],
-                 dest_run_args(desttype, [destcd + destvol + " && tar -xmf -"
-                                          +" && { sync -f . || sync; }"
-                                          +" && mv in_process.tmp ../in_process"
-                                          ])
-                ])
-        os.replace("../in_process.tmp", "../in_process")
+                 dest_run_args(desttype, [destcd + destvol + " && tar -xmf -"])
+                ], cwd=volume.path)
 
     # Start merge operation on dest
     retcode = dest_run([destcd + destvol + " && python3 "
@@ -2405,22 +2390,22 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
                         check=False, out=">>"+tmpdir+"/merge.log"
                       )
 
+    catch_signals()
     if retcode == 50:
-        # Initialization didn't complete, so abort
-        set_in_process(None)
+        # Initialization didn't complete, so reload aset and abort
+        aset = get_configs(options)
+        aset.set_in_process(None)
         for f in ("merge.lst.gz","volinfo.tmp",target+"/info.tmp"):
             if exists(f):  os.remove(f)
-        dest_run([destcd + destvol
-                  +" && rm -rf merge merge-init merge.lst.gz"], check=False)
+        dest_run([destcd + destvol + " && rm -rf merge merge.lst.gz"], check=False)
         x_it(retcode, "Error: Merge could not initialize!")
     elif retcode != 0:
         x_it(retcode, "Error: Remote exited!")
 
-    catch_signals()
     # Finalize merge operation on dest
     dest_run([destcd + destvol + " && python3 "
                 +tmpdir+"-rpc/dest_helper.py merge --finalize"+(" --resume" if resume else "")
-                +" && rm -rf ../in_process merge merge.lst.gz"
+                +" && rm -rf merge merge.lst.gz"
                 ],
                 trap=True, out=">>"+tmpdir+"/merge.log"
             )
@@ -2430,7 +2415,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
               "volinfo", "../archive.ini"):
         if exists(f+".tmp"):  os.replace(f+".tmp", f)
 
-    set_in_process(None, dest=False)    ; os.remove("merge.lst.gz")
+    aset.set_in_process(None, dest=True)    ; os.remove("merge.lst.gz")
     catch_signals(None)
 
     # Check consistency after resuming merge
@@ -2798,16 +2783,13 @@ def rename_volume(oldname, newname):
         if not shutil.which(prg):  raise RuntimeError("Required command not found: "+prg)
 
     os.chdir(aset.path)    ; volume   = aset.vols[oldname]
-    confname = os.path.basename(aset.confpath)    ; was_in_process = aset.in_process is not None
     if not aset.rename_volume(oldname, newname, ext=".tmp"):
         x_it(1, "Error: Cannot rename '%s' to '%s'." % (oldname,newname))
 
     catch_signals()
-    if not aset.in_process:   set_in_process(["rename", oldname, newname])
-    rc = dest_run([ destcd + bkdir + " && cat >archive.ini"],
-                    infile=aset.confpath+".tmp", trap=True)
+    update_dest(pathlist=[aset.confname], ext=".tmp")
     os.replace(aset.confpath+".tmp", aset.confpath)
-    set_in_process(None)    ; catch_signals(None)
+    catch_signals(None)
 
     for ext in (".tick",".tock"):
         vg = aset.vgname    ; lv_remove(vg, newname+ext)
@@ -2815,7 +2797,7 @@ def rename_volume(oldname, newname):
 
     full_aset = ArchiveSet(aset.name, metadir+topdir, allvols=True)
     if len(full_aset.vols[newname].sessions) \
-    and compare_files(pathlist=[confname], volumes=[full_aset.vols[newname]]):
+    and compare_files(pathlist=[aset.confname], volumes=[full_aset.vols[newname]]):
         x_it(1, "Error: Local and archive metadata differ.")
 
     return full_aset
@@ -2826,7 +2808,7 @@ def add_volume(datavol):
     aset.add_volume(datavol, ext=".tmp")
 
     catch_signals()
-    dest_run([ destcd + bkdir + " && cat >archive.ini"], infile=aset.confpath+".tmp")
+    update_dest(pathlist=[aset.confname], ext=".tmp")
     os.replace(aset.confpath+".tmp", aset.confpath)
     catch_signals(None)
 
@@ -2847,13 +2829,13 @@ def delete_volume(dv):
 
     print("\nDeleting volume", dv, "from archive.")
     catch_signals()
-    if not aset.in_process:       set_in_process(["delete", dv])
+    if not aset.in_process:       aset.set_in_process(["delete", dv])
     dvid = aset.delete_volume(dv)
 
     confname = os.path.basename(aset.confpath)
     dest_run([destcd + bkdir + "  && cat >"+confname + "  && { sync -f . || sync; }"],
              infile=aset.confpath)
-    set_in_process(None)
+    aset.set_in_process(None)
 
     if dvid:
         dest_run([destcd + bkdir + "  && rm -rf '%s'" % dvid])
@@ -3161,10 +3143,12 @@ volgroups, l_vols= {}, {}    ; get_lvm_vgs()
 # to the destination.
 # Enh: Use separate dest class so aset can be inst after detect_dest_state()
 #      and/or move detect call to aset init.
-destsys = desttype = dest_run_map = dest_online = dest_in_process = dest_free = dest_writable= None
-aset             = get_configs(options)
+aset = destsys = desttype = dest_run_map = dest_online = dest_free = dest_writable = None
+aset = get_configs(options)
 destsys, desttype= detect_internal_state()
-dest_online, dest_free, dest_in_process, dest_writable  = detect_dest_state(destsys)
+dest_online, dest_free, dest_writable, archive_ini_hash  = detect_dest_state(destsys)
+print("Archive last updated:", aset.updated_at)
+
 bkdir            = topdir+"/"+aset.name
 destpath         = os.path.normpath(pjoin(aset.destmountpoint,aset.destdir))
 destcd           = " cd '"+destpath+"'"
@@ -3196,7 +3180,7 @@ if aset.in_process and dest_online and not options.from_arch \
     if (options.action == "delete" and aset.in_process[1] == options.volumes[0]) \
         or (options.clean and options.force):
         # user is currently deleting the in_process volume or using --clean --force
-        set_in_process(None)
+        aset.set_in_process(None)
     elif aset.in_process:
         open(aset.path+"/in_process_retry","w").close()
     elif exists(aset.path+"/in_process_retry"):
@@ -3210,14 +3194,15 @@ if aset.in_process and dest_online and not options.from_arch \
         elif aset.in_process[0] == "rename":
             aset = rename_volume(aset.in_process[1], aset.in_process[2])
         elif aset.in_process[0] == "merge":
-            merge_sessions(aset.in_process[1], aset.in_process[4].split("/"),
+            merge_sessions(aset.in_process[1], aset.in_process[4].split(":|"),
                         aset.in_process[3], clear_sources=bool(aset.in_process[2]))
 
-elif dest_in_process:
-    x_it(1, "Archive locked in_process without local indicator. Exiting.")
+# FIX: Handle this more gracefully
+if not hmac.compare_digest(aset.raw_hashval, archive_ini_hash) and dest_online:
+    raise RuntimeError("Destination archive.ini out of sync: "
+                        +aset.raw_hashval+" vs "+archive_ini_hash)
 
-
-if aset.vgname in volgroups and options.action != "arch-check":
+if aset.vgname in volgroups and options.action not in ("arch-check","arch-delete","delete"):
     arch_check([], startup=True)
 
 
