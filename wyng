@@ -24,10 +24,11 @@ except:
 # ArchiveSet manages configuration and configured volume info
 
 class ArchiveSet:
+    confname = "archive.ini"
     def __init__(self, name, top, allvols=False, children=True):
         self.name        = name
         self.path        = pjoin(top,name)
-        self.confpath    = pjoin(self.path,"archive.ini")
+        self.confpath    = pjoin(self.path, self.confname)
         self.vols        = {}
         self.dedupindex  = {}
         self.dedupsessions = []
@@ -127,8 +128,9 @@ class ArchiveSet:
 
         for ext in {".tick",".tock"}:          lv_remove(self.vgname, datavol+ext, check=True)
 
-    def rename_volume(self, datavol, newname, confname=""):
+    def rename_volume(self, datavol, newname, confname="", ext=""):
         vol = self.vols[datavol]
+        if newname+ext in os.listdir(self.path):   os.replace(newname+ext, datavol)
         if newname in self.conf["volumes"] or newname+ext in os.listdir(self.path) \
         or self.Volume.volname_check(newname):
             return False
@@ -136,7 +138,8 @@ class ArchiveSet:
         if datavol in self.conf["volumes"] and datavol in self.vols:
             self.conf["volumes"][newname] = self.conf["volumes"][datavol]
             self.vols[newname] = self.vols[datavol]
-            del(self.vols[datavol], self.conf["volumes"][datavol])    ; self.save_conf(ext)
+            del(self.vols[datavol], self.conf["volumes"][datavol])
+            self.save_conf(self.confname+ext)
             shutil.rmtree(self.path+"/"+newname+ext, ignore_errors=True)
             if exists(vol.path):   os.replace(vol.path, aset.path+"/"+newname+ext)
         else:
@@ -961,10 +964,11 @@ elif cmd == "dedup":
                     print(err)   ; raise err
     print(ddcount, "reduced.")
 elif cmd == "rename":
+    catch_signals()    ; oldname = sys.argv[2]    ; newname = sys.argv[3]    ; replaced = False
     if exists(oldname) and exists(newname):   shutil.rmtree(newname)
     if exists(oldname):   replace(oldname, newname)   ; replaced = True
-    if not replaced and exists(newname):   sys.exit(40)
     replace("archive.ini.tmp", "archive.ini")    ; fssync(".")
+    if not replaced and exists(newname):   sys.exit(40)
     if not replaced:   sys.exit(41)
 elif cmd == "get-configs":
     with open(tmpdir+"/tar.lst","w") as tarlstf:
@@ -2762,7 +2766,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.3.0wip"      ; prog_date = "20210710"
+prog_version          = "0.3.0wip"      ; prog_date = "20210813"
 format_version        = 2               ; debug     = False       ; tmpdir = None
 
 # Disk block size:
