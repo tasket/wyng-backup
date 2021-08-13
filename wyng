@@ -16,6 +16,7 @@ from array import array         ; import resource
 
 try:
     import zstd, warnings
+    warnings.filterwarnings("ignore", category=DeprecationWarning, module="zstd")
 except:
     zstd = None
 
@@ -23,7 +24,7 @@ except:
 # ArchiveSet manages configuration and configured volume info
 
 class ArchiveSet:
-    def __init__(self, name, top, allvols=False):
+    def __init__(self, name, top, allvols=False, children=True):
         self.name        = name
         self.path        = pjoin(top,name)
         self.confpath    = pjoin(self.path,"archive.ini")
@@ -60,10 +61,6 @@ class ArchiveSet:
             setattr(self, name, int(cp["var"][name]) \
                                 if name in self.a_ints else cp["var"][name])
 
-        # Fix: Remove filterwarnings when upstream fixes their code...
-        if zstd and self.compression == "zstd":
-            warnings.filterwarnings("ignore", category=DeprecationWarning)
-
         # load volume metadata objects
         for key in cp["volumes"]:
             # conditions when a volume must be loaded:
@@ -72,7 +69,7 @@ class ArchiveSet:
             # - volume specified on command line
             # - no volumes specified (hence all)
             # - deduplication is in effect
-            if allvols or self.in_process or options.from_arch or \
+            if children and allvols or self.in_process or options.from_arch or \
             (cp["volumes"][key] != "disable" and \
             (len(options.volumes)==0 or key in options.volumes or options.dedup)):
                 os.makedirs(pjoin(self.path,key), exist_ok=True)
@@ -131,14 +128,17 @@ class ArchiveSet:
         for ext in {".tick",".tock"}:          lv_remove(self.vgname, datavol+ext, check=True)
 
     def rename_volume(self, datavol, newname, confname=""):
-        if newname in self.conf["volumes"] or newname in os.listdir(self.path) \
+        vol = self.vols[datavol]
+        if newname in self.conf["volumes"] or newname+ext in os.listdir(self.path) \
         or self.Volume.volname_check(newname):
             return False
 
         if datavol in self.conf["volumes"] and datavol in self.vols:
-            self.vols[datavol].save_volinfo()
             self.conf["volumes"][newname] = self.conf["volumes"][datavol]
-            del(self.conf["volumes"][datavol])    ; self.save_conf(fname=confname)
+            self.vols[newname] = self.vols[datavol]
+            del(self.vols[datavol], self.conf["volumes"][datavol])    ; self.save_conf(ext)
+            shutil.rmtree(self.path+"/"+newname+ext, ignore_errors=True)
+            if exists(vol.path):   os.replace(vol.path, aset.path+"/"+newname+ext)
         else:
             print("Config for %s not present." % datavol)
             return False
@@ -182,7 +182,7 @@ class ArchiveSet:
             # load sessions as reverse-linked list, starting with the last;
             # store as dict and sequential list of session names
             if debug:  print("\nVOLUME",self.name, self.first, self.last)
-            sprev = self.last ### if self.last else "None"
+            sprev = self.last
             while sprev != "None":
                 if debug:  print(sprev, end="  ")
                 # instantiate:
@@ -961,11 +961,11 @@ elif cmd == "dedup":
                     print(err)   ; raise err
     print(ddcount, "reduced.")
 elif cmd == "rename":
-    catch_signals()    ; oldname = sys.argv[2]    ; newname = sys.argv[3]    ; replaced = False
-    if exists(oldname) and exists(newname):   sys.exit(50)
+    if exists(oldname) and exists(newname):   shutil.rmtree(newname)
     if exists(oldname):   replace(oldname, newname)   ; replaced = True
+    if not replaced and exists(newname):   sys.exit(40)
     replace("archive.ini.tmp", "archive.ini")    ; fssync(".")
-    if not replaced:   sys.exit(40)
+    if not replaced:   sys.exit(41)
 elif cmd == "get-configs":
     with open(tmpdir+"/tar.lst","w") as tarlstf:
         vols = [sys.argv[2]] if len(sys.argv)>2 else [x.name for x in os.scandir() if x.is_dir()]
@@ -1623,7 +1623,8 @@ def send_volume(datavol, localtime, ses_tags, send_all):
         if retcode != 0:
             raise RuntimeError("tar transport failure code %d" % retcode)
 
-        if ses.volsize != prior_size:   check_manifest_sequence(datavol, vol.sesnames)
+        if ses.volsize != prior_size and len(vol.sessions) > 1:
+            check_manifest_sequence(datavol, vol.sesnames)
 
         # Finalize on VM/remote
         catch_signals()
@@ -2545,25 +2546,23 @@ def rename_volume(oldname, newname):
 
     os.chdir(aset.path)    ; volume   = aset.vols[oldname]
     confname = os.path.basename(aset.confpath)    ; was_in_process = aset.in_process is not None
-    if not aset.rename_volume(oldname, newname, confname=confname+".tmp"):
+    if not aset.rename_volume(oldname, newname, ext=".tmp"):
         x_it(1, "Error: Cannot rename '%s' to '%s'." % (oldname,newname))
 
-    do_exec[[CP.tar, "-czf", tmpdir+"/rename.tgz", confname+".tmp", oldname+"/volinfo"]]
     catch_signals()
     if not aset.in_process:   set_in_process(["rename", oldname, newname])
-    rc = dest_run([ destcd + bkdir + " && tar -xzf - && python3 "
-                   +tmpdir+("-rpc/dest_helper.py rename '%s' '%s'" % (oldname, newname)) ],
-                    infile=tmpdir+"/rename.tgz", check=False, trap=True)
+    if volume.sessions:
+        rc = dest_run([ destcd + bkdir + " && cat >archive.ini.tmp && python3 "
+                    +tmpdir+("-rpc/dest_helper.py rename '%s' '%s'" % (oldname, newname)) ],
+                        infile=aset.confpath+".tmp", check=False, trap=True)
+        if rc not in (0, 40):
+            raise RuntimeError("Destination exit code "+str(rc))
+    else:
+        rc = dest_run([ destcd + bkdir + " && cat >archive.ini"],
+                        infile=aset.confpath+".tmp", trap=True)
 
-    if rc == 50:
-        set_in_process(None)
-        raise RuntimeError("'%s' already exists in destination!")
-
-    if rc not in (0, 40):
-        raise RuntimeError("Destination exit code "+str(rc))
-
-    if oldname in os.listdir(aset.path):
-        os.replace(aset.path+"/"+oldname, aset.path+"/"+newname)
+    if newname+".tmp" in os.listdir(aset.path):
+        os.replace(aset.path+"/"+newname+".tmp", aset.path+"/"+newname)
     os.replace(aset.confpath+".tmp", aset.confpath)
     set_in_process(None)    ; catch_signals(None)
 
@@ -2572,7 +2571,7 @@ def rename_volume(oldname, newname):
         if lv_exists(vg, oldname+ext):   lv_rename(vg, oldname+ext, newname+ext)
 
     full_aset = ArchiveSet(aset.name, metadir+topdir, allvols=True)
-    if rc != 40 and len(full_aset.vols[newname].sessions) \
+    if len(full_aset.vols[newname].sessions) \
     and compare_files(pathlist=[confname], volumes=[full_aset.vols[newname]]):
         x_it(1, "Error: Local and archive metadata differ.")
 
@@ -2731,7 +2730,7 @@ def catch_signals(action="do"):
 
 
 def handle_signal(signum, frame):
-    sys.stderr.write(" *** Caught signal "+signum)
+    sys.stderr.write(" *** Caught signal "+str(signum))
     if signum not in signals_caught:   signals_caught.append(signum)
 
 
@@ -2876,7 +2875,6 @@ shutil.rmtree(big_tmpdir, ignore_errors=True)
 if exists(tmpdir):
     os.rename(tmpdir, tmpdir+"-old")
 os.makedirs(tmpdir+"/rpc")
-os.makedirs(metadir+topdir+"/wyng.old", exist_ok=True)
 os.makedirs(big_tmpdir, exist_ok=True)
 
 
