@@ -34,21 +34,27 @@ except:
 # ArchiveSet manages configuration and configured volume info
 
 class ArchiveSet:
-    confname    = "archive.ini"
-    mhash_sz    = 44                ; max_volumes = 4096
 
-    def __init__(self, name, top, passphrase=None, allvols=False, children=True):
+    confname    = "archive.ini"   ; max_volumes  = 4096           ; volname_len = 112
+    mhash_sz    = 44              ; max_sessions = 16384          ; comment_len = 100
+    sesname_sz  = 17              ; tag_len      = 25             ; max_tags = 5
+    max_conf_sz = (volname_len + comment_len + mhash_sz + 25) * max_volumes + 1000
+    max_infosz  = (tag_len+comment_len + 10) * max_tags + 1000
+    max_volinfosz= (mhash_sz + sesname_sz + 10) * max_sessions + 1000
+
+    def __init__(self, name, top, allvols=False, children=2,
+                 passphrase=None, mcrypto=None, datacrypto=None):
         self.name        = name
         self.path        = pjoin(top,name)
         self.confpath    = pjoin(self.path, self.confname)
         self.vols        = {}
         self.dedupindex  = {}
         self.dedupsessions = []
-        self.mcrypto     = None
-        self.datacrypto  = None
+        self.mcrypto     = mcrypto
+        self.datacrypto  = datacrypto
         self.raw_hashval = None
-        self.max_conf_sz = (volname_len+comment_len+self.mhash_sz+25) * self.max_volumes + 1000
         # persisted:
+        self.format_ver = "0"
         self.chunksize   = bkchunksize
         self.compression = "zstd" if zstd else "zlib"
         self.compr_level = str(compressors[self.compression][1])
@@ -59,7 +65,7 @@ class ArchiveSet:
         self.destdir     = "."
         self.destmountpoint = None
         self.uuid        = None
-        self.updated_at  = None    #### IMPLEMENT
+        self.updated_at  = None
         self.data_cipher = None
         self.in_process  = []
 
@@ -75,9 +81,10 @@ class ArchiveSet:
 
         # init metadata crypto
         if exists(self.path+"/archive.salt"):
-            if not passphrase:   passphrase = ask_passphrase()
-            self.mcrypto = DataCryptography("aes-256-siv", self.path+"/archive.salt",
-                                            slot=1, passphrase=passphrase[:])
+            if not self.mcrypto and not passphrase:   passphrase = ask_passphrase()
+            if not self.mcrypto:
+                self.mcrypto = DataCryptography("aes-256-siv", self.path+"/archive.salt",
+                                                slot=1, passphrase=passphrase[:])
 
         # read attributes from archive.ini file
         with open(self.confpath, "rb") as f:   buf = f.read(self.max_conf_sz)
@@ -85,13 +92,19 @@ class ArchiveSet:
         if self.mcrypto:   buf = self.mcrypto.decrypt(buf)
         if options.debug:   print(gzip.decompress(buf).decode("UTF-8"))
         cp.read_string(gzip.decompress(buf).decode("UTF-8"))
-        self.a_ints      = {"chunksize"}
+        self.a_ints      = ("format_ver","chunksize")
         for key, value in cp["var"].items():
             setattr(self, key, int(value) if key in self.a_ints else value)
         self.in_process  = [ ln for ln in cp["in_process"].values() ]
 
+        if int(self.format_ver) > format_version:
+            raise ValueError("Archive format ver = "+self.format_ver+
+                                ". Expected = "+format_version)
+        elif self.format_ver == "0":
+            raise ValueError("No format_version; Alpha archive?")
+
         # init data crypto
-        if self.mcrypto:
+        if self.mcrypto and not self.datacrypto:
             assert passphrase and passphrase != bytes(len(passphrase))
             self.datacrypto = DataCryptography(self.data_cipher, self.path+"/archive.salt",
                                                slot=0, passphrase=passphrase)
@@ -111,8 +124,8 @@ class ArchiveSet:
             if children and (allvols or self.in_process or options.from_arch or \
             (len(options.volumes)==0 or key in options.volumes or options.dedup)):
                 # instantiate:
-                self.vols[key] = self.Volume(self, vid, key, hashval,
-                                             pjoin(self.path,vid), self.vgname)
+                self.vols[key] = self.Volume(self, vid, key, hashval, pjoin(self.path,vid),
+                                             self.vgname, children=children)
                 if options.dedup:   self.dedupsessions += self.vols[key].sessions.values()
 
         # Create master session list sorted for deduplication
@@ -121,6 +134,8 @@ class ArchiveSet:
 
     def save_conf(self, ext=""):
         c = self.conf['var']
+        c['updated_at']  = self.updated_at = str(time.time())
+        c['format_ver']  = str(format_version)
         c['chunksize']   = str(self.chunksize)
         c['compression'] = self.compression
         c['compr_level'] = self.compr_level
@@ -237,28 +252,26 @@ class ArchiveSet:
 
 
     class Volume:
-        def __init__(self, archive, vid, name, hashval, path, vgname):
+
+        def __init__(self, archive, vid, name, hashval, path, vgname, children=2):
             self.vid     = vid                       ; self.name    = name
             self.archive = archive                   ; self.path    = path
             self.vgname  = vgname                    ; self.mapfile = path+"/deltamap"
             self.sessions= {}                        ; self.sesnames= []
-            self.first   = self.last = "None"        ; self.meta_checked = False
+            self.first   = self.last = "None"        ; self.meta_checked = False ####
             self.tags    = {}
             # persisted:
-            self.format_ver = "0"    #### move to archive
-            self.last_uuid= None     #### implement
-            self.desc    = ""
+            self.last_uuid  = None     #### implement
+            self.desc       = ""
             # other:
             self.changed_bytes = 0
-            self.max_infosz = (tag_len+comment_len+10) * max_tags + 1000
-            self.max_volinfosz= (self.archive.mhash_sz+self.Ses.sesname_sz+10) + 1000
 
             # load volume info
             if path:   os.makedirs(path, exist_ok=True)
             if path and hashval != "0":
                 with open(pjoin(path,"volinfo"), "rb") as f:
                     fsize = f.seek(0,2)   ; f.seek(0)
-                    if fsize > self.max_volinfosz:   raise ValueError("volinfo too large")
+                    if fsize > ArchiveSet.max_volinfosz:   raise ValueError("volinfo too large")
                     buf = f.read(fsize)
                 if self.archive.mcrypto:   buf = self.archive.mcrypto.decrypt(buf)
                 assert hmac.compare_digest(hashval, self.archive.b64hash(buf))
@@ -267,7 +280,8 @@ class ArchiveSet:
                         vname, value = ln.split("=", maxsplit=1)
                         vname = vname.strip()    ; value = value.strip()
                         if vname.startswith("S_"):
-                            self.sessions[vname] = self.Ses(self, vname, value, path+"/"+vname)
+                            self.sessions[vname] = self.Ses(self, vname, value,
+                                                            path+"/"+vname if children > 1 else "")
                         else:
                             setattr(self, vname, value)
 
@@ -276,15 +290,28 @@ class ArchiveSet:
             self.sesnames = sesnames = [y.name for y in seslist]
             if sesnames:   self.first = sesnames[0]   ; self.last = sesnames[-1]
 
-            if int(self.format_ver) > format_version:
-                raise ValueError("Archive format ver = "+self.format_ver+
-                                 ". Expected = "+format_version)
-            elif self.format_ver == "0" and len(self.sessions):
-                raise ValueError("No format_version; Alpha archive?")
-
             if exists(pjoin(path,"volchanged")):
                 self.changed_bytes = int(open(pjoin(path,"volchanged"),"r").readlines()[0].strip())
 
+
+        def save_volinfo(self, ext=""):
+            os.makedirs(self.path, exist_ok=True)   ; fname = "volinfo"
+            with io.StringIO() as f:
+                print("last_uuid =", self.last_uuid, file=f)
+             ####   if not prune:   self.desc = options.voldesc.strip()[:comment_len]
+                print("desc =", self.desc, file=f)
+                for ses in self.sessions.values():
+                    print(ses.name, "=", ses.hashval, file=f)
+
+                buf = self.archive.compress(f.getvalue().encode("UTF-8"),
+                                            int(self.archive.compr_level))
+                self.archive.conf["volumes"][self.name] = self.vid+" "+self.archive.b64hash(buf)
+
+            if self.archive.mcrypto:   buf = self.archive.mcrypto.encrypt(buf)
+            with open(pjoin(self.path,fname+ext), "wb") as f:
+                f.write(buf)
+                f.flush()    ; os.fsync(f.fileno())
+            self.archive.save_conf(ext)
 
         def volname_check(vname):
             check = re.compile(alphanumsym)
@@ -309,26 +336,6 @@ class ArchiveSet:
             if not volume_size:
                 volume_size = self.volsize()
             return (volume_size // self.archive.chunksize // 8) + 1
-
-        def save_volinfo(self, ext=""):
-            os.makedirs(self.path, exist_ok=True)   ; fname = "volinfo"
-            with io.StringIO() as f:
-                print("format_ver =", format_version, file=f)
-                print("last_uuid =", self.last_uuid, file=f)
-             ####   if not prune:   self.desc = options.voldesc.strip()[:comment_len]
-                print("desc =", self.desc, file=f)
-                for ses in self.sessions.values():
-                    print(ses.name, "=", ses.hashval, file=f)
-
-                buf = self.archive.compress(f.getvalue().encode("UTF-8"),
-                                            int(self.archive.compr_level))
-                self.archive.conf["volumes"][self.name] = self.vid+" "+self.archive.b64hash(buf)
-
-            if self.archive.mcrypto:   buf = self.archive.mcrypto.encrypt(buf)
-            with open(pjoin(self.path,fname+ext), "wb") as f:
-                f.write(buf)
-                f.flush()    ; os.fsync(f.fileno())
-            self.archive.save_conf(ext)
 
         def changed_bytes_add(self, amount, reset=False, save=False):
             if reset:
@@ -396,13 +403,12 @@ class ArchiveSet:
         class Ses:
             attr_str  = ("localtime","previous","uuid","manifesthash")
             attr_int  = ("volsize","sequence")
-            sesname_sz= 17
 
             def __init__(self, volume, name, hashval, path="", addtags={}):
                 self.volume   = volume;  self.archive = self.volume.archive
                 self.name     = name
                 self.path     = path
-                self.saved    = False
+                self.saved    = self.loaded = False
                 self.toggle   = True
                 self.hashval  = hashval
                 self.meta_checked = False ####
@@ -418,8 +424,8 @@ class ArchiveSet:
 
                 if path and hashval != "0":
                     with open(pjoin(path,"info"), "rb") as sf:
-                        fsize = sf.seek(0,2)   ; sf.seek(0)
-                        if fsize > self.volume.max_infosz:   raise ValueError("info too large")
+                        fsize = os.fstat(sf.fileno()).st_size
+                        if fsize > ArchiveSet.max_infosz:   raise ValueError("info too large")
                         buf = sf.read(fsize)
                     if self.archive.mcrypto:   buf = self.archive.mcrypto.decrypt(buf)
                     assert hmac.compare_digest(hashval, self.archive.b64hash(buf))
@@ -436,9 +442,9 @@ class ArchiveSet:
                             setattr(self, vname, 
                                 int(value) if vname in self.attr_int else value)
 
-                    if not exists(pjoin(path,"manifest.z")):
-                        raise FileNotFoundError("ERROR: Manifest does not exist for "+name)
-                    self.saved = True
+                    #if not exists(pjoin(path,"manifest.z")):
+                        #raise FileNotFoundError("ERROR: Manifest does not exist for "+name)
+                    self.saved = self.loaded = True
                     self.manifest_max = self.volsize // self.archive.chunksize * ((256//4) + 20)
 
                 for tag in addtags:   self.tag_add(tag)
@@ -447,18 +453,19 @@ class ArchiveSet:
             def tag_parse(self, tag, delim=" "):
                 parts = tag.strip().split(delim, maxsplit=1)    ; tag_id = parts[0].strip().lower()
                 result = tuple()
-                if len(tag_id) > tag_len:
-                    sys.stderr.write("Error: Max "+tag_len+" alphanumeric chars for tag ID.\n")
+                if len(tag_id) > ArchiveSet.tag_len:
+                    sys.stderr.write("Error: Max "+ArchiveSet.tag_len+" alphanumeric chars for tag ID.\n")
                 elif not re.match(alphanumsym, tag_id):
                     sys.stderr.write("Error: Allowed tag ID chars are "+alphanumsym+"\n")
                 elif tag_id == "all":
                     sys.stderr.write("Error: tag 'all' is reserved.")
                 else:
-                    result = (tag_id, "" if len(parts) == 1 else parts[1].strip()[:comment_len])
+                    result = (tag_id, "" if len(parts) == 1 else parts[1].strip()[:ArchiveSet.comment_len])
                 return result
 
             def tag_add(self, tag):
-                if len(self.tags) >= max_tags:   x_it(1, max_tags+" maximum tags.")
+                if len(self.tags) >= ArchiveSet.max_tags:
+                    x_it(1, ArchiveSet.max_tags+" maximum tags.")
                 self.saved = False    ; voltags = self.volume.tags    ; tid = tag[0]
                 if tid not in self.tags:   self.tags[tid] = tag[1]
                 if tid in voltags:
@@ -498,9 +505,9 @@ class ArchiveSet:
 # DataCryptography(): Handle crypto functions and state for volume data
 
 class DataCryptography():
-
-    crypto_key_bits = 256        ; max_ct_bits = 128
+    crypto_key_bits = 256        ; max_ct_bits = 128      ; total_keyfile_sz = 150
     crypto_ciphers  = {"aes-256-siv", "aes-256-cbc", "xchacha20"}
+
 
     def __init__(self, ci_type, keyfile, slot, passphrase, init=False):
         assert passphrase is None or type(passphrase) == bytearray
@@ -773,14 +780,15 @@ def fssync(path):
 def ask_passphrase(verify=False, recur=0):
     if recur > 5:   x_it(1, "Max retries on input.")
     passphrase  = bytearray(getpass.getpass("Enter passphrase: "), encoding="UTF-8")
-    if verify:
+    if verify and not options.unattended:
         if len(passphrase) < 10:
             print("Passphrase must be 10 or more characters.")
             clear_array(passphrase)
-            return ask_passphrase(verify=True, recur=recur+1)
+            passphrase = ask_passphrase(verify=True, recur=recur+1)
         passphrase2 = bytearray(getpass.getpass("Re-enter passphrase: "), encoding="UTF-8")
         if passphrase != passphrase2:
             clear_array(passphrase)    ; passphrase=None
+            x_it(1, "Entries do not match.")
         clear_array(passphrase2)
     return passphrase
 
@@ -836,8 +844,6 @@ def arch_init(aset):
         # Security Enh: Possibly use mmap+mlock to store passphrase/key values,
         #               and wipe them from RAM after use.
         passphrase      = ask_passphrase(verify=True)
-        if passphrase is None:   x_it(1, "Entries do not match.")
-
         aset.mcrypto    = DataCryptography("aes-256-siv", aset.path+"/archive.salt", slot=1,
                                            passphrase=passphrase[:], init=True)
         aset.datacrypto = DataCryptography(aset.data_cipher, aset.path+"/archive.salt", slot=0,
@@ -1015,7 +1021,7 @@ def check_manifest_sequence(datavol, sesnames):
 
 def get_configs(opts):
     aname = "default"    ; bkdir = topdir + "/" + aname
-    load_children = opts.action not in ("arch-delete","delete","add")
+    load_children = 0 if opts.action in ("arch-delete","delete","add") else 2
 
     if opts.from_arch:
         # Prepare a temporary metadata dir and init aset with it
@@ -1028,7 +1034,6 @@ def get_configs(opts):
  
     if opts.action == "arch-init" and not aset.destmountpoint:
         arch_init(aset)
-        #### x_it(0, "Done.")
     elif opts.action == "arch-init":
         x_it(1, "Archive already initialized for "+aset.name)
     if not aset.destmountpoint:
@@ -1036,45 +1041,92 @@ def get_configs(opts):
 
     return aset
 
-#REFACTOR
+
+def fetch_file_blobs(recv_list, ext=""):
+    cmd = dest_run_args(desttype,
+            [destcd + bkdir
+             +" && exec 2>>"+tmpdir+"-rpc/receive.log"
+             +" && python3 "+tmpdir+"-rpc/dest_helper.py receive"
+            ])
+    recvp = subprocess.Popen(cmd, stdout=subprocess.PIPE, stdin=subprocess.PIPE)
+    recvp.stdin.write(("".join((x+"\n" for x,y in recv_list))).encode("UTF-8"))
+    recvp.stdin.flush()    ; rc = recvp.poll()
+    for fname, fsz in list(recv_list):
+        if rc is not None:   raise RuntimeError("Process terminated early.")
+        # Read chunk size
+        untrusted_size = int.from_bytes(recvp.stdout.read(4),"big")
+        if untrusted_size > fsz or not untrusted_size:
+            raise BufferError("Bad file size "+untrusted_size)
+
+        # Size is OK.
+        size = untrusted_size
+        # Read chunk buffer
+        untrusted_buf = recvp.stdout.read(size)    ; rc  = recvp.poll()
+        if len(untrusted_buf) != size:
+            with open(tmpdir+"/bufdump", "wb") as dump:   dump.write(untrusted_buf)
+            raise BufferError("Got %d bytes, expected %d" % (len(untrusted_buf), size))
+
+        os.makedirs(os.path.dirname(aset.path+"/"+fname), exist_ok=True)
+        with open(aset.path+"/"+fname+ext, "wb") as outf:   outf.write(untrusted_buf)
+
+
 def get_configs_remote():
     make_local = options.action == "arch-init"
-    if not options.unattended:
-        print("\nMetadata will be read from the archive;"
-              "\nPlease check that the archive is in a trusted, secure condition!")
-        ans = ask_input("Proceed? [y/N] ")
-        if ans.lower() not in ("y","yes"):
-            x_it(0,"Stopped.")
 
-    do_exec([dest_run_args(desttype, [destcd + bkdir
-                    +" && "+CP.python+" "+tmpdir+"-rpc/dest_helper.py get-configs "
-                    +(options.volumes[0] if len(options.volumes)>0 and not make_local else "")]),
-             [CP.tar, "-xzf", "-"]], cwd=aset.path)
+    recv_list = (("archive.ini",  ArchiveSet.max_conf_sz),
+                 ("archive.salt", DataCryptography.total_keyfile_sz))
+    fetch_file_blobs(recv_list, ext=".auth_req")
+    if not exists(aset.path+"/archive.salt.auth_req"):
+        raise NotImplementedError("Fetch config without key data.") # Fix
 
-    if not exists(aset.path+"/archive.ini"):
-        x_it(1,"Failed to retrieve remote configuration: No info.")
+    # Instantiate ArchiveSet to authenticate archive.ini
+    for fname, fsz in recv_list:   os.replace(aset.path+"/"+fname+".auth_req", aset.path+"/"+fname)
+    new_aset = ArchiveSet(aset.name, os.path.dirname(aset.path), children=0)
+    mcrypto  = new_aset.mcrypto    ; datacrypto = new_aset.datacrypto
+    assert isinstance(mcrypto, DataCryptography) and isinstance(datacrypto, DataCryptography)
+
+    # Initial auth successful! Fetch + auth volume metadata...
+    mcrypto  = new_aset.mcrypto    ; datacrypto = new_aset.datacrypto
+    recv_list= [(x.split()[0]+"/volinfo", ArchiveSet.max_volinfosz)
+                 for x in new_aset.conf["volumes"].values()]
+    fetch_file_blobs(list(recv_list))
+    new_aset = ArchiveSet(aset.name, os.path.dirname(aset.path), children=1,
+                          mcrypto=mcrypto, datacrypto=datacrypto)
+
+    # Fetch + auth session metadata... use list flattener
+    ses_list =[(x.name, x.volume.name) for sub in
+               (vol.sessions.values() for vol in new_aset.vols.values()) for x in sub]
+    fetch_file_blobs([(new_aset.vols[y].vid+"/"+x+"/info",
+                       ArchiveSet.max_infosz) for x,y in ses_list])
+    new_aset = ArchiveSet(new_aset.name, os.path.dirname(new_aset.path), children=2,
+                          mcrypto=mcrypto, datacrypto=datacrypto)
+
+    fetch_file_blobs([(new_aset.vols[y].vid+"/"+x+"/manifest.z",
+                       new_aset.vols[y].sessions[x].manifest_max) for x,y in ses_list])
+    for vol in new_aset.vols.values():   vol.decode_manifests(vol.sesnames, force=True)
 
     if make_local:
-        if exists(metadir+bkdir):   shutil.rmtree(metadir+bkdir)
-        # Assumes aset.path is same fs as metadir! See get_configs().
-        os.rename(aset.path, metadir+bkdir)
-        new_path = metadir+topdir
+        if exists(metadir+bkdir) :  shutil.rmtree(metadir+bkdir)
+        new_path = metadir+topdir;  shutil.move(aset.path, new_path)
+        new_aset = ArchiveSet(aset.name, new_path, mcrypto=mcrypto, datacrypto=datacrypto)
     else:
         new_path = os.path.dirname(aset.path)
 
-    # Create final ArchiveSet object with imported config & current dest+local
-    new_aset = ArchiveSet(aset.name, new_path)   ; new_aset.destsys = aset.destsys
-    new_aset.destdir = aset.destdir              ; new_aset.destmountpoint= aset.destmountpoint
+    # Configure final ArchiveSet object with imported config & current dest+local
+    update = False
+    for attr in ("destsys","destdir","destmountpoint"):
+        aval = getattr(aset, attr)
+        if getattr(new_aset, attr) != aval:   setattr(new_aset, attr, aval)   ; update = True
     if options.local:
         vgname, poolname = options.local.split("/")
         if not vg_exists(vgname):
             print("Warning: Volume group '%s' does not exist." % vgname)
         if not lv_exists(vgname, poolname):
             print("Warning: LV pool '%s' does not exist." % poolname)
-        new_aset.vgname   = vgname    ; new_aset.poolname = poolname
+        new_aset.vgname   = vgname    ; new_aset.poolname = poolname    ; update = True
         lvm_meta_snapshot(new_aset, "release")
 
-    new_aset.save_conf()
+    if make_local and update:   new_aset.save_conf()    ; update_dest([new_aset.confname])
     return new_aset
 
 
@@ -1250,18 +1302,6 @@ elif cmd == "dedup":
                     if exists(dest+"-lnk"):   remove(dest+"-lnk")
                     print(err)   ; raise err
     print(ddcount, "reduced.")
-
-#REFACTOR
-elif cmd == "get-configs":
-    with open(tmpdir+"/tar.lst","w") as tarlstf:
-        vols = [sys.argv[2]] if len(sys.argv)>2 else [x.name for x in os.scandir() if x.is_dir()]
-        for volname in vols:
-            if exists(volname+"/volinfo"):   print(volname+"/volinfo", file=tarlstf)
-            for ses in os.scandir(volname):
-                if ses.is_dir() and ses.name.startswith("S_") and not ses.name.endswith("-tmp"):
-                    for f in ("info","manifest"):   print(volname+"/"+ses.name+"/"+f, file=tarlstf)
-    p = subprocess.check_call(["tar","-czf","-","--no-recursion","--verbatim-files-from",
-    "--files-from="+tmpdir+"/tar.lst","archive.ini"])
     '''
     with open(tmpdir +"/rpc/dest_helper.py", "wb") as progf:
         progf.write(bytes(dest_program, encoding="UTF=8"))
@@ -2041,7 +2081,7 @@ def monitor_send(datavols, selected=[], monitor_only=True):
             tag = aset.Volume.Ses.tag_parse(None, ans, delim=",")
             if not tag:   continue
             ses_tags.append(tag)
-            if len(ses_tags) == max_tags:   break
+            if len(ses_tags) == ArchiveSet.max_tags:   break
         print(len(ses_tags), "tags total.")
     elif options.tag and not monitor_only:
         for tag_opt in options.tag:
@@ -2250,7 +2290,7 @@ def autoprune(datavol, needed_space=0, apmode="off", include=set()):
                     for dses in apcal[span+bigday]:
                         if dses[1]:
                             # always decr bigday, but don't toggle if session is excluded
-                            dlist[bigday] -= 1     #### ; print("_",end="") ####
+                            dlist[bigday] -= 1
                             dses[1] = vol.sessions[dses[0]].toggle = dses[0] in exclude
                             break
 
@@ -2264,7 +2304,6 @@ def autoprune(datavol, needed_space=0, apmode="off", include=set()):
                 if to_prune:
                     # prioritize ranges that overlap with requested includes
                     if include and not (set(to_prune) & include):
-                        #print("#", end="") ####
                         to_prune.clear()    ; skipped = True    ; continue
 
                     target_s = vol.sesnames[vol.sesnames.index(to_prune[-1]) + 1]
@@ -2274,7 +2313,6 @@ def autoprune(datavol, needed_space=0, apmode="off", include=set()):
                     include -= set(to_prune)    ; removed_ct += len(to_prune);   to_prune.clear()
                     if not include and nthresh and removed_ct >= nthresh*factor:  break # for ses
             else:
-                #print(".", end="") ####
                 to_prune.append(ses)
 
         if removed_ct:
@@ -3064,8 +3102,7 @@ local_actions         = ("monitor","list","version")
 write_actions         = ("add","send","prune","delete","rename","arch-delete","arch-deduplicate")
 dest_actions          = ("receive","verify","diff","arch-check","arch-init") + write_actions
 
-comment_len = 100             ; tag_len = 25                 ; max_tags = 5
-volname_len = 112             ; alphanumsym = "^[a-zA-Z0-9\+\._-]+$"
+alphanumsym = "^[a-zA-Z0-9\+\._-]+$"
 pjoin       = os.path.join    ; exists = os.path.exists
 
 
@@ -3186,7 +3223,6 @@ aset = destsys = desttype = dest_run_map = dest_online = dest_free = dest_writab
 aset = get_configs(options)
 destsys, desttype= detect_internal_state()
 dest_online, dest_free, dest_writable, archive_ini_hash  = detect_dest_state(destsys)
-print("Archive last updated:", aset.updated_at)
 
 bkdir            = topdir+"/"+aset.name
 destpath         = os.path.normpath(pjoin(aset.destmountpoint,aset.destdir))
@@ -3203,7 +3239,8 @@ if not dest_online and (options.remap or options.from_arch \
 
 if options.from_arch:
     aset         = get_configs_remote()
-#### os.makedirs(metadir+bkdir, exist_ok=True)
+
+print("Archive last updated:", aset.updated_at)
 
 # Set 'l_vols' to reference selected volgroup and check for orphan snapshots
 if aset.vgname in volgroups:   l_vols = volgroups[aset.vgname].lvs
