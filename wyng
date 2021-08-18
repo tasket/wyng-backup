@@ -41,6 +41,7 @@ class ArchiveSet:
     max_conf_sz = (volname_len + comment_len + mhash_sz + 25) * max_volumes + 1000
     max_infosz  = (tag_len+comment_len + 10) * max_tags + 1000
     max_volinfosz= (mhash_sz + sesname_sz + 10) * max_sessions + 1000
+    attr_ints   = {"format_ver","chunksize"}                      ; attr_float = {"updated_at"}
 
     def __init__(self, name, top, allvols=False, children=2,
                  passphrase=None, mcrypto=None, datacrypto=None):
@@ -87,22 +88,21 @@ class ArchiveSet:
                                                 slot=1, passphrase=passphrase[:])
         ###elif check options.crypto and/or passphrase, throw exception
 
-        # read attributes from archive.ini file
+        # decode archive.ini file
         with open(self.confpath, "rb") as f:   buf = f.read(self.max_conf_sz)
         self.raw_hashval = hashlib.sha256(buf).hexdigest()
         if self.mcrypto:   buf = self.mcrypto.decrypt(buf)
         if options.debug:   print(gzip.decompress(buf).decode("UTF-8"))
+
+        # read attributes from archive.ini
         cp.read_string(gzip.decompress(buf).decode("UTF-8"))
-        self.a_ints      = ("format_ver","chunksize")
         for key, value in cp["var"].items():
-            setattr(self, key, int(value) if key in self.a_ints else value)
+            setattr(self, key, int(value) if key in self.attr_ints else value)
         self.in_process  = [ ln for ln in cp["in_process"].values() ]
 
-        if self.format_ver > format_version:
+        if self.format_ver > format_version or not self.format_ver:
             raise ValueError("Archive format ver = "+str(self.format_ver)+
                                 ". Expected = "+str(format_version))
-        elif self.format_ver == 0:
-            raise ValueError("No format_version; Alpha archive?")
 
         # init data crypto
         if self.mcrypto and not self.datacrypto:
@@ -168,14 +168,21 @@ class ArchiveSet:
         #if not tmp:   os.replace(self.confpath+".tmp", self.confpath)
         if dest:      update_dest(pathlist=[self.confname], ext=".tmp" if tmp else "")
 
-    def add_volume(self, datavol, ext=""):
+    def add_volume(self, datavol, desc="", ext=""):
+        errs = []
         if len(self.conf["volumes"]) >= self.max_volumes:   x_it(1, "Too many volumes")
         if datavol in self.conf["volumes"]:
-            print(datavol+" is already configured.")    ; return False
+            print(datavol+" is already configured.")    ; return None
 
         namecheck = self.Volume.volname_check(datavol)
         if namecheck:
-            sys.stderr.write(namecheck+"\n")   ; error_cache.append(datavol)  ; return False
+            errs.append(namecheck+"\n")
+        if len(desc.encode("UTF-8")) > self.comment_len:
+            errs.append("Error: Max "+self.comment_len+" size for volume desc.\n")
+        if not desc.isprintable():
+            errs.append("Error: [^control] not allowed in volume desc.\n")
+        if errs:
+            sys.stderr.write("".join(errs))    ; error_cache.append(datavol)    ; return None
 
         while True:
             vid = "Vol_"+os.urandom(2).hex()
@@ -187,13 +194,15 @@ class ArchiveSet:
                              "by a Wyng snapshot from a different archive!\n" % datavol)
 
         self.conf["volumes"][datavol] = vid + " 0"
-        self.save_conf(ext)    ; print("Volume", datavol, "added to archive config.")
-        return True
+        self.vols[datavol] = vol = self.Volume(self, vid, datavol, "0", pjoin(self.path,vid),
+                                               self.vgname, children=0)
+        vol.save_volinfo(ext)
+        return vol
 
     def delete_volume(self, datavol):
         vid = None
         if datavol in self.conf["volumes"]:
-            vid, hashval = self.conf["volumes"].split(maxsplit=1)
+            vid, _ = self.conf["volumes"][datavol].strip().split(maxsplit=1)
             del(self.conf["volumes"][datavol])
             self.save_conf()
             if exists(pjoin(self.path,vid)):      shutil.rmtree(pjoin(self.path,vid))
@@ -301,7 +310,6 @@ class ArchiveSet:
             os.makedirs(self.path, exist_ok=True)   ; fname = "volinfo"
             with io.StringIO() as f:
                 print("last_uuid =", self.last_uuid, file=f)
-             ####   if not prune:   self.desc = options.voldesc.strip()[:comment_len]
                 print("desc =", self.desc, file=f)
                 for ses in self.sessions.values():
                     print(ses.name, "=", ses.hashval, file=f)
@@ -322,8 +330,8 @@ class ArchiveSet:
                 return "Only characters A-Z 0-9 . + _ - are allowed in volume names."
             if vname in (".",".."):
                 return "Bad volume name."
-            if len(vname) > volname_len:
-                return "Volume name must be %d characters or less." % volname_len
+            if len(vname) > ArchiveSet.volname_len:
+                return "Volume name must be %d characters or less." % ArchiveSet.volname_len
 
             return "" # OK
 
@@ -454,16 +462,24 @@ class ArchiveSet:
 
 
             def tag_parse(self, tag, delim=" "):
-                parts = tag.strip().split(delim, maxsplit=1)    ; tag_id = parts[0].strip().lower()
-                result = tuple()
-                if len(tag_id) > ArchiveSet.tag_len:
-                    sys.stderr.write("Error: Max "+ArchiveSet.tag_len+" alphanumeric chars for tag ID.\n")
-                elif not re.match(alphanumsym, tag_id):
-                    sys.stderr.write("Error: Allowed tag ID chars are "+alphanumsym+"\n")
-                elif tag_id == "all":
-                    sys.stderr.write("Error: tag 'all' is reserved.")
-                else:
-                    result = (tag_id, "" if len(parts) == 1 else parts[1].strip()[:ArchiveSet.comment_len])
+                result = tuple()    ; errs = []      ; parts = tag.strip().split(delim, maxsplit=1)
+                tag_id = parts[0].strip().lower()    ; comment = parts[1].strip()
+
+                if len(tag_id.encode("UTF-8")) > ArchiveSet.tag_len:
+                    errs.append("Error: Max "+ArchiveSet.tag_len+" size for tag ID.\n")
+                if len(comment.encode("UTF-8")) > ArchiveSet.comment_len:
+                    errs.append("Error: Max "+ArchiveSet.comment_len+" size for comment.\n")
+                if re.match(".*[,=\^]", tag_id) or any(map(str.isspace, tag_id)) \
+                or not tag_id.isprintable():
+                    errs.append("Error: [^control], [space], and ',^=' not allowed in tag ID.\n")
+                if not comment.isprintable():
+                    errs.append("Error: [^control] not allowed in tag comment.\n")
+                if tag_id == "all":   errs.append("Error: tag 'all' is reserved.\n")
+                sys.stderr.write("".join(errs))
+
+                if not errs:
+                    result = (tag_id, "" if len(parts) == 1
+                                         else parts[1].strip()[:ArchiveSet.comment_len])
                 return result
 
             def tag_add(self, tag):
@@ -1491,9 +1507,9 @@ def dest_run_args(dest_type, commands, trap=False):
 
 
 def update_dest(pathlist=[], volumes=[], sessions=[], ext="", dcd="", lcd="", delete=False):
-    update_list =  pathlist + [x.vid+"/volinfo" for x in volumes] \
-                            + [x.volume.vid+"/"+x.name+"/info" for x in sessions] \
-                            + [x.volume.vid+"/"+x.name+"/manifest.z" for x in sessions]
+    update_list = [x.vid+"/volinfo" for x in volumes] \
+                + [x.volume.vid+"/"+x.name+"/info" for x in sessions] \
+                + [x.volume.vid+"/"+x.name+"/manifest.z" for x in sessions] + pathlist
     dcd  = destcd+bkdir + (" && cd '"+dcd+"'" if dcd else "")
     if not lcd:   lcd = aset.path
 
@@ -2883,14 +2899,17 @@ def rename_volume(oldname, newname):
     return full_aset
 
 
-def add_volume(datavol):
+def add_volume(datavol, desc):
     if not lv_exists(aset.vgname, datavol):   print("Warning:", datavol, "does not exist.")
-    if not aset.add_volume(datavol, ext=".tmp"):   return
+    vol = aset.add_volume(datavol, desc=desc, ext=".tmp")
+    if not vol:   return
 
     catch_signals()
-    update_dest(pathlist=[aset.confname], ext=".tmp")
+    update_dest(pathlist=[aset.confname], volumes=[vol], ext=".tmp")
+    os.replace(pjoin(vol.path, vol.vid, "volinfo.tmp"), pjoin(vol.path, vol.vid, "volinfo"))
     os.replace(aset.confpath+".tmp", aset.confpath)
     catch_signals(None)
+    print("Volume", datavol, "added to archive config.")
 
 
 # Remove a volume from the archive
@@ -2911,10 +2930,7 @@ def delete_volume(dv):
     catch_signals()
     if not aset.in_process:       aset.set_in_process(["delete", dv])
     dvid = aset.delete_volume(dv)
-
-    confname = os.path.basename(aset.confpath)
-    dest_run([destcd + bkdir + "  && cat >"+confname + "  && { sync -f . || sync; }"],
-             infile=aset.confpath)
+    update_dest(pathlist=[aset.confname])
     aset.set_in_process(None)
 
     if dvid:
@@ -3362,7 +3378,7 @@ elif options.action == "add":
         x_it(1, "Volume name(s) required for 'add'.")
 
     for dv in options.volumes:
-        if dv not in aset.vols:   add_volume(dv)
+        if dv not in aset.vols:   add_volume(dv, options.voldesc)
 
 
 elif options.action == "rename":
