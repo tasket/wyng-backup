@@ -237,8 +237,9 @@ class ArchiveSet:
                 print("uuid =", self.uuid if self.uuid else str(uuid.uuid4()), file=f)
                 print("first =", self.first, file=f)
                 print("last =", self.last, file=f)
-
-                if not prune:   self.desc = options.voldesc.strip()[:comment_len]
+                if not prune and options.voldesc:
+                    self.desc = "".join(filter(str.isprintable,
+                                               options.voldesc.strip()))[:comment_len]
                 print("desc =", self.desc, file=f)
                 print("que_meta_update =", self.que_meta_update, file=f)
                 f.flush()    ; os.fsync(f.fileno())
@@ -340,12 +341,12 @@ class ArchiveSet:
 
 
             def tag_parse(self, tag, delim=" "):
-                parts = tag.strip().split(delim, maxsplit=1)    ; tag_id = parts[0].strip().lower()
-                result = tuple()
+                parts = "".join(filter(str.isprintable, tag.strip())).split(delim, maxsplit=1)
+                tag_id = parts[0].strip().lower()    ; result = tuple()
                 if len(tag_id) > tag_len:
-                    sys.stderr.write("Error: Max "+tag_len+" alphanumeric chars for tag ID.\n")
-                elif not re.match(alphanumsym, tag_id):
-                    sys.stderr.write("Error: Allowed tag ID chars are "+alphanumsym+"\n")
+                    sys.stderr.write("Error: Max "+tag_len+" chars for tag ID.\n")
+                elif re.match(".*[,=\^]", tag_id) or any(map(str.isspace, tag_id)):
+                    sys.stderr.write("Error: [space] and ',=^' chars not allowed.\n")
                 elif tag_id == "all":
                     sys.stderr.write("Error: tag 'all' is reserved.")
                 else:
