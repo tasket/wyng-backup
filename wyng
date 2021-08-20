@@ -38,10 +38,10 @@ class ArchiveSet:
     confname    = "archive.ini"   ; max_volumes  = 4096           ; volname_len = 112
     mhash_sz    = 44              ; max_sessions = 16384          ; comment_len = 100
     sesname_sz  = 17              ; tag_len      = 25             ; max_tags = 5
+
     max_conf_sz = (volname_len + comment_len + mhash_sz + 25) * max_volumes + 1000
     max_infosz  = (tag_len+comment_len + 10) * max_tags + 1000
     max_volinfosz= (mhash_sz + sesname_sz + 10) * max_sessions + 1000
-    attr_ints   = {"format_ver","chunksize"}                      ; attr_float = {"updated_at"}
 
     def __init__(self, name, top, allvols=False, children=2,
                  passphrase=None, mcrypto=None, datacrypto=None):
@@ -55,7 +55,8 @@ class ArchiveSet:
         self.datacrypto  = datacrypto
         self.raw_hashval = None
         # persisted:
-        self.format_ver = 0
+        self.attr_ints   = {"format_ver","chunksize"}
+        self.format_ver  = 0
         self.chunksize   = bkchunksize
         self.compression = "zstd" if zstd else "zlib"
         self.compr_level = str(compressors[self.compression][1])
@@ -112,6 +113,7 @@ class ArchiveSet:
 
         self.compress    = compressors[self.compression][2]
         self.decompress  = compressors[self.compression][0].decompress
+        self.gethash     = hash_funcs[self.hashtype]
 
         # load volume metadata objects
         for key, value in cp["volumes"].items():
@@ -227,8 +229,7 @@ class ArchiveSet:
         return True
 
     def b64hash(self, buf):
-        h = hash_funcs[self.hashtype](buf).digest()
-        return base64.urlsafe_b64encode(h).decode("UTF-8")
+        return base64.urlsafe_b64encode(self.gethash(buf).digest()).decode("ascii")
 
     def encode_file(self, fname, dest=None, get_digest=True, compress=True):
         # Enh: optimize memory use
@@ -283,10 +284,10 @@ class ArchiveSet:
                     fsize = f.seek(0,2)   ; f.seek(0)
                     if fsize > ArchiveSet.max_volinfosz:   raise ValueError("volinfo too large")
                     buf = f.read(fsize)
-                if self.archive.mcrypto:   buf = self.archive.mcrypto.decrypt(buf)
-                assert hmac.compare_digest(hashval, self.archive.b64hash(buf))
-                if options.debug:   print(self.archive.decompress(buf).decode("UTF-8"))
-                with io.StringIO(self.archive.decompress(buf).decode("UTF-8")) as f:
+                if archive.mcrypto:   buf = archive.mcrypto.decrypt(buf)
+                assert hmac.compare_digest(hashval, archive.b64hash(buf))
+                if options.debug:   print(archive.decompress(buf).decode("UTF-8"))
+                with io.StringIO(archive.decompress(buf).decode("UTF-8")) as f:
                     for ln in f:
                         vname, value = ln.split("=", maxsplit=1)
                         vname = vname.strip()    ; value = value.strip()
@@ -416,7 +417,7 @@ class ArchiveSet:
             attr_int  = ("volsize","sequence")
 
             def __init__(self, volume, name, hashval, path="", addtags={}):
-                self.volume   = volume;  self.archive = self.volume.archive
+                self.volume   = volume;    self.archive = arch = volume.archive
                 self.name     = name
                 self.path     = path
                 self.saved    = self.loaded = False
@@ -438,9 +439,9 @@ class ArchiveSet:
                         fsize = os.fstat(sf.fileno()).st_size
                         if fsize > ArchiveSet.max_infosz:   raise ValueError("info too large")
                         buf = sf.read(fsize)
-                    if self.archive.mcrypto:   buf = self.archive.mcrypto.decrypt(buf)
-                    assert hmac.compare_digest(hashval, self.archive.b64hash(buf))
-                    with io.StringIO(self.archive.decompress(buf).decode("UTF-8")) as sf:
+                    if arch.mcrypto:   buf = arch.mcrypto.decrypt(buf)
+                    assert hmac.compare_digest(hashval, arch.b64hash(buf))
+                    with io.StringIO(arch.decompress(buf).decode("UTF-8")) as sf:
                         for ln in sf:
                             if ln.strip() == "uuid =":  continue
                             vname, value = ln.split("=", maxsplit=1)
@@ -456,7 +457,7 @@ class ArchiveSet:
                     #if not exists(pjoin(path,"manifest.z")):
                         #raise FileNotFoundError("ERROR: Manifest does not exist for "+name)
                     self.saved = self.loaded = True
-                    self.manifest_max = self.volsize // self.archive.chunksize * ((256//4) + 20)
+                    self.manifest_max = self.volsize // arch.chunksize * ((256//4) + 20)
 
                 for tag in addtags:   self.tag_add(tag)
 
@@ -500,19 +501,19 @@ class ArchiveSet:
                     if len(voltags[tag]) == 0:    del(voltags[tag])
 
             def save_info(self, ext=""):
-                assert self.path   ; fname = "info"
-                self.manifesthash = self.archive.encode_file(self.path+"/manifest"+ext,
-                                                        dest=self.path+"/manifest.z"+ext)
+                assert self.path   ; fname = "info"   ; arch = self.volume.archive
+                self.manifesthash = arch.encode_file(self.path+"/manifest"+ext,
+                                                     dest=self.path+"/manifest.z"+ext)
                 with io.StringIO() as f:
                     for attr in self.attr_str+self.attr_int:
                         print(attr, "=", getattr(self, attr), file=f)
                     for tkey, tdesc in self.tags.items():
                         print("tag =",   tkey, tdesc, file=f)
-                    buf = self.archive.compress(f.getvalue().encode("UTF-8"),
-                                                int(self.archive.compr_level))
-                    self.hashval = self.archive.b64hash(buf)
+                    buf = arch.compress(f.getvalue().encode("UTF-8"),
+                                        int(arch.compr_level))
+                    self.hashval = arch.b64hash(buf)
 
-                if self.archive.mcrypto:   buf = self.archive.mcrypto.encrypt(buf)
+                if arch.mcrypto:   buf = arch.mcrypto.encrypt(buf)
                 with open(pjoin(self.path,fname+ext), "wb") as f:
                     f.write(buf)
                     f.flush()    ; os.fsync(f.fileno())
@@ -909,7 +910,7 @@ def arch_init(aset):
 def arch_check(vol_list=None, startup=False):
     gethash  = hash_funcs[aset.hashtype]   ; chunksize = aset.chunksize
     attended = not options.unattended      ; stray_dirs= []
-    compare_digest = hmac.compare_digest
+    compare_digest = hmac.compare_digest   ; b64enc    = base64.urlsafe_b64encode
 
     decrypt  = aset.datacrypto.decrypt if aset.datacrypto else None
 
@@ -950,7 +951,7 @@ def arch_check(vol_list=None, startup=False):
             x_it(1, "Error: Local and archive metadata differ.")
 
         # Check index sequencing in first and combined manifests
-        print("  index sequence...")
+        print("  index sequence,", end="")
         mset = []
         for ses in vol.sesnames:
             # print(ses, "size =", vol.sessions[ses].volsize)
@@ -958,14 +959,14 @@ def arch_check(vol_list=None, startup=False):
             check_manifest_sequence(volname, mset)
 
         # Check hashes of each session individually
-        print("  data:")
+        print(" data:")
         for sesname in reversed(vol.sesnames):
             ses = vol.sessions[sesname]    ; manifest = ses.path+"/manifest"    ; bcount = 0
             if options.session \
             and ((options.session.lower() == "newest" and sesname != vol.sesnames[-1]) \
             or options.session < ses.localtime):
                 continue # Enh: use seq
-            if attended:   print("   Session %s... " % sesname, end="", flush=True)
+            if attended:   print("  Session %s... " % sesname, end="", flush=True)
 
             # FixCheck for stray entries here
             cmd1 = [[CP.sed, "-E", "/^0\s/ d; "
@@ -1012,10 +1013,11 @@ def arch_check(vol_list=None, startup=False):
                         untrusted_buf = decrypt(untrusted_buf)
 
                     # Validate data
-                    if not compare_digest(cksum, gethash(untrusted_buf).hexdigest()):
+                    if not compare_digest(cksum, b64enc(gethash(untrusted_buf).digest()).decode("ascii")):
                         with open(tmpdir+"/bufdump", "wb") as dump:   dump.write(untrusted_buf)
                         print(mfline)
-                        raise ValueError("Bad hash "+fname+" :: "+gethash(untrusted_buf).hexdigest())
+                        raise ValueError("Bad hash "+fname+" :: "
+                                         +str(b64enc(gethash(untrusted_buf).digest())))
 
             if attended:   print(bcount, "bytes OK")
 
@@ -1027,8 +1029,9 @@ def check_manifest_sequence(datavol, sesnames):
             ln = mrgf.readline().strip()
             if not ln:   break
             ln1, ln2 = ln.split()
-            assert (len(ln1) == 64 or ln1 == "0")    ; h1 = int(ln1, 16)
-            assert len(ln2) == 17    ; a1 = int("0"+ln2, 16)
+            if ln1 != "0":
+                assert len(ln1) == aset.mhash_sz    ; h1 = base64.urlsafe_b64decode(ln1)
+            assert len(ln2) == aset.sesname_sz      ; a1 = int("0"+ln2, 16)
             if addr != a1:
                 print(ln); raise("Manifest seq error. Expected %d got %d." % (addr, a1))
 
@@ -1809,8 +1812,9 @@ def send_volume(datavol, localtime, ses_tags, send_all):
          open(sdir+"-tmp/manifest", "wt") as hashf,                                \
          open("/dev/zero" if send_all else vol.mapfile+"-tmp","rb") as bmapf:
 
-        vf_seek = vf.seek; vf_read = vf.read
-        gethash = hash_funcs[aset.hashtype]   ; BytesIO = io.BytesIO
+        vf_seek = vf.seek; vf_read = vf.read   ; BytesIO = io.BytesIO
+        gethash = hash_funcs[aset.hashtype]    ; b64enc  = base64.urlsafe_b64encode
+        b2int   = int.from_bytes
 
         # Show progress in increments determined by 1000/checkpt_pct
         # where '200' results in five updates i.e. in unattended mode.
@@ -1864,14 +1868,14 @@ def send_volume(datavol, localtime, ses_tags, send_all):
                 # Compress & write only non-empty chunks
                 if buf == zeros:
                     if fman_hash == "0":   continue
-                    hexhash = "0"
+                    b64hash = "0"
                 else:
                     # Compress chunk and hash it
                     buf    = compress(buf, compresslevel)
-                    bhash  = gethash(buf)   ; hexhash = bhash.hexdigest()
+                    bhash  = gethash(buf)   ; b64hash = b64enc(bhash.digest()).decode("ascii")
 
                     # Skip when current and prior chunks are the same
-                    if fman_hash == hexhash:  continue
+                    if fman_hash == b64hash:  continue
 
                 # Start tar stream
                 if not stream_started:
@@ -1885,8 +1889,8 @@ def send_volume(datavol, localtime, ses_tags, send_all):
                     tarf_addfile(tarinfo=tar_info)
 
                 # Add entry to new manifest
-                print(hexhash, destfile, file=hashf)
-                if hexhash == "0":   continue
+                print(b64hash, destfile, file=hashf)
+                if b64hash == "0":   continue
 
                 # Add buffer to stream
                 tar_info = TarInfo("%s-tmp/%s/%s" % (sdir, destfile[1:addrsplit], destfile))
@@ -1894,11 +1898,11 @@ def send_volume(datavol, localtime, ses_tags, send_all):
                 # If chunk already in archive, link to it
                 if dedup:
                     bhashb = bhash.digest()
-                    i      = int(hexhash[:ht_ksize], 16)
+                    i      = b2int(bhashb[:ht_ksize], "big")
                     pos    = hashtree[i].find(bhashb)     ; ddses = None
                     if pos % hash_w == 0:
                         data_i = chtree[i][pos//hash_w]   ; dataf.seek(data_i*(ses_w+ch_w))
-                        ddses  = ddsessions[int.from_bytes(dataf.read(ses_w),"big")]
+                        ddses  = ddsessions[b2int(dataf.read(ses_w),"big")]
                         if ddses is None:
                             hashtree[i][pos:pos+hash_w] = ddblank_ch # zero-out obsolete entry
                         else:
@@ -1989,9 +1993,9 @@ def init_dedup_index5(listfile=""):
     ctime = time.perf_counter()    ; makelist = bool(listfile)
     # Define arrays and element widths
     hash_w     = hash_bits // 8
-    ht_ksize   = 4 # hex digits for tree key
-    hashtree   = [bytearray() for x in range(2**(ht_ksize*4))]
-    chtree     = [array("I") for x in range(2**(ht_ksize*4))]
+    ht_ksize   = 2 # binary digits for tree key
+    hashtree   = [bytearray() for x in range(2**(ht_ksize*8))]
+    chtree     = [array("I") for x in range(2**(ht_ksize*8))]
     chtree_max = 2**(chtree[0].itemsize*8) # "I" has 32bit range
     chdigits   = max_address.bit_length() // 4 # 4bits per digit
     ses_w = 2; ch_w = chdigits //2
@@ -2000,8 +2004,8 @@ def init_dedup_index5(listfile=""):
     addrsplit  = -address_split[1]
 
     dataf  = open(tmpdir+"/hashindex.dat","w+b")
-    dataf_read  = dataf.read    ; dataf_seek = dataf.seek    ; int_frbytes = int.from_bytes
-    dataf_write = dataf.write   ; bfromhex = bytes().fromhex
+    dataf_read  = dataf.read    ; dataf_seek = dataf.seek      ; int_frbytes = int.from_bytes
+    dataf_write = dataf.write   ; bfromhex = bytes().fromhex   ; b64dec = base64.urlsafe_b64decode
     if makelist:   dedupf = gzip.open(tmpdir+"/"+listfile, "wt")
 
     count = match = 0
@@ -2012,8 +2016,8 @@ def init_dedup_index5(listfile=""):
             for ln in manf:
                 ln1, ln2 = ln.split()
                 if ln1 == "0":   continue
-                bhashb = bfromhex(ln1)
-                i      = int(ln1[:ht_ksize], 16)
+                bhashb = b64dec(ln1)
+                i      = int_frbytes(bhashb[:ht_ksize], "big")
                 pos    = hashtree[i].find(bhashb)
                 if pos % hash_w == 0:
                     match += 1
@@ -2032,7 +2036,7 @@ def init_dedup_index5(listfile=""):
                     hashtree[i].extend(bhashb)
                     chtree[i].append(count)
                     dataf_write(sesnum.to_bytes(ses_w,"big"))
-                    dataf_write(bfromhex(ln2[1:]))
+                    dataf_write(bfromhex(ln2[1:]))  # Enh: scale no. digits to match vol size
                     count += 1
 
     if listfile:
@@ -2584,7 +2588,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     compress    = compressors[aset.compression][2]  ; compresslevel = int(aset.compr_level)
     decompress  = compressors[aset.compression][0].decompress
     decrypt     = aset.datacrypto.decrypt if aset.datacrypto else None
-    compare_digest = hmac.compare_digest
+    compare_digest = hmac.compare_digest          ; b64enc    = base64.urlsafe_b64encode
 
 
     if diff or verify_only:
@@ -2765,7 +2769,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         # Request chunks on-demand if local chunk doesn't match cksum
         if sparse and save_path:
             volf_seek(addr)
-            if gethash(compress(volf_read(chunksize), compresslevel)).hexdigest() == cksum:
+            if b64enc(gethash(compress(volf_read(chunksize),
+                                       compresslevel)).digest()).decode("ascii") == cksum:
                 continue
             else:
                 print("%s/%s/%s" % (ses, faddr[1:addrsplit], faddr), flush=True, file=gv_stdin)
@@ -2799,11 +2804,11 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             untrusted_buf = decrypt(untrusted_buf)
 
         # Validate data chunk
-        if not compare_digest(cksum, gethash(untrusted_buf).hexdigest()):
+        if not compare_digest(cksum, b64enc(gethash(untrusted_buf).digest()).decode("ascii")):
             with open(tmpdir+"/bufdump", "wb") as dump:
                 dump.write(untrusted_buf)
             print(mfline)
-            raise ValueError("Bad hash "+faddr+" :: "+gethash(untrusted_buf).hexdigest())
+            raise ValueError("Bad hash "+faddr+" :: "+str(b64enc(gethash(untrusted_buf).digest())))
 
         ##  Buffer is OK  ##
 
@@ -2906,7 +2911,7 @@ def add_volume(datavol, desc):
 
     catch_signals()
     update_dest(pathlist=[aset.confname], volumes=[vol], ext=".tmp")
-    os.replace(pjoin(vol.path, vol.vid, "volinfo.tmp"), pjoin(vol.path, vol.vid, "volinfo"))
+    os.replace(pjoin(vol.path, "volinfo.tmp"), pjoin(vol.path, "volinfo"))
     os.replace(aset.confpath+".tmp", aset.confpath)
     catch_signals(None)
     print("Volume", datavol, "added to archive config.")
