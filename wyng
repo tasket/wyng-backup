@@ -85,12 +85,12 @@ class ArchiveSet:
             return
 
         # init metadata crypto
-        if True:  #### self.salt_f:
-            if not mcrypto and not passphrase:   passphrase = ask_passphrase()
-            if not mcrypto:
-                self.mcrypto = mcrypto = DataCryptography("aes-256-siv", self.confpath+".salt",
-                                                          slot=1, passphrase=passphrase[:])
-        ###elif check options.crypto and/or passphrase, throw exception
+        if not mcrypto and not passphrase:   passphrase = ask_passphrase()
+        if not mcrypto:
+            assert passphrase and passphrase != bytes(len(passphrase))
+            self.mcrypto = mcrypto \
+                = DataCryptography("aes-256-siv", self.confpath+".salt",
+                                    slot=1, passphrase=passphrase[:])
 
         # decode archive.ini file
         with open(self.confpath, "rb") as f:   buf = f.read(self.max_conf_sz)
@@ -111,9 +111,9 @@ class ArchiveSet:
         # init data crypto
         if mcrypto and not self.datacrypto:
             assert passphrase and passphrase != bytes(len(passphrase))
-            self.datacrypto= datacrypto = DataCryptography(self.data_cipher, mcrypto.keyfile,
-                                                           slot=0, passphrase=passphrase)
-            self.datacrypto.ctcadence = 20
+            self.datacrypto = datacrypto \
+                = DataCryptography(self.data_cipher, mcrypto.keyfile, slot=0,
+                                   passphrase=passphrase, cadence=20)
 
         if mcrypto:
             # use higest known counter values
@@ -126,7 +126,7 @@ class ArchiveSet:
 
         # load volume metadata objects
         for key, value in cp["volumes"].items():
-            vid, hashval = value.split(" ", maxsplit=1)    ; assert vid.startswith("Vol_")
+            vid, hashval = value.split(" ", maxsplit=1)
             # conditions when a volume must be loaded:
             # - allvols flag is set
             # - in_process flag from an unfinished action
@@ -146,6 +146,7 @@ class ArchiveSet:
 
     def save_conf(self, ext=""):
         c = self.conf['var']    ; mcrypto = self.mcrypto
+        c['uuid']        = self.uuid if self.uuid else str(uuid.uuid4())
         c['updated_at']  = self.updated_at = str(time.time())
         c['format_ver']  = str(format_version)
         c['chunksize']   = str(self.chunksize)
@@ -157,10 +158,11 @@ class ArchiveSet:
         c['destsys']     = self.destsys     # move
         c['destdir']     = self.destdir
         c['destmountpoint'] = self.destmountpoint
-        c['uuid']        = self.uuid if self.uuid else str(uuid.uuid4())
+        c['data_cipher'] = self.data_cipher
         if self.mcrypto:
-            self.mci_count = mcrypto.counter ;    self.dataci_count = self.datacrypto.counter
-            c['data_cipher'] = self.data_cipher
+            if self.datacrypto.counter > self.datacrypto.ctstart:
+                self.dataci_count = self.datacrypto.counter
+            self.mci_count = mcrypto.counter
             c['dataci_count']= str(self.dataci_count)
             c['mci_count']   = str(self.mci_count)
         self.conf['in_process'] = { x: ln if type(ln) is str else ":|".join(ln)
@@ -542,17 +544,17 @@ class DataCryptography():
     crypto_ciphers  = {"aes-256-siv", "aes-256-cbc", "xchacha20"}
 
 
-    def __init__(self, ci_type, keyfile, slot, passphrase, init=False):
+    def __init__(self, ci_type, keyfile, slot, passphrase, cadence=1, init=False):
         assert passphrase is None or type(passphrase) == bytearray
-        assert ci_type in self.crypto_ciphers
+        assert cadence > 0 and ci_type in self.crypto_ciphers
         if not issubclass(type(keyfile), io.IOBase):
             if not exists(keyfile):   open(keyfile, "wb").close()
             keyfile =  open(keyfile, "r+b")
 
         self.keyfile = keyfile          ; self.ci_type = ci_type
         self.key     = None             ; kbits = self.crypto_key_bits
-        self.slot    = slot             ; self.counter = None           ; self.ctcadence = 1
-        self.get_rnd = get_random_bytes
+        self.slot    = slot             ; self.counter = self.ctstart = None
+        self.ctcadence = cadence        ; self.get_rnd = get_random_bytes
 
         if ci_type == "aes-256-cbc":
             # FIX: Probably requires IV encryption with different non-data key
@@ -591,20 +593,19 @@ class DataCryptography():
         if init:
             self.key     = self.new_key(passphrase)
         else:
-            keyfile.seek(self.slot_offset)
-            self.counter = int.from_bytes(keyfile.read(self.countsz), byteorder="big") + 1
+            keyfile.seek(self.slot_offset)    ; ctbytes = keyfile.read(self.countsz)
+            self.counter = self.ctstart = cadence - 1 + int.from_bytes(ctbytes, "big")
             salt         = keyfile.read(self.key_sz)   ; assert len(salt) == self.key_sz
             self.key     = self.derive_key(salt, passphrase)
 
-
     def __del__(self):
-        self.save_counter()
+        if self.counter and self.counter > self.ctstart:   self.save_counter()
         if self.key:   clear_array(self.key)
 
 
     # Key file binary format: counter=8B, key=key_sz
     def new_key(self, passphrase):
-        salt = self.get_rnd(self.key_sz)      ; self.counter = 0
+        salt = self.get_rnd(self.key_sz)      ; self.counter = self.ctstart = 0
         self.keyfile.seek(self.slot_offset)   ; self.keyfile.write(bytes(self.countsz) + salt)
         return self.derive_key(salt, passphrase)
 
@@ -622,16 +623,15 @@ class DataCryptography():
     # A random 'bolster' block is added as a prefix to the plaintext buffer;
     # A random padding is also used and 'buf' must be prefixed by len % blk_sz (1 byte)
     def _enc_aes_256_cbc_rndpad(self, buf):
-        iv     = self.get_rnd(self.rndivsz) + self.counter.to_bytes(self.countsz, "big")
-        blk_sz = self.blk_sz
-        cipher = self.AES_new(self.key, self.mode, iv=iv)
-        pad_sz = blk_sz - (len(buf) % blk_sz) & self.ps_mask
+        blk_sz = self.blk_sz    ; pad_sz = blk_sz - (len(buf) % blk_sz) & self.ps_mask
         if pad_sz:   buf += self.get_rnd(pad_sz)
 
-        plaintxt= self.get_rnd(blk_sz) + buf
-        buf     = cipher.encrypt(plaintxt) + pad_sz.to_bytes(1,"big")
-        self.save_counter()    ; self.counter += len(plaintxt) // blk_sz
+        plaintxt= self.get_rnd(blk_sz) + buf    ; self.counter += len(plaintxt) // blk_sz
         if self.counter > self.max_count:   raise ValueError("Key exhaustion.")
+        iv      = self.get_rnd(self.rndivsz) + self.counter.to_bytes(self.countsz, "big")
+        cipher  = self.AES_new(self.key, self.mode, iv=iv)
+        buf     = cipher.encrypt(plaintxt) + pad_sz.to_bytes(1,"big")
+        self.save_counter()
         return iv + buf
 
     # Decrypt aes-256-cbc:
@@ -646,12 +646,12 @@ class DataCryptography():
 
     # Encrypt aes-256-siv:
     def _enc_aes_256_siv(self, buf):
+        self.counter += 1
+        if self.counter > self.max_count:   raise ValueError("Key exhaustion.")
         nonce  = self.get_rnd(self.randomsz) + self.counter.to_bytes(self.countsz, "big")
         cipher = self.AES_new(self.key, self.mode, nonce=nonce)
         buf, ci_tag = cipher.encrypt_and_digest(buf)
         if self.counter % self.ctcadence == 0:   self.save_counter()
-        self.counter += 1
-        if self.counter > self.max_count:   raise ValueError("Key exhaustion.")
         return  nonce + ci_tag + buf
 
     # Decrypt aes-256-siv:
@@ -663,12 +663,12 @@ class DataCryptography():
 
     # Encrypt [X]ChaCha20:
     def _enc_chacha20(self, buf):
+        self.counter += 1
+        if self.counter > self.max_count:   raise ValueError("Key exhaustion.")
         nonce  = self.get_rnd(self.randomsz) + self.counter.to_bytes(self.countsz, "big")
         cipher = self.ChaCha20_new(key=self.key, nonce=nonce)
         buf    = cipher.encrypt(buf)
         if self.counter % self.ctcadence == 0:   self.save_counter()
-        self.counter += 1
-        if self.counter > self.max_count:   raise ValueError("Key exhaustion.")
         return  nonce + buf
 
     # Decrypt [X]ChaCha20:
@@ -898,16 +898,16 @@ def arch_init(aset):
                                            passphrase=passphrase, init=True)
 
     elif aset.data_cipher != "off":
-        raise ValueError("Unknown cipher.")
+        raise ValueError("Invalid cipher option.")
 
-    print(); print("Encryption    =", aset.data_cipher)
+    print(); print("Encryption    :", aset.data_cipher)
 
     if options.hashtype:
         if options.hashtype not in hash_funcs:
             x_it(1, "Hash function '"+options.hashtype+"' is not available on this system.")
         aset.hashtype = options.hashtype
 
-    print("Hashing       =", aset.hashtype)
+    print("Hashing       :", aset.hashtype)
 
     if options.compression:
         if ":" in options.compression:
@@ -920,7 +920,7 @@ def arch_init(aset):
             x_it(1, "Invalid compression spec.")
         aset.compression = compression      ; aset.compr_level = compr_level
 
-    print("Compression   = %s:%s" % (aset.compression, aset.compr_level))
+    print("Compression   : %s:%s" % (aset.compression, aset.compr_level))
 
     if options.chfactor:
         # accepts an exponent from 1 to 6
@@ -1136,7 +1136,7 @@ def get_configs_remote():
     assert isinstance(mcrypto, DataCryptography) and isinstance(datacrypto, DataCryptography)
 
     # Initial auth successful! Fetch + auth volume metadata...
-    mcrypto  = new_aset.mcrypto    ; datacrypto = new_aset.datacrypto
+    #mcrypto  = new_aset.mcrypto    ; datacrypto = new_aset.datacrypto
     recv_list= [(x.split()[0]+"/volinfo", ArchiveSet.max_volinfosz)
                  for x in new_aset.conf["volumes"].values()]
     fetch_file_blobs(recv_list)
@@ -3132,7 +3132,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4.0wip"      ; prog_date = "20210823"
+prog_version          = "0.4.0wip"      ; prog_date = "20210824"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 
 # Disk block size:
@@ -3204,7 +3204,7 @@ parser.add_argument("--remap", action="store_true", default=False, help="Remap s
 parser.add_argument("--local", default="",    help="Init: LVM vg/pool containing source volumes")
 parser.add_argument("--dest", default="",     help="Init: type:location of archive")
 parser.add_argument("--subdir", default="",   help="Init: optional subdir for --dest")
-parser.add_argument("--encrypt", default="aes-256-siv", help="Init: compression type:level")
+parser.add_argument("--encrypt", default="xchacha20", help="Init: compression type:level")
 parser.add_argument("--compression", default="", help="Init: compression type:level")
 parser.add_argument("--hashtype", default="", help="Init: hash function type")
 parser.add_argument("--chunk-factor", dest="chfactor", type=int,
@@ -3298,7 +3298,10 @@ if not dest_online and (options.remap or options.from_arch \
 if options.from_arch:
     aset         = get_configs_remote()
 
-print("Archive last updated:", aset.updated_at)
+# Display archive update time as local time
+arch_dt_raw = datetime.datetime.fromtimestamp(float(aset.updated_at), datetime.timezone.utc)
+arch_dt     = arch_dt_raw.astimezone().isoformat(sep=u" ")
+sys.stderr.write("Archive last updated %s (%s)\n" % (arch_dt[:-6], arch_dt[-6:]))
 
 # Set 'l_vols' to reference selected volgroup and check for orphan snapshots
 if aset.vgname in volgroups:   l_vols = volgroups[aset.vgname].lvs
