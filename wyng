@@ -43,6 +43,7 @@ class ArchiveSet:
     max_infosz  = (tag_len+comment_len + 10) * max_tags + 1000
     max_volinfosz= (mhash_sz + sesname_sz + 10) * max_sessions + 1000
 
+
     def __init__(self, name, top, allvols=False, children=2,
                  passphrase=None, mcrypto=None, datacrypto=None):
         self.name        = name
@@ -540,7 +541,10 @@ class ArchiveSet:
 # DataCryptography(): Handle crypto functions and state for volume data
 
 class DataCryptography():
-    crypto_key_bits = 256        ; max_ct_bits = 128      ; total_keyfile_sz = 150
+
+    crypto_key_bits = 256        ; max_ct_bits = 128
+    max_keyfile_sz  = ((crypto_key_bits*2) + max_ct_bits) * 2 // 8
+    time_headroom   = int(60*60*24*365.25*50)             ; timesz  = 32 // 8
     crypto_ciphers  = {"aes-256-siv", "aes-256-cbc", "xchacha20"}
 
 
@@ -554,7 +558,8 @@ class DataCryptography():
         self.keyfile = keyfile          ; self.ci_type = ci_type
         self.key     = None             ; kbits = self.crypto_key_bits
         self.slot    = slot             ; self.counter = self.ctstart = None
-        self.ctcadence = cadence        ; self.get_rnd = get_random_bytes
+        self.ctcadence = cadence 
+        self.timer   = time.time        ; self.get_rnd = get_random_bytes
 
         if ci_type == "aes-256-cbc":
             # FIX: Probably requires IV encryption with different non-data key
@@ -579,10 +584,10 @@ class DataCryptography():
             self.decrypt = self._dec_aes_256_siv
 
         elif ci_type == "xchacha20":
-            self.key_sz  = kbits//8                   ; self.max_count = 2**80-64
-            self.nonce_sz= 24                         ; self.buf_start = self.nonce_sz
+            self.key_sz  = kbits//8                ; self.max_count = 2**80-64
+            self.nonce_sz= 24                      ; self.buf_start = self.nonce_sz
             self.countsz = self.max_count.bit_length() // 8
-            self.randomsz=self.nonce_sz - self.countsz
+            self.randomsz=self.nonce_sz - self.countsz - self.timesz
             self.ChaCha20_new = Cipher_ChaCha20.new
             self.encrypt = self._enc_chacha20
             self.decrypt = self._dec_chacha20
@@ -617,7 +622,7 @@ class DataCryptography():
 
     def save_counter(self):
         self.keyfile.seek(self.slot_offset)
-        self.keyfile.write(int.to_bytes(self.counter, self.countsz, "big"))
+        self.keyfile.write(self.counter.to_bytes(self.countsz, "big"))
 
     # Encrypt aes-256-cbc:
     # A random 'bolster' block is added as a prefix to the plaintext buffer;
@@ -665,7 +670,10 @@ class DataCryptography():
     def _enc_chacha20(self, buf):
         self.counter += 1
         if self.counter > self.max_count:   raise ValueError("Key exhaustion.")
-        nonce  = self.get_rnd(self.randomsz) + self.counter.to_bytes(self.countsz, "big")
+        # Nonce composed from 1) 32bit current time offset + 80bit rnd + 80bit counter
+        nonce  = (int(self.timer()) - self.time_headroom).to_bytes(self.timesz, "big") \
+               + self.get_rnd(self.randomsz) \
+               + self.counter.to_bytes(self.countsz, "big")
         cipher = self.ChaCha20_new(key=self.key, nonce=nonce)
         buf    = cipher.encrypt(buf)
         if self.counter % self.ctcadence == 0:   self.save_counter()
@@ -1124,7 +1132,7 @@ def get_configs_remote():
     make_local = options.action == "arch-init"
 
     recv_list = [(ArchiveSet.confname,  ArchiveSet.max_conf_sz),
-                 (ArchiveSet.confname+".salt", DataCryptography.total_keyfile_sz)]
+                 (ArchiveSet.confname+".salt", DataCryptography.max_keyfile_sz)]
     fetch_file_blobs(recv_list, ext=".auth_req")
     if not exists(aset.confpath+".salt.auth_req"):
         raise NotImplementedError("Fetch config without key data.") # Fix
@@ -3132,7 +3140,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4.0wip"      ; prog_date = "20210824"
+prog_version          = "0.4.0wip"      ; prog_date = "20210826"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 
 # Disk block size:
