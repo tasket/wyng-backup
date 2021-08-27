@@ -25,6 +25,7 @@ except:
 try:
     from Cryptodome.Cipher import AES as Cipher_AES
     from Cryptodome.Cipher import ChaCha20 as Cipher_ChaCha20
+    from Cryptodome.Cipher import ChaCha20_Poly1305 as Cipher_ChaCha20_Poly1305
     from Cryptodome.Random import get_random_bytes
     import Cryptodome.Util.Padding
 except:
@@ -49,6 +50,9 @@ class ArchiveSet:
         self.name        = name
         self.path        = pjoin(top,name)
         self.confpath    = pjoin(self.path, self.confname)
+        self.confprefix  = b"[WYNG%02d]\n" % format_version
+        self.modeprefix  = b"ci = "      ; self.modesuffix = b"\n"      ; self.ci_mode = None
+
         self.vols        = {}
         self.dedupindex  = {}
         self.dedupsessions = []
@@ -75,6 +79,7 @@ class ArchiveSet:
         self.mci_count   = self.dataci_count  =  0
         self.in_process  = []
 
+
         # parser for the .ini formatted configuration
         self.conf = cp   = configparser.ConfigParser()
         cp.optionxform   = lambda option: option
@@ -85,17 +90,34 @@ class ArchiveSet:
             self.uuid = str(uuid.uuid4())
             return
 
-        # init metadata crypto
-        if not mcrypto and not passphrase:   passphrase = ask_passphrase()
-        if not mcrypto:
-            assert passphrase and passphrase != bytes(len(passphrase))
-            self.mcrypto = mcrypto \
-                = DataCryptography("aes-256-siv", self.confpath+".salt",
-                                    slot=1, passphrase=passphrase[:])
-
         # decode archive.ini file
+        # Format "magic" is "[WYNGvv]\n" where vv = format version: 9 bytes
+        # Format mode is next as "ci = m0\n" where m = cipher mode: 8 bytes
         with open(self.confpath, "rb") as f:   buf = f.read(self.max_conf_sz)
         self.raw_hashval = hashlib.sha256(buf).hexdigest()
+        if not buf.startswith(self.confprefix + self.modeprefix):
+            if not buf.startswith(b"[var]\n"):
+                raise ValueError("Not a Wyng format.")
+            else:
+                old_v2_format = True  ; raise NotImplementedError("Old format conversion")
+        else:
+            old_v2_format = False    #; untrusted_ver = 2
+
+        buf = buf[len(self.confprefix)+len(self.modeprefix):]
+        self.ci_mode = ci_mode = buf[:3]    ; buf = buf[3:]
+        assert ci_mode.endswith(self.modesuffix)
+        if ci_mode[:2] == b"00":
+            self.mcrypto = None
+        else:
+            # init metadata crypto
+            ci_types = DataCryptography.crypto_codes[ci_mode[:2]]
+            if not passphrase:   passphrase = ask_passphrase()
+            assert passphrase and passphrase != bytes(len(passphrase))
+            self.mcrypto = mcrypto \
+                = DataCryptography(ci_types[1], self.confpath+".salt",
+                                    slot=1, passphrase=passphrase[:])
+
+
         if mcrypto:   buf = mcrypto.decrypt(buf)
         if options.debug:   print(gzip.decompress(buf).decode("UTF-8"))
 
@@ -112,6 +134,7 @@ class ArchiveSet:
         # init data crypto
         if mcrypto and not self.datacrypto:
             assert passphrase and passphrase != bytes(len(passphrase))
+            #assert ci_types[1] == self.data_cipher
             self.datacrypto = datacrypto \
                 = DataCryptography(self.data_cipher, mcrypto.keyfile, slot=0,
                                    passphrase=passphrase, cadence=20)
@@ -174,7 +197,9 @@ class ArchiveSet:
             self.conf.write(f)    ; f.flush()
             buf = gzip.compress(f.getvalue().encode("UTF-8"), 4)
         if self.mcrypto:   buf = self.mcrypto.encrypt(buf)
-        with open(self.confpath+ext, "wb") as fsave:   fsave.write(buf)
+        header = self.confprefix + self.modeprefix + self.ci_mode
+        assert len(header) == 17
+        with open(self.confpath+ext, "wb") as fsave:   fsave.write(header + buf)
 
     # Set or clear state for the archive as 'in_process' in case of interruption during write.
     # Format is list containing strings or list of strings. For latter, ':|' is the delimiter.
@@ -545,21 +570,27 @@ class DataCryptography():
     crypto_key_bits = 256        ; max_ct_bits = 128
     max_keyfile_sz  = ((crypto_key_bits*2) + max_ct_bits) * 2 // 8
     time_headroom   = int(60*60*24*365.25*50)             ; timesz  = 32 // 8
-    crypto_ciphers  = {"aes-256-siv", "aes-256-cbc", "xchacha20"}
+
+    # Matrix of recommended mode pairs = 'formatcode: (data, metadata)'
+    crypto_codes    = {b"10":  ("aes-256-siv",        "aes-256-siv"),
+                       b"20":  ("aes-256-cbc",        "aes-256-siv"),
+                       b"30":  ("xchacha20",          "xchacha20-poly1305"),
+                       b"40":  ("xchacha20-poly1305", "xchacha20-poly1305")}
 
 
     def __init__(self, ci_type, keyfile, slot, passphrase, cadence=1, init=False):
         assert passphrase is None or type(passphrase) == bytearray
-        assert cadence > 0 and ci_type in self.crypto_ciphers
+        assert cadence > 0
+
         if not issubclass(type(keyfile), io.IOBase):
             if not exists(keyfile):   open(keyfile, "wb").close()
             keyfile =  open(keyfile, "r+b")
 
         self.keyfile = keyfile          ; self.ci_type = ci_type
         self.key     = None             ; kbits = self.crypto_key_bits
-        self.slot    = slot             ; self.counter = self.ctstart = None
-        self.ctcadence = cadence 
-        self.timer   = time.time        ; self.get_rnd = get_random_bytes
+        self.slot    = slot             ; self.counter  = self.ctstart = None
+        self.ctcadence = cadence
+        self.timer   = time.time        ; self.get_rnd  = get_random_bytes
 
         if ci_type == "aes-256-cbc":
             # FIX: Probably requires IV encryption with different non-data key
@@ -591,6 +622,18 @@ class DataCryptography():
             self.ChaCha20_new = Cipher_ChaCha20.new
             self.encrypt = self._enc_chacha20
             self.decrypt = self._dec_chacha20
+
+        elif ci_type == "xchacha20-poly1305":
+            self.key_sz  = kbits//8         ; self.max_count = 2**80-64    ; self.tag_sz = 16
+            self.nonce_sz= 24               ; self.buf_start = self.nonce_sz + self.tag_sz
+            self.countsz = self.max_count.bit_length() // 8
+            self.randomsz=self.nonce_sz - self.countsz - self.timesz
+            self.ChaCha20_Poly1305_new = Cipher_ChaCha20_Poly1305.new
+            self.encrypt = self._enc_chacha20_poly1305
+            self.decrypt = self._dec_chacha20_poly1305
+
+        else:
+            raise ValueError("Invalid cipher spec "+ci_type)
 
         self.slot_offset = (kbits*2//8 + self.max_ct_bits//8) * self.slot
 
@@ -670,7 +713,7 @@ class DataCryptography():
     def _enc_chacha20(self, buf):
         self.counter += 1
         if self.counter > self.max_count:   raise ValueError("Key exhaustion.")
-        # Nonce composed from 1) 32bit current time offset + 80bit rnd + 80bit counter
+        # Nonce composed from: 32bit current time offset + 80bit rnd + 80bit counter
         nonce  = (int(self.timer()) - self.time_headroom).to_bytes(self.timesz, "big") \
                + self.get_rnd(self.randomsz) \
                + self.counter.to_bytes(self.countsz, "big")
@@ -684,6 +727,26 @@ class DataCryptography():
         nonce  = untrusted_buf[:self.nonce_sz]
         cipher = self.ChaCha20_new(key=self.key, nonce=nonce)
         return cipher.decrypt(untrusted_buf[self.nonce_sz:])
+
+    # Encrypt [X]ChaCha20-Poly1305:
+    def _enc_chacha20_poly1305(self, buf):
+        self.counter += 1
+        if self.counter > self.max_count:   raise ValueError("Key exhaustion.")
+        # Nonce composed from: 32bit current time offset + 80bit rnd + 80bit counter
+        nonce  = (int(self.timer()) - self.time_headroom).to_bytes(self.timesz, "big") \
+               + self.get_rnd(self.randomsz) \
+               + self.counter.to_bytes(self.countsz, "big")
+        cipher = self.ChaCha20_Poly1305_new(key=self.key, nonce=nonce)
+        buf, ci_tag = cipher.encrypt_and_digest(buf)
+        if self.counter % self.ctcadence == 0:   self.save_counter()
+        return  nonce + ci_tag + buf
+
+    # Decrypt [X]ChaCha20-Poly1305:
+    def _dec_chacha20_poly1305(self, untrusted_buf):
+        nonce  = untrusted_buf[:self.nonce_sz]
+        ci_tag = untrusted_buf[self.nonce_sz:self.buf_start]
+        cipher = self.ChaCha20_Poly1305_new(key=self.key, nonce=nonce)
+        return cipher.decrypt_and_verify(untrusted_buf[self.buf_start:], ci_tag)
 
 
 # Define absolute paths of commands
@@ -893,14 +956,16 @@ def arch_init(aset):
 
     os.makedirs(aset.path, exist_ok=True)
 
-    aset.data_cipher = options.encrypt.lower()
-    if aset.data_cipher in DataCryptography.crypto_ciphers:
+    aset.data_cipher = options.encrypt
+    if aset.data_cipher in (x[0] for x in DataCryptography.crypto_codes.values()):
         if options.unattended:   x_it(1, "Enter passphrase interactively.")
 
         # Security Enh: Possibly use mmap+mlock to store passphrase/key values,
         #               and wipe them from RAM after use.
         passphrase      = ask_passphrase(verify=True)
-        aset.mcrypto    = DataCryptography("aes-256-siv", aset.confpath+".salt", slot=1,
+        aset.ci_mode    = [x for x,y in DataCryptography.crypto_codes.items()
+                             if y[0] == aset.data_cipher][0]
+        aset.mcrypto    = DataCryptography("xchacha20-poly1305", aset.confpath+".salt", slot=1,
                                            passphrase=passphrase[:], init=True)
         aset.datacrypto = DataCryptography(aset.data_cipher, aset.confpath+".salt", slot=0,
                                            passphrase=passphrase, init=True)
@@ -3140,7 +3205,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4.0wip"      ; prog_date = "20210826"
+prog_version          = "0.4.0wip"      ; prog_date = "20210827"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 
 # Disk block size:
