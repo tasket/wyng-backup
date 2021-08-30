@@ -810,15 +810,6 @@ def detect_internal_state():
         if not shutil.which(prg):
             raise RuntimeError("Required command not found: "+prg)
 
-    try:
-        p = subprocess.check_output([CP.thin_delta, "-V"])
-    except:
-        p = b""
-    ver = p[:5].decode("UTF-8").strip()    ; target_ver = "0.7.4"
-    if p and ver < target_ver:
-        print("Note: Thin provisioning tools version", target_ver,
-              "or later is recommended for stability. Installed version =", ver+".")
-
 
     #####>  Begin helper program  <#####
 
@@ -1748,6 +1739,13 @@ def monitor_send(datavols, selected=[], monitor_only=True):
 
     for prg in (CP.lvm, CP.dmsetup, CP.thin_delta ):
         if not shutil.which(prg):  raise RuntimeError("Required command not found: "+prg)
+    try:
+        p = subprocess.check_output([CP.thin_delta, "-V"])
+    except:
+        p = b""
+    ver = p[:5].decode("UTF-8").strip()    ; target_ver = "0.7.4"
+    if p and ver < target_ver:
+        raise RuntimeError("Thin provisioning tools version >= "+target_ver+" required.")
 
     localtime = time.strftime("%Y%m%d-%H%M%S")
 
@@ -2269,10 +2267,6 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     elif not save_path:
         save_path = pjoin("/dev",vgname,datavol)
 
-    if save_path or diff:
-        for prg in (CP.lvm, CP.blkdiscard):
-            if not shutil.which(prg):  raise RuntimeError("Required command not found: "+prg)
-
     # Set the session to retrieve
     if select_ses:
         if select_ses[0] == "^":
@@ -2546,8 +2540,6 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 # Rename a volume in the archive
 
 def rename_volume(oldname, newname):
-    for prg in (CP.lvm, CP.blkdiscard):
-        if not shutil.which(prg):  raise RuntimeError("Required command not found: "+prg)
 
     os.chdir(aset.path)    ; volume   = aset.vols[oldname]
     confname = os.path.basename(aset.confpath)    ; was_in_process = aset.in_process is not None
@@ -2580,7 +2572,7 @@ def rename_volume(oldname, newname):
     and compare_files(pathlist=[confname], volumes=[full_aset.vols[newname]]):
         x_it(1, "Error: Local and archive metadata differ.")
 
-    return ArchiveSet(aset.name, metadir+topdir)
+    return full_aset
 
 
 # Remove a volume from the archive
@@ -2767,7 +2759,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.3.0wip"      ; prog_date = "20210813"
+prog_version          = "0.3.0wip"      ; prog_date = "20210829"
 format_version        = 2               ; debug     = False       ; tmpdir = None
 
 # Disk block size:
@@ -2855,8 +2847,6 @@ parser.add_argument("--volume-desc", dest="voldesc", default="",
                     help="Set volume description (add, rename, send)")
 parser.add_argument("volumes", nargs="*")
 options = parser.parse_args()
-#subparser = parser.add_subparsers(help="sub-command help")
-#prs_prune = subparser.add_parser("prune",help="prune help")
 
 # Set stdout to devnull if --quiet is specified
 debug = options.debug    ; assert not (options.quiet and (options.verbose or debug))
