@@ -44,9 +44,11 @@ Public release v0.3 with a range of features including:
 
  - Marking and selecting snapshots with user-defined tags
 
-Data verification currently relies on hash tables being safely stored on the
-source admin system or encrypted volume. Integrated encryption and key-based
-verification are not yet implemented (see notes below for ways to add encryption).
+Alpha pre-release v0.4 which adds:
+
+ - Authenticated encryption
+
+ - Metadata compression
 
 Wyng is released under a GPL license and comes with no warranties expressed or implied.
 
@@ -141,6 +143,7 @@ Please note that dashed parameters are always placed before the command.
 --local=_vg/pool_      | (arch-init) Pool containing local volumes.
 --dest=_type:location_ | (arch-init) Destination of backup archive.
 --subdir=_dirname_     | Optional subdirectory below mountpoint (--from, --dest)
+--encrypt=_cipher_     | Set encryption type or 'off'
 --compression          | (arch-init) Set compression type:level.
 --hashtype             | (arch-init) Set hash algorithm: _sha256_ or _blake2b_.
 --chunk-factor         | (arch-init) Set archive chunk size.
@@ -435,7 +438,10 @@ factor '1', 128kB for factor '2', 256kB for factor '3' and so on. To maintain a 
 space efficiency and performance balance, a factor of '2' or greater is suggested for archives
 that will store volumes larger than about 100GB.
 
-Note that _compression, hashtype_ and _chunk-factor_ cannot be changed for an archive once it is initialized.
+`--encrypt=xchacha20` selects the encryption cipher/mode. Choices are _'xchacha20',
+'xchacha20-poly1305', 'aes-siv'_ and _'off'_.
+
+Note that _encrypt, compression, hashtype_ and _chunk-factor_ cannot be changed for an archive once it is initialized.
 
 ### Options
 
@@ -518,10 +524,6 @@ information when listing sessions.
 
 ### Tips
 
-* If the destination volume is not thoroughly trusted, its currently recommended
-to avoid backing up sensitive data to such a volume -- exercise caution
-and add encryption where necessary.
-
 * To reduce the size of incremental backups it may be helpful to remove cache
 files, if they exist in your source volume(s). Typically, the greatest cache space
 consumption comes from web browsers, so
@@ -535,13 +537,6 @@ or to mount .cache on a separate volume that is not configured for backup.
 practice. Therefore it is best that the `discard` option is used when mounting
 your volumes for normal use.
 
-* The chunk size that your LVM thin pool was initialized with can also affect
-disk space and I/O used when sending backups. Larger LVM chunk
-sizes can mean larger incremental backups for volumes with lots of random writes.
-To see the chunksize for your pool(s) run `sudo lvs -o name,chunksize`. Common sizes
-are 128-512kB so if random writes are prevalent (i.e. for
-large databases or mail archives) then using Wyng deduplication (which resolves
-at 64kB by default) can reduce the size of your backup sessions.
 
 
 ### Troubleshooting notes
@@ -552,67 +547,6 @@ substantially between backups, such as when moving between time zones (including
 If this results in undesired selections with `--session` ranges, its possible
 to nail down the precisely desired range by observing the output of
 `list volumename` and using exact date-times from the listing.
-
-
-### Encryption options
-
-Wyng is slated to integrate encryption in the future. In the meantime,
-here are some encryption approaches you can use to secure your backup archives:
-
-* __Regular Linux systems__:
-
-    Many options exist for mounting an encrypted filesystem on a local
-    backup drive. Some examples you'll find use `gnome-disks` to
-    format a partition as Ext4 on LUKS or VeraCrypt, or they use encrypted filesystems
-    like [Encfs](https://wiki.ubuntu.com/SecureEncryptedRemoteVolumeHowTo)
-    or [Cryfs](https://www.cryfs.org). These
-    create a local filesystem mountpoint, so configuring Wyng with an
-    'internal:/path' destination will suffice.
-
-    For remote backups on untrusted servers, use one of the above encryption
-    options on a shared folder (Encfs, Cryfs) or disk image file (LUKS, VeraCrypt).
-
-    For remote backups where the server is trusted (i.e. encrypted and secured) it
-    is possible to forgo setup of encrypted storage on your local computer and just
-    specify 'ssh://user@address/path' for your Wyng destination.
-
-* __Virtualized host systems__ using Xen, KVM or other hypervisors:
-
-    Option A)  From the admin/storage VM, setup Wyng with an 'ssh://' destination where
-    you wish to store the archive. This destination may be a local guest VM or a
-    remote server.
-
-    Option B)  For hypervisors that support attachment of block devices to
-    different VMs: An encrypted block dev can be attached directly to the
-    admin/storage VM where it is then decrypted and mounted. This requires only an
-    'internal:/path' destination and benefits from not trusting a guest VM or remote
-    server with handling encryption, but performance may be slower due to
-    filesystem-network overhead.
-
-* __Qubes OS:__ A brief description for dom0-encrypted remote storage from a Qubes laptop:
-
-    1. Qube *remotefs* runs `sshfs` or other file sharing to access a remote filesystem
-    and then `losetup` on a remote file (to size the file correctly during inital
-    setup, use `truncate -s <size> mydisk.img` before using `losetup`).
-
-    2. *Domain0* runs `qvm-block attach dom0 remotefs:loop0`.
-
-    3. *Domain0* runs `cryptsetup` on /dev/xvdi to create/access the volume in its
-    encrypted form. Finally, the resulting /dev/mapper device can be mounted for use.
-
-    4. Setup Wyng on *Domain0* with `--dest=internal:/path`
-    pointing to the mounted path.
-
-    A local USB storage option similar to the above can be used by substituting *sys-usb*
-    for *remotefs*.
-
-    As an alternative to the above, if you have a trusted backup qube handling
-    encryption, you can easily setup Wyng in dom0 with a 'qubes://vm-name/path'
-    destination. Also, for Qubes OS where you have both a trusted backup VM *and*
-    trusted server, you can backup to the server via the backup VM with a
-    'qubes-ssh://vm-name:user@address/path' destination. These qubes options can
-    achieve faster performance than the above `qvm-block attach` setup, but they
-    move archive encryption out of Domain 0.
 
 
 ### Beta testers
@@ -633,10 +567,6 @@ Rolling back would involve deleting the wyng.backup dirs and then `cp` in the re
 direction. Note that Wyng may require using --remap afterward. Also note this is _not_
 recommended for regular use.
 
-* Wyng is generally usable with filesystems that don't support hardlinks (such as encryption
-filesystems), however one exception is when using deduplication test modes. When setting
-dedup higher than '1', Wyng will report that the destination is "not ready to receive commands"
-if the destination fs doesn't allow hardlinks.
 
 
 Donations
@@ -650,16 +580,6 @@ be made through [Liberapay](https://liberapay.com/tasket/donate)
 or [Patreon](https://www.patreon.com/tasket).
 
 
-Todo
----
-
-* Encryption integration
-
-* File name and sequence obfuscation
-
-* Zstandard compression
-
-* Btrfs and ZFS support
 
 External Links
 ---

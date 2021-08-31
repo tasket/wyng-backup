@@ -1066,10 +1066,10 @@ def arch_check(vol_list=None, startup=False):
         # Check hashes of each session individually
         print(" data:")
         for sesname in reversed(vol.sesnames):
+            vol.decode_manifests([sesname], force=True)
             ses = vol.sessions[sesname]    ; manifest = ses.path+"/manifest"    ; bcount = 0
-            if options.session \
-            and ((options.session.lower() == "newest" and sesname != vol.sesnames[-1]) \
-            or options.session < ses.localtime):
+            if options.session and ((options.session.lower() == "newest" \
+            and sesname != vol.sesnames[-1]) or options.session < ses.localtime):
                 continue # Enh: use seq
             if attended:   print("  Session %s... " % sesname, end="", flush=True)
 
@@ -3201,7 +3201,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4.0wip"      ; prog_date = "20210830"
+prog_version          = "0.4.0wip"      ; prog_date = "20210831"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 
 # Disk block size:
@@ -3234,6 +3234,9 @@ pjoin       = os.path.join    ; exists = os.path.exists
 
 if sys.hexversion < 0x3050000:
     x_it(1, "Python ver. 3.5 or greater required.")
+
+if tuple(time.gmtime(0))[:6] != (1970, 1, 1, 0, 0, 0):
+    x_it(1, "System time epoch is not 1970-01-01.")
 
 # Root user required
 if os.getuid() > 0:
