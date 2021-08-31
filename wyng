@@ -11,7 +11,7 @@
 import sys, signal, os, stat, shutil, subprocess, time, datetime
 import re, mmap, bz2, zlib, gzip, tarfile, io, fcntl, tempfile
 import argparse, configparser, hashlib, hmac, functools, uuid
-import getpass, base64
+import getpass, base64, platform
 import xml.etree.ElementTree    ; from itertools import islice
 from array import array         ; import resource
 
@@ -27,7 +27,7 @@ try:
     from Cryptodome.Cipher import ChaCha20 as Cipher_ChaCha20
     from Cryptodome.Cipher import ChaCha20_Poly1305 as Cipher_ChaCha20_Poly1305
     from Cryptodome.Random import get_random_bytes
-    import Cryptodome.Util.Padding
+    import Cryptodome
 except:
     Cipher_AES = None
 
@@ -51,7 +51,7 @@ class ArchiveSet:
         self.path        = pjoin(top,name)
         self.confpath    = pjoin(self.path, self.confname)
         self.confprefix  = b"[WYNG%02d]\n" % format_version
-        self.modeprefix  = b"ci = "      ; self.modesuffix = b"\n"      ; self.ci_mode = None
+        self.modeprefix  = b"ci = "      ; self.ci_mode = None
 
         self.vols        = {}
         self.dedupindex  = {}
@@ -93,24 +93,20 @@ class ArchiveSet:
         # decode archive.ini file
         # Format "magic" is "[WYNGvv]\n" where vv = format version: 9 bytes
         # Format mode is next as "ci = m0\n" where m = cipher mode: 8 bytes
-        with open(self.confpath, "rb") as f:   buf = f.read(self.max_conf_sz)
-        self.raw_hashval = hashlib.sha256(buf).hexdigest()
-        if not buf.startswith(self.confprefix + self.modeprefix):
-            if not buf.startswith(b"[var]\n"):
+        with open(self.confpath, "rb") as f:
+            header0 = f.read(9)    ; self.ci_mode = f.read(8)    ; buf = f.read(self.max_conf_sz)
+        self.raw_hashval = hashlib.sha256(header0 + self.ci_mode + buf).hexdigest()
+        if not header0 == self.confprefix and header_mode.startswith(elf.modeprefix):
+            if not header0.startswith(b"[var]\n"):
                 raise ValueError("Not a Wyng format.")
             else:
                 old_v2_format = True  ; raise NotImplementedError("Old format conversion")
         else:
             old_v2_format = False    #; untrusted_ver = 2
 
-        buf = buf[len(self.confprefix)+len(self.modeprefix):]
-        self.ci_mode = ci_mode = buf[:3]    ; buf = buf[3:]
-        assert ci_mode.endswith(self.modesuffix)
-        if ci_mode[:2] == b"00":
-            self.mcrypto = None
-        else:
+        if self.ci_mode[-3:-1] != b"00" and not mcrypto:
             # init metadata crypto
-            ci_types = DataCryptography.crypto_codes[ci_mode[:2]]
+            ci_types = DataCryptography.crypto_codes[self.ci_mode[-3:-1]]
             if not passphrase:   passphrase = ask_passphrase()
             assert passphrase and passphrase != bytes(len(passphrase))
             self.mcrypto = mcrypto \
@@ -133,6 +129,8 @@ class ArchiveSet:
 
         # init data crypto
         if mcrypto and not self.datacrypto:
+            if not float(self.updated_at) < time.time():
+                raise ValueError("Current time is less than archive timestamp!")
             assert passphrase and passphrase != bytes(len(passphrase))
             #assert ci_types[1] == self.data_cipher
             self.datacrypto = datacrypto \
@@ -193,13 +191,11 @@ class ArchiveSet:
                                           for x,ln in enumerate(self.in_process) }
 
         os.makedirs(self.path, exist_ok=True)
-        with io.StringIO() as f:
-            self.conf.write(f)    ; f.flush()
-            buf = gzip.compress(f.getvalue().encode("UTF-8"), 4)
+        with io.StringIO() as fs:
+            self.conf.write(fs)    ; fs.flush()
+            buf = gzip.compress(fs.getvalue().encode("UTF-8"), 4)
         if self.mcrypto:   buf = self.mcrypto.encrypt(buf)
-        header = self.confprefix + self.modeprefix + self.ci_mode
-        assert len(header) == 17
-        with open(self.confpath+ext, "wb") as fsave:   fsave.write(header + buf)
+        with open(self.confpath+ext, "wb") as f:   f.write(self.confprefix + self.ci_mode + buf)
 
     # Set or clear state for the archive as 'in_process' in case of interruption during write.
     # Format is list containing strings or list of strings. For latter, ':|' is the delimiter.
@@ -595,6 +591,8 @@ class DataCryptography():
         if ci_type == "aes-256-cbc":
             # FIX: Probably requires IV encryption with different non-data key
             raise NotImplementedError("Needs work")
+            if not (platform.machine() == "x86_64" and "aes" in cpu_flags):
+                print("Warning: x86_64 + AES crypto sidechannel resistance not detected.")
             self.key_sz  = kbits//8                ; self.max_count = 2**48-64 # <--blocks
             self.iv_sz   = 16                      ; self.buf_start = self.iv_sz
             self.blk_sz  = Cipher_AES.block_size   ; self.ps_mask = self.blk_sz-1
@@ -605,6 +603,8 @@ class DataCryptography():
             self.decrypt = self._dec_aes_256_cbc_rndpad
 
         elif ci_type == "aes-256-siv":
+            if not (platform.machine() == "x86_64" and "aes" in cpu_flags):
+                print("Warning: x86_64 + AES crypto sidechannel resistance not detected.")
             self.key_sz  = 2*kbits//8              ; self.max_count = 2**48-64
             self.nonce_sz= 12                      ; self.tag_sz    = 16
             self.buf_start = self.nonce_sz+self.tag_sz
@@ -615,6 +615,8 @@ class DataCryptography():
             self.decrypt = self._dec_aes_256_siv
 
         elif ci_type == "xchacha20":
+            if Cryptodome.version_info[0:2] < (3,9):
+                raise RuntimeError("Cryptodome version >= 3.9 required for xchacha20 cipher.")
             self.key_sz  = kbits//8                ; self.max_count = 2**80-64
             self.nonce_sz= 24                      ; self.buf_start = self.nonce_sz
             self.countsz = self.max_count.bit_length() // 8
@@ -624,6 +626,8 @@ class DataCryptography():
             self.decrypt = self._dec_chacha20
 
         elif ci_type == "xchacha20-poly1305":
+            if Cryptodome.version_info[0:2] < (3,9):
+                raise RuntimeError("Cryptodome version >= 3.9 required for xchacha20 cipher.")
             self.key_sz  = kbits//8         ; self.max_count = 2**80-64    ; self.tag_sz = 16
             self.nonce_sz= 24               ; self.buf_start = self.nonce_sz + self.tag_sz
             self.countsz = self.max_count.bit_length() // 8
@@ -1257,7 +1261,7 @@ def get_configs_remote():
 
 # Detect features of internal and destination environments:
 
-def detect_internal_state():
+def detect_internal_state():  ####  ###
 
     destsys = aset.destsys    ; desttype = None
     for dt in url_types:
@@ -1271,15 +1275,6 @@ def detect_internal_state():
     for prg in (CP.sort, CP.sed, CP.ssh if desttype=="ssh" else CP.sh):
         if not shutil.which(prg):
             raise RuntimeError("Required command not found: "+prg)
-
-    try:
-        p = subprocess.check_output([CP.thin_delta, "-V"])
-    except:
-        p = b""
-    ver = p[:5].decode("UTF-8").strip()    ; target_ver = "0.7.4"
-    if p and ver < target_ver:
-        print("Note: Thin provisioning tools version", target_ver,
-              "or later is recommended for stability. Installed version =", ver+".")
 
 
     #####>  Begin helper program  <#####
@@ -2185,6 +2180,13 @@ def monitor_send(datavols, selected=[], monitor_only=True):
 
     for prg in (CP.lvm, CP.dmsetup, CP.thin_delta ):
         if not shutil.which(prg):  raise RuntimeError("Required command not found: "+prg)
+    try:
+        p = subprocess.check_output([CP.thin_delta, "-V"])
+    except:
+        p = b""
+    ver = p[:5].decode("UTF-8").strip()    ; target_ver = "0.7.4"
+    if p and ver < target_ver:
+        raise RuntimeError("Thin provisioning tools version >= "+target_ver+" required.")
 
     localtime = time.strftime("%Y%m%d-%H%M%S")
 
@@ -2702,10 +2704,6 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     elif not save_path:
         save_path = pjoin("/dev",vgname,datavol)
 
-    if save_path or diff:
-        for prg in (CP.lvm, CP.blkdiscard):
-            if not shutil.which(prg):  raise RuntimeError("Required command not found: "+prg)
-
     # Set the session to retrieve
     if select_ses:
         if select_ses[0] == "^":
@@ -2752,11 +2750,9 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
     # compare metadata hashes
     if not options.from_arch:
-        print("Checking metadata... ", end="", flush=True)
         if compare_files(volumes=[vol], sessions=incl_ses):
             x_it(1, "Error: Local and archive metadata differ.")
-        else:
-            print("OK")
+    vol.decode_manifests(incl_ses, force=True)
 
     # Merge manifests and send to archive system:
     # sed is used to expand chunk info into a path and filter out any entries
@@ -3205,7 +3201,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4.0wip"      ; prog_date = "20210827"
+prog_version          = "0.4.0wip"      ; prog_date = "20210830"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 
 # Disk block size:
@@ -3250,6 +3246,8 @@ try:
     fcntl.lockf(lockf, fcntl.LOCK_EX|fcntl.LOCK_NB)
 except IOError:
     x_it(1, "ERROR: "+prog_name+" is already running.")
+
+cpu_flags = [x for x in open("/proc/cpuinfo") if x.startswith("flags")] [0].split()[1:]
 
 
 # Parse Arguments:
