@@ -5,42 +5,11 @@
 ###  Licensed under GNU General Public License v3. See file 'LICENSE'.
 
 
-import sys, os, shutil, configparser, subprocess, xml.etree.ElementTree
+import sys, os, signal, tempfile, shutil, configparser, subprocess, xml.etree.ElementTree
 
 
-class ArchiveSet:
-    def __init__(self, name, top, allvols=False):
-        self.name        = name
-        self.path        = top+"/"+name
-        self.confpath    = self.path+"/archive.ini"
-        # persisted:
-        self.chunksize   = None
-        self.compression = None
-        self.compr_level = None
-        self.hashtype    = None
-        self.vgname      = None
-        self.poolname    = None
-        self.destsys     = None
-        self.destdir     = "."
-        self.destmountpoint = None
-        self.uuid        = None
-
-        # parser for the .ini formatted configuration
-        self.conf = cp   = configparser.ConfigParser()
-        cp.optionxform   = lambda option: option
-        cp["var"]        = {}
-        cp["volumes"]    = {}
-
-        # halt configuration if this is a new or temp config
-        if not os.path.exists(self.confpath):
-            self.uuid = str(uuid.uuid4())
-            return
-
-        cp.read(self.confpath)
-        self.a_ints      = {"chunksize"}
-        for name in cp["var"].keys():
-            setattr(self, name, int(cp["var"][name]) \
-                                if name in self.a_ints else cp["var"][name])
+def handle_signal(signum, frame):
+    sys.stderr.write(" *** Caught signal "+str(signum))
 
 
 # Exit with simple message
@@ -59,90 +28,119 @@ if os.getuid() > 0:
 
 
 
-## CONSTANTS ##
+##  MAIN  ##
 
-arch_path = "/var/lib/wyng.backup"      ; aset = ArchiveSet("default", arch_path)
-mvolname  = "wyng-qubes-"+aset.uuid     ; mvolpath = "/dev/"+aset.vgname+"/"+mvolname
+mvolname  = "qubes-xml-backup"
 qubesvar  = "/var/lib/qubes/"           ; qubesxml = "qubes.xml"
 
-if sys.argv[1].lower() == "meta-prep":
-    ## Initialize & mount metadata volume
+p  = subprocess.run(["wyng", "list"], capture_output=True, check=True)
+cv = [x for x in p.stdout.split("\n") if x.startswith("Configured Volumes")][0]
+vgname, poolname = cv[cv.index("[")+1:cv.index("]")].split("/")
 
-    if not os.path.exists(mvolpath):
-        subprocess.run("lvm lvcreate -prw -ay -kn -V 50M --thin -n "+mvolname
-                       " "+aset.vgname+"/"+aset.poolname
-                       "mkfs.xfs "+mvolpath+" && chmod 755 "+mvolpath, shell=True, check=True)
+print("qubes-wyng-util alpha rel. 2021-09-02")
 
-    os.makedirs("/mnt/"+mvolname, exist_ok=True)
-    if not os.path.ismount("/mnt/"+mvolname):
-        subprocess.run(["mount", mvolpath, "/mnt/"+mvolname], check=True)
+if sys.argv[1].lower() == "version":
+    pass
 
+elif sys.argv[1].lower() == "meta-prep":
 
-    ## Copy the Qubes metadata
+    ## tar the Qubes metadata
+    with tempfile.NamedTemporaryFile(delete=False) as tmptarf:
+        subprocess.run(["tar", "-czf", "-", "--exclude=*img", qubesxml, "appvms", "vm-templates",
+                       ], stdout=tmptarf, check=True, cwd=qubesvar)
+        tmptarf.flush()
+        tarname = tmptarf.name    ; tarsize = os.fstat(tmptarf.fileno()).st_size
 
-    for d in ("appvms","vm-templates"):
-        subprocess.run(["rsync", "-a", "--delete", "--exclude=*img",
-                        qubesvar+d, "/mnt/"+mvolname+"/"+d], check=True)
+    ## Initialize the metadata volume
+    if os.path.exists(mvolpath):
+        subprocess.run(["lvm", "lvresize", "-f", "-L", str(tarsize)+"b", mvolpath+"/"+mvolname
+                       ], check=True)
+    else:
+        subprocess.run(["lvm", "lvcreate", "-prw", "-ay", "-kn", "-V", str(tarsize)+"b", "--thin",
+                        "-n", mvolname, vgname+"/"+poolname
+                       ], check=True)
 
-    shutil.copyfile(qubesvar + qubesxml, "/mnt/"+mvolname+"/"+qubesxml)
-    subprocess.run(["umount", mvolpath], check=True)
+    subprocess.run(["dd", "if="+tarname, "of="+mvolpath+"/"+mvolname], check=True)
 
     ## Add our meta volume to Wyng archive
     subprocess.run(["wyng", "-u", "add", mvolname])
 
+
 elif sys.argv[1].lower() == "meta-recover":
+
     ## Restore VM settings
     ## Currently assumes that qubes metadata volume has been restored using a
     ## session ID matching the restored VM session ID.
+    ## Settings restoration is strictly keyed on the VM name, as this is the only identification
+    ## an end user will recognize. Therefore, traditional qubes-backup-restore practice
+    ## of exensive renaming is avoided.
 
-    raise NotImplementedError()
+    spec_qubes = sys.argv[2:]
+    if not spec_qubes:   raise ValueError("Must supply a list of Qubes VMs to restore settings.")
+    tempdir = tempfile.TemporaryDirectory()
+    errs = []
 
-    def find_domain(domains, target):
-        result = None
-        for domain in domains:
-            dname = [ x.text for x in domain.find("properties") if x.attrib["name"] == "name" ][0]
-            if dname == target:   result = domain    ; break
-
-        return result
-
-    qubes     = sys.argv[2:]    ; #live_qubes= Get list of current qube names
-    if not qubes:   raise ValueError("Must supply a list of Qubes VMs to restore settings.")
-
-    if not os.path.exists(mvolpath):   raise RuntimeError(mvolpath+" not found.")
-    os.makedirs("/mnt/"+mvolname, exist_ok=True)
-
-    if not os.path.ismount("/mnt/"+mvolname):
-        subprocess.run(["mount", mvolpath, "/mnt/"+mvolname], check=True)
-
-    #for d in ("appvms","vm-templates"):
-        #shutil.copytree("/mnt/"+mvolname+"/"+d, qubesvar+d, dirs_exist_ok=True)
-
-    stop_qubes = list(set(qubes) & set(live_qubes))
+    # shutdown specified VMs, then temporarily deactivate qubesd daemon
+    # (this segment might be better handled in Qubes admin code)
+    p = subprocess.run(["qvm-ls", "--raw-list"], capture_output=True, check=True)
+    live_qubes = p.stdout.decode("UTF-8").split()
+    stop_qubes = list(set(spec_qubes) & set(live_qubes))
     subprocess.run(["qvm-shutdown", "--force", "--wait", "--timeout=20"] + stop_qubes, check=True)
     subprocess.run(["qvm-kill"] + stop_qubes, check=True)
-    ##catch_signals()
     subprocess.run(["systemctl", "stop", "qubesd"], check=True)
+
+    # prepare metadata files and XML objs for both backup and current/live VMs
     shutil.copyfile(qubesvar+qubesxml, qubesvar+qubesxml+"-bak")
-    bak_tree  = xml.etree.ElementTree("/mnt/"+mvolname+"/"+qubesxml).getroot().find("domains")
-    live_tree = xml.etree.ElementTree(qubesvar + qubesxml).getroot().find("domains")
+    subprocess.run(["tar", "-xzf", "/dev/"+vgname+"/"+mvolname], cwd=tempdir.name, check=True)
+    bak_tree  = xml.etree.ElementTree.parse(tempdir.name+"/"+qubesxml).getroot().find("domains")
+    live_xml  = xml.etree.ElementTree.parse(qubesvar + qubesxml)
+    live_tree = live_xml.getroot().find("domains")
 
-    for qube in qubes:
-        bak_domain = find_domain(bak_tree, qube)
-        if bak_domain:
-            live_domain = find_domain(live_tree, qube)
+    # make dicts from xml trees for easy navigation
+    bak_vms, live_vms = {}, {}
+    for tree, vms in ((bak_tree, bak_vms), (live_tree, live_vms)):
+        for domain in tree:
+            props = { x.attrib["name"]: x for x in domain.find("properties") }
+            if "name" in props:   props["xmldomain"] = domain    ; vms[props["name"]] = props
 
-            # pcode:
-            # assert bak_domain[templatevm] in live_qubes+receiving_qubes
-            # assert bak_domain[netvm] in live_qubes+receiving_qubes
-            # if live_domain:
-            #   bak_domain.qid = live_tree.qid    ; live_tree.remove(live_domain)
-            # elif bak_domain.qid in live_tree_qids:
-            #   bak_domain.change_qid
-            # live_tree.append(bak_domain)
-            # live_tree.save()
+    for qube in spec_qubes:
+        if qube in bak_vms:
+            bak_domain  = bak_vms[qube]
+            assert bak_domain["template"].text in [""] + live_qubes + spec_qubes
+            assert bak_domain["netvm"].text    in [""] + live_qubes + spec_qubes
 
+            # add/replace VM entry in qubes.xml, adjusting 'qid' where necessary;
+            # might need to check 'uuid' in a similar way.
+            # future: possibly add checks for bak vs live VM type
+            live_domain = live_vms.get(qube, default=None)
+            if live_domain:
+                bak_domain["qid"].text = live_tree["qid"].text
+                del(live_tree[live_domain["xmldomain"]])
+            elif bak_domain["qid"].text in [x["qid"].text for x in live_vms.values()]:
+                nextqid = max([int(x["qid"].text) for x in live_vms.values()]) + 1
+                bak_domain["qid"].text = str(nextqid)
+            live_tree.append(bak_domain)
+
+            # replace other metadata files under /var/lib/qubes
+            vdir = "appvms/" if "template" in bak_domain else "vm-templates/":
+            if os.path.exists(qubesvar + vdir + qube):   shutil.rmtree(qubesvar + vdir + qube)
+            if os.path.exists(tempdir.name+"/"+vdir + qube):
+                shutil.copytree(tempdir.name+"/"+vdir + qube,  qubesvar + vdir + qube)
+            else:
+                os.makedir(qubesvar + vdir + qube)
+
+        else:
+            sys.stderr.write("Specified qube not in backup set: "+qube)    ; errs.append(qube)
+
+    # write modified qubes.xml
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGQUIT, signal.SIGABRT, signal.SIGALRM,
+                signal.SIGHUP, signal.SIGTSTP, signal.SIGUSR1):
+        signal.signal(sig, handle_signal)    ; signal.siginterrupt(sig, False)
+
+    live_xml.write(qubesvar + qubesxml)
     subprocess.run(["systemctl", "start", "qubesd"], check=True)
-    subprocess.run(["umount", mvolpath], check=True)
+    p = subprocess.Popen(["qvm-sync-appmenus", "--regenerate-only"])
+    sys.exit(len(errs) > 0)
 
 else:
-    print("Specify 'meta-prep' or 'meta-recover'.")
+    print("Specify 'meta-prep', 'meta-recover' or 'version'.")
