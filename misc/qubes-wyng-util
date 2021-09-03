@@ -15,83 +15,13 @@ def handle_signal(signum, frame):
 # Exit with simple message
 def x_it(code, text):
     sys.stderr.write(text+"\n")
-    #cleanup()
     sys.exit(code)
 
 
-if sys.hexversion < 0x3050000:
-    x_it(1, "Python ver. 3.5 or greater required.")
-
-# Root user required
-if os.getuid() > 0:
-    x_it(1, "Must be root user.")
-
-
-
-##  MAIN  ##
-
-mvolname  = "qubes-xml-backup"
-qubesvar  = "/var/lib/qubes/"           ; qubesxml = "qubes.xml"
-
-p  = subprocess.run(["wyng", "list"], capture_output=True, check=True)
-cv = [x for x in p.stdout.split("\n") if x.startswith("Configured Volumes")][0]
-vgname, poolname = cv[cv.index("[")+1:cv.index("]")].split("/")
-
-print("qubes-wyng-util alpha rel. 2021-09-02")
-
-if sys.argv[1].lower() == "version":
-    pass
-
-elif sys.argv[1].lower() == "meta-prep":
-
-    ## tar the Qubes metadata
-    with tempfile.NamedTemporaryFile(delete=False) as tmptarf:
-        subprocess.run(["tar", "-czf", "-", "--exclude=*img", qubesxml, "appvms", "vm-templates",
-                       ], stdout=tmptarf, check=True, cwd=qubesvar)
-        tmptarf.flush()
-        tarname = tmptarf.name    ; tarsize = os.fstat(tmptarf.fileno()).st_size
-
-    ## Initialize the metadata volume
-    if os.path.exists(mvolpath):
-        subprocess.run(["lvm", "lvresize", "-f", "-L", str(tarsize)+"b", mvolpath+"/"+mvolname
-                       ], check=True)
-    else:
-        subprocess.run(["lvm", "lvcreate", "-prw", "-ay", "-kn", "-V", str(tarsize)+"b", "--thin",
-                        "-n", mvolname, vgname+"/"+poolname
-                       ], check=True)
-
-    subprocess.run(["dd", "if="+tarname, "of="+mvolpath+"/"+mvolname], check=True)
-
-    ## Add our meta volume to Wyng archive
-    subprocess.run(["wyng", "-u", "add", mvolname])
-
-
-elif sys.argv[1].lower() == "meta-recover":
-
-    ## Restore VM settings
-    ## Currently assumes that qubes metadata volume has been restored using a
-    ## session ID matching the restored VM session ID.
-    ## Settings restoration is strictly keyed on the VM name, as this is the only identification
-    ## an end user will recognize. Therefore, traditional qubes-backup-restore practice
-    ## of exensive renaming is avoided.
-
-    spec_qubes = sys.argv[2:]
-    if not spec_qubes:   raise ValueError("Must supply a list of Qubes VMs to restore settings.")
-    tempdir = tempfile.TemporaryDirectory()
-    errs = []
-
-    # shutdown specified VMs, then temporarily deactivate qubesd daemon
-    # (this segment might be better handled in Qubes admin code)
-    p = subprocess.run(["qvm-ls", "--raw-list"], capture_output=True, check=True)
-    live_qubes = p.stdout.decode("UTF-8").split()
-    stop_qubes = list(set(spec_qubes) & set(live_qubes))
-    subprocess.run(["qvm-shutdown", "--force", "--wait", "--timeout=20"] + stop_qubes, check=True)
-    subprocess.run(["qvm-kill"] + stop_qubes, check=True)
-    subprocess.run(["systemctl", "stop", "qubesd"], check=True)
-
+def replace_xml():
     # prepare metadata files and XML objs for both backup and current/live VMs
     shutil.copyfile(qubesvar+qubesxml, qubesvar+qubesxml+"-bak")
-    subprocess.run(["tar", "-xzf", "/dev/"+vgname+"/"+mvolname], cwd=tempdir.name, check=True)
+    subprocess.run(["tar", "-xzf", mvolpath+mvolname], cwd=tempdir.name, check=True)
     bak_tree  = xml.etree.ElementTree.parse(tempdir.name+"/"+qubesxml).getroot().find("domains")
     live_xml  = xml.etree.ElementTree.parse(qubesvar + qubesxml)
     live_tree = live_xml.getroot().find("domains")
@@ -101,7 +31,7 @@ elif sys.argv[1].lower() == "meta-recover":
     for tree, vms in ((bak_tree, bak_vms), (live_tree, live_vms)):
         for domain in tree:
             props = { x.attrib["name"]: x for x in domain.find("properties") }
-            if "name" in props:   props["xmldomain"] = domain    ; vms[props["name"]] = props
+            if "name" in props:   props["xmldomain"] = domain    ; vms[props["name"].text] = props
 
     for qube in spec_qubes:
         if qube in bak_vms:
@@ -112,17 +42,17 @@ elif sys.argv[1].lower() == "meta-recover":
             # add/replace VM entry in qubes.xml, adjusting 'qid' where necessary;
             # might need to check 'uuid' in a similar way.
             # future: possibly add checks for bak vs live VM type
-            live_domain = live_vms.get(qube, default=None)
+            live_domain = live_vms.get(qube, None)
             if live_domain:
-                bak_domain["qid"].text = live_tree["qid"].text
-                del(live_tree[live_domain["xmldomain"]])
+                bak_domain["qid"].text = live_domain["qid"].text
+                live_tree.remove(live_domain["xmldomain"])
             elif bak_domain["qid"].text in [x["qid"].text for x in live_vms.values()]:
                 nextqid = max([int(x["qid"].text) for x in live_vms.values()]) + 1
                 bak_domain["qid"].text = str(nextqid)
-            live_tree.append(bak_domain)
+            live_tree.append(bak_domain["xmldomain"])
 
             # replace other metadata files under /var/lib/qubes
-            vdir = "appvms/" if "template" in bak_domain else "vm-templates/":
+            vdir = "appvms/" if "template" in bak_domain else "vm-templates/"
             if os.path.exists(qubesvar + vdir + qube):   shutil.rmtree(qubesvar + vdir + qube)
             if os.path.exists(tempdir.name+"/"+vdir + qube):
                 shutil.copytree(tempdir.name+"/"+vdir + qube,  qubesvar + vdir + qube)
@@ -138,9 +68,107 @@ elif sys.argv[1].lower() == "meta-recover":
         signal.signal(sig, handle_signal)    ; signal.siginterrupt(sig, False)
 
     live_xml.write(qubesvar + qubesxml)
-    subprocess.run(["systemctl", "start", "qubesd"], check=True)
-    p = subprocess.Popen(["qvm-sync-appmenus", "--regenerate-only"])
-    sys.exit(len(errs) > 0)
+
+
+
+##  MAIN  ##
+
+if sys.hexversion < 0x3050000:
+    x_it(1, "Python ver. 3.5 or greater required.")
+
+# Root user required
+if os.getuid() > 0:
+    x_it(1, "Must be root user.")
+
+# FIX: Check Qubes version here.
+
+mvolname  = "qubes-xml-backup"          ; wyng_cmd = "/usr/bin/wyng"
+qubesvar  = "/var/lib/qubes/"           ; qubesxml = "qubes.xml"
+
+p  = subprocess.check_output([wyng_cmd, "list"]).decode("UTF-8")
+cv = [x for x in p.split("\n") if x.startswith("Configured Volumes")][0]
+vgname, poolname = cv[cv.index("[")+1:cv.index("]")].split("/")
+mvolpath = "/dev/%s/" % vgname
+action   = sys.argv[1].lower() if len(sys.argv) > 1 else ""
+
+print("qubes-wyng-util alpha rel. 2021-09-03")
+
+if action == "version":
+    pass
+
+
+elif action == "meta-prep":
+
+    ## tar the Qubes metadata
+    with tempfile.NamedTemporaryFile(delete=False) as tmptarf:
+        subprocess.run(["tar", "-czf", "-", "--exclude=*img", qubesxml, "appvms", "vm-templates",
+                       ], stdout=tmptarf, check=True, cwd=qubesvar)
+        tmptarf.flush()
+        tarname = tmptarf.name    ; tarsize = os.fstat(tmptarf.fileno()).st_size //1024 //1024
+
+    ## Initialize the metadata volume
+    if os.path.exists(mvolpath+mvolname):
+        subprocess.run(["lvm", "lvremove", "-y", mvolpath+mvolname], check=True)
+
+    subprocess.run(["lvm", "lvcreate", "-prw", "-ay", "-kn", "-V", str(tarsize+1)+"M",
+                    "--thin", "-n", mvolname, vgname+"/"+poolname
+                    ], check=True)
+
+    subprocess.run(["dd", "if="+tarname, "of="+mvolpath+mvolname], check=True)
+
+    ## Add our meta volume to Wyng archive
+    subprocess.run([wyng_cmd, "-u", "add", mvolname])
+
+    print("Metadata saved.")
+
+
+elif action == "meta-recover":
+
+    ## Restore VM settings
+    ## Currently assumes that qubes metadata volume has been restored using a
+    ## session ID matching the restored VM session ID.
+    ## Settings restoration is strictly keyed on the VM name, as this is the only identification
+    ## an end user will recognize. Therefore, traditional qubes-backup-restore practice
+    ## of exensive renaming is avoided.
+
+    spec_qubes = sys.argv[2:]
+    if not spec_qubes:   raise ValueError("Must supply a list of Qubes VMs to restore settings.")
+    tempdir = tempfile.TemporaryDirectory()
+    errs = []
+
+    # shutdown specified VMs, then temporarily deactivate qubesd daemon
+    # (this segment might be better handled in Qubes admin code)
+    live_qubes = subprocess.check_output(["qvm-ls", "--raw-list"]).decode("UTF-8").split()
+    stop_qubes = list(set(spec_qubes) & set(live_qubes))
+    subprocess.run(["qvm-shutdown", "--force", "--wait", "--timeout=20"] + stop_qubes, check=True)
+    subprocess.run(["qvm-kill"] + stop_qubes, check=True)
+    subprocess.run(["systemctl", "stop", "qubesd"], check=True)
+
+    try:
+        replace_xml()
+    except Exception as e:
+        raise e
+    finally:
+        subprocess.run(["systemctl", "start", "qubesd"], check=True)
+        # p = subprocess.Popen(["qvm-sync-appmenus", "--regenerate-only"])
+        sys.exit(len(errs) > 0)
+
+    print("Metadata restored.")
+
 
 else:
-    print("Specify 'meta-prep', 'meta-recover' or 'version'.")
+    print(
+"""\nSpecify 'meta-prep', 'meta-recover [vm names]' or 'version'.
+    
+    Example 1, Backup:
+        $ sudo qubes-wyng-util meta-prep
+        Metadata saved.
+        $ sudo wyng send personal qubes-xml-backup
+        
+    Example 2, Restore:
+        $ sudo wyng receive personal
+        $ sudo wyng receive qubes-xml-backup
+        $ sudo qubes-wyng-util meta-restore personal
+        Metadata restored.
+        $ qvm-sync-appmenus --regenerate-only
+""")
