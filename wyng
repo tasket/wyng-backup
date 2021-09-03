@@ -315,10 +315,11 @@ class ArchiveSet:
             self.changed_bytes = 0
 
             # load volume info
+            if options.debug:  print("\n", vid, "-", name)
             if path:   os.makedirs(path, exist_ok=True)
             if path and hashval != "0":
                 with open(pjoin(path,"volinfo"), "rb") as f:
-                    fsize = f.seek(0,2)   ; f.seek(0)
+                    fsize = os.fstat(f.fileno()).st_size
                     if fsize > ArchiveSet.max_volinfosz:   raise ValueError("volinfo too large")
                     buf = f.read(fsize)
                 if archive.mcrypto:   buf = archive.mcrypto.decrypt(buf)
@@ -1056,7 +1057,7 @@ def arch_check(vol_list=None, startup=False):
             x_it(1, "Error: Local and archive metadata differ.")
 
         # Check index sequencing in first and combined manifests
-        print("  index sequence,", end="")
+        print("  index,", end="")
         mset = []
         for ses in vol.sesnames:
             # print(ses, "size =", vol.sessions[ses].volsize)
@@ -1068,10 +1069,12 @@ def arch_check(vol_list=None, startup=False):
         for sesname in reversed(vol.sesnames):
             vol.decode_manifests([sesname], force=True)
             ses = vol.sessions[sesname]    ; manifest = ses.path+"/manifest"    ; bcount = 0
+
             if options.session and ((options.session.lower() == "newest" \
             and sesname != vol.sesnames[-1]) or options.session < ses.localtime):
                 continue # Enh: use seq
-            if attended:   print("  Session %s... " % sesname, end="", flush=True)
+
+            if attended:   print(" ", sesname[2:], end="... ", flush=True)
 
             # FixCheck for stray entries here
             cmd1 = [[CP.sed, "-E", "/^0\s/ d; "
@@ -1213,7 +1216,6 @@ def get_configs_remote():
     assert isinstance(mcrypto, DataCryptography) and isinstance(datacrypto, DataCryptography)
 
     # Initial auth successful! Fetch + auth volume metadata...
-    #mcrypto  = new_aset.mcrypto    ; datacrypto = new_aset.datacrypto
     recv_list= [(x.split()[0]+"/volinfo", ArchiveSet.max_volinfosz)
                  for x in new_aset.conf["volumes"].values()]
     fetch_file_blobs(recv_list)
@@ -2744,13 +2746,13 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     # Collect session manifests
     include = False   ; incl_ses = []
     for ses in sessions:
-        incl_ses.append(vol.sessions[ses])
+        incl_ses.append(ses)
 
         if ses == select_ses:  break
 
     # compare metadata hashes
     if not options.from_arch:
-        if compare_files(volumes=[vol], sessions=incl_ses):
+        if compare_files(volumes=[vol], sessions=[vol.sessions[x] for x in incl_ses]):
             x_it(1, "Error: Local and archive metadata differ.")
     vol.decode_manifests(incl_ses, force=True)
 
@@ -2758,7 +2760,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     # sed is used to expand chunk info into a path and filter out any entries
     # beyond the current last chunk, then piped to cat on destination.
     # Note address_split is used to bisect filename to construct the subdir.
-    manifest = merge_manifests(datavol, msessions=[x.name for x in incl_ses], addcol=True)
+    manifest = merge_manifests(datavol, msessions=incl_ses, addcol=True)
 
     if not sparse:
         cmds = [[CP.sed, "-E", "/"+last_chunkx+"/q", manifest],  ## Enh: detect vol_shrank
@@ -3062,6 +3064,11 @@ def remove_local_metadata(archive):
 
 def show_list(selected_vols):
 
+    if options.verbose:
+        print("\nArchive Settings:")
+        for key, val in aset.conf["var"].items():
+            print(" %-15s = %s" % (key, val))
+
     # Print list of sessions grouped by tag. First, organize by tag:
     if options.tag:
         print("\nTag Assignments")    ; ltags = {}
@@ -3201,7 +3208,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4.0wip"      ; prog_date = "20210831"
+prog_version          = "0.4.0alpha"    ; prog_date = "20210903"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 
 # Disk block size:
@@ -3528,7 +3535,8 @@ elif options.action == "arch-check":
 
 
 elif options.action == "arch-delete":
-    print("Deleting ALL metadata AND archived data!")
+    desthost = "//"+destsys+" " if destsys else ""
+    print("\nDeleting ALL archived data from", desttype+":" + desthost + destpath + bkdir, "!")
 
     if not options.unattended and not options.force:
         ans = ask_input("Are you sure? [y/N]: ")
