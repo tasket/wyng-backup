@@ -1035,98 +1035,31 @@ def arch_check(vol_list=None, startup=False):
     for volname in vol_list if dest_online else []:
         if volname not in aset.vols:   continue
 
-        # Handle disabled volumes and stray dirs
-        #if startup and volname not in aset.vols:   continue
-        #if volname not in aset.conf["volumes"]:
-            #print("Stray dir '%s'" % volname)    ; stray_dirs.append(volname)
-            #if not startup:   continue
-
         vol = aset.vols[volname]
-        if not startup or options.debug:   print("\nChecking volume", volname, flush=True)
+        if not startup or options.debug:   print("\nVolume", volname, flush=True)
 
         # Remove session tmp dirs
         for sdir in os.scandir(vol.path):
             if sdir.name.startswith("S_") and sdir.name.endswith("-tmp"):
                 if options.debug:   print("Removing partial session dir '%s'" % sdir.name)
                 dest_run([destcd+bkdir + " && rm -rf " + vol.vid+"/"+sdir.name])
-                shutil.rmtree(vol.vid+"/"+sdir.name, ignore_errors=True)
+                shutil.rmtree(vol.path+"/"+sdir.name, ignore_errors=True)
 
         if startup:   continue
 
-        if compare_files(volumes=[vol], sessions=list(vol.sessions.values())):
-            x_it(1, "Error: Local and archive metadata differ.")
-
         # Check index sequencing in first and combined manifests
-        print("  index,", end="")
-        mset = []
-        for ses in vol.sesnames:
-            # print(ses, "size =", vol.sessions[ses].volsize)
-            mset.append(ses)
-            check_manifest_sequence(volname, mset)
+        print("  Checking index,", end="", flush=True) ; mset = []
+        for ses in vol.sesnames:   mset.append(ses)    ; check_manifest_sequence(volname, mset)
 
         # Check hashes of each session individually
         print(" data:")
         for sesname in reversed(vol.sesnames):
-            vol.decode_manifests([sesname], force=True)
-            ses = vol.sessions[sesname]    ; manifest = ses.path+"/manifest"    ; bcount = 0
-
             if options.session and ((options.session.lower() == "newest" \
-            and sesname != vol.sesnames[-1]) or options.session < ses.localtime):
+            and sesname != vol.sesnames[-1]) or options.session < vol.sessions[sesname].localtime):
                 continue # Enh: use seq
 
             if attended:   print(" ", sesname[2:], end="... ", flush=True)
-
-            # FixCheck for stray entries here
-            cmd1 = [[CP.sed, "-E", "/^0\s/ d; "
-                    +"s|^\S+\s+x(\S{" +str(address_split[0])+ "})(\S+)|"+sesname+"/\\1/x\\1\\2|",
-                    manifest],
-                    [CP.gzip, "-c", "-4"],
-                    dest_run_args(desttype, ["cat >"+tmpdir+"-rpc/dest.lst.gz"])]
-            do_exec(cmd1)
-
-            cmd2 = dest_run_args(desttype,
-                    [destcd + bkdir+"/"+vol.vid
-                    +" && exec 2>>"+tmpdir+"-rpc/receive.log"
-                    +" && python3 "+tmpdir+"-rpc/dest_helper.py receive"
-                    ])
-            getses = subprocess.Popen(cmd2, stdout=subprocess.PIPE)
-
-            # Open manifest then receive, check and save data
-            with open(manifest, "r") as mf:
-                for mfline in mf:
-                    cksum, fname = mfline.split()
-                    if cksum.strip() == "0":   continue
-
-                    # Read chunk size
-                    untrusted_size = int.from_bytes(getses.stdout.read(4),"big")
-                    # allow for slight expansion from compression algo
-                    if untrusted_size > chunksize + (chunksize // 64) or untrusted_size < 1:
-                        raise BufferError("Bad chunk size %d for %s" % (untrusted_size, mfline))
-
-                    # Size is OK.
-                    size = untrusted_size    ; bcount += size
-                    # Read chunk buffer
-                    untrusted_buf = getses.stdout.read(size)
-                    rc  = getses.poll()
-                    if rc is not None and len(untrusted_buf) == 0:   break
-
-                    if len(untrusted_buf) != size:
-                        with open(tmpdir+"/bufdump", "wb") as dump:   dump.write(untrusted_buf)
-                        print(mfline)
-                        raise BufferError("Got %d bytes, expected %d" % (len(untrusted_buf), size))
-
-                    # Decrypt the data chunk
-                    # Validation MUST be next step!
-                    if decrypt:
-                        untrusted_buf = decrypt(untrusted_buf)
-
-                    # Validate data
-                    if not compare_digest(cksum, b64enc(gethash(untrusted_buf).digest()).decode("ascii")):
-                        with open(tmpdir+"/bufdump", "wb") as dump:   dump.write(untrusted_buf)
-                        print(mfline)
-                        raise ValueError("Bad hash "+fname+" :: "
-                                         +str(b64enc(gethash(untrusted_buf).digest())))
-
+            bcount = receive_volume(vol.name, select_ses=sesname[2:], verify_only=2)
             if attended:   print(bcount, "bytes OK")
 
 
@@ -2676,7 +2609,7 @@ def compare_files(pathlist=[], volumes=[], sessions=[], clear=True):
 # can be used to resync volume with archive if the deltamap or snapshots
 # are lost or if the local volume reverted to an earlier state.
 
-def receive_volume(datavol, select_ses="", save_path="", diff=False):
+def receive_volume(datavol, select_ses="", save_path="", diff=False, verify_only=0):
 
     def diff_compare(dbuf,z):
         if dbuf != volf.read(chunksize):
@@ -2688,8 +2621,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         else:
             return 0
 
-    verify_only = options.action == "verify"      ; remap     = options.remap
-    attended    = not options.unattended          ; verbose   = not options.quiet
+    verbose     = not options.quiet and verify_only != 2
+    attended    = not options.unattended          ; remap     = options.remap
     sparse      = options.sparse                  ; chunksize = aset.chunksize
     sparse_write= options.sparse_write or sparse  ; debug     = options.debug
     vgname      = aset.vgname                     ; zeros     = bytes(chunksize)
@@ -2745,9 +2678,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
     # Collect session manifests
     include = False   ; incl_ses = []
-    for ses in sessions:
+    for ses in sessions if verify_only != 2 else [select_ses]:
         incl_ses.append(ses)
-
         if ses == select_ses:  break
 
     # compare metadata hashes
@@ -2838,8 +2770,9 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
     if volf:   volf_read = volf.read    ; volf_write = volf.write    ; volf_seek = volf.seek
 
-    print("Receiving" if save_path else "Scanning", "volume :", datavol, select_ses[2:])
-    if save_path:    print("Saving to %s '%s'" % (save_type, save_path))
+    if verbose:
+        print("Receiving" if save_path else "Scanning", "volume :", datavol, select_ses[2:])
+        if save_path:    print("Saving to %s '%s'" % (save_type, save_path))
 
     # Create retriever process using py program
     cmd = dest_run_args(desttype,
@@ -2915,10 +2848,9 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             raise ValueError("Bad hash "+faddr+" :: "+str(b64enc(gethash(untrusted_buf).digest())))
 
         ##  Buffer is OK  ##
-
-        if verify_only:   continue
-
         buf = untrusted_buf
+
+        if verify_only:   bcount += len(buf)    ; continue
 
         # Proceed with decompress.
         decomp = decompress(buf)
@@ -2948,10 +2880,10 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     if rc is not None and rc != 0:
         raise RuntimeError("Error code from getvol process: "+str(rc))
 
-    if not sparse and addr+len(decompress(untrusted_buf)) != volsize:
+    if not sparse and verify_only != 2 and addr+len(decompress(untrusted_buf)) != volsize:
         raise ValueError("Received range %d does not match volume size %d."
                             % (addr+len(decompress(untrusted_buf)), volsize))
-    print("100.00%")
+    if verbose:   print("100.00%")
     if debug:
         print("Received range:", addr+len(buf),
             "\n    Data bytes:", bcount)
@@ -2979,6 +2911,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                 print("\nNext 'send' will bring this volume into sync.")
         elif diff_count:
             x_it(1, "%d bytes differ." % diff_count)
+
+    return bcount
 
 
 # Rename a volume in the archive
