@@ -18,9 +18,15 @@ def x_it(code, text):
     sys.exit(code)
 
 
+def mk_err(qube, text):
+    sys.stderr.write(qube+": "+text)
+    errs.append(qube)
+
+
 def replace_xml():
     # prepare metadata files and XML objs for both backup and current/live VMs
     shutil.copyfile(qubesvar+qubesxml, qubesvar+qubesxml+"-bak")
+    print(qubesvar+qubesxml+"-bak", "created.")
     subprocess.run(["tar", "-xzf", mvolpath+mvolname], cwd=tempdir.name, check=True)
     bak_tree  = xml.etree.ElementTree.parse(tempdir.name+"/"+qubesxml).getroot().find("domains")
     live_xml  = xml.etree.ElementTree.parse(qubesvar + qubesxml)
@@ -35,14 +41,18 @@ def replace_xml():
 
     for qube in spec_qubes:
         if qube in bak_vms:
-            bak_domain  = bak_vms[qube]
-            assert bak_domain["template"].text in [""] + live_qubes + spec_qubes
-            assert bak_domain["netvm"].text    in [""] + live_qubes + spec_qubes
+            bak_domain  = bak_vms[qube]    ; live_domain = live_vms.get(qube, None)
+            istemplate  = "template" not in bak_domain
+            # future: possibly add checks for more VM types
+            if live_domain and ("template" in live_domain == istemplate):
+                mk_err(qube, "AppVM and TemplateVM types conflict.")
+            if not (istemplate or bak_domain["template"].text in [""] + live_qubes + spec_qubes):
+                mk_err(qube, "TemplateVM %s doesn't exist." % bak_domain["template"].text)
+            if bak_domain["netvm"].text not in [""] + live_qubes + spec_qubes:
+                mk_err(qube, "NetVM %s doesn't exist." % bak_domain["netvm"].text)
 
             # add/replace VM entry in qubes.xml, adjusting 'qid' where necessary;
             # might need to check 'uuid' in a similar way.
-            # future: possibly add checks for bak vs live VM type
-            live_domain = live_vms.get(qube, None)
             if live_domain:
                 bak_domain["qid"].text = live_domain["qid"].text
                 live_tree.remove(live_domain["xmldomain"])
@@ -60,7 +70,7 @@ def replace_xml():
                 os.makedir(qubesvar + vdir + qube)
 
         else:
-            sys.stderr.write("Specified qube not in backup set: "+qube)    ; errs.append(qube)
+            mk_err(qube, "Specified qube not in backup set.")
 
     # write modified qubes.xml
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGQUIT, signal.SIGABRT, signal.SIGALRM,
@@ -82,6 +92,7 @@ if os.getuid() > 0:
 
 # FIX: Check Qubes version here.
 
+errs = []
 mvolname  = "qubes-xml-backup"          ; wyng_cmd = "/usr/bin/wyng"
 qubesvar  = "/var/lib/qubes/"           ; qubesxml = "qubes.xml"
 
@@ -91,7 +102,7 @@ vgname, poolname = cv[cv.index("[")+1:cv.index("]")].split("/")
 mvolpath = "/dev/%s/" % vgname
 action   = sys.argv[1].lower() if len(sys.argv) > 1 else ""
 
-print("qubes-wyng-util alpha rel. 2021-09-03")
+print("qubes-wyng-util alpha rel. 2021-09-07")
 
 if action == "version":
     pass
@@ -119,7 +130,7 @@ elif action == "meta-prep":
     ## Add our meta volume to Wyng archive
     subprocess.run([wyng_cmd, "-u", "add", mvolname])
 
-    print("Metadata saved.")
+    print("Qubes metadata staged for backup.")
 
 
 elif action == "meta-recover":
@@ -134,7 +145,10 @@ elif action == "meta-recover":
     spec_qubes = sys.argv[2:]
     if not spec_qubes:   raise ValueError("Must supply a list of Qubes VMs to restore settings.")
     tempdir = tempfile.TemporaryDirectory()
-    errs = []
+
+    print("\nCaution: qubes-wyng-util is still experimental software and not thoroughly tested;\n"
+            "         using it to edit Qubes OS metadata may have deleterious effects!")
+    if input("Continue [y/N]? ").lower() != "y":   sys.exit(0)
 
     # shutdown specified VMs, then temporarily deactivate qubesd daemon
     # (this segment might be better handled in Qubes admin code)
@@ -147,13 +161,13 @@ elif action == "meta-recover":
     try:
         replace_xml()
     except Exception as e:
-        raise e
+        errs.append(e)    ; raise e
     finally:
         subprocess.run(["systemctl", "start", "qubesd"], check=True)
         # p = subprocess.Popen(["qvm-sync-appmenus", "--regenerate-only"])
         sys.exit(len(errs) > 0)
 
-    print("Metadata restored.")
+    print("Qubes metadata restored.")
 
 
 else:
@@ -163,10 +177,10 @@ else:
     Example 1, Backup:
         $ sudo qubes-wyng-util meta-prep
         Metadata saved.
-        $ sudo wyng send personal qubes-xml-backup
+        $ sudo wyng send vm-personal-private qubes-xml-backup
         
     Example 2, Restore:
-        $ sudo wyng receive personal
+        $ sudo wyng receive vm-personal-private
         $ sudo wyng receive qubes-xml-backup
         $ sudo qubes-wyng-util meta-restore personal
         Metadata restored.
