@@ -45,23 +45,21 @@ class ArchiveSet:
     max_volinfosz= (mhash_sz + sesname_sz + 10) * max_sessions + 1000
 
 
-    def __init__(self, name, top, allvols=False, children=2,
+    def __init__(self, name, top, allvols=False, children=2, load_tmp=False,
                  passphrase=None, mcrypto=None, datacrypto=None):
         self.name        = name
         self.path        = pjoin(top,name)
         self.confpath    = pjoin(self.path, self.confname)
         self.confprefix  = b"[WYNG%02d]\n" % format_version
         self.modeprefix  = b"ci = "      ; self.ci_mode = None
-
         self.vols        = {}
         self.dedupindex  = {}
         self.dedupsessions = []
         self.mcrypto     = mcrypto
         self.datacrypto  = datacrypto
         self.raw_hashval = None
-        #self.salt_f      = open(self.confpath+".salt", "r+b") \
-                           #if exists(self.confpath+".salt") else None
         self.attr_ints   = {"format_ver","chunksize","mci_count","dataci_count"}
+
         # persisted:
         self.format_ver  = 0
         self.chunksize   = bkchunksize
@@ -93,10 +91,10 @@ class ArchiveSet:
         # decode archive.ini file
         # Format "magic" is "[WYNGvv]\n" where vv = format version: 9 bytes
         # Format mode is next as "ci = m0\n" where m = cipher mode: 8 bytes
-        with open(self.confpath, "rb") as f:
+        with open(self.confpath+(".tmp"*load_tmp), "rb") as f:
             header0 = f.read(9)    ; self.ci_mode = f.read(8)    ; buf = f.read(self.max_conf_sz)
         self.raw_hashval = hashlib.sha256(header0 + self.ci_mode + buf).hexdigest()
-        if not header0 == self.confprefix and header_mode.startswith(elf.modeprefix):
+        if not (header0 == self.confprefix and self.ci_mode.startswith(self.modeprefix)):
             if not header0.startswith(b"[var]\n"):
                 raise ValueError("Not a Wyng format.")
             else:
@@ -113,11 +111,15 @@ class ArchiveSet:
                 = DataCryptography(ci_types[1], self.confpath+".salt",
                                     slot=1, passphrase=passphrase[:])
 
-
-        if mcrypto:   buf = mcrypto.decrypt(buf)
-        if options.debug:   print(gzip.decompress(buf).decode("UTF-8"))
+        try:
+            # initial decryption + auth
+            if mcrypto:   buf = mcrypto.decrypt(buf)
+        except Exception as e:
+            sys.stderr.write("Error: Could not decrypt/authenticate archive.\n")
+            raise e
 
         # read attributes from archive.ini
+        if options.debug:   print(gzip.decompress(buf).decode("UTF-8"))
         cp.read_string(gzip.decompress(buf).decode("UTF-8"))
         for key, value in cp["var"].items():
             setattr(self, key, int(value) if key in self.attr_ints else value)
@@ -181,7 +183,7 @@ class ArchiveSet:
         c['destdir']     = self.destdir
         c['destmountpoint'] = self.destmountpoint
         c['data_cipher'] = self.data_cipher
-        if self.mcrypto:
+        if mcrypto:
             if self.datacrypto.counter > self.datacrypto.ctstart:
                 self.dataci_count = self.datacrypto.counter
             self.mci_count = mcrypto.counter
@@ -194,7 +196,7 @@ class ArchiveSet:
         with io.StringIO() as fs:
             self.conf.write(fs)    ; fs.flush()
             buf = gzip.compress(fs.getvalue().encode("UTF-8"), 4)
-        if self.mcrypto:   buf = self.mcrypto.encrypt(buf)
+        if mcrypto:   buf = mcrypto.encrypt(buf)
         with open(self.confpath+ext, "wb") as f:   f.write(self.confprefix + self.ci_mode + buf)
 
     # Set or clear state for the archive as 'in_process' in case of interruption during write.
@@ -899,7 +901,7 @@ def lvm_meta_snapshot(arch, action, pool=None):
 
 # Try to sync only selected filesystem
 def fssync(path):
-    if subprocess.call([CP.sync,"-f",path]) != 0:   subprocess.call([CP.sync])
+    return subprocess.Popen([CP.sync,"-f",path])
 
 
 def ask_passphrase(verify=False, recur=0):
@@ -1195,7 +1197,7 @@ cmd = sys.argv[1] ;    tmpdir = "''' + tmpdir + '''-rpc"
 exists = os.path.exists    ; replace = os.replace    ; remove = os.remove
 
 def fssync(path):
-    if subprocess.call(["sync","-f",path]) != 0:   subprocess.call(["sync"])
+    return subprocess.Popen(["sync","-f",path])
 
 def catch_signals():
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGQUIT, signal.SIGABRT, signal.SIGALRM,
@@ -1269,7 +1271,7 @@ def helper_merge():
                     replace(ln[1], ln[2])
                 elif ln[0] == "-rm" and exists(ln[1]):
                     remove(ln[1])
-            fssync(".")    ; open("CHECK-mv-rm","w").close()
+            open("CHECK-mv-rm","w").close()
     except Exception as err:
         print(err)    ; sys.exit(60)
 
@@ -1529,7 +1531,7 @@ def compare_files(pathlist=[], volumes=[], sessions=[], clear=True):
 
     with open(cmp_list, "a") as flist:
         for pth in pathlist:
-            if not exists(pth):   raise FileNotFoundError(pth)
+            #if not exists(pth):   raise FileNotFoundError(pth)
             print(pth, file=flist)
         for v in realvols:
             v.meta_checked = True    ; print(v.vid+"/volinfo", file=flist)
@@ -2041,7 +2043,7 @@ def send_volume(datavol, localtime, ses_tags, send_all):
         catch_signals()
         dest_run([ destcd + bkdir
                  +" && mv -fT "+sdir+"-tmp "+sdir
-                 +" && { sync -f . || sync; }"], trap=True)
+                 +" && ( nohup sync -f . 2&>/dev/null & )" ], trap=True)
 
         # Local finalize
         ses.path = ses.path.rsplit("-tmp",maxsplit=1)[0]   ; os.replace(ses.path+"-tmp", ses.path)
@@ -3143,7 +3145,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4.0alpha"    ; prog_date = "20210903"
+prog_version          = "0.4.0alpha"    ; prog_date = "20210906"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 
 # Disk block size:
@@ -3297,10 +3299,10 @@ aset = destsys = desttype = dest_run_map = dest_online = dest_free = dest_writab
 aset = get_configs(options)
 destsys, desttype= detect_internal_state()
 dest_online, dest_free, dest_writable, archive_ini_hash  = detect_dest_state(destsys)
-
 bkdir            = topdir+"/"+aset.name
 destpath         = os.path.normpath(pjoin(aset.destmountpoint,aset.destdir))
 destcd           = " cd '"+destpath+"'"
+
 
 # Check online status for certain commands.
 if not dest_writable and options.action in write_actions and not options.from_arch \
@@ -3314,13 +3316,22 @@ if not dest_online and (options.remap or options.from_arch \
 if options.from_arch:
     aset         = get_configs_remote()
 
+# Set 'l_vols' to reference selected volgroup and check for orphan snapshots
+if aset.vgname in volgroups:   l_vols = volgroups[aset.vgname].lvs
+
+# Check if local matches dest
+if dest_online and options.action not in ("arch-init","arch-check","arch-delete") + local_actions:
+    if not hmac.compare_digest(aset.raw_hashval, archive_ini_hash) and dest_online:
+
+        # local copy is consistent, so update destination:
+        update_dest(pathlist=[aset.confname]) # Fix: expand checks from here....
+
+    arch_check([], startup=True)
+
 # Display archive update time as local time
 arch_dt_raw = datetime.datetime.fromtimestamp(float(aset.updated_at), datetime.timezone.utc)
 arch_dt     = arch_dt_raw.astimezone().isoformat(sep=u" ")
 sys.stderr.write("Archive last updated %s (%s)\n" % (arch_dt[:-6], arch_dt[-6:]))
-
-# Set 'l_vols' to reference selected volgroup and check for orphan snapshots
-if aset.vgname in volgroups:   l_vols = volgroups[aset.vgname].lvs
 
 
 # Handle unfinished in_process:
@@ -3347,16 +3358,6 @@ if aset.in_process and dest_online and not options.from_arch \
         elif aset.in_process[0] == "merge":
             merge_sessions(aset.in_process[1], aset.in_process[4].split(":|"),
                         aset.in_process[3], clear_sources=bool(aset.in_process[2]))
-
-if aset.vgname in volgroups and options.action \
-not in ("arch-init","arch-check","arch-delete","delete"):
-
-    # FIX: Handle this more gracefully
-    if not hmac.compare_digest(aset.raw_hashval, archive_ini_hash) and dest_online:
-        raise RuntimeError("Destination archive.ini out of sync: "
-                            +aset.raw_hashval+" vs "+archive_ini_hash)
-
-    arch_check([], startup=True)
 
 # Check volume args against config
 exclude_vols  = set(options.volex.split(","))
