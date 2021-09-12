@@ -92,9 +92,9 @@ class ArchiveSet:
         # Format "magic" is "[WYNGvv]\n" where vv = format version: 9 bytes
         # Format mode is next as "ci = m0\n" where m = cipher mode: 8 bytes
         with open(self.confpath+(".tmp"*load_tmp), "rb") as f:
-            header0 = f.read(9)    ; self.ci_mode = f.read(8)    ; buf = f.read(self.max_conf_sz)
-        self.raw_hashval = hashlib.sha256(header0 + self.ci_mode + buf).hexdigest()
-        if not (header0 == self.confprefix and self.ci_mode.startswith(self.modeprefix)):
+            header0 = f.read(9)    ; header1 = f.read(8)    ; buf = f.read(self.max_conf_sz)
+        self.raw_hashval = hashlib.sha256(header0 + header1 + buf).hexdigest()
+        if not (header0 == self.confprefix and header1.startswith(self.modeprefix)):
             if not header0.startswith(b"[var]\n"):
                 raise ValueError("Not a Wyng format.")
             else:
@@ -102,9 +102,10 @@ class ArchiveSet:
         else:
             old_v2_format = False    #; untrusted_ver = 2
 
-        if self.ci_mode[-3:-1] != b"00" and not mcrypto:
+        self.ci_mode = header1[-3:-1]
+        if self.ci_mode != b"00" and not mcrypto:
             # init metadata crypto
-            ci_types = DataCryptography.crypto_codes[self.ci_mode[-3:-1]]
+            ci_types = DataCryptography.crypto_codes[self.ci_mode]
             if not passphrase:   passphrase = ask_passphrase()
             assert passphrase and passphrase != bytes(len(passphrase))
             self.mcrypto = mcrypto \
@@ -197,7 +198,8 @@ class ArchiveSet:
             self.conf.write(fs)    ; fs.flush()
             buf = gzip.compress(fs.getvalue().encode("UTF-8"), 4)
         if mcrypto:   buf = mcrypto.encrypt(buf)
-        with open(self.confpath+ext, "wb") as f:   f.write(self.confprefix + self.ci_mode + buf)
+        with open(self.confpath+ext, "wb") as f:
+            f.write(self.confprefix + self.modeprefix + self.ci_mode + b"\n" + buf)
 
     # Set or clear state for the archive as 'in_process' in case of interruption during write.
     # Format is list containing strings or list of strings. For latter, ':|' is the delimiter.
@@ -963,7 +965,6 @@ def arch_init(aset):
         return
 
     os.makedirs(aset.path, exist_ok=True)
-
     aset.data_cipher = options.encrypt
     if aset.data_cipher in (x[0] for x in DataCryptography.crypto_codes.values()):
         if options.unattended:   x_it(1, "Enter passphrase interactively.")
@@ -971,9 +972,9 @@ def arch_init(aset):
         # Security Enh: Possibly use mmap+mlock to store passphrase/key values,
         #               and wipe them from RAM after use.
         passphrase      = ask_passphrase(verify=True)
-        aset.ci_mode    = [x for x,y in DataCryptography.crypto_codes.items()
-                             if y[0] == aset.data_cipher][0]
-        aset.mcrypto    = DataCryptography("xchacha20-poly1305", aset.confpath+".salt", slot=1,
+        aset.ci_mode, ci= [x for x,y in DataCryptography.crypto_codes.items()
+                             if y[0] == aset.data_cipher]
+        aset.mcrypto    = DataCryptography(ci[1], aset.confpath+".salt", slot=1,
                                            passphrase=passphrase[:], init=True)
         aset.datacrypto = DataCryptography(aset.data_cipher, aset.confpath+".salt", slot=0,
                                            passphrase=passphrase, init=True)
@@ -3145,7 +3146,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4.0alpha"    ; prog_date = "20210906"
+prog_version          = "0.4.0alpha"    ; prog_date = "20210912"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 
 # Disk block size:
