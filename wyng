@@ -29,7 +29,7 @@ try:
     from Cryptodome.Random import get_random_bytes
     import Cryptodome
 except:
-    Cipher_AES = None
+    Cipher_AES = Cipher_ChaCha20 = Cipher_ChaCha20_Poly1305 = None
 
 
 # ArchiveSet manages configuration and configured volume info
@@ -46,7 +46,7 @@ class ArchiveSet:
 
 
     def __init__(self, name, top, allvols=False, children=2, load_tmp=False,
-                 passphrase=None, mcrypto=None, datacrypto=None):
+                 passphrase=None, prior_auth=None):
         self.name        = name
         self.path        = pjoin(top,name)
         self.confpath    = pjoin(self.path, self.confname)
@@ -55,8 +55,6 @@ class ArchiveSet:
         self.vols        = {}
         self.dedupindex  = {}
         self.dedupsessions = []
-        self.mcrypto     = mcrypto
-        self.datacrypto  = datacrypto
         self.raw_hashval = None
         self.attr_ints   = {"format_ver","chunksize","mci_count","dataci_count"}
         self.Volume      = ArchiveVolume
@@ -74,7 +72,7 @@ class ArchiveSet:
         self.destmountpoint = None
         self.uuid        = None
         self.updated_at  = None
-        self.data_cipher = None
+        self.data_cipher = self.ci_mode = None
         self.mci_count   = self.dataci_count  =  0
         self.in_process  = []
 
@@ -103,7 +101,14 @@ class ArchiveSet:
         else:
             old_v2_format = False    #; untrusted_ver = 2
 
-        self.ci_mode = header1[-3:-1]
+        # use existing auth if specified
+        if isinstance(prior_auth, ArchiveSet):
+            self.mcrypto    = mcrypto = prior_auth.mcrypto    ; self.ci_mode = prior_auth.ci_mode
+            self.datacrypto = prior_auth.datacrypto    ; self.data_cipher = prior_auth.data_cipher
+        else:
+            self.ci_mode = header1[-3:-1]
+
+        # parse metadata mode and instantiate it
         if self.ci_mode != b"00" and not mcrypto:
             # init metadata crypto
             ci_types = DataCryptography.crypto_codes[self.ci_mode]
@@ -1124,15 +1129,13 @@ def get_configs_remote():
     # Instantiate ArchiveSet to authenticate archive.ini
     for fname, fsz in recv_list:   os.replace(aset.path+"/"+fname+".auth_req", aset.path+"/"+fname)
     new_aset = ArchiveSet(aset.name, os.path.dirname(aset.path), children=0)
-    mcrypto  = new_aset.mcrypto    ; datacrypto = new_aset.datacrypto
-    assert isinstance(mcrypto, DataCryptography) and isinstance(datacrypto, DataCryptography)
 
     # Initial auth successful! Fetch + auth volume metadata...
     recv_list= [(x.split()[0]+"/volinfo", ArchiveSet.max_volinfosz)
                  for x in new_aset.conf["volumes"].values()]
     fetch_file_blobs(recv_list)
     new_aset = ArchiveSet(aset.name, os.path.dirname(aset.path), children=1,
-                          mcrypto=mcrypto, datacrypto=datacrypto)
+                          prior_auth=new_aset)
 
     # Fetch + auth session metadata... use list flattener
     ses_list =[(x.name, x.volume.name) for sub in
@@ -1140,7 +1143,7 @@ def get_configs_remote():
     fetch_file_blobs([(new_aset.vols[y].vid+"/"+x+"/info",
                        ArchiveSet.max_infosz) for x,y in ses_list])
     new_aset = ArchiveSet(new_aset.name, os.path.dirname(new_aset.path), children=2,
-                          mcrypto=mcrypto, datacrypto=datacrypto)
+                          prior_auth=new_aset)
 
     fetch_file_blobs([(new_aset.vols[y].vid+"/"+x+"/manifest.z",
                        new_aset.vols[y].sessions[x].manifest_max) for x,y in ses_list])
@@ -1149,7 +1152,7 @@ def get_configs_remote():
     if make_local:
         if exists(metadir+bkdir) :  shutil.rmtree(metadir+bkdir)
         new_path = metadir+topdir;  shutil.move(aset.path, new_path)
-        new_aset = ArchiveSet(aset.name, new_path, mcrypto=mcrypto, datacrypto=datacrypto)
+        new_aset = ArchiveSet(aset.name, new_path, prior_auth=new_aset)
     else:
         new_path = os.path.dirname(aset.path)
 
@@ -2941,7 +2944,7 @@ def rename_volume(oldname, newname):
         vg = aset.vgname    ; lv_remove(vg, newname+ext)
         if lv_exists(vg, oldname+ext):   lv_rename(vg, oldname+ext, newname+ext)
 
-    full_aset = ArchiveSet(aset.name, metadir+topdir, allvols=True)
+    full_aset = ArchiveSet(aset.name, metadir+topdir, allvols=True, prior_auth=aset)
     if len(full_aset.vols[newname].sessions) \
     and compare_files(pathlist=[aset.confname], volumes=[full_aset.vols[newname]]):
         x_it(1, "Error: Local and archive metadata differ.")
