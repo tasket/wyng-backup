@@ -59,6 +59,7 @@ class ArchiveSet:
         self.datacrypto  = datacrypto
         self.raw_hashval = None
         self.attr_ints   = {"format_ver","chunksize","mci_count","dataci_count"}
+        self.Volume      = ArchiveVolume
 
         # persisted:
         self.format_ver  = 0
@@ -106,6 +107,7 @@ class ArchiveSet:
         if self.ci_mode != b"00" and not mcrypto:
             # init metadata crypto
             ci_types = DataCryptography.crypto_codes[self.ci_mode]
+            if options.debug:   print("metadata cipher =", ci_types[1])
             if not passphrase:   passphrase = ask_passphrase()
             assert passphrase and passphrase != bytes(len(passphrase))
             self.mcrypto = mcrypto \
@@ -303,266 +305,267 @@ class ArchiveSet:
             open(destname,"wb").write(self.decompress(mbuf))
 
 
-    class Volume:
+class ArchiveVolume:
 
-        def __init__(self, archive, vid, name, hashval, path, vgname, children=2):
-            self.vid     = vid                       ; self.name    = name
-            self.archive = archive                   ; self.path    = path
-            self.vgname  = vgname                    ; self.mapfile = path+"/deltamap"
-            self.sessions= {}                        ; self.sesnames= []
-            self.first   = self.last = "None"        ; self.meta_checked = False ####
-            self.tags    = {}
-            # persisted:
-            self.last_uuid  = None     #### implement
-            self.desc       = ""
-            # other:
-            self.changed_bytes = 0
+    def __init__(self, archive, vid, name, hashval, path, vgname, children=2):
+        self.vid       = vid                       ; self.name    = name
+        self.archive   = archive                   ; self.path    = path
+        self.vgname    = vgname                    ; self.mapfile = path+"/deltamap"
+        self.sessions  = {}                        ; self.sesnames= []
+        self.first     = self.last = "None"        ; self.meta_checked = False ####
+        self.tags      = {}
+        # persisted:
+        self.last_uuid = None     #### implement
+        self.desc      = ""
+        # other:
+        self.changed_bytes = 0
+        self.Ses = Ses = ArchiveSession
 
-            # load volume info
-            if options.debug:  print("\n", vid, "-", name)
-            if path:   os.makedirs(path, exist_ok=True)
-            if path and hashval != "0":
-                with open(pjoin(path,"volinfo"), "rb") as f:
-                    fsize = os.fstat(f.fileno()).st_size
-                    if fsize > ArchiveSet.max_volinfosz:   raise ValueError("volinfo too large")
-                    buf = f.read(fsize)
-                if archive.mcrypto:   buf = archive.mcrypto.decrypt(buf)
-                assert hmac.compare_digest(hashval, archive.b64hash(buf))
-                if options.debug:   print(archive.decompress(buf).decode("UTF-8"))
-                with io.StringIO(archive.decompress(buf).decode("UTF-8")) as f:
-                    for ln in f:
-                        vname, value = ln.split("=", maxsplit=1)
-                        vname = vname.strip()    ; value = value.strip()
-                        if vname.startswith("S_"):
-                            self.sessions[vname] = self.Ses(self, vname, value,
-                                                            path+"/"+vname if children > 1 else "")
-                        else:
-                            setattr(self, vname, value)
+        # load volume info
+        if options.debug:  print("\n", vid, "-", name)
+        if path:   os.makedirs(path, exist_ok=True)
+        if path and hashval != "0":
+            with open(pjoin(path,"volinfo"), "rb") as f:
+                fsize = os.fstat(f.fileno()).st_size
+                if fsize > ArchiveSet.max_volinfosz:   raise ValueError("volinfo too large")
+                buf = f.read(fsize)
+            if archive.mcrypto:   buf = archive.mcrypto.decrypt(buf)
+            assert hmac.compare_digest(hashval, archive.b64hash(buf))
+            if options.debug:   print(archive.decompress(buf).decode("UTF-8"))
+            with io.StringIO(archive.decompress(buf).decode("UTF-8")) as f:
+                for ln in f:
+                    vname, value = ln.split("=", maxsplit=1)
+                    vname = vname.strip()    ; value = value.strip()
+                    if vname.startswith("S_"):
+                        self.sessions[vname] = Ses(self, vname, value,
+                                                   path+"/"+vname if children > 1 else "")
+                    else:
+                        setattr(self, vname, value)
 
-            # session name list sorted by sequence field
-            seslist = list(self.sessions.values()) if children > 1 else []
-            seslist.sort(key=lambda x: x.sequence)
-            self.sesnames = sesnames = [y.name for y in seslist]
-            if sesnames:   self.first = sesnames[0]   ; self.last = sesnames[-1]
+        # session name list sorted by sequence field
+        seslist = list(self.sessions.values()) if children > 1 else []
+        seslist.sort(key=lambda x: x.sequence)
+        self.sesnames = sesnames = [y.name for y in seslist]
+        if sesnames:   self.first = sesnames[0]   ; self.last = sesnames[-1]
 
-            if exists(pjoin(path,"volchanged")):
-                self.changed_bytes = int(open(pjoin(path,"volchanged"),"r").readlines()[0].strip())
+        if exists(pjoin(path,"volchanged")):
+            self.changed_bytes = int(open(pjoin(path,"volchanged"),"r").readlines()[0].strip())
 
 
-        def save_volinfo(self, ext=""):
-            os.makedirs(self.path, exist_ok=True)   ; fname = "volinfo"
-            with io.StringIO() as f:
-                print("last_uuid =", self.last_uuid, file=f)
-                print("desc =", self.desc, file=f)
-                for ses in self.sessions.values():
-                    if ses.saved:   print(ses.name, "=", ses.hashval, file=f)
+    def save_volinfo(self, ext=""):
+        os.makedirs(self.path, exist_ok=True)   ; fname = "volinfo"
+        with io.StringIO() as f:
+            print("last_uuid =", self.last_uuid, file=f)
+            print("desc =", self.desc, file=f)
+            for ses in self.sessions.values():
+                if ses.saved:   print(ses.name, "=", ses.hashval, file=f)
 
-                buf = self.archive.compress(f.getvalue().encode("UTF-8"),
-                                            int(self.archive.compr_level))
-                self.archive.conf["volumes"][self.name] = self.vid+" "+self.archive.b64hash(buf)
+            buf = self.archive.compress(f.getvalue().encode("UTF-8"),
+                                        int(self.archive.compr_level))
+            self.archive.conf["volumes"][self.name] = self.vid+" "+self.archive.b64hash(buf)
 
-            if self.archive.mcrypto:   buf = self.archive.mcrypto.encrypt(buf)
-            with open(pjoin(self.path,fname+ext), "wb") as f:
-                f.write(buf)
+        if self.archive.mcrypto:   buf = self.archive.mcrypto.encrypt(buf)
+        with open(pjoin(self.path,fname+ext), "wb") as f:
+            f.write(buf)
+            f.flush()    ; os.fsync(f.fileno())
+        self.archive.save_conf(ext)
+
+    def volname_check(vname):
+        check = re.compile(alphanumsym)
+        if check.match(vname) is None:
+            return "Only characters A-Z 0-9 . + _ - are allowed in volume names."
+        if vname in (".",".."):
+            return "Bad volume name."
+        if len(vname) > ArchiveSet.volname_len:
+            return "Volume name must be %d characters or less." % ArchiveSet.volname_len
+
+        return "" # OK
+
+    def volsize(self):
+        return self.sessions[self.last].volsize if self.sessions else 0
+
+    def last_chunk_addr(self, vsize=None):
+        if vsize is None:  vsize = self.volsize()
+        return (vsize-1) - ((vsize-1) % self.archive.chunksize)
+
+    # Based on last session size unless volume_size is specified.
+    def mapsize(self, volume_size=None):
+        if not volume_size:
+            volume_size = self.volsize()
+        return (volume_size // self.archive.chunksize // 8) + 1
+
+    def changed_bytes_add(self, amount, reset=False, save=False):
+        if reset:
+            if exists(self.path+"/volchanged"):   os.remove(self.path+"/volchanged")
+            self.changed_bytes = 0  ; return
+
+        self.changed_bytes += amount
+        if save:
+            with open(self.path+"/volchanged", "w") as f:
+                print(self.changed_bytes, file=f)
                 f.flush()    ; os.fsync(f.fileno())
-            self.archive.save_conf(ext)
 
-        def volname_check(vname):
-            check = re.compile(alphanumsym)
-            if check.match(vname) is None:
-                return "Only characters A-Z 0-9 . + _ - are allowed in volume names."
-            if vname in (".",".."):
-                return "Bad volume name."
-            if len(vname) > ArchiveSet.volname_len:
-                return "Volume name must be %d characters or less." % ArchiveSet.volname_len
+    def new_session(self, sname, addtags={}):
+        ns = self.Ses(self, sname, "0", addtags=addtags)
+        ns.path = pjoin(self.path, sname)
+        if self.first == "None":
+            ns.sequence = 0
+            self.first = sname
+        else:
+            ns.previous = self.last
+            ns.sequence = self.sessions[self.last].sequence + 1
 
-            return "" # OK
+        self.last = sname
+        self.sesnames.append(sname)
+        self.sessions[sname] = ns
+        if self.archive.dedupindex:    self.archive.dedupsessions.append(ns)
+        return ns
 
-        def volsize(self):
-            return self.sessions[self.last].volsize if self.sessions else 0
+    def delete_session(self, sname, remove=True, force=False):
+        ses     = self.sessions[sname]
+        index   = self.sesnames.index(sname)    ; affected = None
+        if sname == self.last and ses.saved and not force:
+            raise ValueError("Cannot delete last session")
 
-        def last_chunk_addr(self, vsize=None):
-            if vsize is None:  vsize = self.volsize()
-            return (vsize-1) - ((vsize-1) % self.archive.chunksize)
+        for tag in list(ses.tags.keys()):   self.sessions[sname].tag_del(tag)
+        del(self.sesnames[index], self.sessions[sname])
 
-        # Based on last session size unless volume_size is specified.
-        def mapsize(self, volume_size=None):
-            if not volume_size:
-                volume_size = self.volsize()
-            return (volume_size // self.archive.chunksize // 8) + 1
+        if self.archive.dedupsessions:
+            indexdd = self.archive.dedupsessions.index(ses)
+            self.archive.dedupsessions[indexdd] = None
 
-        def changed_bytes_add(self, amount, reset=False, save=False):
-            if reset:
-                if exists(self.path+"/volchanged"):   os.remove(self.path+"/volchanged")
-                self.changed_bytes = 0  ; return
+        # Following condition means:
+        #   * sesnames cannot be empty
+        #   * ses wasn't deleted from end of list
 
-            self.changed_bytes += amount
-            if save:
-                with open(self.path+"/volchanged", "w") as f:
-                    print(self.changed_bytes, file=f)
-                    f.flush()    ; os.fsync(f.fileno())
+        if len(self.sesnames) > index:
+            affected = self.sesnames[index]
+            self.sessions[affected].previous = ses.previous
 
-        def new_session(self, sname, addtags={}):
-            ns = self.Ses(self, sname, "0", addtags=addtags)
-            ns.path = pjoin(self.path, sname)
-            if self.first == "None":
-                ns.sequence = 0
-                self.first = sname
-            else:
-                ns.previous = self.last
-                ns.sequence = self.sessions[self.last].sequence + 1
+        self.first = self.sesnames[0] if len(self.sesnames) else "None"
+        self.last  = self.sesnames[-1] if len(self.sesnames) else "None"
 
-            self.last = sname
-            self.sesnames.append(sname)
-            self.sessions[sname] = ns
-            if self.archive.dedupindex:    self.archive.dedupsessions.append(ns)
-            #os.makedirs(pjoin(self.path, sname))
-            return ns
+        if remove and exists(pjoin(self.path, sname)):   shutil.rmtree(ses.path)
+        return affected
 
-        def delete_session(self, sname, remove=True, force=False):
-            ses     = self.sessions[sname]
-            index   = self.sesnames.index(sname)    ; affected = None
-            if sname == self.last and ses.saved and not force:
-                raise ValueError("Cannot delete last session")
-
-            for tag in list(ses.tags.keys()):   self.sessions[sname].tag_del(tag)
-            del(self.sesnames[index], self.sessions[sname])
-
-            if self.archive.dedupsessions:
-                indexdd = self.archive.dedupsessions.index(ses)
-                self.archive.dedupsessions[indexdd] = None
-
-            # Following condition means:
-            #   * sesnames cannot be empty
-            #   * ses wasn't deleted from end of list
-
-            if len(self.sesnames) > index:
-                affected = self.sesnames[index]
-                self.sessions[affected].previous = ses.previous
-
-            self.first = self.sesnames[0] if len(self.sesnames) else "None"
-            self.last  = self.sesnames[-1] if len(self.sesnames) else "None"
-
-            if remove and exists(pjoin(self.path, sname)):   shutil.rmtree(ses.path)
-            return affected
-
-        def decode_manifests(self, sesnames, force=False):
-            for ses in (self.sessions[x] for x in sesnames):
-                if not ses.mfready or force:
-                    ses.mfready = True
-                    self.archive.decode_file(ses.path+"/manifest.z",
-                                             digest=ses.manifesthash, max_sz=ses.manifest_max)
+    def decode_manifests(self, sesnames, force=False):
+        for ses in (self.sessions[x] for x in sesnames):
+            if not ses.mfready or force:
+                ses.mfready = True
+                self.archive.decode_file(ses.path+"/manifest.z",
+                                            digest=ses.manifesthash, max_sz=ses.manifest_max)
 
 
-        class Ses:
-            attr_str  = ("localtime","previous","uuid","manifesthash")
-            attr_int  = ("volsize","sequence")
+class ArchiveSession:
 
-            def __init__(self, volume, name, hashval, path="", addtags={}):
-                self.volume   = volume;    self.archive = arch = volume.archive
-                self.name     = name
-                self.path     = path
-                self.saved    = self.loaded = False
-                self.toggle   = True
-                self.hashval  = hashval
-                self.meta_checked = False ####
-                self.mfready  = exists(path+"/manifest")
-                # persisted:
-                self.uuid     = None
-                self.localtime= None
-                self.volsize  = None
-                self.sequence = None
-                self.previous = "None"
-                self.tags     = {}
-                self.manifesthash = None
+    attr_str  = ("localtime","previous","uuid","manifesthash")
+    attr_int  = ("volsize","sequence")
 
-                if path and hashval != "0":
-                    with open(pjoin(path,"info"), "rb") as sf:
-                        fsize = os.fstat(sf.fileno()).st_size
-                        if fsize > ArchiveSet.max_infosz:   raise ValueError("info too large")
-                        buf = sf.read(fsize)
-                    if arch.mcrypto:   buf = arch.mcrypto.decrypt(buf)
-                    assert hmac.compare_digest(hashval, arch.b64hash(buf))
-                    with io.StringIO(arch.decompress(buf).decode("UTF-8")) as sf:
-                        for ln in sf:
-                            if ln.strip() == "uuid =":  continue
-                            vname, value = ln.split("=", maxsplit=1)
-                            vname = vname.strip()    ; value = value.strip()
-                            if value == "none":   value = "None"
-                            if vname == "tag":
-                                self.tag_add(self.tag_parse(value))
-                                continue
+    def __init__(self, volume, name, hashval, path="", addtags={}):
+        self.volume   = volume;    self.archive = arch = volume.archive
+        self.name     = name
+        self.path     = path
+        self.saved    = self.loaded = False
+        self.toggle   = True
+        self.hashval  = hashval
+        self.meta_checked = False ####
+        self.mfready  = exists(path+"/manifest")
+        # persisted:
+        self.uuid     = None
+        self.localtime= None
+        self.volsize  = None
+        self.sequence = None
+        self.previous = "None"
+        self.tags     = {}
+        self.manifesthash = None
 
-                            setattr(self, vname, 
-                                int(value) if vname in self.attr_int else value)
+        if path and hashval != "0":
+            with open(pjoin(path,"info"), "rb") as sf:
+                fsize = os.fstat(sf.fileno()).st_size
+                if fsize > ArchiveSet.max_infosz:   raise ValueError("info too large")
+                buf = sf.read(fsize)
+            if arch.mcrypto:   buf = arch.mcrypto.decrypt(buf)
+            assert hmac.compare_digest(hashval, arch.b64hash(buf))
+            with io.StringIO(arch.decompress(buf).decode("UTF-8")) as sf:
+                for ln in sf:
+                    if ln.strip() == "uuid =":  continue
+                    vname, value = ln.split("=", maxsplit=1)
+                    vname = vname.strip()    ; value = value.strip()
+                    if value == "none":   value = "None"
+                    if vname == "tag":
+                        self.tag_add(ArchiveSession.tag_parse(value))
+                        continue
 
-                    #if not exists(pjoin(path,"manifest.z")):
-                        #raise FileNotFoundError("ERROR: Manifest does not exist for "+name)
-                    self.saved = self.loaded = True
-                    self.manifest_max = self.volsize // arch.chunksize * ((256//4) + 20)
+                    setattr(self, vname, 
+                        int(value) if vname in self.attr_int else value)
 
-                for tag in addtags:   self.tag_add(tag)
+            #if not exists(pjoin(path,"manifest.z")):
+                #raise FileNotFoundError("ERROR: Manifest does not exist for "+name)
+            self.saved = self.loaded = True
+            self.manifest_max = self.volsize // arch.chunksize * ((256//4) + 20)
+
+        for tag in addtags:   self.tag_add(tag)
 
 
-            def tag_parse(self, tag, delim=" "):
-                result = tuple()    ; errs = []      ; parts = tag.strip().split(delim, maxsplit=1)
-                tag_id = parts[0].strip().lower()    ; comment = parts[1].strip()
+    def tag_parse(tag, delim=" "):
+        result = tuple()    ; errs = []      ; parts = tag.strip().split(delim, maxsplit=1)
+        tag_id = parts[0].strip().lower()    ; comment = parts[1].strip()
 
-                if len(tag_id.encode("UTF-8")) > ArchiveSet.tag_len:
-                    errs.append("Error: Max "+ArchiveSet.tag_len+" size for tag ID.\n")
-                if len(comment.encode("UTF-8")) > ArchiveSet.comment_len:
-                    errs.append("Error: Max "+ArchiveSet.comment_len+" size for comment.\n")
-                if re.match(".*[,=\^]", tag_id) or any(map(str.isspace, tag_id)) \
-                or not tag_id.isprintable():
-                    errs.append("Error: [^control], [space], and ',^=' not allowed in tag ID.\n")
-                if not comment.isprintable():
-                    errs.append("Error: [^control] not allowed in tag comment.\n")
-                if tag_id == "all":   errs.append("Error: tag 'all' is reserved.\n")
-                sys.stderr.write("".join(errs))
+        if len(tag_id.encode("UTF-8")) > ArchiveSet.tag_len:
+            errs.append("Error: Max "+ArchiveSet.tag_len+" size for tag ID.\n")
+        if len(comment.encode("UTF-8")) > ArchiveSet.comment_len:
+            errs.append("Error: Max "+ArchiveSet.comment_len+" size for comment.\n")
+        if re.match(".*[,=\^]", tag_id) or any(map(str.isspace, tag_id)) \
+        or not tag_id.isprintable():
+            errs.append("Error: [^control], [space], and ',^=' not allowed in tag ID.\n")
+        if not comment.isprintable():
+            errs.append("Error: [^control] not allowed in tag comment.\n")
+        if tag_id == "all":   errs.append("Error: tag 'all' is reserved.\n")
+        sys.stderr.write("".join(errs))
 
-                if not errs:
-                    result = (tag_id, "" if len(parts) == 1
-                                         else parts[1].strip()[:ArchiveSet.comment_len])
-                return result
+        if not errs:
+            result = (tag_id, "" if len(parts) == 1
+                                    else parts[1].strip()[:ArchiveSet.comment_len])
+        return result
 
-            def tag_add(self, tag):
-                if len(self.tags) >= ArchiveSet.max_tags:
-                    x_it(1, ArchiveSet.max_tags+" maximum tags.")
-                self.saved = False    ; voltags = self.volume.tags    ; tid = tag[0]
-                if tid not in self.tags:   self.tags[tid] = tag[1]
-                if tid in voltags:
-                    voltags[tid].add(self.name)
-                else:
-                    voltags[tid] = {self.name}
-                return True
+    def tag_add(self, tag):
+        if len(self.tags) >= ArchiveSet.max_tags:
+            x_it(1, ArchiveSet.max_tags+" maximum tags.")
+        self.saved = False    ; voltags = self.volume.tags    ; tid = tag[0]
+        if tid not in self.tags:   self.tags[tid] = tag[1]
+        if tid in voltags:
+            voltags[tid].add(self.name)
+        else:
+            voltags[tid] = {self.name}
+        return True
 
-            def tag_del(self, tag):
-                del(self.tags[tag])   ; voltags = self.volume.tags
-                if tag in voltags:
-                    if self.name in voltags[tag]:   voltags[tag].remove(self.name)
-                    if len(voltags[tag]) == 0:    del(voltags[tag])
+    def tag_del(self, tag):
+        del(self.tags[tag])   ; voltags = self.volume.tags
+        if tag in voltags:
+            if self.name in voltags[tag]:   voltags[tag].remove(self.name)
+            if len(voltags[tag]) == 0:    del(voltags[tag])
 
-            def save_info(self, ext=""):
-                assert self.path   ; fname = "info"   ; arch = self.volume.archive
-                self.manifesthash = arch.encode_file(self.path+"/manifest"+ext,
-                                                     dest=self.path+"/manifest.z"+ext)
-                with io.StringIO() as f:
-                    for attr in self.attr_str+self.attr_int:
-                        print(attr, "=", getattr(self, attr), file=f)
-                    for tkey, tdesc in self.tags.items():
-                        print("tag =",   tkey, tdesc, file=f)
-                    buf = arch.compress(f.getvalue().encode("UTF-8"),
-                                        int(arch.compr_level))
-                    self.hashval = arch.b64hash(buf)
+    def save_info(self, ext=""):
+        assert self.path   ; fname = "info"   ; arch = self.volume.archive
+        self.manifesthash = arch.encode_file(self.path+"/manifest"+ext,
+                                                dest=self.path+"/manifest.z"+ext)
+        with io.StringIO() as f:
+            for attr in self.attr_str+self.attr_int:
+                print(attr, "=", getattr(self, attr), file=f)
+            for tkey, tdesc in self.tags.items():
+                print("tag =",   tkey, tdesc, file=f)
+            buf = arch.compress(f.getvalue().encode("UTF-8"),
+                                int(arch.compr_level))
+            self.hashval = arch.b64hash(buf)
 
-                if arch.mcrypto:   buf = arch.mcrypto.encrypt(buf)
-                with open(pjoin(self.path,fname+ext), "wb") as f:
-                    f.write(buf)
-                    f.flush()    ; os.fsync(f.fileno())
-                self.saved = self.loaded = True
-                self.volume.save_volinfo(ext)
+        if arch.mcrypto:   buf = arch.mcrypto.encrypt(buf)
+        with open(pjoin(self.path,fname+ext), "wb") as f:
+            f.write(buf)
+            f.flush()    ; os.fsync(f.fileno())
+        self.saved = self.loaded = True
+        self.volume.save_volinfo(ext)
 
-# END class ArchiveSet, Volume, Ses
+# END class ArchiveSet, ArchiveVolume, ArchiveSession
 
 
 # DataCryptography(): Handle crypto functions and state for volume data
@@ -972,8 +975,8 @@ def arch_init(aset):
         # Security Enh: Possibly use mmap+mlock to store passphrase/key values,
         #               and wipe them from RAM after use.
         passphrase      = ask_passphrase(verify=True)
-        aset.ci_mode, ci= [x for x,y in DataCryptography.crypto_codes.items()
-                             if y[0] == aset.data_cipher]
+        aset.ci_mode, ci= [(x,y) for x,y in DataCryptography.crypto_codes.items()
+                                 if y[0] == aset.data_cipher][0]
         aset.mcrypto    = DataCryptography(ci[1], aset.confpath+".salt", slot=1,
                                            passphrase=passphrase[:], init=True)
         aset.datacrypto = DataCryptography(aset.data_cipher, aset.confpath+".salt", slot=0,
@@ -1520,7 +1523,7 @@ def dest_run_args(dest_type, commands, trap=False):
 
 # Compare files between local and dest archive, using hashes.
 # The file tmpdir/compare-files.lst can be pre-populated with file paths if clear=False;
-# otherwise will build metadata file list from Volume & Ses objects.
+# otherwise will build metadata file list from Volume & Session objects.
 # Returns False if local and dest hashes match.
 
 def compare_files(pathlist=[], volumes=[], sessions=[], clear=True):
@@ -2184,14 +2187,14 @@ def monitor_send(datavols, selected=[], monitor_only=True):
         while True:
             ans = ask_input("[%d]: " % (len(ses_tags)+1)).strip()
             if not ans:   break
-            tag = aset.Volume.Ses.tag_parse(None, ans, delim=",")
+            tag = ArchiveSession.tag_parse(None, ans, delim=",")
             if not tag:   continue
             ses_tags.append(tag)
             if len(ses_tags) == ArchiveSet.max_tags:   break
         print(len(ses_tags), "tags total.")
     elif options.tag and not monitor_only:
         for tag_opt in options.tag:
-            tag = aset.Volume.Ses.tag_parse(None, tag_opt, delim=",")
+            tag = ArchiveSession.tag_parse(None, tag_opt, delim=",")
             if not tag:   raise ValueError("Invalid tag "+tag_opt)
             ses_tags.append(tag)
 
