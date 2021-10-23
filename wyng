@@ -530,7 +530,7 @@ def lvm_meta_snapshot(arch, action, pool=None):
 
 # Try to sync only selected filesystem
 def fssync(path):
-    if subprocess.call([CP.sync,"-f",path]) != 0:   subprocess.call([CP.sync])
+    return subprocess.Popen([CP.sync,"-f",path])
 
 
 # Initialize a new ArchiveSet:
@@ -635,7 +635,8 @@ def arch_check(vol_list=None, startup=False):
         for sdir in os.scandir(vol.path):
             if sdir.name.startswith("S_") and sdir.name.endswith("-tmp") and dest_writable:
                 if options.debug:   print("Removing partial session dir '%s'" % sdir.name)
-                dest_run([destcd+bkdir + " && rm -rf " + volname+"/"+sdir.name])
+                dest_run([destcd+bkdir + " && rm -rf " + volname+"/"+sdir.name
+                                       + " && rm -rf " + volname+"/"+sdir.name.split("-tmp")[0]])
                 shutil.rmtree(vol.path+"/"+sdir.name, ignore_errors=True)
 
         if startup:   continue
@@ -821,7 +822,7 @@ cmd = sys.argv[1] ;    tmpdir = "''' + tmpdir + '''-rpc"
 exists = os.path.exists    ; replace = os.replace    ; remove = os.remove
 
 def fssync(path):
-    if subprocess.call(["sync","-f",path]) != 0:   subprocess.call(["sync"])
+    return subprocess.Popen(["sync","-f",path])
 
 def catch_signals():
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGQUIT, signal.SIGABRT, signal.SIGALRM,
@@ -895,7 +896,7 @@ def helper_merge():
                     replace(ln[1], ln[2])
                 elif ln[0] == "-rm" and exists(ln[1]):
                     remove(ln[1])
-            fssync(".")    ; open("CHECK-mv-rm","w").close()
+            open("CHECK-mv-rm","w").close()
     except Exception as err:
         print(err)    ; sys.exit(60)
 
@@ -1627,7 +1628,7 @@ def send_volume(datavol, localtime, ses_tags, send_all):
         dest_run([ destcd + bkdir
                  +" && mv -fT "+sdir+"-tmp "+sdir
                  +" && mv -f "+datavol+"/volinfo-tmp "+datavol+"/volinfo"
-                 +" && { sync -f . || sync; }"], trap=True)
+                 +" && ( nohup sync -f . 2&>/dev/null & )"], trap=True)
 
         # Local finalize
         ses.path = ses.path.rsplit("-tmp",maxsplit=1)[0]   ; os.replace(ses.path+"-tmp", ses.path)
@@ -2150,8 +2151,8 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
         # Send new metadata and process lists to dest
         do_exec([[CP.tar, "-cf", "-", "../in_process.tmp", "volinfo.tmp", "merge.lst.gz", target],
                  dest_run_args(desttype, [destcd + bkdir+"/"+datavol + " && tar -xmf -"
-                                          +" && { sync -f . || sync; }"
                                           +" && mv in_process.tmp ../in_process"
+                                          +" && ( nohup sync -f . 2&>/dev/null & )"
                                           ])
                 ])
         os.replace("../in_process.tmp", "../in_process")
@@ -2759,7 +2760,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.3.0wip"      ; prog_date = "20210829"
+prog_version          = "0.3.0wip"      ; prog_date = "20211022"
 format_version        = 2               ; debug     = False       ; tmpdir = None
 
 # Disk block size:
@@ -3072,7 +3073,8 @@ elif options.action == "arch-check":
 
 
 elif options.action == "arch-delete":
-    print("Deleting ALL metadata AND archived data!")
+    desthost = "//"+destsys+" " if destsys else ""
+    print("\nDeleting ALL archived data from", desttype+":" + desthost + destpath + bkdir, "!")
 
     if not options.unattended and not options.force:
         ans = ask_input("Are you sure? [y/N]: ")

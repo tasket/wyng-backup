@@ -57,8 +57,7 @@ Requirements & Setup
 Before starting:
 
 * Thin-provisioning-tools, lvm2, and python >=3.5.4 must be present on the source system. For top
-performance, at least python 3.6 plus the `python3-zstd` package should be installed before
-creating an archive.
+performance, the `python3-zstd` package should be installed before creating an archive.
 
 * The destination system (if different from source) should also have python, plus
 a basic Unix command set and filesystem (i.e. a typical Linux or BSD system).
@@ -69,7 +68,7 @@ Wyng is currently distributed as a single Python executable with no complex
 supporting modules or other program files; it can be placed in '/usr/local/bin'
 or another place of your choosing.
 
-Settings are initialized with `wyng arch-init`:
+Archives are created with `wyng arch-init`:
 
 ```
 
@@ -156,9 +155,11 @@ Please note that dashed parameters are always placed before the command.
 
 #### send
 
-Performs a backup by sending volume data to a new archive session
-(each session under an archival volume represents the entire contents of
-the source volume at that time, even if only changed data is sent):
+Performs a backup by sending volume data to a new archive session; this is always incremental
+unless it is the first time a volume is being sent. Each session under an archival volume represents
+the entire contents of the source volume at that time, even if only changed data is sent.
+All volumes that were added to the archive will be included unless volume names are specified or
+`--volex` is used to exclude volumes.
 
 ```
 
@@ -167,24 +168,17 @@ wyng send
 
 ```
 
-If Wyng has no metadata on file about a
-volume, its treated as a new addition to the backup set so an initial snapshot will
-be made and a full backup will be sent to the archive;
-otherwise it will automatically use snapshot delta information to send a much faster
-incremental backup. Whenever a `send` operation is completed, snapshots are
-renewed just as with the `monitor` command.
-
-A `send` operation may refuse to backup a volume if there is not enough space on the
+Note: A `send` operation may refuse to backup a volume if there is not enough space on the
 destination. One way to avoid this situation is to specify `--autoprune=on` which
 will cause Wyng to remove older backup sessions from the archive when space is needed.
 
 
 #### receive
 
-Retrieves a volume instance (using the latest session ID
+Retrieves a volume snapshot (using the latest session ID
 if `--session` isn't specified) from the archive and saves it to either the volume's
 original path or the path specified
-with `--save-to`. If `--session` is used, only one date-time is accepted. The volume
+with `--save-to`. If `--session` is used, only one date-time or tag is accepted. The volume
 name is required.
 
 ```
@@ -518,8 +512,7 @@ information when listing sessions.
 
 ### Tips
 
-* If the destination volume is not thoroughly trusted, its currently recommended
-to avoid backing up sensitive data to such a volume -- exercise caution
+* Its recommended to avoid backing up sensitive data to untrusted storage -- exercise caution
 and add encryption where necessary.
 
 * To reduce the size of incremental backups it may be helpful to remove cache
@@ -603,9 +596,6 @@ here are some encryption approaches you can use to secure your backup archives:
     4. Setup Wyng on *Domain0* with `--dest=internal:/path`
     pointing to the mounted path.
 
-    A local USB storage option similar to the above can be used by substituting *sys-usb*
-    for *remotefs*.
-
     As an alternative to the above, if you have a trusted backup qube handling
     encryption, you can easily setup Wyng in dom0 with a 'qubes://vm-name/path'
     destination. Also, for Qubes OS where you have both a trusted backup VM *and*
@@ -614,6 +604,23 @@ here are some encryption approaches you can use to secure your backup archives:
     achieve faster performance than the above `qvm-block attach` setup, but they
     move archive encryption out of Domain 0.
 
+    Local USB storage is relatively simple: Attach the drive to dom0 then encrypt/decrypt it
+    and then mount it.
+
+### Authentication options
+
+    Some of the above encryption methods have [options](https://www.kernel.org/doc/html/latest/admin-guide/device-mapper/dm-integrity.html) that enable authentication.
+
+    Wyng archives can also be authenticated by signing the metadata. For example:
+
+```
+$ # Sign #
+$ find /var/lib/wyng.backup -name archive.ini -o -name manifest -o -name '*info' | xargs b2sum >hashes
+$ gpg --sign hashes
+
+$ # Verify #
+$ gpg --verify hashes && b2sum -c hashes && echo Archive OK.
+```
 
 ### Beta testers
 
@@ -634,7 +641,7 @@ direction. Note that Wyng may require using --remap afterward. Also note this is
 recommended for regular use.
 
 * Wyng is generally usable with filesystems that don't support hardlinks (such as encryption
-filesystems), however one exception is when using deduplication test modes. When setting
+filesystems), however one exception is when using deduplication mode. When setting
 dedup higher than '1', Wyng will report that the destination is "not ready to receive commands"
 if the destination fs doesn't allow hardlinks.
 
@@ -649,17 +656,6 @@ If you like Wyng or my other efforts, monetary contributions are welcome and can
 be made through [Liberapay](https://liberapay.com/tasket/donate)
 or [Patreon](https://www.patreon.com/tasket).
 
-
-Todo
----
-
-* Encryption integration
-
-* File name and sequence obfuscation
-
-* Zstandard compression
-
-* Btrfs and ZFS support
 
 External Links
 ---
