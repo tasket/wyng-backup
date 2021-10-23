@@ -72,6 +72,8 @@ class ArchiveSet:
         self.destmountpoint = None
         self.uuid        = None
         self.updated_at  = None
+        self.mcrypto     = mcrypto = None
+        self.datacrypto  = datacrypto = None
         self.data_cipher = self.ci_mode = None
         self.mci_count   = self.dataci_count  =  0
         self.in_process  = []
@@ -104,7 +106,8 @@ class ArchiveSet:
         # use existing auth if specified
         if isinstance(prior_auth, ArchiveSet):
             self.mcrypto    = mcrypto = prior_auth.mcrypto    ; self.ci_mode = prior_auth.ci_mode
-            self.datacrypto = prior_auth.datacrypto    ; self.data_cipher = prior_auth.data_cipher
+            self.datacrypto = datacrypto = prior_auth.datacrypto
+            self.data_cipher = prior_auth.data_cipher
         else:
             self.ci_mode = header1[-3:-1]
 
@@ -142,7 +145,6 @@ class ArchiveSet:
             if not float(self.updated_at) < time.time():
                 raise ValueError("Current time is less than archive timestamp!")
             assert passphrase and passphrase != bytes(len(passphrase))
-            #assert ci_types[1] == self.data_cipher
             self.datacrypto = datacrypto \
                 = DataCryptography(self.data_cipher, mcrypto.keyfile, slot=0,
                                    passphrase=passphrase, cadence=20)
@@ -1705,10 +1707,9 @@ def get_lvm_deltas(datavols):
     catch_signals()
     for apool in sorted(poolset):
         poolname = apool.replace("-","--")
-        lvm_meta_snapshot(aset, "reserve", pool=apool)
 
-        err = False
         try:
+            lvm_meta_snapshot(aset, "reserve", pool=apool)
             for datavol in datavols:
                 if l_vols[datavol].pool_lv != apool:   continue
                 snap1vol = datavol + ".tick"    ; snap2vol = datavol + ".tock"
@@ -3152,7 +3153,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4.0alpha"    ; prog_date = "20210912"
+prog_version          = "0.4.0alpha"    ; prog_date = "20211022"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 
 # Disk block size:
@@ -3326,6 +3327,9 @@ if options.from_arch:
 # Set 'l_vols' to reference selected volgroup and check for orphan snapshots
 if aset.vgname in volgroups:   l_vols = volgroups[aset.vgname].lvs
 
+
+
+
 # Check if local matches dest
 if dest_online and options.action not in ("arch-init","arch-check","arch-delete") + local_actions:
     if not hmac.compare_digest(aset.raw_hashval, archive_ini_hash) and dest_online:
@@ -3334,6 +3338,10 @@ if dest_online and options.action not in ("arch-init","arch-check","arch-delete"
         update_dest(pathlist=[aset.confname]) # Fix: expand checks from here....
 
     arch_check([], startup=True)
+
+
+
+
 
 # Display archive update time as local time
 arch_dt_raw = datetime.datetime.fromtimestamp(float(aset.updated_at), datetime.timezone.utc)
@@ -3357,7 +3365,7 @@ if aset.in_process and dest_online and not options.from_arch \
     elif exists(aset.path+"/in_process_retry"):
         x_it(1, "Interrupted process already retried; Exiting.")
 
-    if aset.in_process and aset.in_process[0] in ("delete","merge","rename"):
+    if aset.in_process and aset.in_process[0] in ("delete","merge"):
         print("Completing prior operation in progress:", " ".join(aset.in_process[0:2]))
 
         if aset.in_process[0] == "delete":
