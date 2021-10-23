@@ -56,6 +56,8 @@ class ArchiveSet:
             self.uuid = str(uuid.uuid4())
             return
 
+        if open(self.confpath, "rb").read(5) == b"[WYNG":
+            raise ValueError("Wrong format version.")
         cp.read(self.confpath)
         self.a_ints      = {"chunksize"}
         for name in cp["var"].keys():
@@ -1295,10 +1297,9 @@ def get_lvm_deltas(datavols):
     catch_signals()
     for apool in sorted(poolset):
         poolname = apool.replace("-","--")
-        lvm_meta_snapshot(aset, "reserve", pool=apool)
 
-        err = False
         try:
+            lvm_meta_snapshot(aset, "reserve", pool=apool)
             for datavol in datavols:
                 if l_vols[datavol].pool_lv != apool:   continue
                 snap1vol = datavol + ".tick"    ; snap2vol = datavol + ".tock"
