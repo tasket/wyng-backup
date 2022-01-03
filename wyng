@@ -118,7 +118,7 @@ class ArchiveSet:
         self.conf["volumes"][datavol] = "enable"
         self.save_conf()
         vol = self.vols[datavol] = self.Volume(self,datavol, pjoin(self.path,datavol), self.vgname)
-        vol.save_volinfo()    ; print("Volume", datavol, "added to archive config.")
+        vol.save_volinfo()
         return True
 
 
@@ -128,7 +128,10 @@ class ArchiveSet:
 
         if exists(pjoin(self.path,datavol)):      shutil.rmtree(pjoin(self.path,datavol))
 
-        for ext in {".tick",".tock"}:          lv_remove(self.vgname, datavol+ext, check=True)
+        for ext in {".tick",".tock"}:
+            if lv_exists(self.vgname, datavol+ext) and (options.clean \
+            or "arch-"+self.uuid in volgroups[self.vgname].lvs[datavol+ext].tags):
+                lv_remove(self.vgname, datavol+ext, check=True)
 
     def rename_volume(self, datavol, newname, confname="", ext=""):
         vol = self.vols[datavol]
@@ -532,7 +535,7 @@ def lvm_meta_snapshot(arch, action, pool=None):
 
 # Try to sync only selected filesystem
 def fssync(path):
-    return subprocess.Popen([CP.sync,"-f",path])
+    if options.maxsync:   subprocess.Popen([CP.sync,"-f",path])
 
 
 # Initialize a new ArchiveSet:
@@ -631,12 +634,12 @@ def arch_check(vol_list=None, startup=False):
             aset.vols[volname] = ArchiveSet.Volume(aset, volname,aset.path+"/"+volname,aset.vgname)
 
         vol = aset.vols[volname]
-        if not startup or options.debug:   print("\nChecking volume", volname, flush=True)
+        if not startup or debug:   print("\nChecking volume", volname, flush=True)
 
         # Remove session tmp dirs
         for sdir in os.scandir(vol.path):
             if sdir.name.startswith("S_") and sdir.name.endswith("-tmp") and dest_writable:
-                if options.debug:   print("Removing partial session dir '%s'" % sdir.name)
+                if debug:   print("Removing partial session dir '%s'" % sdir.name)
                 dest_run([destcd+bkdir + " && rm -rf " + volname+"/"+sdir.name
                                        + " && rm -rf " + volname+"/"+sdir.name.split("-tmp")[0]])
                 shutil.rmtree(vol.path+"/"+sdir.name, ignore_errors=True)
@@ -820,11 +823,11 @@ def detect_internal_state():
     '''#  Copyright Christopher Laprise 2018-2021
 #  Licensed under GNU General Public License v3. See github.com/tasket/wyng-backup
 import os, sys, signal, shutil, subprocess, gzip, tarfile
-cmd = sys.argv[1] ;    tmpdir = "''' + tmpdir + '''-rpc"
+cmd = sys.argv[1]   ; tmpdir = "''' + tmpdir + '''-rpc"   ; msync = "--sync" in sys.argv
 exists = os.path.exists    ; replace = os.replace    ; remove = os.remove
 
 def fssync(path):
-    return subprocess.Popen(["sync","-f",path])
+    if msync:   subprocess.Popen(["sync","-f",path])
 
 def catch_signals():
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGQUIT, signal.SIGABRT, signal.SIGALRM,
@@ -1212,15 +1215,17 @@ def prepare_snapshots(datavols):
     print("Preparing snapshots...")
     incr_vols, complete_vols = set(), set()    ; vgname = aset.vgname
     for datavol in datavols:
+        if not lv_exists(vgname, datavol):
+            print("  Warning: Local '%s' does not exist!" % datavol)
+            continue
+
+        if datavol not in aset.vols and not monitor_only:   aset.add_volume(datavol)
+
         # 'mapfile' is the deltamap file, 'snapXvol' are the .tick and .tock snapshots.
         # .tick holds vol state between send/monitor ops;
         # .tock is new snapshot which is compared w .tick and then replaces it (send/monitor).
         vol      = aset.vols[datavol]   ; mapfile  = vol.mapfile
         snap1vol = datavol + ".tick"    ; snap2vol = datavol + ".tock"
-
-        if not lv_exists(vgname, datavol):
-            print("Warning: Local '%s' does not exist!" % datavol)
-            continue
 
         if lv_exists(vgname, snap1vol) and "arch-"+aset.uuid not in l_vols[snap1vol].tags \
         and "arch-" in " ".join(l_vols[snap1vol].tags):
@@ -1291,7 +1296,7 @@ def prepare_snapshots(datavols):
 def get_lvm_deltas(datavols):
     vgname   = aset.vgname.replace("-","--")
     poolset  = set(l_vols[x].pool_lv for x in datavols)
-    print("Acquiring deltas.")
+    if options.verbose:   print("Acquiring deltas.")
 
     # Reserve a metadata snapshot for the LVM thin pool; required for a live pool.
     catch_signals()
@@ -1468,7 +1473,8 @@ def send_volume(datavol, localtime, ses_tags, send_all):
     untar_cmd = [destcd + " && mkdir -p ."+bkdir
                  + " && exec >>"+tmpdir+"-rpc/send.log 2>&1"
                  + " && "+destcd+bkdir + " && echo "+datavol
-                 + " && python3 "+tmpdir+"-rpc/dest_helper.py send" ]
+                 + " && python3 "+tmpdir+"-rpc/dest_helper.py send"
+                 + (" --sync" if options.maxsync else "")]
 
     # Open source volume and its delta bitmap as r, session manifest as w.
     with open(pjoin("/dev",aset.vgname,snap2vol),"rb", buffering=chunksize) as vf, \
@@ -1592,7 +1598,7 @@ def send_volume(datavol, localtime, ses_tags, send_all):
             if minibmap or send_all:  addr += chunksize
 
     print("\r  100% ", ("%8.1fM  |  %s" % (bcount/1000000, datavol)),
-          ("\n  (reduced %0.1fM)" % (ddbytes/1000000)) if ddbytes and options.debug else "",
+          ("\n  (reduced %0.1fM)" % (ddbytes/1000000)) if ddbytes and debug else "",
           end="")
 
     # Send session info, end stream and cleanup
@@ -1629,7 +1635,8 @@ def send_volume(datavol, localtime, ses_tags, send_all):
         dest_run([ destcd + bkdir
                  +" && mv -fT "+sdir+"-tmp "+sdir
                  +" && mv -f "+datavol+"/volinfo-tmp "+datavol+"/volinfo"
-                 +" && ( nohup sync -f . 2&>/dev/null & )"], trap=True)
+                 +(" && ( nohup sync -f . 2&>/dev/null & )" if options.maxsync else "")
+                 ], trap=True)
 
         # Local finalize
         ses.path = ses.path.rsplit("-tmp",maxsplit=1)[0]   ; os.replace(ses.path+"-tmp", ses.path)
@@ -1643,7 +1650,7 @@ def send_volume(datavol, localtime, ses_tags, send_all):
     rotate_snapshots(vol, rotate=True)
     init_deltamap(vol, vol.mapfile, vol.mapsize())
     catch_signals(None)
-    if dedup and options.debug:   show_mem_stats()
+    if dedup and debug:   show_mem_stats()
 
     return stream_started + bcount, freed
 
@@ -1671,7 +1678,6 @@ def init_dedup_index5(listfile=""):
     if makelist:   dedupf = gzip.open(tmpdir+"/"+listfile, "wt")
 
     count = match = 0
-    ##count = 1; dataf.write(bytes(ses_w + ch_w)) # first is null
     for sesnum, ses in enumerate(ddsessions):
         volname = ses.volume.name; sesname = ses.name
         with open(pjoin(ses.path,"manifest"),"r") as manf:
@@ -1701,14 +1707,12 @@ def init_dedup_index5(listfile=""):
                     dataf_write(bfromhex(ln2[1:]))
                     count += 1
 
-    if listfile:
-        dedupf.close()
-        #dataf.close()
+    if listfile:   dedupf.close()
 
     aset.dedupindex    = (hashtree, ht_ksize, hash_w, dataf, chtree, chdigits, ch_w, ses_w)
     aset.dedupsessions = ddsessions
 
-    if not options.debug:  return
+    if not debug:  return
     print("\nIndexed in %.1f seconds." % (time.perf_counter()-ctime))
     vsz, rss = map(int, os.popen("ps -up"+str(os.getpid())).readlines()[-1].split()[4:6])
     print("\nMemory use: Max %dMB, index count: %d, matches: %d" %
@@ -1982,7 +1986,7 @@ def autoprune(datavol, needed_space=0, apmode="off", include=set()):
                     for dses in apcal[span+bigday]:
                         if dses[1]:
                             # always decr bigday, but don't toggle if session is excluded
-                            dlist[bigday] -= 1     #### ; print("_",end="") ####
+                            dlist[bigday] -= 1
                             dses[1] = vol.sessions[dses[0]].toggle = dses[0] in exclude
                             break
 
@@ -1996,7 +2000,6 @@ def autoprune(datavol, needed_space=0, apmode="off", include=set()):
                 if to_prune:
                     # prioritize ranges that overlap with requested includes
                     if include and not (set(to_prune) & include):
-                        #print("#", end="") ####
                         to_prune.clear()    ; skipped = True    ; continue
 
                     target_s = vol.sesnames[vol.sesnames.index(to_prune[-1]) + 1]
@@ -2006,7 +2009,6 @@ def autoprune(datavol, needed_space=0, apmode="off", include=set()):
                     include -= set(to_prune)    ; removed_ct += len(to_prune);   to_prune.clear()
                     if not include and nthresh and removed_ct >= nthresh*factor:  break # for ses
             else:
-                #print(".", end="") ####
                 to_prune.append(ses)
 
         if removed_ct:
@@ -2153,14 +2155,14 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
         do_exec([[CP.tar, "-cf", "-", "../in_process.tmp", "volinfo.tmp", "merge.lst.gz", target],
                  dest_run_args(desttype, [destcd + bkdir+"/"+datavol + " && tar -xmf -"
                                           +" && mv in_process.tmp ../in_process"
-                                          +" && ( nohup sync -f . 2&>/dev/null & )"
                                           ])
                 ])
         os.replace("../in_process.tmp", "../in_process")
 
     # Start merge operation on dest
     retcode = dest_run([destcd + bkdir+"/"+datavol + " && python3 "
-                        +tmpdir+"-rpc/dest_helper.py merge"+(" --resume" if resume else "")
+                        + tmpdir+"-rpc/dest_helper.py merge"
+                        + (" --resume" if resume else "") + (" --sync" if options.maxsync else "")
                         ],
                         check=False, out=">>"+tmpdir+"/merge.log"
                       )
@@ -2229,7 +2231,7 @@ def compare_files(pathlist=[], volumes=[], sessions=[], clear=True):
     # maybe switch cmp to diff/sha256sum if they are safe enough to read untrusted input
     files  = [tmpdir+"/compare-hashes.local", tmpdir+"/compare-hashes.dest"]
     result = do_exec([[CP.cmp] + files], check=False) > 0
-    if result and options.debug:
+    if result and debug:
         print("'diff %s %s' output:" % tuple(files))
         subprocess.call([CP.diff] + files)
 
@@ -2317,12 +2319,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         if ses == select_ses:  break
 
     # compare metadata hashes
-    if not options.from_arch:
-        print("Checking metadata... ", end="", flush=True)
-        if compare_files(volumes=[vol], sessions=incl_ses):
+    if not options.from_arch and compare_files(volumes=[vol], sessions=incl_ses):
             x_it(1, "Error: Local and archive metadata differ.")
-        else:
-            print("OK")
 
     # Merge manifests and send to archive system:
     # sed is used to expand chunk info into a path and filter out any entries
@@ -2406,7 +2404,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
     if volf:   volf_read = volf.read    ; volf_write = volf.write    ; volf_seek = volf.seek
 
-    print("Receiving" if save_path else "Scanning", "volume :", datavol, select_ses[2:])
+    print("Receiving" if save_path else "Scanning", "volume:", datavol, select_ses[2:])
     if save_path:    print("Saving to %s '%s'" % (save_type, save_path))
 
     # Create retriever process using py program
@@ -2474,9 +2472,9 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
             raise ValueError("Bad hash "+faddr+" :: "+gethash(untrusted_buf).hexdigest())
 
         ##  Buffer is OK  ##
+        buf = untrusted_buf   ; bcount += len(buf)
 
         if verify_only:   continue
-        buf = untrusted_buf
 
         # Proceed with decompress.
         decomp = decompress(buf)
@@ -2486,8 +2484,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         if addr == lchunk_addr and len(decomp) != volsize - lchunk_addr:
             print(mfline)
             raise BufferError("Decompressed to %d bytes." % len(decomp))
-
-        buf = decomp    ; bcount += len(buf)
+        buf = decomp
 
         if save_path:
             volf_seek(addr)
@@ -2509,11 +2506,10 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     if not sparse and addr+len(decompress(untrusted_buf)) != volsize:
         raise ValueError("Received range %d does not match volume size %d."
                             % (addr+len(decompress(untrusted_buf)), volsize))
-    print("100.00%")
-    if debug:
-        print("Received range:", addr+len(buf),
-            "\n    Data bytes:", bcount)
-    if diff_count:  print("Diff bytes:", diff_count)
+
+    print("Data bytes:", bcount, end="")
+    print("  OK" if not diff_count else "  Diff bytes: " + str(diff_count))
+    if verbose:   print("Received range:", addr+len(buf))
 
     if volf:  volf.close()
     if save_path:
@@ -2532,7 +2528,6 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     elif diff:
         if remap:
             bmapf.close()
-            print("Delta bytes re-mapped:", diff_count)
             if diff_count > 0 and options.action != "send":
                 print("\nNext 'send' will bring this volume into sync.")
         elif diff_count:
@@ -2761,7 +2756,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.3.0wip"      ; prog_date = "20211022"
+prog_version          = "0.3.0wip"      ; prog_date = "20220102"
 format_version        = 2               ; debug     = False       ; tmpdir = None
 
 # Disk block size:
@@ -2840,6 +2835,7 @@ parser.add_argument("--chunk-factor", dest="chfactor", type=int,
 parser.add_argument("--meta-dir", dest="metadir", default="", help="Use alternate metadata path")
 parser.add_argument("--force", action="store_true", default=False, help="For arch-delete")
 parser.add_argument("--clean", action="store_true", default=False, help="Clean snapshots, metadata")
+parser.add_argument("--maxsync", action="store_true", default=False, help="Use more fs sync")
 parser.add_argument("--debug", action="store_true", default=False, help="Debug mode")
 parser.add_argument("--quiet", action="store_true", default=False)
 parser.add_argument("--verbose", action="store_true", default=False)
@@ -2852,6 +2848,7 @@ options = parser.parse_args()
 
 # Set stdout to devnull if --quiet is specified
 debug = options.debug    ; assert not (options.quiet and (options.verbose or debug))
+if debug:   options.verbose = True
 if options.quiet and options.action != "list":
     options.unattended = True
     sys.stdout = open(os.devnull, "w")
@@ -2966,7 +2963,7 @@ exclude_vols  = set(options.volex.split(","))
 datavols      = sorted(set(aset.vols.keys())  - exclude_vols)
 selected_vols = sorted(set(options.volumes[:]) - exclude_vols)
 for vol in selected_vols[:]:
-    if vol not in aset.vols and options.action not in {"add","delete","rename"}:
+    if vol not in aset.vols and options.action not in {"add","delete","rename","send"}:
         print("Volume "+vol+" not configured; Skipping.")
         del(selected_vols[selected_vols.index(vol)])
 
