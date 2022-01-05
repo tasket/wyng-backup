@@ -8,22 +8,22 @@ Fast incremental backups for logical volumes.
 Wyng is able to deliver faster, more efficient incremental backups for logical
 volumes. It accesses logical volume *metadata* (instead of re-scanning data over
 and over) to instantly find which *data* has changed since the last backup.
-Combined with a Time Machine style storage format, it can also prune older
+Combined with its Time Machine style storage format, Wyng can also prune older
 backups from the archive very quickly, meaning you only ever have to do a full
 backup once and can send incremental backups to the same archive indefinitely
 and frequently.
 
-Having nearly instantaneous access to volume changes and a nimble archival format
+Speed - Having nearly instantaneous access to volume changes and a nimble archival format
 enables backing up even terabyte-sized volumes multiple times per hour with little
 impact on system resources.
 
-Wyng sends data as *streams* whenever possible, which avoids writing temporary
-caches of data to disk. And Wyng's ingenious snapshot rotation avoids common
+Efficiency - Wyng sends data as streams whenever possible, which avoids writing temporary
+caches of data to disk. And Wyng's ingenious snapshot monitoring avoids common
 _aging snapshot_ space consumption pitfalls.
 
-Wyng also doesn't require the
+Security - Wyng doesn't require the
 source admin system to ever mount processed volumes, so it safely handles
-untrusted data in guest filesystems to bolster container-based security.
+untrusted data in guest filesystems.
 
 
 ### Status
@@ -32,7 +32,7 @@ Public release v0.3 with a range of features including:
 
  - Incremental backups of Linux thin-provisioned LVM volumes
 
- - Supported destinations: Local filesystem, Virtual machine or SSH host
+ - Supported destinations: Local filesystem, VM or SSH host (plus S3 & SFTP with FUSE)
 
  - Send, receive, verify and list contents
 
@@ -44,9 +44,9 @@ Public release v0.3 with a range of features including:
 
  - Marking and selecting snapshots with user-defined tags
 
-Data verification currently relies on hash tables being safely stored on the
-source admin system or encrypted volume. Integrated encryption and key-based
-verification are not yet implemented (see notes below for ways to add encryption).
+Integrated encryption and key-based
+verification are under development (see notes below for ways to add encryption
+or try the v0.4 alpha branch).
 
 Wyng is released under a GPL license and comes with no warranties expressed or implied.
 
@@ -59,8 +59,8 @@ Before starting:
 * Thin-provisioning-tools, lvm2, and python >=3.5.4 must be present on the source system. For top
 performance, the `python3-zstd` package should be installed before creating an archive.
 
-* The destination system (if different from source) should also have python, plus
-a basic Unix command set and filesystem (i.e. a typical Linux or BSD system).
+* The destination system should have a Unix-type filesystem with a robust inode
+implementation (i.e. Ext4 or other fairly recent fs).
 
 * Volumes to be backed-up must reside in an LVM thin-provisioned pool.
 
@@ -72,14 +72,23 @@ Archives are created with `wyng arch-init`:
 
 ```
 
-wyng arch-init --local=vg/pool --dest=ssh://me@exmaple.com/mnt/bkdrive
+# wyng arch-init --local=vg/pool --dest=ssh://me@example.com/mnt/bkdrive
 
 ...or...
 
-wyng arch-init --local=vg/pool --dest=internal:/ --subdir=home/user
+# wyng arch-init --local=vg/pool --dest=internal:/ --subdir=home/user
+Wyng 0.3.0 release 20220104
+Compression = zstd:7
+Hashing = blake2b
+Done.
 
-wyng add my_big_volume
+# wyng send my_big_volume
+Wyng 0.3.0 release 20220104
+Preparing snapshots...
+  Pairing snapshot for my_big_volume
 
+Sending backup session 20220104-133430 to ssh://me@example.com
+  100%     859.7M  |  my_big_volume 
 
 ```
 
@@ -243,6 +252,9 @@ The `--keep` option can accept a single date-time or a tag in the form `^tagID`.
 Matching sessions will be excluded from pruning and autopruning.
 
 
+### Less Commonly-used Commands
+
+
 #### monitor
 
 Frees disk space that is cumulatively occupied by aging LVM
@@ -281,7 +293,8 @@ wyng add vm-untrusted-private
 
 
 ```
-Adds a new entry to the list of volumes configured for backup.
+Adds a new entry to the list of volumes configured for backup.  Volume will be backed up
+by future `send` commands.
 
 
 #### delete
@@ -622,39 +635,11 @@ $ # Verify #
 $ gpg --verify hashes && b2sum -c hashes && echo Archive OK.
 ```
 
-### Beta testers
-
-* Testing goals are basically stability, usability, security and efficiency. Compatibility
-is also a valued topic, where source systems are generally expected to be a fairly recent
-Linux distro or Qubes OS. Destination systems can vary a lot, they just need to have Python and
-support Unix conventions.
-
-* If you wish to run Wyng operations that may want to roll back later,
-its possible to "backup the backup" in a relatively quick manner using a hardlink copy:
-```
-sudo cp -a /var/lib/wyng.backup /var/lib/wyng.backup-02
-sudo cp -rl /dest/path/wyng.backup /dest/path/wyng.backup-02
-```
-
-Rolling back would involve deleting the wyng.backup dirs and then `cp` in the reverse
-direction. Note that Wyng may require using --remap afterward. Also note this is _not_
-recommended for regular use.
-
-* Wyng is generally usable with filesystems that don't support hardlinks (such as encryption
-filesystems), however one exception is when using deduplication mode. When setting
-dedup higher than '1', Wyng will report that the destination is "not ready to receive commands"
-if the destination fs doesn't allow hardlinks.
-
 
 Donations
 ---
-<a href="https://liberapay.com/tasket/donate"><img alt="Donate using Liberapay" src="media/lp_donate.svg" height=54></a>
-
-<a href="https://www.patreon.com/tasket"><img alt="Donate with Patreon" src="media/become_a_patron_button.png" height=50></a>
-
 If you like Wyng or my other efforts, monetary contributions are welcome and can
-be made through [Liberapay](https://liberapay.com/tasket/donate)
-or [Patreon](https://www.patreon.com/tasket).
+be made through [Liberapay](https://liberapay.com/tasket/donate) or [Buy Me a Coffee](https://www.buymeacoffee.com/tasket).
 
 
 External Links

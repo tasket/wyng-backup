@@ -16,7 +16,7 @@ from array import array         ; import resource
 
 try:
     import zstd, warnings
-    warnings.filterwarnings("ignore", category=DeprecationWarning, module="zstd")
+    warnings.filterwarnings("ignore", category=DeprecationWarning)
 except:
     zstd = None
 
@@ -486,7 +486,6 @@ def get_lv_path_pool(path):
 
 
 def lv_remove(vgname, lvname, sync=True, check=False):
-    # Enh: re-write with asyncio
     assert not (sync == False and check)
     if lv_exists(vgname, lvname):
         del(volgroups[vgname].lvs[lvname])
@@ -664,7 +663,7 @@ def arch_check(vol_list=None, startup=False):
             if options.session \
             and ((options.session.lower() == "newest" and sesname != vol.sesnames[-1]) \
             or options.session < ses.localtime):
-                continue # Enh: use seq
+                continue
             if attended:   print("  Session %s... " % sesname, end="", flush=True)
 
             # FixCheck for stray entries here
@@ -891,7 +890,7 @@ def helper_merge():
         os.chdir("merge")  #  CD
         if not resume or not exists("CHECK-mv-rm"):
             print("Merge: remove/replace files.")    ; subdirs = set()
-            for src in src_list:  # Enh: replace os.scandir w manifest method
+            for src in src_list:
                 for i in os.scandir(src):
                     if i.is_dir():   subdirs.add(i.name)
             for sdir in subdirs:   os.makedirs(merge_target+"/"+sdir, exist_ok=True)
@@ -1810,7 +1809,6 @@ def monitor_send(datavols, selected=[], monitor_only=True):
 
         if datavol in send_alls or dnew+dfreed > 0:
             if vol.changed_bytes > dest_free:
-                # Enh: add loop here for all volumes, implement a 'forced' mode
                 autoprune(datavol, needed_space=vol.changed_bytes, apmode=options.autoprune)
                 if vol.changed_bytes > dest_free:
                     print(" %d additional bytes needed." % (vol.changed_bytes-dest_free))
@@ -1930,7 +1928,7 @@ def prune_sessions(datavol, times):
 def autoprune(datavol, needed_space=0, apmode="off", include=set()):
     global dest_free
 
-    def get_dest_free(): ## Enh: add sanitize
+    def get_dest_free():
         for ln in open(tmpdir+"/merge.log","r").readlines():
             if ln.startswith("wyng_check_free"):  dest_free = int(ln.split()[1])
         return dest_free
@@ -1980,7 +1978,7 @@ def autoprune(datavol, needed_space=0, apmode="off", include=set()):
                 dlist = []    ; offset = 0
                 for day in range(span, min(span+ndays, enddate.toordinal())):
                     dlist.append(sum( x[1] for x in apcal[day] ))
-                while sum(dlist) > nsessions: ## Enh: Make even distribution
+                while sum(dlist) > nsessions:
                     bigday = dlist.index(max(dlist[offset:]), offset)
                     offset += (ndays//nsessions)+1    ; offset %= min(ndays, len(dlist))
                     for dses in apcal[span+bigday]:
@@ -2030,7 +2028,6 @@ def autoprune(datavol, needed_space=0, apmode="off", include=set()):
 # and merges the manifests. Setting 'addcol' will add a colunm showing the session dir name.
 
 def merge_manifests(datavol, msessions=None, mtarget=None, addcol=False):
-    # Enh: implement mtarget to support merge_sessions()
     volume    = aset.vols[datavol]
     msessions = volume.sesnames if not msessions else msessions
     sespaths  = [ os.path.basename(volume.sessions[x].path) for x in msessions ]
@@ -2329,7 +2326,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     manifest = merge_manifests(datavol, msessions=[x.name for x in incl_ses], addcol=True)
 
     if not sparse:
-        cmds = [[CP.sed, "-E", "/"+last_chunkx+"/q", manifest],  ## Enh: detect vol_shrank
+        cmds = [[CP.sed, "-E", "/"+last_chunkx+"/q", manifest],
                 [CP.sed, "-E", "/^0\s/ d; "
                 "s|^\S+\s+x(\S{" +str(address_split[0])+ "})(\S+)\s+(S_\S+)|\\3/\\1/x\\1\\2|;"],
                 [CP.gzip, "-c", "-4"
@@ -2641,11 +2638,11 @@ def show_list(selected_vols):
     elif not selected_vols and not len(options.volumes):
         print("\nConfigured Volumes [%s/%s]\n" % (aset.vgname, aset.poolname))
         maxwidth = max(len(x.name) for x in aset.vols.values())
-        fmt    = "%7.1f GB  %-" + str(maxwidth+5) + "s  %s"
+        fmt    = "%7.2f GB  %-" + str(maxwidth+5) + "s  %s"
         for vname in sorted(x.name for x in aset.vols.values()):
             vol = aset.vols[vname]   ; sname = vol.sesnames[-1][2:] if len(vol.sesnames) else " "
             if options.verbose:
-                print(fmt % ((aset.vols[vname].volsize() / 1024**3), vname, sname))
+                print(fmt % ((vol.volsize() / 1024**3), vname, sname))
                 if vol.desc:   print("  desc:", vol.desc)
             else:
                 print(vname)
@@ -2756,7 +2753,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.3.0wip"      ; prog_date = "20220102"
+prog_version          = "0.3.0"         ; prog_date = "20220104"
 format_version        = 2               ; debug     = False       ; tmpdir = None
 
 # Disk block size:
@@ -2853,7 +2850,7 @@ if options.quiet and options.action != "list":
     options.unattended = True
     sys.stdout = open(os.devnull, "w")
 
-if not options.quiet:   print("%s %s %s" % (prog_name.capitalize(), prog_version, prog_date))
+print("%s %s release %s" % (prog_name.capitalize(), prog_version, prog_date))
 
 if options.action not in ("send", "arch-deduplicate"):   options.dedup = False
 
@@ -2877,8 +2874,9 @@ os.makedirs(big_tmpdir, exist_ok=True)
 signal_handlers  = {}    ; signals_caught = []    ; error_cache = []
 
 # Dict of compressors in the form: (library, default_compress_level, compress_func)
-compressors      = {"zlib": (zlib, 4, zlib.compress), "bz2": (bz2, 9, bz2.compress)}
-if zstd:    compressors["zstd"] = (zstd, 7, lambda data, lvl: zstd.compress(data, lvl, 2))
+compressors      =    {"zlib":   (zlib, 4, zlib.compress),
+                       "bz2" :   (bz2,  9, bz2.compress)}
+if zstd:   compressors["zstd"] = (zstd, 3, lambda data, lvl: zstd.compress(data, lvl, 3))
 
 hash_funcs       = {"sha256": hashlib.sha256}
 if "blake2b" in hashlib.algorithms_available:
@@ -2896,8 +2894,6 @@ volgroups, l_vols= {}, {}    ; get_lvm_vgs()
 
 # Create an ArchiveSet object with get_configs() and set global vars pertaining
 # to the destination.
-# Enh: Use separate dest class so aset can be inst after detect_dest_state()
-#      and/or move detect call to aset init.
 destsys = desttype = dest_run_map = dest_online = dest_in_process = dest_free = dest_writable= None
 aset             = get_configs()
 destsys, desttype= detect_internal_state()
