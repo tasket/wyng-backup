@@ -32,7 +32,7 @@ except:
     Cipher_AES = Cipher_ChaCha20 = Cipher_ChaCha20_Poly1305 = None
 
 
-# ArchiveSet manages configuration and configured volume info
+# ArchiveSet manages archive metadata incl. volumes and sessions
 
 class ArchiveSet:
 
@@ -3053,11 +3053,11 @@ def show_list(selected_vols):
     elif not selected_vols and not len(options.volumes):
         print("\nConfigured Volumes [%s/%s]\n" % (aset.vgname, aset.poolname))
         maxwidth = max(len(x.name) for x in aset.vols.values())
-        fmt    = "%7.1f GB  %-" + str(maxwidth+5) + "s  %s"
+        fmt    = "%7.2f GB  %s  %-" + str(maxwidth+5) + "s  %s"
         for vname in sorted(x.name for x in aset.vols.values()):
             vol = aset.vols[vname]   ; sname = vol.sesnames[-1][2:] if len(vol.sesnames) else " "
             if options.verbose:
-                print(fmt % ((aset.vols[vname].volsize() / 1024**3), vname, sname))
+                print(fmt % ((vol.volsize() / 1024**3), vol.vid, vname, sname))
                 if vol.desc:   print("  desc:", vol.desc)
             else:
                 print(vname)
@@ -3168,7 +3168,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4.0alpha"    ; prog_date = "20220102"
+prog_version          = "0.4.0alpha"    ; prog_date = "20220104"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 
 # Disk block size:
@@ -3273,8 +3273,7 @@ if options.quiet and options.action != "list":
     options.unattended = True
     sys.stdout = open(os.devnull, "w")
 
-
-if not options.quiet:   print("%s %s %s" % (prog_name.capitalize(), prog_version, prog_date))
+print("%s %s release %s" % (prog_name.capitalize(), prog_version, prog_date))
 
 if options.action not in ("send", "arch-deduplicate"):   options.dedup = False
 
@@ -3300,7 +3299,7 @@ signal_handlers  = {}    ; signals_caught = []    ; error_cache = []
 # Dict of compressors in the form: (library, default_compress_level, compress_func)
 compressors      =    {"zlib":   (zlib, 4, zlib.compress),
                        "bz2" :   (bz2,  9, bz2.compress)}
-if zstd:   compressors["zstd"] = (zstd, 7, lambda data, lvl: zstd.compress(data, lvl, 2))
+if zstd:   compressors["zstd"] = (zstd, 3, lambda data, lvl: zstd.compress(data, lvl, 3))
 
 hash_funcs       =    {"sha256": hashlib.sha256}
 if "blake2b" in hashlib.algorithms_available:
