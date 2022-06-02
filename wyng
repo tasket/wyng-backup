@@ -172,10 +172,10 @@ class ArchiveSet:
                 # instantiate:
                 self.vols[key] = self.Volume(self, vid, key, hashval, pjoin(self.path,vid),
                                              self.vgname, children=children)
-                if options.dedup:   self.dedupsessions += self.vols[key].sessions.values()
+                #### if options.dedup:   self.dedupsessions += self.vols[key].sessions.values()
 
         # Create master session list sorted for deduplication
-        self.dedupsessions.sort(key=lambda x: x.localtime, reverse=True)
+        #### self.dedupsessions.sort(key=lambda x: x.localtime, reverse=True)
 
 
     def save_conf(self, ext=""):
@@ -956,10 +956,6 @@ def arch_init(aset):
         x_it(1,"--from and --dest cannot be used together.")
     if options.local:
         vgname, poolname = options.local.split("/")
-        if not vg_exists(vgname):
-            print("Warning: Volume group '%s' does not exist." % vgname)
-        if not lv_exists(vgname, poolname):
-            print("Warning: LV pool '%s' does not exist." % poolname)
         aset.vgname   = vgname
         aset.poolname = poolname
 
@@ -1175,12 +1171,7 @@ def get_configs_remote():
         if getattr(new_aset, attr) != aval:   setattr(new_aset, attr, aval)   ; update = True
     if options.local:
         vgname, poolname = options.local.split("/")
-        if not vg_exists(vgname):
-            print("Warning: Volume group '%s' does not exist." % vgname)
-        if not lv_exists(vgname, poolname):
-            print("Warning: LV pool '%s' does not exist." % poolname)
         new_aset.vgname   = vgname    ; new_aset.poolname = poolname    ; update = True
-        lvm_meta_snapshot(new_aset, "release")
 
     # Enh: Examine imported .salt counters to ensure they are not wildly increased
     # above values in archive.ini (anti-DoS). Possibly warn or prompt user.
@@ -1633,6 +1624,8 @@ def prepare_snapshots(datavols):
 
     print("Preparing snapshots...")
     incr_vols, complete_vols = set(), set()    ; vgname = aset.vgname
+    if not vg_exists(vgname):
+        print("Warning: Volume group '%s' does not exist." % vgname)
     for datavol in datavols:
         if not lv_exists(vgname, datavol):
             print("Warning: Local '%s' does not exist!" % datavol)
@@ -1721,6 +1714,8 @@ def get_lvm_deltas(datavols):
     catch_signals()
     for apool in sorted(poolset):
         poolname = apool.replace("-","--")
+        if not lv_exists(vgname, apool):
+            raise RuntimeError("LV pool '%s/%s' does not exist." % (vgname, apool))
 
         try:
             lvm_meta_snapshot(aset, "reserve", pool=apool)
@@ -2061,6 +2056,7 @@ def send_volume(datavol, localtime, ses_tags, send_all):
             raise RuntimeError("tar transport failure code %d" % retcode)
 
         if ses.volsize != prior_size and len(vol.sessions) > 1:
+            os.link(ses.path+"/manifest.tmp", ses.path+"/manifest")
             check_manifest_sequence(datavol, vol.sesnames)
 
         # Finalize on VM/remote
@@ -2096,7 +2092,8 @@ def send_volume(datavol, localtime, ses_tags, send_all):
 
 def init_dedup_index5(listfile=""):
 
-    ctime = time.perf_counter()    ; makelist = bool(listfile)
+    ctime      = time.perf_counter()    ; makelist = bool(listfile)
+    addrsplit  = -address_split[1]
     # Define arrays and element widths
     hash_w     = hash_bits // 8
     ht_ksize   = 2 # binary digits for tree key
@@ -2105,9 +2102,11 @@ def init_dedup_index5(listfile=""):
     chtree_max = 2**(chtree[0].itemsize*8) # "I" has 32bit range
     chdigits   = max_address.bit_length() // 4 # 4bits per digit
     ses_w = 2; ch_w = chdigits //2
-    # limit number of sessions to ses_w range:
+
+    # Create master session list, limit to ses_w range
+    for vol in aset.vols.values():   aset.dedupsessions += vol.sessions.values()
+    aset.dedupsessions.sort(key=lambda x: x.localtime, reverse=True)
     ddsessions = aset.dedupsessions[:2**(ses_w*8)-(len(aset.vols))-1]
-    addrsplit  = -address_split[1]
 
     dataf  = open(tmpdir+"/hashindex.dat","w+b")
     dataf_read  = dataf.read    ; dataf_seek = dataf.seek      ; int_frbytes = int.from_bytes
@@ -2179,6 +2178,9 @@ def dedup_existing():
 
 def monitor_send(datavols, selected=[], monitor_only=True):
     global dest_free
+
+    if options.autoprune.lower() == "full":
+        for dv in aset.vols:   autoprune(dv, apmode="full")
 
     for prg in (CP.lvm, CP.dmsetup, CP.thin_delta ):
         if not shutil.which(prg):  raise RuntimeError("Required command not found: "+prg)
@@ -3168,7 +3170,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4.0alpha"    ; prog_date = "20220104"
+prog_version          = "0.4.0alpha"    ; prog_date = "20220601"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 
 # Disk block size:
@@ -3189,7 +3191,8 @@ shell_prefix          = "set -e && export LC_ALL=C\n"
 url_types             = ("ssh://", "qubes-ssh://", "qubes://", "internal:")
 
 ssh_opts              = ["-x", "-o", "ControlPath=~/.ssh/controlsocket-%r@%h-%p",
-                         "-o", "ControlMaster=auto", "-o", "ControlPersist=60"]
+                         "-o", "ControlMaster=auto", "-o", "ControlPersist=60",
+                         "-o", "ServerAliveInterval=30", "-o", "ConnectTimeout=30"]
 
 local_actions         = ("monitor","list","version")
 write_actions         = ("add","send","prune","delete","rename","arch-delete","arch-deduplicate")
@@ -3312,13 +3315,9 @@ if options.from_arch and options.action not in ("receive","verify","list","arch-
 init_dedup_index = [None, init_dedup_index5][options.dedup]
 monitor_only     = options.action == "monitor" # gather metadata without backing up
 
-# Get LVM listings
-volgroups, l_vols= {}, {}    ; get_lvm_vgs()
-
 # Create an ArchiveSet object with get_configs() and set global vars pertaining
 # to the destination.
-# Enh: Use separate dest class so aset can be inst after detect_dest_state()
-#      and/or move detect call to aset init.
+# Passphrase input happens here; no stdin before this point!
 aset = destsys = desttype = dest_run_map = dest_online = dest_free = dest_writable = None
 aset = get_configs(options)
 destsys, desttype= detect_internal_state()
@@ -3326,7 +3325,6 @@ dest_online, dest_free, dest_writable, archive_ini_hash  = detect_dest_state(des
 bkdir            = topdir+"/"+aset.name
 destpath         = os.path.normpath(pjoin(aset.destmountpoint,aset.destdir))
 destcd           = " cd '"+destpath+"'"
-
 
 # Check online status for certain commands.
 if not dest_writable and options.action in write_actions and not options.from_arch \
@@ -3340,8 +3338,10 @@ if not dest_online and (options.remap or options.from_arch \
 if options.from_arch:
     aset         = get_configs_remote()
 
-# Set 'l_vols' to reference selected volgroup and check for orphan snapshots
+# Get LVM listings
+volgroups, l_vols= {}, {}    ; get_lvm_vgs()
 if aset.vgname in volgroups:   l_vols = volgroups[aset.vgname].lvs
+lvm_meta_snapshot(aset, "release")
 
 
 
