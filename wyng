@@ -44,6 +44,7 @@ class ArchiveSet:
     max_infosz  = (tag_len+comment_len + 10) * max_tags + 1000
     max_volinfosz= (mhash_sz + sesname_sz + 10) * max_sessions + 1000
 
+    attr_ints   = {"format_ver","chunksize","mci_count","dataci_count"}
 
     def __init__(self, name, top, allvols=False, children=2, load_tmp=False,
                  passphrase=None, prior_auth=None):
@@ -51,12 +52,13 @@ class ArchiveSet:
         self.path        = pjoin(top,name)
         self.confpath    = pjoin(self.path, self.confname)
         self.confprefix  = b"[WYNG%02d]\n" % format_version
-        self.modeprefix  = b"ci = "      ; self.ci_mode = None
+        self.modeprefix  = b"ci = "
+        self.mcrypto     = mcrypto = None
+        self.datacrypto  = datacrypto = None
         self.vols        = {}
         self.dedupindex  = {}
         self.dedupsessions = []
         self.raw_hashval = None
-        self.attr_ints   = {"format_ver","chunksize","mci_count","dataci_count"}
         self.Volume      = ArchiveVolume
 
         # persisted:
@@ -64,7 +66,7 @@ class ArchiveSet:
         self.chunksize   = bkchunksize
         self.compression = "zstd" if zstd else "zlib"
         self.compr_level = str(compressors[self.compression][1])
-        self.hashtype    = "blake2b" if "blake2b" in hash_funcs else "sha256"
+        self.hashtype    = "blake2b"
         self.vgname      = None
         self.poolname    = None
         self.destsys     = None
@@ -72,8 +74,6 @@ class ArchiveSet:
         self.destmountpoint = None
         self.uuid        = None
         self.updated_at  = None
-        self.mcrypto     = mcrypto = None
-        self.datacrypto  = datacrypto = None
         self.data_cipher = self.ci_mode = None
         self.mci_count   = self.dataci_count  =  0
         self.in_process  = []
@@ -111,16 +111,14 @@ class ArchiveSet:
         else:
             self.ci_mode = header1[-3:-1]
 
-        # parse metadata mode and instantiate it
+        # parse metadata crypto mode and instantiate it
         if self.ci_mode != b"00" and not mcrypto:
-            # init metadata crypto
             ci_types = DataCryptography.crypto_codes[self.ci_mode]
             if debug:   print("metadata cipher =", ci_types[1])
             if not passphrase:   passphrase = ask_passphrase()
             assert passphrase and passphrase != bytes(len(passphrase))
-            self.mcrypto = mcrypto \
-                = DataCryptography(ci_types[1], self.confpath+".salt",
-                                    slot=1, passphrase=passphrase[:])
+            self.mcrypto = mcrypto = DataCryptography(ci_types[1], self.confpath+".salt",
+                                       slot=1, passphrase=passphrase[:])
 
         try:
             # initial decryption + auth
@@ -172,10 +170,6 @@ class ArchiveSet:
                 # instantiate:
                 self.vols[key] = self.Volume(self, vid, key, hashval, pjoin(self.path,vid),
                                              self.vgname, children=children)
-                #### if options.dedup:   self.dedupsessions += self.vols[key].sessions.values()
-
-        # Create master session list sorted for deduplication
-        #### self.dedupsessions.sort(key=lambda x: x.localtime, reverse=True)
 
 
     def save_conf(self, ext=""):
@@ -292,13 +286,9 @@ class ArchiveSet:
         mcrypto = self.mcrypto    ; digest = None
         destname= dest if dest else fname+(".z" if compress else "")
 
-        with  open(fname,"r+b") as inf,   mmap.mmap(inf.fileno(), 0) as inmap, \
-              memoryview(inmap) as inmv:
-            if self.compression == "zstd":
-                # Remove this after replacing crippled library
-                mbuf = self.compress(bytes(inmv), int(self.compr_level)) if compress else inmv
-            else:
-                mbuf = self.compress(inmv, int(self.compr_level)) if compress else inmv
+        with  open(fname,"r+b") as inf,   mmap.mmap(inf.fileno(), 0) as inmap:
+            inbuf = bytes(inmap) if self.compression == "zstd" else inmap
+            mbuf  = self.compress(inbuf, int(self.compr_level)) if compress else inbuf
             if get_digest:   digest = self.b64hash(mbuf)
             if mcrypto:      mbuf = mcrypto.encrypt(mbuf)
             open(destname,"wb").write(mbuf)
@@ -320,21 +310,24 @@ class ArchiveSet:
 
 class ArchiveVolume:
 
+    __slots__ = ("vid","name","archive","path","vgname","mapfile","sessions","sesnames",
+                 "first","last","meta_checked","tags","last_uuid","desc","changed_bytes")
+
     def __init__(self, archive, vid, name, hashval, path, vgname, children=2):
         self.vid       = vid                       ; self.name    = name
         self.archive   = archive                   ; self.path    = path
         self.vgname    = vgname                    ; self.mapfile = path+"/deltamap"
         self.sessions  = {}                        ; self.sesnames= []
-        self.first     = self.last = "None"        ; self.meta_checked = False ####
+        self.first     = self.last = "None"        ; self.meta_checked = False
         self.tags      = {}
         # persisted:
         self.last_uuid = None     #### implement
         self.desc      = ""
         # other:
         self.changed_bytes = 0
-        self.Ses = Ses = ArchiveSession
 
         # load volume info
+        Ses = ArchiveSession
         if debug:  print("\n", vid, "-", name)
         if path:   os.makedirs(path, exist_ok=True)
         if path and hashval != "0":
@@ -368,7 +361,7 @@ class ArchiveVolume:
     def save_volinfo(self, ext=""):
         os.makedirs(self.path, exist_ok=True)   ; fname = "volinfo"
         with io.StringIO() as f:
-            print("last_uuid =", self.last_uuid, file=f)
+            #### print("last_uuid =", self.last_uuid, file=f)
             print("desc =", self.desc, file=f)
             for ses in self.sessions.values():
                 if ses.saved:   print(ses.name, "=", ses.hashval, file=f)
@@ -419,7 +412,7 @@ class ArchiveVolume:
                 f.flush()    ; os.fsync(f.fileno())
 
     def new_session(self, sname, addtags={}):
-        ns = self.Ses(self, sname, "0", addtags=addtags)
+        ns = ArchiveSession(self, sname, "0", addtags=addtags)
         ns.path = pjoin(self.path, sname)
         if self.first == "None":
             ns.sequence = 0
@@ -475,6 +468,9 @@ class ArchiveSession:
 
     attr_str  = ("localtime","previous","uuid","manifesthash")
     attr_int  = ("volsize","sequence")
+    attr_misc = ("tags","volume","archive","name","path","saved","loaded","toggle",
+                 "hashval","meta_checked")
+    __slots__ = attr_str + attr_int + attr_misc
 
     def __init__(self, volume, name, hashval, path="", addtags={}):
         self.volume   = volume;    self.archive = arch = volume.archive
@@ -483,7 +479,7 @@ class ArchiveSession:
         self.saved    = self.loaded = False
         self.toggle   = True
         self.hashval  = hashval
-        self.meta_checked = False ####
+        self.meta_checked = False
         # persisted:
         self.uuid     = None
         self.localtime= None
@@ -811,6 +807,7 @@ class Lvm_Volume:
     colnames  = ["vg_name","lv_name","lv_attr","lv_size","lv_time","lv_uuid",
                  "pool_lv","thin_id","transaction_id","tags"]
     attr_ints = ["lv_size"]
+    __slots__ = colnames
 
     def __init__(self, members):
         for attr in self.colnames:
@@ -1067,8 +1064,9 @@ def arch_check(vol_list=None, startup=False):
 
         if startup:   continue
 
-        # Check index sequencing in first and combined manifests
-        print("  Checking index,", end="", flush=True) ; mset = []
+        # Check ses sequence number is unique and combined manifests are correct
+        print("  Checking indexes,", end="", flush=True) ; mset = []
+        assert len(vol.sessions) == len(set((x.sequence for x in vol.sessions.values())))
         for ses in vol.sesnames:   mset.append(ses)    ; check_manifest_sequence(volname, mset)
 
         # Check hashes of each session individually
@@ -1858,7 +1856,6 @@ def send_volume(datavol, localtime, ses_tags, send_all):
     ses = vol.new_session(bksession, addtags=ses_tags)
     ses.localtime = localtime
     ses.uuid      = l_vols[snap2vol].lv_uuid
-    ses.trans_id  = l_vols[datavol].transaction_id
     ses.volsize   = snap2size
     ses.path      = vol.path+"/"+bksession+"-tmp"
 
@@ -1907,7 +1904,7 @@ def send_volume(datavol, localtime, ses_tags, send_all):
         gethash = hash_funcs[aset.hashtype]    ; b64enc  = base64.urlsafe_b64encode
         b2int   = int.from_bytes
 
-        checkpt = 128 #### if options.quiet else 20
+        checkpt = 128
         addr    = counter = percent = 0
 
         # Feed delta bmap to inner loop in pieces segmented by large zero delimeter.
@@ -2495,7 +2492,7 @@ def merge_manifests(datavol, msessions=None, mtarget=None, addcol=False):
     else:
         cdir  = volume.path     ; slsort  = slist[0]
 
-    do_exec([[CP.sort, "-umd", "-k2,2", "--batch-size=64", "--files0-from="+slsort]],
+    do_exec([[CP.sort, "-umd", "-k2,2", "--batch-size=16", "--files0-from="+slsort]],
             out=outfile, cwd=cdir)
     if addcol:  shutil.rmtree(tmp+"/m")
 
@@ -2544,7 +2541,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
             print("###", file=lstf)
 
         # Unique-merge filenames: one for rename, one for new full manifest.
-        do_exec([[CP.sort, "-umd", "-k2,2", "--batch-size=64"] + manifests],
+        do_exec([[CP.sort, "-umd", "-k2,2", "--batch-size=16"] + manifests],
                 out="manifest.one", cwd=m_tmp)
         do_exec([[CP.sort, "-umd", "-k2,2", "manifest.one",
                 pjoin(volume.path, merge_target, "manifest")]],
@@ -3202,8 +3199,8 @@ alphanumsym = "^[a-zA-Z0-9\+\._-]+$"
 pjoin       = os.path.join    ; exists = os.path.exists
 
 
-if sys.hexversion < 0x3050000:
-    x_it(1, "Python ver. 3.5 or greater required.")
+if sys.hexversion < 0x3080000:
+    x_it(1, "Python ver. 3.8 or greater required.")
 
 if tuple(time.gmtime(0))[:6] != (1970, 1, 1, 0, 0, 0):
     x_it(1, "System time epoch is not 1970-01-01.")
@@ -3304,9 +3301,8 @@ compressors      =    {"zlib":   (zlib, 4, zlib.compress),
                        "bz2" :   (bz2,  9, bz2.compress)}
 if zstd:   compressors["zstd"] = (zstd, 3, lambda data, lvl: zstd.compress(data, lvl, 3))
 
-hash_funcs       =    {"sha256": hashlib.sha256}
-if "blake2b" in hashlib.algorithms_available:
-    hash_funcs["blake2b"] = functools.partial(hashlib.blake2b, digest_size=hash_bits//8)
+hash_funcs       = {"sha256" : hashlib.sha256,
+                    "blake2b": functools.partial(hashlib.blake2b, digest_size=hash_bits//8)}
 
 # Check --from usage (access other/unconfigured archive).
 if options.from_arch and options.action not in ("receive","verify","list","arch-init"):
@@ -3452,16 +3448,18 @@ elif options.action == "receive":
 
 
 elif options.action == "verify":
-    if len(selected_vols) != 1:
-        x_it(1, "Specify one volume for verify.")
     if options.session and len(options.session.split(",")) > 1:
         x_it(1, "Specify one session for verify.")
-    receive_volume(selected_vols[0],
-                   select_ses="" if not options.session else options.session.split(",")[0],
-                   verify_only=1, save_path="")
+
+    for dv in selected_vols:
+        receive_volume(dv,
+                    select_ses="" if not options.session else options.session.split(",")[0],
+                    verify_only=1, save_path="")
 
 
 elif options.action == "diff":
+    if len(selected_vols) != 1:
+        x_it(1, "Specify one volume for diff.")
     if selected_vols:
         receive_volume(selected_vols[0], save_path="", diff=True)
 
