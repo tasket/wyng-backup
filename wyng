@@ -63,7 +63,7 @@ class ArchiveSet:
 
         # persisted:
         self.format_ver  = 0
-        self.chunksize   = bkchunksize
+        self.chunksize   = bkchunksize * 2
         self.compression = "zstd" if zstd else "zlib"
         self.compr_level = str(compressors[self.compression][1])
         self.hashtype    = "blake2b"
@@ -786,6 +786,7 @@ class CP:
     tee  = "/usr/bin/tee"    ; sync  = "/bin/sync"       ; dmsetup  = "/sbin/dmsetup"
     find = "/usr/bin/find"   ; xargs = "/usr/bin/xargs"  ; sha256sum= "/usr/bin/sha256sum"
     cmp  = "/usr/bin/cmp"    ; gzip  = "/bin/gzip"       ; diff     = "/usr/bin/diff"
+    cp   = "/bin/cp"
     mountpoint = "/bin/mountpoint"    ; thin_delta = "/usr/sbin/thin_delta"
     blkdiscard = "/sbin/blkdiscard"   ; nice       = "/usr/bin/nice"
 
@@ -2530,12 +2531,14 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
 
         with open("merge.lst", "wt") as lstf:
             print(merge_target, target, file=lstf)
+            volume.decode_one_manifest(volume.sessions[merge_target])
 
             # Get manifests, append session name to eol, print session names to list.
             #print("  Reading manifests")
             manifests = []
             for ses in merge_sources:
                 if clear_sources:   print(ses, file=lstf)    ; manifests.append("man."+ses)
+                volume.decode_one_manifest(volume.sessions[ses])
                 do_exec([[CP.sed, "-E", "s|$| "+ses+"|", ses+"/manifest"
                         ]], out=m_tmp+"/man."+ses)
             print("###", file=lstf)
@@ -2694,8 +2697,6 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False, verify_only
     if diff and remap and select_ses != sessions[-1]:
         x_it(1, "Cannot use prior session for remap.")
 
-    volsize   = vol.sessions[select_ses].volsize    ; volf = None
-
     if save_path and exists(save_path) and attended:
         print("\n!! This will", "overwrite" if sparse_write else "erase all",
               "existing data in",save_path,"!!")
@@ -2703,12 +2704,13 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False, verify_only
         if ans.lower() not in {"y","yes"}:
             x_it(0,"")
 
+    volsize     = vol.sessions[select_ses].volsize   ; volf = None
     chdigits    = max_address.bit_length() // 4      ; chformat    = "x%0"+str(chdigits)+"x"
     lchunk_addr = vol.last_chunk_addr(volsize)       ; last_chunkx = chformat % lchunk_addr
     addrsplit   = -address_split[1]                  ; rc = None
 
     # Collect session manifests
-    include = False   ; incl_ses = []
+    incl_ses = []
     for ses in sessions if verify_only != 2 else [select_ses]:
         incl_ses.append(ses)
         if ses == select_ses:  break
@@ -2828,6 +2830,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False, verify_only
             if save_path:
                 volf_seek(addr)
                 if sparse_write and volf_read(chunksize) != zeros:
+                    ## Enh:  Use hole punch when available...
                     volf_seek(addr)    ; volf_write(zeros)    ; diff_count += chunksize
             elif diff:
                 volf_seek(addr)    ; diff_count += diff_compare(zeros,True)
@@ -3152,9 +3155,10 @@ def x_it(code, text):
 
 
 def cleanup():
+    if debug:   subprocess.run([CP.copy, "-a", tmpdir, "/tmp/wyng-debug"])
     if not debug:
         shutil.rmtree(big_tmpdir, ignore_errors=True)
-        for f in (big_tmpdir, tmpdir, tmpdir+"-rpc", tmpdir+"-old"):
+        for f in (big_tmpdir, tmpdir, tmpdir+"-rpc"):
             shutil.rmtree(f, ignore_errors=True)
     if error_cache:
         sys.stderr.write("Error on volume(s): " + ", ".join(error_cache) + "\n")
@@ -3167,14 +3171,14 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4.0alpha"    ; prog_date = "20220601"
+prog_version          = "0.4.0alpha"    ; prog_date = "20220715"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 
 # Disk block size:
 bs                    = 512
 # LVM min blocks = 128 = 64kBytes:
 lvm_block_factor      = 128
-# Default archive chunk size = 64kBytes:
+# Smallest archive chunk size = 64kBytes:
 bkchunksize           = 1 * lvm_block_factor * bs
 assert bkchunksize % (lvm_block_factor * bs) == 0
 max_address           = 0xffffffffffffffff # 64bits
@@ -3275,19 +3279,21 @@ if options.quiet and options.action != "list":
 
 print("%s %s release %s" % (prog_name.capitalize(), prog_version, prog_date))
 
+options.action = options.action.lower()
 if options.action not in ("send", "arch-deduplicate"):   options.dedup = False
+if options.action == "arch-deduplicate":   options.dedup = True
+if options.from_arch and options.action not in ("receive","verify","list","arch-init"):
+    x_it(1,"--from option can be used only with: receive, verify, list, arch-init")
 
 
 # Setup tmp and metadata dirs
 metadir     = options.metadir if options.metadir else "/var/lib"
 topdir      = "/"+prog_name+".backup040" ####
-tmpdir      = "/tmp/"+prog_name
+tmpdir_obj  = tempfile.TemporaryDirectory(prefix=prog_name)   ; tmpdir = tmpdir_obj.name
 big_tmpdir  = metadir+topdir+"/.tmp"
 
-shutil.rmtree(tmpdir+"-old", ignore_errors=True)
+shutil.rmtree("/tmp/wyng-debug", ignore_errors=True)
 shutil.rmtree(big_tmpdir, ignore_errors=True)
-if exists(tmpdir):
-    os.rename(tmpdir, tmpdir+"-old")
 os.makedirs(tmpdir+"/rpc")
 os.makedirs(big_tmpdir, exist_ok=True)
 
@@ -3304,10 +3310,6 @@ if zstd:   compressors["zstd"] = (zstd, 3, lambda data, lvl: zstd.compress(data,
 hash_funcs       = {"sha256" : hashlib.sha256,
                     "blake2b": functools.partial(hashlib.blake2b, digest_size=hash_bits//8)}
 
-# Check --from usage (access other/unconfigured archive).
-if options.from_arch and options.action not in ("receive","verify","list","arch-init"):
-    x_it(1,"--from option can be used only with: receive, verify, list, arch-init")
-# Select dedup test algorithm.
 init_dedup_index = [None, init_dedup_index5][options.dedup]
 monitor_only     = options.action == "monitor" # gather metadata without backing up
 

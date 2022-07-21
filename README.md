@@ -333,12 +333,12 @@ archive volume, _not_ your source volume.
 De-duplicates the entire archive by removing repeating patterns. This can save space
 on the destination's drive while keeping the archived volumes intact.
 
-De-duplication can also be performed on an ongoing basis by using `--dedup` with `send`.
+De-duplication can also be performed incrementally by using `--dedup` with `send`.
 
 
 ```
 
-wyng --dedup arch-deduplicate
+wyng arch-deduplicate
 
 
 ```
