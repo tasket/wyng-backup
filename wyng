@@ -69,9 +69,6 @@ class ArchiveSet:
         self.hashtype    = "blake2b"
         self.vgname      = None
         self.poolname    = None
-        self.destsys     = None    ####
-        self.destdir     = "."     ####
-        self.destmountpoint = None ####
         self.uuid        = None
         self.updated_at  = None
         self.data_cipher = self.ci_mode = None
@@ -183,9 +180,6 @@ class ArchiveSet:
         c['hashtype']    = self.hashtype
         c['vgname']      = self.vgname      # move to volname
         c['poolname']    = self.poolname    # move to ses info
-        c['destsys']     = self.destsys     #### move
-        c['destdir']     = self.destdir
-        c['destmountpoint'] = self.destmountpoint
         c['data_cipher'] = self.data_cipher
         if mcrypto:
             if self.datacrypto.counter > self.datacrypto.ctstart:
@@ -561,7 +555,7 @@ class ArchiveSession:
     def save_info(self, ext=""):
         assert self.path   ; fname = "info"   ; arch = self.volume.archive
         self.manifesthash = arch.encode_file(self.path+"/manifest"+ext,
-                                                dest=self.path+"/manifest.z"+ext)
+                                             fdest=self.path+"/manifest.z"+ext)
         with io.StringIO() as f:
             for attr in self.attr_str+self.attr_int:
                 print(attr, "=", getattr(self, attr), file=f)
@@ -1042,7 +1036,7 @@ def arch_check(vol_list=None, startup=False):
         for sdir in os.scandir(vol.path):
             if sdir.name.startswith("S_") and sdir.name.endswith("-tmp"):
                 if debug:   print("Removing partial session dir '%s'" % sdir.name)
-                dest_run([destcd+bkdir + " && rm -rf " + vol.vid+"/"+sdir.name])
+                dest.run([destcd+bkdir + " && rm -rf " + vol.vid+"/"+sdir.name])
                 shutil.rmtree(vol.path+"/"+sdir.name, ignore_errors=True)
 
         if startup:   continue
@@ -1189,6 +1183,7 @@ class Destination:
                 if opts.subdir.strip()[0] == "/":   x_it(1,"Subdir cannot be absolute path.")
                 destdir    = opts.subdir.strip()
 
+        self.write_helper_program()
         self.sys     = destsys    ; self.dtype  = None    ; self.mountpoint = destmountpoint
         for dt in self.url_types:
             if destsys.startswith(dt):
@@ -1262,7 +1257,7 @@ class Destination:
         elif dest_type == "internal":
             add_cmd = [pjoin(tmpdir,remotetmp)]
 
-        ret = dest_run_map[dest_type] + add_cmd
+        ret = self.run_map[dest_type] + add_cmd
         #print("CMD",ret)
         return ret
 
@@ -1427,7 +1422,7 @@ elif cmd == "dedup":
             or options.remap or options.from_arch:  #### Fix: options.action
 
             if self.dtype == "qubes-ssh":
-                # fix: possibly remove dargs and use dest_run()
+                # fix: possibly remove dargs and use dest.run()
                 dargs = self.run_map["qubes"][:-1] + [destsys.split(":")[0]]
 
                 cmd = dargs + [shell_prefix \
@@ -1563,7 +1558,7 @@ def compare_files(pathlist=[], volumes=[], sessions=[], clear=True):
 
     do_exec([[CP.xargs, CP.sha256sum]], cwd=aset.path,
             infile=cmp_list, out=tmpdir+"/compare-hashes.local")
-    dest_run([destcd + bkdir +" && xargs sha256sum"],
+    dest.run([destcd + bkdir +" && xargs sha256sum"],
              infile=cmp_list, out=tmpdir+"/compare-hashes.dest")
     # maybe switch cmp to diff/sha256sum if they are safe enough to read untrusted input
     files  = [tmpdir+"/compare-hashes.local", tmpdir+"/compare-hashes.dest"]
@@ -1584,7 +1579,7 @@ def update_dest(archive, pathlist=[], volumes=[], sessions=[], ext="", delete=Fa
                 + [x.volume.vid+"/"+x.name+"/manifest.z" for x in sessions] + pathlist
 
     if delete:
-        assert not ext;  dest_run([dcd + " && xargs rm -f"], inlines=update_list)
+        assert not ext;  dest.run([dcd + " && xargs rm -f"], inlines=update_list)
         return
 
     do_exec([[CP.tar,"-cf","-","--no-recursion","--verbatim-files-from","--files-from", "-"],
@@ -2071,7 +2066,7 @@ def send_volume(datavol, localtime, ses_tags, send_all):
 
         # Finalize on VM/remote
         catch_signals()
-        dest_run([ destcd + bkdir
+        dest.run([ destcd + bkdir
                  +" && mv -T "+sdir+"-tmp "+sdir
                  +" && mv "+vol.vid+"/volinfo.tmp "+vol.vid+"/volinfo"
                  +" && mv archive.ini.tmp archive.ini"
@@ -2601,7 +2596,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
                 ], cwd=volume.path)
 
     # Start merge operation on dest
-    retcode = dest_run([destcd + destvol + " && python3 "
+    retcode = dest.run([destcd + destvol + " && python3 "
                         + tmpdir+"-rpc/dest_helper.py merge"
                         + (" --resume" if resume else "") + (" --sync" if options.maxsync else "")
                         ],
@@ -2615,13 +2610,13 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
         aset.set_in_process(None)
         for f in ("merge.lst.gz","volinfo.tmp",target+"/info.tmp"):
             if exists(f):  os.remove(f)
-        dest_run([destcd + destvol + " && rm -rf merge merge.lst.gz"], check=False)
+        dest.run([destcd + destvol + " && rm -rf merge merge.lst.gz"], check=False)
         x_it(retcode, "Error: Merge could not initialize!")
     elif retcode != 0:
         x_it(retcode, "Error: Remote exited!")
 
     # Finalize merge operation on dest
-    dest_run([destcd + destvol + " && python3 "
+    dest.run([destcd + destvol + " && python3 "
                 +tmpdir+"-rpc/dest_helper.py merge --finalize"+(" --resume" if resume else "")
                 +" && rm -rf merge merge.lst.gz"
                 ],
@@ -3010,7 +3005,7 @@ def delete_volume(dv):
     aset.set_in_process(None)
 
     if dvid:
-        dest_run([destcd + bkdir + "  && rm -rf '%s'" % dvid])
+        dest.run([destcd + bkdir + "  && rm -rf '%s'" % dvid])
     catch_signals(None)
     return
 
@@ -3527,7 +3522,7 @@ elif options.action == "arch-delete":
           +" && rm -rf ."+bkdir
           +" && { sync -f . || sync; }"
           ]
-    dest_run(cmd)
+    dest.run(cmd)
 
 
 elif options.action == "arch-deduplicate":
