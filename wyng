@@ -306,6 +306,11 @@ class ArchiveSet:
 
 
         class Ses:
+            attr_str  = ("localtime","format","previous","uuid")
+            attr_int  = ("volsize","sequence")
+            attr_misc = ("tags","volume","name","path","saved","toggle","meta_checked")
+            __slots__ = attr_str + attr_int + attr_misc
+
             def __init__(self, volume, name, path="", addtags={}):
                 self.name     = name
                 self.path     = path
@@ -321,8 +326,6 @@ class ArchiveSet:
                 self.sequence = None
                 self.previous = "None"
                 self.tags     = {}
-                attr_str      = ("localtime","format","previous","uuid")
-                attr_int      = ("volsize","sequence")
 
                 if path:
                     with open(pjoin(path,"info"), "r") as sf:
@@ -336,7 +339,7 @@ class ArchiveSet:
                                 continue
 
                             setattr(self, vname, 
-                                int(value) if vname in attr_int else value)
+                                    int(value) if vname in self.attr_int else value)
 
                     if not exists(pjoin(path,"manifest")):
                         raise FileNotFoundError("ERROR: Manifest does not exist for "+name)
@@ -1773,14 +1776,14 @@ def monitor_send(datavols, selected=[], monitor_only=True):
         while True:
             ans = ask_input("[%d]: " % (len(ses_tags)+1)).strip()
             if not ans:   break
-            tag = aset.Volume.Ses.tag_parse(None, ans, delim=",")
+            tag = aset.Volume.Ses.tag_parse(ans, delim=",")
             if not tag:   continue
             ses_tags.append(tag)
             if len(ses_tags) > 4:   break
         print(len(ses_tags), "tags total.")
     elif options.tag and not monitor_only:
         for tag_opt in options.tag:
-            tag = aset.Volume.Ses.tag_parse(None, tag_opt, delim=",")
+            tag = aset.Volume.Ses.tag_parse(tag_opt, delim=",")
             if not tag:   raise ValueError("Invalid tag "+tag_opt)
             ses_tags.append(tag)
 
@@ -2753,7 +2756,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.3.0"         ; prog_date = "20220104"
+prog_version          = "0.3.0"         ; prog_date = "20220727"
 format_version        = 2               ; debug     = False       ; tmpdir = None
 
 # Disk block size:
@@ -2774,7 +2777,8 @@ shell_prefix          = "set -e && export LC_ALL=C\n"
 url_types             = ("ssh://", "qubes-ssh://", "qubes://", "internal:")
 
 ssh_opts              = ["-x", "-o", "ControlPath=~/.ssh/controlsocket-%r@%h-%p",
-                         "-o", "ControlMaster=auto", "-o", "ControlPersist=60"]
+                         "-o", "ControlMaster=auto", "-o", "ControlPersist=60",
+                         "-o", "ServerAliveInterval=30", "-o", "ConnectTimeout=30"]
 
 local_actions         = ("monitor","list","version","add")
 write_actions         = ("send","prune","delete","rename","arch-delete","arch-deduplicate")
@@ -2852,7 +2856,11 @@ if options.quiet and options.action != "list":
 
 print("%s %s release %s" % (prog_name.capitalize(), prog_version, prog_date))
 
+options.action = options.action.lower()
 if options.action not in ("send", "arch-deduplicate"):   options.dedup = False
+if options.action == "arch-deduplicate":   options.dedup = True
+if options.from_arch and options.action not in ("receive","verify","list","arch-init"):
+    x_it(1,"--from option can be used only with: receive, verify, list, arch-init")
 
 
 # Setup tmp and metadata dirs
@@ -2882,9 +2890,6 @@ hash_funcs       = {"sha256": hashlib.sha256}
 if "blake2b" in hashlib.algorithms_available:
     hash_funcs["blake2b"] = functools.partial(hashlib.blake2b, digest_size=hash_bits//8)
 
-# Check --from usage (access other/unconfigured archive).
-if options.from_arch and options.action not in ("receive","verify","list","arch-init"):
-    x_it(1,"--from option can be used only with: receive, verify, list, arch-init")
 # Select dedup test algorithm.
 init_dedup_index = [None, init_dedup_index5][options.dedup]
 monitor_only     = options.action == "monitor" # gather metadata without backing up
