@@ -154,23 +154,38 @@ class ArchiveSet:
         self.gethash     = hash_funcs[self.hashtype]
 
         # load volume metadata objects
-        for key, value in cp["volumes"].items():
-            vid, hashval = value.split(" ", maxsplit=1)
+        convlist = []
+        for key, value in dict(cp["volumes"]).items():
             # conditions when a volume must be loaded:
             # - allvols flag is set
             # - in_process flag from an unfinished action
             # - volume specified on command line
             # - no volumes specified (hence all)
             # - deduplication is in effect
-            if children and (allvols or self.in_process or options.from_arch or \
-            (len(options.volumes)==0 or key in options.volumes or options.dedup)):
+            if children: ## and (allvols or self.in_process or options.from_arch or \
+            ##(len(options.volumes)==0 or key in options.volumes or options.dedup)):
                 # instantiate:
-                self.vols[key] = self.Volume(self, vid, key, hashval, pjoin(self.path,vid),
-                                             self.vgname, children=children)
+                if value.startswith("Vol_") and " " in value.strip(): #### convert older alpha
+                    vid, hashval = value.strip().split(" ", maxsplit=1)
+                    vname = key; convlist.append(vname)
+                else:
+                    vid = key; hashval = value; vname = None
+
+                volume = self.Volume(self, vid, hashval, pjoin(self.path,vid),
+                                             self.vgname, name=vname, children=children)
+                self.vols[volume.name] = volume
+        print(len(self.vols), "vols")
+        if convlist and dest.writable: #### convert older alpha
+            cp["volumes"].clear()
+            for v in self.vols.values():   v.save_volinfo()
+            try:
+                update_dest(self, pathlist=[self.confname], volumes=list(self.vols.values()))
+            except:
+                x_it(1,"convert error")
 
 
     def save_conf(self, ext=""):
-        c = self.conf['var']    ; mcrypto = self.mcrypto
+        c = self.conf['var']    ; c.clear()    ; mcrypto = self.mcrypto
         c['uuid']        = self.uuid if self.uuid else str(uuid.uuid4())
         c['updated_at']  = self.updated_at = str(time.time())
         c['format_ver']  = str(format_version)
@@ -211,7 +226,7 @@ class ArchiveSet:
     def add_volume(self, datavol, desc="", ext=""):
         errs = []
         if len(self.conf["volumes"]) >= self.max_volumes:   x_it(1, "Too many volumes")
-        if datavol in self.conf["volumes"]:
+        if datavol in self.vols:
             print(datavol+" is already configured.")    ; return None
 
         namecheck = self.Volume.volname_check(datavol)
@@ -226,50 +241,28 @@ class ArchiveSet:
 
         while True:
             vid = "Vol_"+os.urandom(2).hex()
-            if vid not in (x.vid for x in self.vols.values()):   break
+            if vid not in self.conf["volumes"]:   break
 
-        # Enh: move to main add_volume()
-        if lv_exists(self.vgname, datavol+".tick") \
-        and "arch-"+self.uuid not in volgroups[self.vgname].lvs[datavol+".tick"].tags:
-            sys.stderr.write("Warning: Volume '%s' is already tracked"
-                             "by a Wyng snapshot from a different archive!\n" % datavol)
-
-        self.conf["volumes"][datavol] = vid + " 0"
-        self.vols[datavol] = vol = self.Volume(self, vid, datavol, "0", pjoin(self.path,vid),
-                                               self.vgname, children=0)
+        self.vols[datavol] = vol = self.Volume(self, vid, "0", pjoin(self.path,vid),
+                                               self.vgname, name=datavol, children=0)
         vol.save_volinfo(ext)
         return vol
 
     def delete_volume(self, datavol):
-        vid = None
-        if datavol in self.conf["volumes"]:
-            vid, _ = self.conf["volumes"][datavol].strip().split(maxsplit=1)
-            del(self.conf["volumes"][datavol])
-            self.save_conf()
-            if exists(pjoin(self.path,vid)):      shutil.rmtree(pjoin(self.path,vid))
+        # Enh: add delete-by-vid
+        vid = self.vols[datavol].vid    ; vpath = self.vols[datavol].path
+        del(self.vols[datavol], self.conf["volumes"][vid])
+        self.save_conf()
 
-        # Enh: move lv_remove to main delete_volume()
-        for ext in {".tick",".tock"}:
-            if lv_exists(self.vgname, datavol+ext) and (options.clean \
-            or "arch-"+self.uuid in volgroups[self.vgname].lvs[datavol+ext].tags):
-                lv_remove(self.vgname, datavol+ext, check=True)
-
+        if exists(vpath):    shutil.rmtree(vpath)
         return vid
 
     def rename_volume(self, datavol, newname, ext=""):
         vol = self.vols[datavol]
-        if newname in self.conf["volumes"] or self.Volume.volname_check(newname):
-            return False
+        if newname in self.vols or self.Volume.volname_check(newname):   return False
 
-        if datavol in self.conf["volumes"] and datavol in self.vols:
-            self.conf["volumes"][newname] = self.conf["volumes"][datavol]
-            self.vols[newname] = vol    ; vol.name = newname
-            del(self.vols[datavol], self.conf["volumes"][datavol])
-            self.save_conf(ext)
-        else:
-            print("Config for %s not present." % datavol)
-            return False
-
+        vol.name = newname
+        vol.save_volinfo(ext)
         return True
 
     def b64hash(self, buf):
@@ -307,20 +300,19 @@ class ArchiveVolume:
     __slots__ = ("vid","name","archive","path","vgname","mapfile","sessions","sesnames",
                  "first","last","meta_checked","tags","last_uuid","desc","changed_bytes")
 
-    def __init__(self, archive, vid, name, hashval, path, vgname, children=2):
-        self.vid       = vid                       ; self.name    = name
+    def __init__(self, archive, vid, hashval, path, vgname, name=None, children=2):
+        self.vid       = vid                       ; self.tags    = {}
         self.archive   = archive                   ; self.path    = path
         self.vgname    = vgname                    ; self.mapfile = path+"/deltamap"
         self.sessions  = {}                        ; self.sesnames= []
         self.first     = self.last = "None"        ; self.meta_checked = False
-        self.tags      = {}
-        # persisted:
+        # persisted here:
         self.last_uuid = None     #### implement
+        self.name      = name
         self.desc      = ""
         # other:
         self.changed_bytes = 0
 
-        # load volume info
         Ses = ArchiveSession
         if debug:  print("\n", vid, "-", name)
         if path:   os.makedirs(path, exist_ok=True)
@@ -341,6 +333,7 @@ class ArchiveVolume:
                                                    path+"/"+vname if children > 1 else "")
                     else:
                         setattr(self, vname, value)
+        if not self.name: raise ValueError("Vol name missing")
 
         # session name list sorted by sequence field
         seslist = list(self.sessions.values()) if children > 1 else []
@@ -356,13 +349,14 @@ class ArchiveVolume:
         os.makedirs(self.path, exist_ok=True)   ; fname = "volinfo"
         with io.StringIO() as f:
             #### print("last_uuid =", self.last_uuid, file=f)
+            print("name =", self.name, file=f)
             print("desc =", self.desc, file=f)
             for ses in self.sessions.values():
                 if ses.saved:   print(ses.name, "=", ses.hashval, file=f)
 
             buf = self.archive.compress(f.getvalue().encode("UTF-8"),
                                         int(self.archive.compr_level))
-            self.archive.conf["volumes"][self.name] = self.vid+" "+self.archive.b64hash(buf)
+            self.archive.conf["volumes"][self.vid] = self.archive.b64hash(buf)
 
         if self.archive.mcrypto:   buf = self.archive.mcrypto.encrypt(buf)
         with open(pjoin(self.path,fname+ext), "wb") as f:
@@ -1015,7 +1009,12 @@ def arch_check(vol_list=None, startup=False):
     decrypt  = aset.datacrypto.decrypt if aset.datacrypto else None
 
     #if not vol_list:   vol_list = [x.name for x in os.scandir(aset.path) if x.is_dir()]
-    if not vol_list:   vol_list = aset.conf["volumes"].keys()
+    if not vol_list:   vol_list = aset.vols.keys()
+
+    ini_strays = set(aset.conf["volumes"].keys()) - set((x.vid for x in aset.vols.values()))
+    if ini_strays:
+        print("Stray .ini volumes:", ini_strays)
+        # Enh: offer to remove/recoved strays
 
     # Remove orphan snapshots
     for lv in list(l_vols.values()):
@@ -1078,8 +1077,11 @@ def check_manifest_sequence(datavol, sesnames):
 # Get global configuration settings:
 
 def get_configs(opts):
+    global dest
     arch_name = "default"    ; bkdir = topdir + "/" + arch_name
-    load_children = 0 if opts.action in ("arch-delete","delete","add") else 2
+    load_children = 1 if opts.action in ("arch-delete","delete","add") else 2
+
+    dest = Destination(arch_name, opts=opts)
 
     if opts.from_arch:
         # Prepare a temporary metadata dir and init aset with it
@@ -1090,8 +1092,7 @@ def get_configs(opts):
     else:
         aset    = ArchiveSet(arch_name, metadir+topdir, children=load_children)
  
-    dest = Destination(aset.name, opts=opts)
-
+    #### Test dest.archive_ini_hash here:
     if opts.action == "arch-init" and aset.updated_at is None:
         arch_init(aset)
     elif opts.action == "arch-init":
@@ -1163,34 +1164,29 @@ class Destination:
                          "-o", "ControlMaster=auto", "-o", "ControlPersist=60",
                          "-o", "ServerAliveInterval=30", "-o", "ConnectTimeout=30"]
 
-    def __init__(self, aset_name, opts=None, destsys=None, destmountpoint=None, destdir="."):
+    def __init__(self, aset_name, opts): #, destsys=None, destmountpoint=None, destdir="."):
 
-        if opts:
-            dspec   = opts.from_arch if opts.from_arch else opts.dest
-            destsys = delim = mountpoint = ""
-            for i in self.url_types:
-                if dspec.startswith(i):
-                    destsys, delim, mountpoint = dspec.replace(i,"",1).partition("/")
-                    break
-            if (not mountpoint and not delim) or (i != "internal:" and not destsys) or \
-               (i == "qubes-ssh://" and ("" in destsys.split(":") or len(destsys.split(":"))<2)):
-                x_it(1,"Error: Malformed --dest specification.")
+        if opts.dest_name and not opts.dest:
+            dspec = self.load(opts.dest_name)
+        elif opts.dest:
+            dspec = opts.dest
+        ##dspec   = opts.from_arch if opts.from_arch else opts.dest
 
-            destsys        = i+destsys
-            destmountpoint = delim+mountpoint
-
-            if opts.subdir:
-                if opts.subdir.strip()[0] == "/":   x_it(1,"Subdir cannot be absolute path.")
-                destdir    = opts.subdir.strip()
-
-        self.write_helper_program()
-        self.sys     = destsys    ; self.dtype  = None    ; self.mountpoint = destmountpoint
+        destsys = delim = destdir = dtype = ""
         for dt in self.url_types:
-            if destsys.startswith(dt):
-                self.dtype = dt.rstrip(":/")    ; self.sys = destsys[len(dt):]
+            if dspec.startswith(dt):
+                destsys, delim, destdir = dspec.replace(dt,"",1).partition("/")
+                self.dtype  = dt.rstrip(":/")
+                self.sys    = destsys
+                self.path   = os.path.normpath(destdir)
                 break
         if not self.dtype:
             raise ValueError("'%s' not an accepted type." % destsys)
+        if (not destdir and not delim) or (dt != "internal:" and not destsys) or \
+            (dt == "qubes-ssh://" and ("" in destsys.split(":") or len(destsys.split(":"))<2)):
+            x_it(1,"Error: Malformed --dest specification.")
+
+        self.write_helper_program()
 
         for prg in (CP.sort, CP.sed, CP.ssh if self.dtype=="ssh" else CP.sh):
             if not shutil.which(prg):
@@ -1204,10 +1200,8 @@ class Destination:
                                       "-p", self.sys.split(":")[0]]
                         }
 
-        self.subdir  = destdir
-        self.path    = os.path.normpath(pjoin(self.mountpoint, self.subdir))
         self.free, self.online, self.writable, self.archive_ini_hash \
-                     = self.detect_state(self.sys, aset_name)
+        = self.detect_state(self.sys, aset_name)
 
 
     def get_free(self, fpath): ## Enh: add sanitize
@@ -1221,7 +1215,7 @@ class Destination:
 
         if dest_type is None:   dest_type = self.dtype
 
-        cmd = self.run_args(dest_type, commands, trap=trap)
+        cmd = self.run_args(commands, trap=trap)
         return do_exec([cmd], infile=infile, inlines=inlines, out=out, check=check)
 
 
@@ -1229,8 +1223,9 @@ class Destination:
     # The input commands are stored in a temp file and a standard command that
     # runs the temp file is returned.
 
-    def run_args(self, dest_type, commands, trap=False):
+    def run_args(self, commands, trap=False):
         trapcmd = "trap '' INT TERM QUIT ABRT ALRM TSTP USR1\n" if trap else ""
+        dest_type = self.dtype
         # shunt commands to tmp file
         with tempfile.NamedTemporaryFile(dir=tmpdir, delete=False) as tmpf:
             cmd = bytes(trapcmd + shell_prefix
@@ -1246,7 +1241,7 @@ class Destination:
                     ]], infile=pjoin(tmpdir,remotetmp))
             if dest_type == "qubes":
                 add_cmd = [CP.sh+" "+pjoin(tmpdir+"-rpc",remotetmp)]
-            elif dest_type == "qubes-ssh":
+            else:
                 add_cmd = [CP.ssh+" "+" ".join(self.ssh_opts)+" "+self.sys.split(":")[1]
                         +' "$('+CP.cat+' '+pjoin(tmpdir+"-rpc",remotetmp)+')"']
 
@@ -1257,9 +1252,7 @@ class Destination:
         elif dest_type == "internal":
             add_cmd = [pjoin(tmpdir,remotetmp)]
 
-        ret = self.run_map[dest_type] + add_cmd
-        #print("CMD",ret)
-        return ret
+        return self.run_map[dest_type] + add_cmd
 
 
     def write_helper_program(self):
@@ -1430,9 +1423,8 @@ elif cmd == "dedup":
                     ]
                 do_exec([cmd])
 
-            rdir = "'"+self.mountpoint+"/"+self.subdir+topdir+"/"+aset_name+"'"
-            cmd = ["mountpoint -q '"+self.mountpoint
-                    +"' && mkdir -p "+rdir+" && cd "+rdir
+            rdir = "'"+self.path+topdir+"/"+aset_name+"'"
+            cmd = ["mkdir -p "+rdir+" && cd "+rdir
 
                     # send helper program to remote dest
                     +"  && rm -rf "+tmpdir+"-rpc  &&  mkdir -p "+tmpdir+"-rpc"
@@ -1448,7 +1440,7 @@ elif cmd == "dedup":
                     +"  && { if [ -e archive.ini ]; then sha256sum archive.ini; else echo none; fi }"
                     ]
             try:
-                do_exec([self.run_args(self.dtype, cmd),
+                do_exec([self.run_args(cmd),
                         # sanitize remote output:
                         ["cat","-v"],  ["tail","--bytes=2000"]
                         ],
@@ -1571,7 +1563,7 @@ def compare_files(pathlist=[], volumes=[], sessions=[], clear=True):
 
 
 def update_dest(archive, pathlist=[], volumes=[], sessions=[], ext="", delete=False):
-    dcd = " cd '"+dest.mountpoint+"/"+dest.subdir+topdir+"/"+archive.name+"'"
+    dcd = " cd '"+dest.path+topdir+"/"+archive.name+"'"
     lcd = archive.path
 
     update_list = [x.vid+"/volinfo" for x in volumes] \
@@ -1583,13 +1575,13 @@ def update_dest(archive, pathlist=[], volumes=[], sessions=[], ext="", delete=Fa
         return
 
     do_exec([[CP.tar,"-cf","-","--no-recursion","--verbatim-files-from","--files-from", "-"],
-             dest.run_args(dest.dtype,  [dcd + " && tar -xf -"]
+             dest.run_args([dcd + " && tar -xf -"]
                                     + [" && mv '"+x+ext+"' '"+x+"'" for x in update_list if ext])
             ], inlines=[x+ext for x in update_list], cwd=lcd)
 
 
 def fetch_file_blobs(recv_list, ext=""):
-    cmd = dest.run_args(dest.dtype,
+    cmd = dest.run_args(
             [destcd + bkdir
              +" && exec 2>>"+tmpdir+"-rpc/receive.log"
              +" && python3 "+tmpdir+"-rpc/dest_helper.py receive"
@@ -1976,7 +1968,7 @@ def send_volume(datavol, localtime, ses_tags, send_all):
 
                 # Start tar stream
                 if not stream_started:
-                    untar = subprocess.Popen(dest.run_args(dest.dtype, untar_cmd),
+                    untar = subprocess.Popen(dest.run_args(untar_cmd),
                             stdin =subprocess.PIPE,    stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL)
                     tarf = tarfile.open(mode="w|", fileobj=untar.stdin)
@@ -2172,7 +2164,7 @@ def dedup_existing():
     init_dedup_index("dedup.lst.gz")
 
     print("Linking...")
-    do_exec([dest.run_args(dest.dtype, [destcd + bkdir
+    do_exec([dest.run_args([destcd + bkdir
                +" && /bin/cat >"+tmpdir+"-rpc/dest.lst.gz"
                +" && /usr/bin/python3 "+tmpdir+"-rpc/dest_helper.py dedup"
                ])
@@ -2592,7 +2584,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
         volume.sessions[target].save_info(".tmp")
         do_exec([[CP.tar, "-cf", "-", "../archive.ini", "../archive.ini.tmp", "volinfo.tmp",
                               "merge.lst.gz", target+"/info.tmp", target+"/manifest.z.tmp"],
-                 dest.run_args(dest.dtype, [destcd + destvol + " && tar -xmf -"])
+                 dest.run_args([destcd + destvol + " && tar -xmf -"])
                 ], cwd=volume.path)
 
     # Start merge operation on dest
@@ -2733,7 +2725,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False, verify_only
                 "s|^\S+\s+x(\S{" +str(address_split[0])+ "})(\S+)\s+(S_\S+)|\\3/\\1/x\\1\\2|;"],
                 [CP.gzip, "-c", "-4"
                 ],
-                dest.run_args(dest.dtype, ["cat >"+tmpdir+"-rpc/dest.lst.gz"]),
+                dest.run_args(["cat >"+tmpdir+"-rpc/dest.lst.gz"]),
             ]   # Enh: replace list with range
         do_exec(cmds)
 
@@ -2808,7 +2800,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False, verify_only
         if save_path:    print("Saving to %s '%s'" % (save_type, save_path))
 
     # Create retriever process using py program
-    cmd = dest.run_args(dest.dtype,
+    cmd = dest.run_args(
             [destcd + bkdir+"/"+vol.vid
              +" && exec 2>>"+tmpdir+"-rpc/receive.log"
              +" && python3 "+tmpdir+"-rpc/dest_helper.py receive"
@@ -2955,8 +2947,9 @@ def rename_volume(oldname, newname):
         x_it(1, "Error: Cannot rename '%s' to '%s'." % (oldname,newname))
 
     catch_signals()
-    update_dest(aset, pathlist=[aset.confname], ext=".tmp")
-    os.replace(aset.confpath+".tmp", aset.confpath)
+    update_dest(aset, pathlist=[aset.confname], volumes=[volume], ext=".tmp")
+    for fl in (aset.confpath, volume.path+"/volinfo"):
+        os.replace(fl+".tmp", fl)
     catch_signals(None)
 
     for ext in (".tick",".tock"):
@@ -2981,6 +2974,11 @@ def add_volume(datavol, desc):
     os.replace(pjoin(vol.path, "volinfo.tmp"), pjoin(vol.path, "volinfo"))
     os.replace(aset.confpath+".tmp", aset.confpath)
     catch_signals(None)
+
+    if lv_exists(aset.vgname, datavol+".tick") \
+    and "arch-"+aset.uuid not in volgroups[aset.vgname].lvs[datavol+".tick"].tags:
+        sys.stderr.write("Warning: Volume '%s' is already tracked"
+                            "by a Wyng snapshot from a different archive!\n" % datavol)
 
 
 # Remove a volume from the archive
@@ -3007,6 +3005,11 @@ def delete_volume(dv):
     if dvid:
         dest.run([destcd + bkdir + "  && rm -rf '%s'" % dvid])
     catch_signals(None)
+
+    for ext in {".tick",".tock"}:
+        if lv_exists(aset.vgname, dv+ext) and (options.clean \
+        or "arch-"+aset.uuid in volgroups[aset.vgname].lvs[dv+ext].tags):
+            lv_remove(aset.vgname, dv+ext, check=True)
     return
 
 
@@ -3155,7 +3158,9 @@ def x_it(code, text):
 
 
 def cleanup():
-    if debug:   subprocess.run([CP.copy, "-a", tmpdir, "/tmp/wyng-debug"])
+    if debug:
+        shutil.rmtree("/tmp/"+prog_name+"-debug", ignore_errors=True)
+        shutil.move(tmpdir, "/tmp/"+prog_name+"-debug")
     if not debug:
         shutil.rmtree(big_tmpdir, ignore_errors=True)
         for f in (big_tmpdir, tmpdir, tmpdir+"-rpc"):
@@ -3171,7 +3176,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4.0alpha2"   ; prog_date = "20220725"
+prog_version          = "0.4.0alpha2"   ; prog_date = "20220727"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 
 # Disk block size:
@@ -3234,13 +3239,14 @@ parser.add_argument("--keep", action="append", default=[],
 parser.add_argument("--volex", default="", help="Exclude volume(s)")
 parser.add_argument("--autoprune", default="off", help="Automatic pruning")
 parser.add_argument("--from", dest="from_arch", default="",
-                    help="Address+Path of other non-configured archive (receive, verify)")
+                    help="Address+Path of other non-configured archive (receive, verify)") ####
 parser.add_argument("--save-to", dest="saveto", default="",help="Path to store volume for receive")
 parser.add_argument("--sparse", action="store_true", default=False, help="Retrieve differences only")
 parser.add_argument("--sparse-write", action="store_true", default=False, help="Save differences only")
 parser.add_argument("--remap", action="store_true", default=False, help="Remap snapshots")
 parser.add_argument("--local", default="",    help="Init: LVM vg/pool containing source volumes")
 parser.add_argument("--dest", default="",     help="Init: type:location of archive")
+parser.add_argument("--dest-name", "-n", default="", help="Nickname for dest location")
 parser.add_argument("--subdir", default="",   help="Init: optional subdir for --dest")
 parser.add_argument("--encrypt", default="xchacha20", help="Init: compression type:level")
 parser.add_argument("--compression", default="", help="Init: compression type:level")
@@ -3285,7 +3291,7 @@ topdir      = "/"+prog_name+".backup040" ####
 tmpdir_obj  = tempfile.TemporaryDirectory(prefix=prog_name)   ; tmpdir = tmpdir_obj.name
 big_tmpdir  = metadir+topdir+"/.tmp"
 
-shutil.rmtree("/tmp/wyng-debug", ignore_errors=True)
+shutil.rmtree("/tmp/"+prog_name+"-debug", ignore_errors=True)
 shutil.rmtree(big_tmpdir, ignore_errors=True)
 os.makedirs(tmpdir+"/rpc")
 os.makedirs(big_tmpdir, exist_ok=True)
