@@ -11,9 +11,9 @@
 import sys, signal, os, stat, shutil, subprocess, time, datetime
 import re, mmap, bz2, zlib, gzip, tarfile, io, fcntl, tempfile
 import argparse, configparser, hashlib, hmac, functools, uuid
-import getpass, base64, platform
+import getpass, base64, platform, resource
 import xml.etree.ElementTree    ; from itertools import islice
-from array import array         ; import resource
+from array import array         ; from urllib.parse import urlparse
 
 try:
     import zstd, warnings
@@ -155,7 +155,7 @@ class ArchiveSet:
 
         # load volume metadata objects
         convlist = []
-        for key, value in dict(cp["volumes"]).items():
+        for key, value in cp["volumes"].items():
             # conditions when a volume must be loaded:
             # - allvols flag is set
             # - in_process flag from an unfinished action
@@ -174,7 +174,6 @@ class ArchiveSet:
                 volume = self.Volume(self, vid, hashval, pjoin(self.path,vid),
                                              self.vgname, name=vname, children=children)
                 self.vols[volume.name] = volume
-        print(len(self.vols), "vols")
         if convlist and dest.writable: #### convert older alpha
             cp["volumes"].clear()
             for v in self.vols.values():   v.save_volinfo()
@@ -774,7 +773,6 @@ class CP:
     tee  = "/usr/bin/tee"    ; sync  = "/bin/sync"       ; dmsetup  = "/sbin/dmsetup"
     find = "/usr/bin/find"   ; xargs = "/usr/bin/xargs"  ; sha256sum= "/usr/bin/sha256sum"
     cmp  = "/usr/bin/cmp"    ; gzip  = "/bin/gzip"       ; diff     = "/usr/bin/diff"
-    cp   = "/bin/cp"
     mountpoint = "/bin/mountpoint"    ; thin_delta = "/usr/sbin/thin_delta"
     blkdiscard = "/sbin/blkdiscard"   ; nice       = "/usr/bin/nice"
 
@@ -1158,41 +1156,50 @@ def get_configs_remote():
 
 class Destination:
 
-    url_types         = ("ssh://", "qubes-ssh://", "qubes://", "internal:")
+    url_types         = ("ssh", "file", "qubes-ssh", "qubes")
 
     ssh_opts          = ["-x", "-o", "ControlPath=~/.ssh/controlsocket-%r@%h-%p",
                          "-o", "ControlMaster=auto", "-o", "ControlPersist=60",
                          "-o", "ServerAliveInterval=30", "-o", "ConnectTimeout=30"]
 
-    def __init__(self, aset_name, opts): #, destsys=None, destmountpoint=None, destdir="."):
+    def __init__(self, aset_name, opts):
 
-        if opts.dest_name and not opts.dest:
-            dspec = self.load(opts.dest_name)
-        elif opts.dest:
-            dspec = opts.dest
-        ##dspec   = opts.from_arch if opts.from_arch else opts.dest
+        # fetch locations list, dest spec
+        locs = self.load_locations()
+        dspec = opts.from_arch if opts.from_arch else opts.dest    ; dname = opts.dest_name
+        if dname:
+            if re.match(".*[,=\^]", dname) or any(map(str.isspace, dname)) \
+            or not dname.isprintable():
+                x_it(1,"Error: [^control], [space], and ',^=' not allowed in dest-name.")
+            if not dspec and dname in locs:
+                dspec = locs[dname]
+        elif not opts.dest and "default" in locs:
+            dspec = locs["default"]
 
-        destsys = delim = destdir = dtype = ""
-        for dt in self.url_types:
-            if dspec.startswith(dt):
-                destsys, delim, destdir = dspec.replace(dt,"",1).partition("/")
-                self.dtype  = dt.rstrip(":/")
-                self.sys    = destsys
-                self.path   = os.path.normpath(destdir)
-                break
-        if not self.dtype:
-            raise ValueError("'%s' not an accepted type." % destsys)
-        if (not destdir and not delim) or (dt != "internal:" and not destsys) or \
-            (dt == "qubes-ssh://" and ("" in destsys.split(":") or len(destsys.split(":"))<2)):
+        # parse and validate dest spec
+        if not dspec:                 x_it(1,"Error: Missing dest specification.")
+        if not dspec.isprintable():   x_it(1,"Error: [^control] not allowed in dest.")
+        dparts      = urlparse(dspec)    ; self.dtype = dtype = dparts.scheme
+        if dtype not in self.url_types:
+            x_it(1,"'%s' not an accepted type." % destsys)
+        if (dtype == "file" and (dparts.netloc or not dparts.path)) \
+        or (dtype in ("ssh","qubes","qubes-ssh") and not dparts.netloc) \
+        or (dtype == "qubes-ssh" and not all(dparts.netloc.partition(":"))) :
             x_it(1,"Error: Malformed --dest specification.")
+        self.spec   = dspec
+        self.sys    = dparts.netloc
+        self.path   = os.path.normpath(dparts.path)
 
-        self.write_helper_program()
+        # save locations change
+        if opts.dest and dname:
+            locs[dname] = opts.dest
+            self.save_locations(locs)    ; del(locs)
 
-        for prg in (CP.sort, CP.sed, CP.ssh if self.dtype=="ssh" else CP.sh):
+        for prg in (CP.sort, CP.sed, CP.ssh if dtype=="ssh" else CP.sh):
             if not shutil.which(prg):
                 raise RuntimeError("Required command not found: "+prg)
 
-        self.run_map = {"internal":   [CP.sh],
+        self.run_map = {"file":       [CP.sh],
                         "ssh":        [CP.ssh] + self.ssh_opts + [self.sys],
                         "qubes":      [CP.qvm_run, "--no-color-stderr", "--no-color-output",
                                       "-p", self.sys],
@@ -1200,8 +1207,9 @@ class Destination:
                                       "-p", self.sys.split(":")[0]]
                         }
 
+        self.write_helper_program()
         self.free, self.online, self.writable, self.archive_ini_hash \
-        = self.detect_state(self.sys, aset_name)
+        = self.detect_state(aset_name, opts)
 
 
     def get_free(self, fpath): ## Enh: add sanitize
@@ -1218,6 +1226,16 @@ class Destination:
         cmd = self.run_args(commands, trap=trap)
         return do_exec([cmd], infile=infile, inlines=inlines, out=out, check=check)
 
+    def load_locations(self):
+        if not exists(vardir+"/dests"):   return {}
+        with open(vardir+"/dests", "r") as fl:
+            loc = { x: y for x, y in (w.strip().split(" ",maxsplit=1) for w in fl.readlines()) }
+
+        return loc
+
+    def save_locations(self, locs):
+        with open(vardir+"/dests", "w") as fl:
+            for x, y in locs.items():   print(x, y, file=fl)
 
     # Build command lists that can be shunted to remote systems.
     # The input commands are stored in a temp file and a standard command that
@@ -1249,7 +1267,7 @@ class Destination:
             #add_cmd = [' "$(cat '+pjoin(tmpdir,remotetmp)+')"']
             add_cmd = [cmd]
 
-        elif dest_type == "internal":
+        elif dest_type == "file":
             add_cmd = [pjoin(tmpdir,remotetmp)]
 
         return self.run_map[dest_type] + add_cmd
@@ -1407,16 +1425,16 @@ elif cmd == "dedup":
     #####>  End helper program  <#####
 
 
-    def detect_state(self, destsys, aset_name):  #### maybe switch destsys to self.sys
+    def detect_state(self, aset_name, opts):
         dest_in_proc  = False    ; dest_free = None    ; online = False
-        dest_writable = True     ; ini_hash  = "none"
+        dest_writable = False    ; ini_hash  = "none"
 
-        if (options.action not in local_actions and destsys is not None) \
+        if (options.action not in local_actions and self.sys is not None) \
             or options.remap or options.from_arch:  #### Fix: options.action
 
             if self.dtype == "qubes-ssh":
                 # fix: possibly remove dargs and use dest.run()
-                dargs = self.run_map["qubes"][:-1] + [destsys.split(":")[0]]
+                dargs = self.run_map["qubes"][:-1] + [self.sys.split(":")[0]]
 
                 cmd = dargs + [shell_prefix \
                     +CP.rm+" -rf "+tmpdir+"-rpc  &&  mkdir -p "+tmpdir+"-rpc"
@@ -1426,18 +1444,18 @@ elif cmd == "dedup":
             rdir = "'"+self.path+topdir+"/"+aset_name+"'"
             cmd = ["mkdir -p "+rdir+" && cd "+rdir
 
+                    # check free space and archive.ini status on remote
+                    +"  && echo -n 'wyng_check_free ' && stat -f -c '%a %S' ."
+                    +"  && echo -n 'wyng_archive_ini '"
+                    +"  && { if [ -e archive.ini ]; then sha256sum archive.ini; else echo none; fi }"
+
                     # send helper program to remote dest
                     +"  && rm -rf "+tmpdir+"-rpc  &&  mkdir -p "+tmpdir+"-rpc"
                     +"  && cat >"+tmpdir+"-rpc/dest_helper.py"
 
                     # test write access and hardlinks
-                    +"  && touch archive.dat || echo 'wyng_read_only'"
+                    +"  && touch archive.dat && echo 'wyng_writable'"
                     +(" && ln -f archive.dat .hardlink" if options.dedup else "")
-
-                    # check free space and archive.ini status on remote
-                    +"  && echo -n 'wyng_check_free ' && stat -f -c '%a %S' ."
-                    +"  && echo -n 'wyng_archive_ini '"
-                    +"  && { if [ -e archive.ini ]; then sha256sum archive.ini; else echo none; fi }"
                     ]
             try:
                 do_exec([self.run_args(cmd),
@@ -1456,8 +1474,8 @@ elif cmd == "dedup":
                         ini_hash = ln.split()[1]
                     elif ln.startswith("wyng_check_free"):
                         parts = ln.split()    ; dest_free = int(parts[1]) * int(parts[2])
-                    elif ln.startswith("wyng_read_only"):
-                        dest_writable = False
+                    elif ln.startswith("wyng_writable"):
+                        dest_writable = True
 
         return dest_free, dest_free is not None, dest_writable, ini_hash
 
@@ -2209,14 +2227,14 @@ def monitor_send(datavols, selected=[], monitor_only=True):
         while True:
             ans = ask_input("[%d]: " % (len(ses_tags)+1)).strip()
             if not ans:   break
-            tag = ArchiveSession.tag_parse(None, ans, delim=",")
+            tag = ArchiveSession.tag_parse(ans, delim=",")
             if not tag:   continue
             ses_tags.append(tag)
             if len(ses_tags) == ArchiveSet.max_tags:   break
         print(len(ses_tags), "tags total.")
     elif options.tag and not monitor_only:
         for tag_opt in options.tag:
-            tag = ArchiveSession.tag_parse(None, tag_opt, delim=",")
+            tag = ArchiveSession.tag_parse(tag_opt, delim=",")
             if not tag:   raise ValueError("Invalid tag "+tag_opt)
             ses_tags.append(tag)
 
@@ -2233,8 +2251,7 @@ def monitor_send(datavols, selected=[], monitor_only=True):
         if compare_files(volumes=cmpvols, sessions=cmpses):
             x_it(1, "Error: Local and archive metadata differ.")
 
-        print("\nSending backup session", localtime,
-              "to", (dest.dtype+"://"+dest.sys) if dest.dtype != "internal" else dest.path)
+        print("\nSending backup session %s to '%s'." % (localtime, dest.spec))
 
     for datavol in sorted(incrementals | send_alls):
         vol = aset.vols[datavol]    ; dnew = dfreed = 0
@@ -3029,6 +3046,7 @@ def remove_local_metadata(archive):
 
 def show_list(selected_vols):
 
+    if dest.archive_ini_hash == "none":   print("(CACHED)")
     if options.verbose:
         print("\nArchive Settings:")
         for key, val in aset.conf["var"].items():
@@ -3176,7 +3194,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4.0alpha2"   ; prog_date = "20220727"
+prog_version          = "0.4.0alpha2"   ; prog_date = "20220730"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 
 # Disk block size:
@@ -3244,10 +3262,9 @@ parser.add_argument("--save-to", dest="saveto", default="",help="Path to store v
 parser.add_argument("--sparse", action="store_true", default=False, help="Retrieve differences only")
 parser.add_argument("--sparse-write", action="store_true", default=False, help="Save differences only")
 parser.add_argument("--remap", action="store_true", default=False, help="Remap snapshots")
-parser.add_argument("--local", default="",    help="Init: LVM vg/pool containing source volumes")
-parser.add_argument("--dest", default="",     help="Init: type:location of archive")
+parser.add_argument("--dest", default="",     help="URL to archive")
 parser.add_argument("--dest-name", "-n", default="", help="Nickname for dest location")
-parser.add_argument("--subdir", default="",   help="Init: optional subdir for --dest")
+parser.add_argument("--local", default="",    help="Init: LVM vg/pool containing source volumes")
 parser.add_argument("--encrypt", default="xchacha20", help="Init: compression type:level")
 parser.add_argument("--compression", default="", help="Init: compression type:level")
 parser.add_argument("--hashtype", default="", help="Init: hash function type")
@@ -3285,12 +3302,14 @@ if options.from_arch and options.action not in ("receive","verify","list","arch-
     x_it(1,"--from option can be used only with: receive, verify, list, arch-init")
 
 
-# Setup tmp and metadata dirs
+# Setup var, tmp and metadata dirs
+vardir      = "/var/lib/"+prog_name
 metadir     = options.metadir if options.metadir else "/var/lib"
 topdir      = "/"+prog_name+".backup040" ####
 tmpdir_obj  = tempfile.TemporaryDirectory(prefix=prog_name)   ; tmpdir = tmpdir_obj.name
 big_tmpdir  = metadir+topdir+"/.tmp"
 
+os.makedirs(vardir, exist_ok=True)
 shutil.rmtree("/tmp/"+prog_name+"-debug", ignore_errors=True)
 shutil.rmtree(big_tmpdir, ignore_errors=True)
 os.makedirs(tmpdir+"/rpc")
@@ -3321,13 +3340,15 @@ bkdir       = topdir+"/"+aset.name
 destcd      = " cd '"+dest.path+"'"
 
 # Check online status for certain commands.
-if not dest.writable and options.action in write_actions and not options.from_arch \
-                    and not (options.action == "delete" and options.clean):
-    x_it(1, "Destination not writable.")
 if not dest.online and (options.remap or options.from_arch \
                     or options.action not in local_actions) \
                     and not (options.action == "delete" and options.clean):
     x_it(1, "Destination not ready to receive commands.")
+if not dest.writable and options.action in write_actions and not options.from_arch \
+                    and not (options.action == "delete" and options.clean):
+    x_it(1, "Destination not writable.")
+if dest.archive_ini_hash == "none" and options.action not in ("list","arch-init"):
+    x_it(1,"Archive not found at '%s'" % dest.spec)
 
 if options.from_arch:
     aset         = get_configs_remote()
@@ -3365,7 +3386,7 @@ if dest.online and options.action not in ("arch-init","arch-check","arch-delete"
 arch_dt_raw = datetime.datetime.fromtimestamp(float(aset.updated_at), datetime.timezone.utc)
 arch_dt     = arch_dt_raw.astimezone().isoformat(sep=u" ")
 sys.stderr.write("Archive last updated %s (%s)\n\n" % (arch_dt[:-6], arch_dt[-6:]))
-
+if options.verbose:   sys.stderr.write("Dest location: %s\n" % dest.spec)
 
 # Handle unfinished in_process:
 # Functions supported here must not internally use global variable inputs that are unique to
@@ -3506,8 +3527,7 @@ elif options.action == "arch-check":
 
 elif options.action == "arch-delete":
     desthost = "//"+dest.sys+" " if dest.sys else ""
-    ###print("\nDeleting ALL archived data from", desttype+":" + desthost + dest.path + bkdir, "!")
-    print("\nDeleting ALL archived data from", dest.dtype+":" + desthost + dest.path + bkdir, "!")
+    print("\nDeleting ALL archived data from '%s' !" % dest.spec)
 
     if not options.unattended and not options.force:
         ans = ask_input("Are you sure? [y/N]: ")

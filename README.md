@@ -75,27 +75,20 @@ Settings are initialized with `wyng arch-init`:
 
 ```
 
-wyng arch-init --local=vg/pool --dest=ssh://me@exmaple.com/mnt/bkdrive
+wyng arch-init --local=vg/pool --dest=ssh://me@exmaple.com:/mnt/bkdrive -n default
 
 ...or...
 
-wyng arch-init --local=vg/pool --dest=internal:/ --subdir=home/user
+wyng arch-init --local=vg/pool --dest=file:/home/user -n default
 
 wyng add my_big_volume
 
 
 ```
 
-The `--dest` argument always ends in a _mountpoint_ (mounted volume) absolute path.
-In the second example, the destination system has no unique mountpoint in the
-desired backup path, so `--dest` ends with the root '/' path and the `--subdir`
-argument is supplied to complete the archive path.
-
-The destination mountpoint is automatically checked to make sure its mounted
-before executing certain Wyng commands
-including `send`, `receive`, `verify`, `delete` and `prune`.
-
-(See the `arch-init` summary below for more details.)
+The `--dest` argument includes the destination type, remote system (where applicable)
+and file path.  The `-n` or `--dest-name` argument tells Wyng to associate the dest location
+with the name "default" which will be automatically used for future Wyng commands.
 
 
 ## Operation
@@ -113,7 +106,7 @@ Please note that dashed parameters are always placed before the command.
 | **list** _[volume_name]_    | List volumes or volume sessions.
 | **send** _[volume_name]_    | Perform a backup of enabled volumes.
 | **receive** _volume_name_   | Restore a volume from the archive.
-| **verify** _volume_name_    | Verify a volume against SHA-256 manifest.
+| **verify** _volume_name_    | Verify volumes' data integrity.
 | **prune** _[volume_name]_   | Remove older backup sessions to recover archive space.
 | **monitor**                 | Collect volume change metadata & rotate snapshots.
 | **diff** _volume_name_      | Compare local volume with archived volume.
@@ -142,12 +135,12 @@ Please note that dashed parameters are always placed before the command.
 --from=_type:location_ | Retrieve from a specific unconfigured archive (receive, verify, list, arch-init).
 --local=_vg/pool_      | (arch-init) Pool containing local volumes.
 --dest=_type:location_ | (arch-init) Destination of backup archive.
---subdir=_dirname_     | Optional subdirectory below mountpoint (--from, --dest)
+--dest-name=, -n _name_  | Retrieve a dest location, or with --dest store location under _name_
 --encrypt=_cipher_     | Set encryption type or 'off'
 --compression          | (arch-init) Set compression type:level.
 --hashtype             | (arch-init) Set hash algorithm: _sha256_ or _blake2b_.
 --chunk-factor         | (arch-init) Set archive chunk size.
---dedup                | Use deduplication for send (see notes).
+--dedup, -d            | Use deduplication for send (see notes).
 --clean                | Perform garbage collection (arch-check) or medata removal (delete).
 --meta-dir=_path_      | Use a different metadata dir than the default.
 --volex=_volname[,*]_  | Exclude volumes (send, monitor, list, prune).
@@ -159,9 +152,8 @@ Please note that dashed parameters are always placed before the command.
 
 #### send
 
-Performs a backup by sending volume data to a new archive session
-(each session under an archival volume represents the entire contents of
-the source volume at that time, even if only changed data is sent):
+Performs a backup by storing volume data to a new session in the archive.  If the volume
+already exists in the archive, incremental mode is automatically used.
 
 ```
 
@@ -169,13 +161,6 @@ wyng send
 
 
 ```
-
-If Wyng has no metadata on file about a
-volume, its treated as a new addition to the backup set so an initial snapshot will
-be made and a full backup will be sent to the archive;
-otherwise it will automatically use snapshot delta information to send a much faster
-incremental backup. Whenever a `send` operation is completed, snapshots are
-renewed just as with the `monitor` command.
 
 A `send` operation may refuse to backup a volume if there is not enough space on the
 destination. One way to avoid this situation is to specify `--autoprune=on` which
@@ -192,7 +177,7 @@ name is required.
 
 ```
 
-wyng --save-to=myfile.img receive vm-work-private
+wyng receive vm-work-private
 
 
 ```
@@ -200,11 +185,12 @@ wyng --save-to=myfile.img receive vm-work-private
 ...restores a volume called 'vm-work-private' to 'myfile.img' in
 the current folder.
 
-Its possible to specify any valid file path or block
-device. However, note that '/dev/_vgname_/_lvname_' is a special form
+Its possible to receive to any valid file path or block device using the `--save-to` option.
+However, note that '/dev/_vgname_/_lvname_' is a special form
 that indicates you are saving to an LVM volume; Wyng will only auto-create LVs for you
 if the save-to path is specified this way.
-For any save path, Wyng will try to discard old data before receiving.
+For any save path, Wyng will try to discard old data before receiving unless `--sparse` or
+`--sparse-write` options are used.
 
 _Emergency and Recovery situations:_ The `--from` option may be used to
 receive from any Wyng archive that is not currently configured in the current
@@ -349,7 +335,7 @@ wyng arch-deduplicate
 Initialize a new backup archive configuration...
 ```
 
-wyng --local=myvg/mypool --dest=internal:/mountpoint arch-init
+wyng --local=myvg/mypool --dest=file:/mnt/backups -n default arch-init
 
 
 ```
@@ -357,7 +343,7 @@ wyng --local=myvg/mypool --dest=internal:/mountpoint arch-init
 Initialize a new backup archive with storage parameters...
 ```
 
-wyng --local=myvg/mypool --dest=internal:/mpoint --chunk-factor=3 --hashtype=blake2b arch-init
+wyng --local=myvg/mypool --dest=file:/mnt/backups --chunk-factor=3 --hashtype=blake2b arch-init
 
 
 ```
@@ -365,7 +351,7 @@ wyng --local=myvg/mypool --dest=internal:/mpoint --chunk-factor=3 --hashtype=bla
 Import a configuration from an existing archive...
 ```
 
-wyng --from=internal:/mountpoint arch-init
+wyng --from=file:/mnt/backups arch-init
 
 
 ```
@@ -407,6 +393,13 @@ have to be there before using `send`.
 `--dest` when using `arch-init`, describes the location where backups will be sent.
 It accepts one of the following forms, always ending in a mountpoint path:
 
+| _URL Form_ | _Destination Type_
+|----------|-----------------
+|__file:__/path                           | Local filesystem
+|__ssh:__//user@example.com[:port][/path]      | SSH server
+|__qubes:__//vm-name[/path]                     | Qubes virtual machine
+|__qubes-ssh:__//vm-name:me@example.com[:port][/path]  | SSH server via a Qubes VM
+
 Note: --local and --dest are required if not using --from.
 
 `--from` accepts a URL like `--dest`, but retrieves the configuration from an existing archive.
@@ -414,23 +407,12 @@ This imports the archive's configuration and can permanently save it as the
 local configuration. This option can also be used with: list, receive and verify commands.
 Note: You can override the archive's LVM settings by specifying `--local`.
 
-| _URL Form_ | _Destination Type_
-|----------|-----------------
-|__internal:__/path                           | Local filesystem
-|__ssh:__//user@example.com/path              | SSH server
-|__qubes:__//vm-name/path                     | Qubes virtual machine
-|__qubes-ssh:__//vm-name:me@example.com/path  | SSH server via a Qubes VM
-
-`--subdir` In conjunction with `--dest` or `--from`, allows you to specify a subdirectory
-below the mountpoint.
-
 `--compression=zstd:3` accepts the form `type` or `type:level`. The three types available are
 the default `zstd`, plus `zlib` and `bz2`. Note that Wyng will only default to `zstd` when the
 'python3-zstd' package is installed; otherwise it will fall back to the less capable `zlib`.
 
 `--hashtype=blake2b` accepts a value of either _'sha256'_ or _'blake2b'_ (the default).
-The digest size used for blake2b is 256 bits. Note that with Python 3.5 the hashtype will
-fall back to sha256 as blake2b was introduced in Python 3.6.
+The digest size used for blake2b is 256 bits.
 
 `--chunk-factor=1` sets the pre-compression data chunk size used within the destination archive.
 Accepted range is an integer exponent from '1' to '6', resulting in a chunk size of 64kB for
@@ -444,6 +426,21 @@ that will store volumes larger than about 100GB.
 Note that _encrypt, compression, hashtype_ and _chunk-factor_ cannot be changed for an archive once it is initialized.
 
 ### Options
+
+`--dest=URL`
+
+The option tells Wyng where to access the archive and is required for all commands unless
+`--dest-name` is used.  See the URL Form table in the above `arch-init` section.
+
+`--dest-name=name`, `-n name`
+
+Use a shorthand name for the destination.  Together with `--dest` the dest URL spec is stored
+under _name_; without `--dest` the URL associated with _name_ is retrieved.  If the special name
+_default_ is set, it will automatically be used for the destination URL when neither `--dest` nor
+`--dest-name` are specified on the command line.  There is no particular Wyng command required
+for `--dest-name` and it will store or retrieve dest URLs any time its used on the command line.
+
+Note that dest names are stored only in local system settings, separate from the archive itself.
 
 `--session=<date-time>[,<date-time>]` OR
 `--session=^<tag>[,^<tag>]`
@@ -480,11 +477,11 @@ from the archive and written to the local volume. This results in reduced remote
 usage while receiving at the expense of some extra CPU usage on the local machine, and also uses
 less local disk space when snapshots are a factor (implies '--sparse-write`).
 
-`--dedup`
+`--dedup`, `-d`
 
 When used with the `send` command, data chunks from the new backup will be sent only if
-they don't already exist somewhere in the archive. If its a duplicate, the chunk will be
-linked instead of sent and stored, saving disk space and possibly time and bandwith.
+they don't already exist somewhere in the archive. Otherwise, a link will be used saving
+disk space and possibly time and bandwith.
 
 The tradeoff for deduplicating is longer startup time for Wyng, in addition to using more
 memory and CPU resources during backups. Using `--dedup` works best if you are backing-up
