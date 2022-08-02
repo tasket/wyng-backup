@@ -424,7 +424,7 @@ class Lvm_VolGroup:
 
 class Lvm_Volume:
     colnames  = ["vg_name","lv_name","lv_attr","lv_size","lv_time","lv_uuid",
-                 "pool_lv","thin_id","transaction_id","tags"]
+                 "pool_lv","thin_id","tags"]
     attr_ints = ["lv_size"]
 
     def __init__(self, members):
@@ -1445,7 +1445,6 @@ def send_volume(datavol, localtime, ses_tags, send_all):
     ses = vol.new_session(bksession, addtags=ses_tags)
     ses.localtime = localtime
     ses.uuid      = l_vols[snap2vol].lv_uuid
-    ses.trans_id  = l_vols[datavol].transaction_id
     ses.volsize   = snap2size
     ses.format    = "folders"
     ses.path      = vol.path+"/"+bksession+"-tmp"
