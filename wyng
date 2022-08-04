@@ -1385,10 +1385,10 @@ def update_delta_digest(datavol):
             for pos in range(markall_pos, bmap_size):  bmap_mm[pos] = 0xff
             dnewchunks += (bmap_size - markall_pos) * 8
 
-        map_updated = dnewchunks+dfreedblocks+anynew+vol.map_used(ext="-tmp") > 0
         if dnewchunks+dfreedblocks:   bmapf.flush()    ; os.fsync(bmapf.fileno())
 
     catch_signals()
+    map_updated = dnewchunks+dfreedblocks+anynew+vol.map_used(ext="-tmp") > 0
     if monitor_only:
         rotate_snapshots(vol, rotate=map_updated)
         os.rename(vol.mapfile+"-tmp", vol.mapfile)
@@ -2754,7 +2754,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.3.1"         ; prog_date = "20220803"
+prog_version          = "0.3.1"         ; prog_date = "20220804"
 format_version        = 2               ; debug     = False       ; tmpdir = None
 
 # Disk block size:
