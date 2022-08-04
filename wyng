@@ -225,15 +225,14 @@ class ArchiveSet:
             if vsize is None:  vsize = self.volsize()
             return (vsize-1) - ((vsize-1) % self.archive.chunksize)
 
-        #def map_used(self):
-            ## fix: account for -tmp filename
-            #return os.stat(self.mapfile).st_blocks
-
         # Based on last session size unless volume_size is specified.
         def mapsize(self, volume_size=None):
             if not volume_size:
                 volume_size = self.volsize()
             return (volume_size // self.archive.chunksize // 8) + 1
+
+        def map_used(self, ext=""):
+            return os.stat(self.mapfile+ext).st_blocks
 
         def save_volinfo(self, fname="volinfo", prune=False):
             os.makedirs(self.path, exist_ok=True)
@@ -1253,7 +1252,7 @@ def prepare_snapshots(datavols):
                 lv_rename(vgname, snap2vol, snap1vol)
 
             if lv_exists(vgname, snap1vol) and exists(mapfile) \
-            and os.stat(mapfile).st_blocks == 0 and "delta" in l_vols[snap1vol].tags:
+            and vol.map_used() == 0 and "delta" in l_vols[snap1vol].tags:
                 # Handle inadvertant mapfile reset
                 lv_remove(vgname, snap1vol)    ; print("  Removed mis-matched delta", snap1vol)
 
@@ -1343,7 +1342,7 @@ def update_delta_digest(datavol):
     # Get xml parser and initialize vars
     dtree       = xml.etree.ElementTree.parse(tmpdir+"/delta."+datavol).getroot()
     dblocksize  = int(dtree.get("data_block_size"))
-    dnewchunks   = isnew  = dfreedblocks = 0
+    dnewchunks  = isnew  = anynew = dfreedblocks = 0
 
     # Check for volume size increase;
     # Chunks from 'markall_pos' onward will be marked for backup.
@@ -1366,7 +1365,7 @@ def update_delta_digest(datavol):
             blocklen   = int(delta.get("length")) * dblocksize
             blockend   = min(blockbegin+blocklen, snap_ceiling)
             if delta.tag in ("different", "right_only"):
-                isnew = 1
+                isnew = anynew = 1
             elif delta.tag == "left_only":
                 isnew = 0    ; dfreedblocks += blockend - blockbegin
             else: # superfluous tag
@@ -1386,8 +1385,8 @@ def update_delta_digest(datavol):
             for pos in range(markall_pos, bmap_size):  bmap_mm[pos] = 0xff
             dnewchunks += (bmap_size - markall_pos) * 8
 
-        map_updated = dnewchunks+dfreedblocks > 0
-        if map_updated:   bmapf.flush()    ; os.fsync(bmapf.fileno())
+        map_updated = dnewchunks+dfreedblocks+anynew+vol.map_used(ext="-tmp") > 0
+        if dnewchunks+dfreedblocks:   bmapf.flush()    ; os.fsync(bmapf.fileno())
 
     catch_signals()
     if monitor_only:
@@ -1398,7 +1397,7 @@ def update_delta_digest(datavol):
 
     if dnewchunks:   vol.changed_bytes_add(dnewchunks*aset.chunksize, save=monitor_only)
     catch_signals(None)
-    return dnewchunks, dfreedblocks #fix
+    return map_updated
 
 
 # Reads addresses from manifest and marks corresponding chunks in a volume's deltamap.
@@ -1803,13 +1802,13 @@ def monitor_send(datavols, selected=[], monitor_only=True):
               "to", (desttype+"://"+destsys) if desttype != "internal" else destpath)
 
     for datavol in sorted(incrementals | send_alls):
-        vol = aset.vols[datavol]    ; dnew = dfreed = 0
+        vol = aset.vols[datavol]    ; updated = False
         print(" ", "Scan" if monitor_only else "Send", "volume      | ", datavol, flush=True,end="")
 
-        if datavol in incrementals:   dnew, dfreed = update_delta_digest(datavol)
+        if datavol in incrementals:   updated = update_delta_digest(datavol)
         if monitor_only:   continue
 
-        if datavol in send_alls or dnew+dfreed > 0:
+        if datavol in send_alls or updated:
             if vol.changed_bytes > dest_free:
                 autoprune(datavol, needed_space=vol.changed_bytes, apmode=options.autoprune)
                 if vol.changed_bytes > dest_free:
@@ -1822,7 +1821,7 @@ def monitor_send(datavols, selected=[], monitor_only=True):
             dest_free   -= int(dnew + (dnew * 0.05))
 
         else:
-            rotate_snapshots(vol, rotate=False)
+            rotate_snapshots(vol, rotate=False)    ; dnew = dfreed = 0
             os.rename(vol.mapfile+"-tmp", vol.mapfile)
 
         print("\r" if dnew+dfreed else "\r  No changes   ", flush=True)
@@ -2755,7 +2754,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.3.0"         ; prog_date = "20220727"
+prog_version          = "0.3.1"         ; prog_date = "20220803"
 format_version        = 2               ; debug     = False       ; tmpdir = None
 
 # Disk block size:
