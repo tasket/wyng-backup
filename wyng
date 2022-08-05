@@ -286,10 +286,9 @@ class ArchiveSet:
         destname= fdest if fdest else (fname[:-2] if fname.endswith(".z") else fname)
         mcrypto = self.mcrypto         ; buf_start = mcrypto.buf_start if mcrypto else 0
 
-        with  open(fname,"r+b") as inf,   mmap.mmap(inf.fileno(), 0) as inmap, \
-              memoryview(inmap) as inmv:
-            assert buf_start < len(inmv) <= max_sz ## Fix: move to get_configs_remote()
-            mbuf = mcrypto.decrypt(inmv) if mcrypto else inmv
+        with  open(fname,"r+b") as inf,   mmap.mmap(inf.fileno(), 0) as inmap:
+            assert buf_start < len(inmap) <= max_sz ## Fix: move to get_configs_remote()
+            mbuf = mcrypto.decrypt(inmap) if mcrypto else bytes(inmap)
             assert hmac.compare_digest(digest, self.b64hash(mbuf))
             open(destname,"wb").write(self.decompress(mbuf))
 
@@ -3191,7 +3190,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4.0alpha2"   ; prog_date = "20220804"
+prog_version          = "0.4.0alpha2"   ; prog_date = "20220805"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 
 # Disk block size:
