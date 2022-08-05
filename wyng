@@ -580,7 +580,8 @@ class DataCryptography:
     time_headroom   = int(60*60*24*365.25*50)             ; timesz  = 32 // 8
 
     # Matrix of recommended mode pairs = 'formatcode: (data, metadata)'
-    crypto_codes    = {b"10":  ("aes-256-siv",        "aes-256-siv"),
+    crypto_codes    = {b"00":  ("off",                "off"),
+                       b"10":  ("aes-256-siv",        "aes-256-siv"),
                        b"20":  ("aes-256-cbc",        "aes-256-siv"),
                        b"30":  ("xchacha20",          "xchacha20-poly1305"),
                        b"40":  ("xchacha20-poly1305", "xchacha20-poly1305")}
@@ -950,22 +951,23 @@ def arch_init(aset):
         return
 
     os.makedirs(aset.path, exist_ok=True)
-    aset.data_cipher = options.encrypt
-    if aset.data_cipher in (x[0] for x in DataCryptography.crypto_codes.values()):
-        if options.unattended:   x_it(1, "Enter passphrase interactively.")
-
-        # Security Enh: Possibly use mmap+mlock to store passphrase/key values,
-        #               and wipe them from RAM after use.
-        passphrase      = ask_passphrase(verify=True)
+    aset.data_cipher = options.encrypt.lower()
+    # Fix: duplicates code in aset... move to aset class.
+    if aset.data_cipher in (x[0] for x in DataCryptography.crypto_codes.values()): 
         aset.ci_mode, ci= [(x,y) for x,y in DataCryptography.crypto_codes.items()
                                  if y[0] == aset.data_cipher][0]
-        aset.mcrypto    = DataCryptography(ci[1], aset.confpath+".salt", slot=1,
-                                           passphrase=passphrase[:], init=True)
-        aset.datacrypto = DataCryptography(aset.data_cipher, aset.confpath+".salt", slot=0,
-                                           passphrase=passphrase, init=True)
 
-    elif aset.data_cipher != "off":
-        raise ValueError("Invalid cipher option.")
+        if aset.data_cipher != "off":
+            ##if options.unattended:   x_it(1, "Enter passphrase interactively.")
+            # Security Enh: Possibly use mmap+mlock to store passphrase/key values,
+            #               and wipe them from RAM after use.
+            passphrase      = ask_passphrase(verify=True)
+            aset.mcrypto    = DataCryptography(ci[1], aset.confpath+".salt", slot=1,
+                                            passphrase=passphrase[:], init=True)
+            aset.datacrypto = DataCryptography(aset.data_cipher, aset.confpath+".salt", slot=0,
+                                            passphrase=passphrase, init=True)
+    else:
+        x_it(1,"Error: Invalid cipher option.")
 
     print(); print("Encryption    :", aset.data_cipher)
 
@@ -1036,7 +1038,7 @@ def arch_check(vol_list=None, startup=False):
         for sdir in os.scandir(vol.path):
             if sdir.name.startswith("S_") and sdir.name.endswith("-tmp"):
                 if debug:   print("Removing partial session dir '%s'" % sdir.name)
-                dest.run([destcd+bkdir + " && rm -rf " + vol.vid+"/"+sdir.name])
+                dest.run([dest.cd+bkdir + " && rm -rf " + vol.vid+"/"+sdir.name])
                 shutil.rmtree(vol.path+"/"+sdir.name, ignore_errors=True)
 
         if startup:   continue
@@ -1192,6 +1194,8 @@ class Destination:
         self.spec   = dspec
         self.sys    = dparts.netloc
         self.path   = os.path.normpath(dparts.path)
+        self.cd     = " cd '"+self.path+"'"
+
 
         # save locations change
         if opts.dest and dname:
@@ -1571,7 +1575,7 @@ def compare_files(pathlist=[], volumes=[], sessions=[], clear=True):
 
     do_exec([[CP.xargs, CP.sha256sum]], cwd=aset.path,
             infile=cmp_list, out=tmpdir+"/compare-hashes.local")
-    dest.run([destcd + bkdir +" && xargs sha256sum"],
+    dest.run([dest.cd + bkdir +" && xargs sha256sum"],
              infile=cmp_list, out=tmpdir+"/compare-hashes.dest")
     # maybe switch cmp to diff/sha256sum if they are safe enough to read untrusted input
     files  = [tmpdir+"/compare-hashes.local", tmpdir+"/compare-hashes.dest"]
@@ -1603,7 +1607,7 @@ def update_dest(archive, pathlist=[], volumes=[], sessions=[], ext="", delete=Fa
 
 def fetch_file_blobs(recv_list, ext=""):
     cmd = dest.run_args(
-            [destcd + bkdir
+            [dest.cd + bkdir
              +" && exec 2>>"+tmpdir+"-rpc/receive.log"
              +" && python3 "+tmpdir+"-rpc/dest_helper.py receive"
             ])
@@ -1666,9 +1670,6 @@ def prepare_snapshots(datavols):
                 print("  Skipping %s; LV snapshot is from a different archive." % datavol)
                 continue
 
-        # Reclaim deltamap from interrupted session.
-        if exists(mapfile+"-tmp"):  os.rename(mapfile+"-tmp", mapfile)
-
         # Make deltamap or initial snapshot if necessary. Try to recover paired state
         # by comparing snapshot UUIDs; a match means remap is unnecessary.
         if len(vol.sessions):
@@ -1682,13 +1683,19 @@ def prepare_snapshots(datavols):
                 lv_rename(vgname, snap2vol, snap1vol)
 
             if lv_exists(vgname, snap1vol) and exists(mapfile) \
-            and vol.map_used() == 0 and "delta" in l_vols[snap1vol].tags:
-                # Handle inadvertant mapfile reset
+            and (    (vol.map_used() == 0 and "delta" in " ".join(l_vols[snap1vol].tags))
+                  or (vol.map_used() > 0 and
+                      "delta-"+str(os.path.getmtime(vol.mapfile)) not in l_vols[snap1vol].tags
+                      )
+                 ):
+                # Handle inadvertant mapfile snapshot mis-match
+                init_deltamap(vol, mapfile, vol.mapsize())
                 lv_remove(vgname, snap1vol)    ; print("  Removed mis-matched delta", snap1vol)
 
-            if lv_exists(vgname, snap1vol) and not exists(mapfile) \
-            and vol.last in l_vols[snap1vol].tags and "delta" not in l_vols[snap1vol].tags \
-            and l_vols[snap1vol].lv_uuid == vol.sessions[vol.last].uuid:
+            if not exists(mapfile) and lv_exists(vgname, snap1vol) \
+            and vol.last in l_vols[snap1vol].tags \
+            and "delta" not in " ".join(l_vols[snap1vol].tags) \
+            and l_vols[snap1vol].lv_uuid == vol.sessions[vol.last].uuid: ####
                 # Latest session matches current snapshot; OK to make blank map.
                 init_deltamap(vol, mapfile, vol.mapsize())
 
@@ -1768,9 +1775,6 @@ def update_delta_digest(datavol):
     snap1size   = l_vols[snap1vol].lv_size   ; snap2size = l_vols[snap2vol].lv_size
     assert len(vol.sessions) and exists(vol.mapfile)
 
-    # Put deltamap into a temporary state
-    os.rename(vol.mapfile, vol.mapfile+"-tmp")
-
     # Get xml parser and initialize vars
     dtree       = xml.etree.ElementTree.parse(tmpdir+"/delta."+datavol).getroot()
     dblocksize  = int(dtree.get("data_block_size"))
@@ -1782,7 +1786,7 @@ def update_delta_digest(datavol):
     markall_pos = (next_chunk_addr//chunksize//8) if snap2size-1 >= next_chunk_addr else None
 
     # Setup access to deltamap as an mmap object.
-    with open(vol.mapfile+"-tmp", "r+b") as bmapf:
+    with open(vol.mapfile, "r+b") as bmapf:
         snap_ceiling = max(snap1size, snap2size) // bs    ; chunkblocks = chunksize // bs
         bmap_size    = vol.mapsize(max(snap1size, snap2size))
         bmapf.truncate(bmap_size)    ; bmapf.flush()
@@ -1817,13 +1821,13 @@ def update_delta_digest(datavol):
             for pos in range(markall_pos, bmap_size):  bmap_mm[pos] = 0xff
             dnewchunks += (bmap_size - markall_pos) * 8
 
-        map_updated = dnewchunks+dfreedblocks+anynew+vol.map_used(ext="-tmp") > 0
         if dnewchunks+dfreedblocks:   bmapf.flush()    ; os.fsync(bmapf.fileno())
 
     catch_signals()
+    map_updated = dnewchunks+dfreedblocks+anynew+vol.map_used() > 0
     if monitor_only:
-        rotate_snapshots(vol, rotate=map_updated)
-        os.rename(vol.mapfile+"-tmp", vol.mapfile)
+        rotate_snapshots(vol, rotate=map_updated,
+                              delta_time=str(os.path.getmtime(vol.mapfile)))
         print(("\r  %d ch, %d dis" % (dnewchunks, dfreedblocks//chunksize))
                 if map_updated else "\r  No changes   ")
 
@@ -1903,16 +1907,16 @@ def send_volume(datavol, localtime, ses_tags, send_all):
 
     # Use tar to stream files to destination
     stream_started = False
-    untar_cmd = [destcd + " && mkdir -p ."+bkdir
+    untar_cmd = [dest.cd + " && mkdir -p ."+bkdir
                  + " && exec >>"+tmpdir+"-rpc/send.log 2>&1"
-                 + " && "+destcd+bkdir + " && echo "+vol.vid
+                 + " && "+dest.cd+bkdir + " && echo "+vol.vid
                  + " && python3 "+tmpdir+"-rpc/dest_helper.py send"
                  + (" --sync" if options.maxsync else "")]
 
     # Open source volume and its delta bitmap as r, session manifest as w.
     with open(pjoin("/dev",aset.vgname,snap2vol),"rb", buffering=chunksize) as vf, \
          open(sdir+"-tmp/manifest.tmp", "wt") as hashf,                             \
-         open("/dev/zero" if send_all else vol.mapfile+"-tmp","rb") as bmapf:
+         open("/dev/zero" if send_all else vol.mapfile,"rb") as bmapf:
 
         vf_seek = vf.seek; vf_read = vf.read   ; BytesIO = io.BytesIO
         gethash = hash_funcs[aset.hashtype]    ; b64enc  = base64.urlsafe_b64encode
@@ -2071,7 +2075,7 @@ def send_volume(datavol, localtime, ses_tags, send_all):
 
         # Finalize on VM/remote
         catch_signals()
-        dest.run([ destcd + bkdir
+        dest.run([ dest.cd + bkdir
                  +" && mv -T "+sdir+"-tmp "+sdir
                  +" && mv "+vol.vid+"/volinfo.tmp "+vol.vid+"/volinfo"
                  +" && mv archive.ini.tmp archive.ini"
@@ -2177,7 +2181,7 @@ def dedup_existing():
     init_dedup_index("dedup.lst.gz")
 
     print("Linking...")
-    do_exec([dest.run_args([destcd + bkdir
+    do_exec([dest.run_args([dest.cd + bkdir
                +" && /bin/cat >"+tmpdir+"-rpc/dest.lst.gz"
                +" && /usr/bin/python3 "+tmpdir+"-rpc/dest_helper.py dedup"
                ])
@@ -2270,7 +2274,6 @@ def monitor_send(datavols, selected=[], monitor_only=True):
 
         else:
             rotate_snapshots(vol, rotate=False)    ; dnew = 0
-            os.rename(vol.mapfile+"-tmp", vol.mapfile)
 
         print("\r" if dnew else "\r  No changes   ", flush=True)
 
@@ -2279,16 +2282,15 @@ def init_deltamap(vol, bmfile, bmsize):
     vol.changed_bytes_add(0, reset=True)
     if exists(bmfile):
         os.remove(bmfile)
-    if exists(bmfile+"-tmp"):
-        os.remove(bmfile+"-tmp")
     with open(bmfile, "wb") as bmapf:
         bmapf.truncate(bmsize)    ; bmapf.flush()
 
 
-def rotate_snapshots(vol, rotate=True):
+def rotate_snapshots(vol, rotate=True, delta_time=""):
     snap1vol = vol.name+".tick"   ; snap2vol = vol.name+".tock"
     if rotate:
-        do_exec([[CP.lvm,"lvchange","--addtag="+vol.last, aset.vgname+"/"+snap2vol]])
+        tags =["--addtag=delta-"+delta_time] if delta_time else []
+        do_exec([[CP.lvm,"lvchange","--addtag="+vol.last]+tags+[aset.vgname+"/"+snap2vol]])
         lv_remove(aset.vgname, snap1vol)    ; lv_rename(aset.vgname, snap2vol, snap1vol)
     else:
         lv_remove(aset.vgname, snap2vol, sync=False)
@@ -2596,11 +2598,11 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
         volume.sessions[target].save_info(".tmp")
         do_exec([[CP.tar, "-cf", "-", "../archive.ini", "../archive.ini.tmp", "volinfo.tmp",
                               "merge.lst.gz", target+"/info.tmp", target+"/manifest.z.tmp"],
-                 dest.run_args([destcd + destvol + " && tar -xmf -"])
+                 dest.run_args([dest.cd + destvol + " && tar -xmf -"])
                 ], cwd=volume.path)
 
     # Start merge operation on dest
-    retcode = dest.run([destcd + destvol + " && python3 "
+    retcode = dest.run([dest.cd + destvol + " && python3 "
                         + tmpdir+"-rpc/dest_helper.py merge"
                         + (" --resume" if resume else "") + (" --sync" if options.maxsync else "")
                         ],
@@ -2614,13 +2616,13 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
         aset.set_in_process(None)
         for f in ("merge.lst.gz","volinfo.tmp",target+"/info.tmp"):
             if exists(f):  os.remove(f)
-        dest.run([destcd + destvol + " && rm -rf merge merge.lst.gz"], check=False)
+        dest.run([dest.cd + destvol + " && rm -rf merge merge.lst.gz"], check=False)
         x_it(retcode, "Error: Merge could not initialize!")
     elif retcode != 0:
         x_it(retcode, "Error: Remote exited!")
 
     # Finalize merge operation on dest
-    dest.run([destcd + destvol + " && python3 "
+    dest.run([dest.cd + destvol + " && python3 "
                 +tmpdir+"-rpc/dest_helper.py merge --finalize"+(" --resume" if resume else "")
                 +" && rm -rf merge merge.lst.gz"
                 ],
@@ -2813,7 +2815,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False, verify_only
 
     # Create retriever process using py program
     cmd = dest.run_args(
-            [destcd + bkdir+"/"+vol.vid
+            [dest.cd + bkdir+"/"+vol.vid
              +" && exec 2>>"+tmpdir+"-rpc/receive.log"
              +" && python3 "+tmpdir+"-rpc/dest_helper.py receive"
             ])
@@ -3015,7 +3017,7 @@ def delete_volume(dv):
     aset.set_in_process(None)
 
     if dvid:
-        dest.run([destcd + bkdir + "  && rm -rf '%s'" % dvid])
+        dest.run([dest.cd + bkdir + "  && rm -rf '%s'" % dvid])
     catch_signals(None)
 
     for ext in {".tick",".tock"}:
@@ -3189,7 +3191,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4.0alpha2"   ; prog_date = "20220803"
+prog_version          = "0.4.0alpha2"   ; prog_date = "20220804"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 
 # Disk block size:
@@ -3328,10 +3330,9 @@ monitor_only     = options.action == "monitor" # gather metadata without backing
 
 # Create ArchiveSet and Destination objects with get_configs().
 # Passphrase input happens here; no stdin before this point!
-aset = dest = destcd = None
+aset = dest = None
 aset, dest  = get_configs(options)
 bkdir       = topdir+"/"+aset.name
-destcd      = " cd '"+dest.path+"'"
 
 # Check online status for certain commands.
 if not dest.online and (options.remap or options.from_arch \
@@ -3379,7 +3380,8 @@ if dest.online and options.action not in ("arch-init","arch-check","arch-delete"
 # Display archive update time as local time
 arch_dt_raw = datetime.datetime.fromtimestamp(float(aset.updated_at), datetime.timezone.utc)
 arch_dt     = arch_dt_raw.astimezone().isoformat(sep=u" ")
-sys.stderr.write("Archive last updated %s (%s)\n\n" % (arch_dt[:-6], arch_dt[-6:]))
+sys.stderr.write("Encrypted " if (aset.mcrypto and aset.datacrypto) else "Unencrypted ")
+sys.stderr.write("archive last updated %s (%s)\n\n" % (arch_dt[:-6], arch_dt[-6:]))
 if options.verbose:   sys.stderr.write("Dest location: %s\n" % dest.spec)
 
 # Handle unfinished in_process:
@@ -3538,7 +3540,7 @@ elif options.action == "arch-delete":
 
     # Remove from destination
     print("\nDeleting entire archive...")
-    cmd = [destcd
+    cmd = [dest.cd
           +" && rm -rf ."+bkdir
           +" && { sync -f . || sync; }"
           ]
