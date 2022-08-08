@@ -387,7 +387,7 @@ class ArchiveVolume:
         return (volume_size // self.archive.chunksize // 8) + 1
 
     def map_used(self, ext=""):
-        return os.stat(self.mapfile+ext).st_blocks
+        return os.stat(self.mapfile+ext).st_blocks if exists(self.mapfile+ext) else 0
 
     def changed_bytes_add(self, amount, reset=False, save=False):
         if reset:
@@ -815,8 +815,9 @@ class Lvm_Volume:
 
 def get_lvm_vgs(vg_to_lvols=None):
     global volgroups, l_vols
-    l_vols = None    ; volgroups = {}
+    l_vols.clear()    ; volgroups.clear()
 
+    if not shutil.which(CP.lvm):   sys.stderr.write("LVM not available.\n"); return
     do_exec([[CP.lvm, "lvs", "--units=b", "--noheadings", "--separator=::",
                 "--options=" + ",".join(Lvm_Volume.colnames)]],
             out=tmpdir+"/volumes.lst")
@@ -840,6 +841,7 @@ def lv_exists(vgname, lvname):
 
 
 def vg_exists(vgname):
+    if not volgroups:   return False
     try:
         do_exec([[CP.lvm, "vgdisplay", vgname]])
     except subprocess.CalledProcessError:
@@ -850,11 +852,12 @@ def vg_exists(vgname):
 
 # Converts a non-cannonical LV path to LV name plus pool and vg names.
 def get_lv_path_pool(path):
+    if not volgroups:   return "", "", ""
     try:
         p = subprocess.run([CP.lvm, "lvs", "--separator=::", "--noheadings",
                             "--options=lv_name,pool_lv,vg_name", path], check=True,
                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    except subprocess.CalledProcessError:
+    except:
         return "", "", ""
     else:
         return p.stdout.decode("utf-8").strip().split("::")
@@ -897,12 +900,11 @@ def lv_rename(vgname, vol1, vol2):
 # arch must be a configured ArchiveSet; action must be "reserve" or "release".
 # Specifying "release" without "pool=" will attempt to release all pools.
 def lvm_meta_snapshot(arch, action, pool=None):
-    vgname   = arch.vgname.replace("-","--")
-    the_pool = pool if pool else arch.poolname
-    checkerr = action == "reserve"
+    if arch.vgname not in volgroups:   return
+    vgname   = arch.vgname.replace("-","--")      ; checkerr = action == "reserve"
+    the_pool = pool if pool else arch.poolname    ; vgpools  = volgroups[arch.vgname].poolnames
 
-    for pool in volgroups[arch.vgname].poolnames if not pool and action == "release" \
-                else [the_pool]:
+    for pool in vgpools & vgpools if not pool and action == "release" else {the_pool}:
         poolname = pool.replace("-","--")
         do_exec([[CP.dmsetup,"message", vgname+"-"+poolname+"-tpool",
                 "0", action+"_metadata_snap"]], check=checkerr)
@@ -1681,7 +1683,7 @@ def prepare_snapshots(datavols):
                 # Recover interrupted snapshot rotation
                 lv_rename(vgname, snap2vol, snap1vol)
 
-            if lv_exists(vgname, snap1vol) and exists(mapfile) \
+            if lv_exists(vgname, snap1vol) \
             and (    (vol.map_used() == 0 and "delta" in " ".join(l_vols[snap1vol].tags))
                   or (vol.map_used() > 0 and
                       "delta-"+str(os.path.getmtime(vol.mapfile)) not in l_vols[snap1vol].tags
@@ -1820,6 +1822,7 @@ def update_delta_digest(datavol):
             for pos in range(markall_pos, bmap_size):  bmap_mm[pos] = 0xff
             dnewchunks += (bmap_size - markall_pos) * 8
 
+        del(bmap_mm)
         if dnewchunks+dfreedblocks:   bmapf.flush()    ; os.fsync(bmapf.fileno())
 
     catch_signals()
@@ -1830,7 +1833,7 @@ def update_delta_digest(datavol):
         print(("\r  %d ch, %d dis" % (dnewchunks, dfreedblocks//chunksize))
                 if map_updated else "\r  No changes   ")
 
-    if dnewchunks:   vol.changed_bytes_add(dnewchunks*chunksize, save=monitor_only)
+    if dnewchunks:   vol.changed_bytes_add(dnewchunks*chunksize, save=True)
     catch_signals(None)
     return map_updated
 
@@ -3190,7 +3193,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4.0alpha2"   ; prog_date = "20220805"
+prog_version          = "0.4.0alpha2"   ; prog_date = "20220807"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 
 # Disk block size:
@@ -3421,7 +3424,7 @@ for vol in selected_vols[:]:
 # Process Commands:
 
 if options.action   == "monitor":
-    monitor_send(datavols, monitor_only=True)
+    monitor_send(datavols, selected_vols, monitor_only=True)
 
 
 elif options.action == "send":
