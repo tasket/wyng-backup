@@ -442,8 +442,9 @@ class Lvm_Volume:
 
 def get_lvm_vgs(vg_to_lvols=None):
     global volgroups, l_vols
-    l_vols = None    ; volgroups = {}
+    l_vols.clear()    ; volgroups.clear()
 
+    if not shutil.which(CP.lvm):   sys.stderr.write("LVM not available.\n"); return
     do_exec([[CP.lvm, "lvs", "--units=b", "--noheadings", "--separator=::",
                 "--options=" + ",".join(Lvm_Volume.colnames)]],
             out=tmpdir+"/volumes.lst")
@@ -467,6 +468,7 @@ def lv_exists(vgname, lvname):
 
 
 def vg_exists(vgname):
+    if not volgroups:   return False
     try:
         do_exec([[CP.lvm, "vgdisplay", vgname]])
     except subprocess.CalledProcessError:
@@ -477,6 +479,7 @@ def vg_exists(vgname):
 
 # Converts a non-cannonical LV path to LV name plus pool and vg names.
 def get_lv_path_pool(path):
+    if not volgroups:   return "", "", ""
     try:
         p = subprocess.run([CP.lvm, "lvs", "--separator=::", "--noheadings",
                             "--options=lv_name,pool_lv,vg_name", path], check=True,
@@ -523,13 +526,12 @@ def lv_rename(vgname, vol1, vol2):
 # arch must be a configured ArchiveSet; action must be "reserve" or "release".
 # Specifying "release" without "pool=" will attempt to release all pools.
 def lvm_meta_snapshot(arch, action, pool=None):
-    vgname   = arch.vgname.replace("-","--")
-    the_pool = pool if pool else arch.poolname
-    checkerr = action == "reserve"
+    if arch.vgname not in volgroups:   return
+    vgname   = arch.vgname.replace("-","--")      ; checkerr = action == "reserve"
+    the_pool = pool if pool else arch.poolname    ; vgpools  = volgroups[arch.vgname].poolnames
 
-    for pool in volgroups[arch.vgname].poolnames if not pool and action == "release" \
-                else [the_pool]:
-        poolname = pool.replace("-","--")
+    for pool in vgpools & vgpools if not pool and action == "release" else {the_pool}:
+         poolname = pool.replace("-","--")
         do_exec([[CP.dmsetup,"message", vgname+"-"+poolname+"-tpool",
                 "0", action+"_metadata_snap"]], check=checkerr)
 
@@ -2754,7 +2756,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.3.1"         ; prog_date = "20220804"
+prog_version          = "0.3.1"         ; prog_date = "20220807"
 format_version        = 2               ; debug     = False       ; tmpdir = None
 
 # Disk block size:
@@ -2970,7 +2972,7 @@ for vol in selected_vols[:]:
 # Process Commands:
 
 if options.action   == "monitor":
-    monitor_send(datavols, monitor_only=True)
+    monitor_send(datavols, selected_vols, monitor_only=True)
 
 
 elif options.action == "send":
