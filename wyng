@@ -34,7 +34,7 @@ class ArchiveSet:
         self.dedupsessions = []
         self.in_process  = get_in_process(self.path)
         # persisted:
-        self.chunksize   = bkchunksize
+        self.chunksize   = bkchunksize * 2
         self.compression = "zstd" if zstd else "zlib"
         self.compr_level = str(compressors[self.compression][1])
         self.hashtype    = "blake2b" if "blake2b" in hash_funcs else "sha256"
@@ -399,7 +399,7 @@ class CP:
     awk  = "/usr/bin/awk"    ; sed   = "/bin/sed"        ; sort     = "/usr/bin/sort"
     cat  = "/bin/cat"        ; mkdir = "/bin/mkdir"      ; python   = "/usr/bin/python3"
     mv   = "/bin/mv"         ; grep  = "/bin/grep"       ; ssh      = "/usr/bin/ssh"
-    sh   = "/bin/sh"         ; tar   = "/bin/tar"        ; touch    = "/usr/bin/touch"
+    sh   = "/bin/sh"         ; tar   = "/bin/tar"        ; tail     = "/usr/bin/tail"
     rm   = "/bin/rm"         ; lvm   = "/sbin/lvm"       ; qvm_run  = "/usr/bin/qvm-run"
     tee  = "/usr/bin/tee"    ; sync  = "/bin/sync"       ; dmsetup  = "/sbin/dmsetup"
     find = "/usr/bin/find"   ; xargs = "/usr/bin/xargs"  ; sha256sum= "/usr/bin/sha256sum"
@@ -984,7 +984,7 @@ elif cmd == "get-configs":
     "--files-from="+tmpdir+"/tar.lst","archive.ini"])
     '''
     with open(tmpdir +"/rpc/dest_helper.py", "wb") as progf:
-        progf.write(bytes(dest_program, encoding="UTF=8"))
+        progf.write(bytes(dest_program, encoding="UTF-8"))
 
     #####>  End helper program  <#####
 
@@ -1037,7 +1037,7 @@ def detect_dest_state(destsys):
         try:
             do_exec([dest_run_args(desttype, cmd),
                      # sanitize remote output:
-                     ["cat","-v"],  ["tail","--bytes=2000"]
+                     [CP.cat,"-v"],  [CP.tail,"--bytes=2000"]
                     ],
                     out=tmpdir+"/dest-state.log", infile=tmpdir+"/rpc/dest_helper.py")
             online = True
@@ -2756,8 +2756,20 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.3.1"         ; prog_date = "20220807"
+prog_version          = "0.3.2"         ; prog_date = "20220818"
 format_version        = 2               ; debug     = False       ; tmpdir = None
+
+
+if sys.hexversion < 0x3050000:
+    x_it(1, "Python ver. 3.5 or greater required.")
+
+# Allow only one instance at a time
+lockpath = "/var/lock/"+prog_name
+try:
+    lockf = open(lockpath, "w")
+    fcntl.lockf(lockf, fcntl.LOCK_EX|fcntl.LOCK_NB)
+except IOError:
+    x_it(1, "ERROR: "+prog_name+" is already running.")
 
 # Disk block size:
 bs                    = 512
@@ -2780,29 +2792,13 @@ ssh_opts              = ["-x", "-o", "ControlPath=~/.ssh/controlsocket-%r@%h-%p"
                          "-o", "ControlMaster=auto", "-o", "ControlPersist=60",
                          "-o", "ServerAliveInterval=30", "-o", "ConnectTimeout=30"]
 
-local_actions         = ("monitor","list","version","add")
-write_actions         = ("send","prune","delete","rename","arch-delete","arch-deduplicate")
-dest_actions          = ("receive","verify","diff","arch-check","arch-init") + write_actions
-
 comment_len = 100             ; tag_len = 25
 volname_len = 112             ; alphanumsym = "^[a-zA-Z0-9\+\._-]+$"
 pjoin       = os.path.join    ; exists = os.path.exists
 
-
-if sys.hexversion < 0x3050000:
-    x_it(1, "Python ver. 3.5 or greater required.")
-
-# Root user required
-if os.getuid() > 0:
-    x_it(1, "Must be root user.")
-
-# Allow only one instance at a time
-lockpath = "/var/lock/"+prog_name
-try:
-    lockf = open(lockpath, "w")
-    fcntl.lockf(lockf, fcntl.LOCK_EX|fcntl.LOCK_NB)
-except IOError:
-    x_it(1, "ERROR: "+prog_name+" is already running.")
+local_actions         = ("monitor","list","version","add")
+write_actions         = ("send","prune","delete","rename","arch-delete","arch-deduplicate")
+dest_actions          = ("receive","verify","diff","arch-check","arch-init") + write_actions
 
 # Parse Arguments:
 parser = argparse.ArgumentParser(description="")
@@ -2845,18 +2841,20 @@ parser.add_argument("--dedup", "-d", action="store_true", default=False,
 parser.add_argument("--volume-desc", dest="voldesc", default="",
                     help="Set volume description (add, rename, send)")
 parser.add_argument("volumes", nargs="*")
-options = parser.parse_args()
+options = parser.parse_args()    ; options.action = options.action.lower()
 
 # Set stdout to devnull if --quiet is specified
 debug = options.debug    ; assert not (options.quiet and (options.verbose or debug))
 if debug:   options.verbose = True
-if options.quiet and options.action != "list":
+if options.quiet and options.action not in ("list","version"):
     options.unattended = True
     sys.stdout = open(os.devnull, "w")
 
 print("%s %s release %s" % (prog_name.capitalize(), prog_version, prog_date))
 
-options.action = options.action.lower()
+if options.action in write_actions+("arch-init","monitor") and os.getuid() > 0:
+    x_it(1, "Must be root user for %s." % options.action)
+if options.action == "version":   x_it(0,"")
 if options.action not in ("send", "arch-deduplicate"):   options.dedup = False
 if options.action == "arch-deduplicate":   options.dedup = True
 if options.from_arch and options.action not in ("receive","verify","list","arch-init"):
@@ -2977,10 +2975,6 @@ if options.action   == "monitor":
 
 elif options.action == "send":
     monitor_send(datavols, selected_vols, monitor_only=False)
-
-
-elif options.action == "version":
-    print(prog_name, "version", prog_version)
 
 
 elif options.action == "prune":
