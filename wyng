@@ -362,7 +362,7 @@ class ArchiveVolume:
             f.flush()    ; os.fsync(f.fileno())
         self.archive.save_conf(ext)
 
-    def volname_check(vname):
+    def volname_check(vname): # Fix: move to LocalStorage class
         check = re.compile(alphanumsym)
         if check.match(vname) is None:
             return "Only characters A-Z 0-9 . + _ - are allowed in volume names."
@@ -817,6 +817,7 @@ def get_lvm_vgs(vg_to_lvols=None):
     global volgroups, l_vols
     l_vols.clear()    ; volgroups.clear()
 
+    if not admin_permission:   return
     if not shutil.which(CP.lvm):   sys.stderr.write("LVM not available.\n"); return
     do_exec([[CP.lvm, "lvs", "--units=b", "--noheadings", "--separator=::",
                 "--options=" + ",".join(Lvm_Volume.colnames)]],
@@ -3195,6 +3196,24 @@ def cleanup():
 prog_name             = "wyng"
 prog_version          = "0.4.0alpha2"   ; prog_date = "20220807"
 format_version        = 3               ; debug     = False       ; tmpdir = None
+admin_permission      = os.getuid() == 0
+
+
+if sys.hexversion < 0x3080000:
+    x_it(1, "Python ver. 3.8 or greater required.")
+
+if tuple(time.gmtime(0))[:6] != (1970, 1, 1, 0, 0, 0):
+    x_it(1, "System time epoch is not 1970-01-01.")
+
+# Allow only one instance at a time
+lockpath = "/var/lock/"+prog_name
+try:
+    lockf = open(lockpath, "w")
+    fcntl.lockf(lockf, fcntl.LOCK_EX|fcntl.LOCK_NB)
+except IOError:
+    x_it(1, "ERROR: "+prog_name+" is already running.")
+
+cpu_flags = [x for x in open("/proc/cpuinfo") if x.startswith("flags")] [0].split()[1:]
 
 # Disk block size:
 bs                    = 512
@@ -3210,34 +3229,12 @@ hash_bits             = 256
 
 os.environ["LC_ALL"]  = "C"    ; shell_prefix   = "set -e && export LC_ALL=C\n"
 
-local_actions         = ("monitor","list","version")
-write_actions         = ("add","send","prune","delete","rename","arch-delete","arch-deduplicate")
-dest_actions          = ("receive","verify","diff","arch-check","arch-init") + write_actions
-
 alphanumsym = "^[a-zA-Z0-9\+\._-]+$"
 pjoin       = os.path.join    ; exists = os.path.exists
 
-
-if sys.hexversion < 0x3080000:
-    x_it(1, "Python ver. 3.8 or greater required.")
-
-if tuple(time.gmtime(0))[:6] != (1970, 1, 1, 0, 0, 0):
-    x_it(1, "System time epoch is not 1970-01-01.")
-
-# Root user required
-if os.getuid() > 0:
-    x_it(1, "Must be root user.")
-
-# Allow only one instance at a time
-lockpath = "/var/lock/"+prog_name
-try:
-    lockf = open(lockpath, "w")
-    fcntl.lockf(lockf, fcntl.LOCK_EX|fcntl.LOCK_NB)
-except IOError:
-    x_it(1, "ERROR: "+prog_name+" is already running.")
-
-cpu_flags = [x for x in open("/proc/cpuinfo") if x.startswith("flags")] [0].split()[1:]
-
+local_actions         = ("monitor","list","version")
+write_actions         = ("add","send","prune","delete","rename","arch-delete","arch-deduplicate")
+dest_actions          = ("receive","verify","diff","arch-check","arch-init") + write_actions
 
 # Parse Arguments:
 parser = argparse.ArgumentParser(description="")
@@ -3281,20 +3278,20 @@ parser.add_argument("--dedup", "-d", action="store_true", default=False,
 parser.add_argument("--volume-desc", dest="voldesc", default="",
                     help="Set volume description (add, rename, send)")
 parser.add_argument("volumes", nargs="*")
-options = parser.parse_args()
-#subparser = parser.add_subparsers(help="sub-command help")
-#prs_prune = subparser.add_parser("prune",help="prune help")
+options = parser.parse_args()    ; options.action = options.action.lower()
 
 # Set stdout to devnull if --quiet is specified
 debug = options.debug    ; assert not (options.quiet and (options.verbose or debug))
 if debug:   options.verbose = True
-if options.quiet and options.action != "list":
+if options.quiet and options.action not in ("list","version"):
     options.unattended = True
     sys.stdout = open(os.devnull, "w")
 
 print("%s %s release %s" % (prog_name.capitalize(), prog_version, prog_date))
 
-options.action = options.action.lower()
+if options.action in write_actions+("arch-init","monitor") and not admin_permission:
+    x_it(1, "Must be root/admin user for %s." % options.action)
+if options.action == "version":   x_it(0,"")
 if options.action not in ("send", "arch-deduplicate"):   options.dedup = False
 if options.action == "arch-deduplicate":   options.dedup = True
 if options.from_arch and options.action not in ("receive","verify","list","arch-init"):
@@ -3312,7 +3309,7 @@ os.makedirs(vardir, exist_ok=True)
 shutil.rmtree("/tmp/"+prog_name+"-debug", ignore_errors=True)
 shutil.rmtree(big_tmpdir, ignore_errors=True)
 os.makedirs(tmpdir+"/rpc")
-os.makedirs(big_tmpdir, exist_ok=True)
+if admin_permission:   os.makedirs(big_tmpdir, exist_ok=True)
 
 
 ## General Configuration ##
@@ -3429,10 +3426,6 @@ if options.action   == "monitor":
 
 elif options.action == "send":
     monitor_send(datavols, selected_vols, monitor_only=False)
-
-
-elif options.action == "version":
-    print(prog_name, "version", prog_version)
 
 
 elif options.action == "prune":
