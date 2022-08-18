@@ -11,8 +11,8 @@
 import sys, signal, os, stat, shutil, subprocess, time, datetime
 import re, mmap, bz2, zlib, gzip, tarfile, io, fcntl, tempfile
 import argparse, configparser, hashlib, hmac, functools, uuid
-import getpass, base64, platform, resource
-import xml.etree.ElementTree    ; from itertools import islice
+import getpass, base64, platform, resource, itertools, heapq
+import xml.etree.ElementTree
 from array import array         ; from urllib.parse import urlparse
 
 try:
@@ -238,9 +238,7 @@ class ArchiveSet:
         if errs:
             sys.stderr.write("".join(errs))    ; error_cache.append(datavol)    ; return None
 
-        while True:
-            vid = "Vol_"+os.urandom(2).hex()
-            if vid not in self.conf["volumes"]:   break
+        while (vid := "Vol_"+os.urandom(2).hex()) in self.conf["volumes"]:   pass
 
         self.vols[datavol] = vol = self.Volume(self, vid, "0", pjoin(self.path,vid),
                                                self.vgname, name=datavol, children=0)
@@ -313,7 +311,7 @@ class ArchiveVolume:
 
         Ses = ArchiveSession
         if debug:  print("\n", vid, "-", name)
-        if path:   os.makedirs(path, exist_ok=True)
+        if path and not exists(path):   os.makedirs(path)    ; do_exec([[CP.chattr, "+c", path]])
         if path and hashval != "0":
             with open(pjoin(path,"volinfo"), "rb") as f:
                 fsize = os.fstat(f.fileno()).st_size
@@ -768,14 +766,14 @@ class DataCryptography:
 # Define absolute paths of commands
 
 class CP:
-    awk  = "/usr/bin/awk"    ; sed   = "/bin/sed"        ; sort     = "/usr/bin/sort"
-    cat  = "/bin/cat"        ; mkdir = "/bin/mkdir"      ; python   = "/usr/bin/python3"
-    mv   = "/bin/mv"         ; grep  = "/bin/grep"       ; ssh      = "/usr/bin/ssh"
-    sh   = "/bin/sh"         ; tar   = "/bin/tar"        ; touch    = "/usr/bin/touch"
-    rm   = "/bin/rm"         ; lvm   = "/sbin/lvm"       ; qvm_run  = "/usr/bin/qvm-run"
-    tee  = "/usr/bin/tee"    ; sync  = "/bin/sync"       ; dmsetup  = "/sbin/dmsetup"
-    find = "/usr/bin/find"   ; xargs = "/usr/bin/xargs"  ; sha256sum= "/usr/bin/sha256sum"
-    cmp  = "/usr/bin/cmp"    ; gzip  = "/bin/gzip"       ; diff     = "/usr/bin/diff"
+    awk    = "/usr/bin/awk"     ; sed   = "/bin/sed"        ; sort     = "/usr/bin/sort"
+    cat    = "/bin/cat"         ; mkdir = "/bin/mkdir"      ; python   = "/usr/bin/python3"
+    mv     = "/bin/mv"          ; grep  = "/bin/grep"       ; ssh      = "/usr/bin/ssh"
+    sh     = "/bin/sh"          ; tar   = "/bin/tar"        ; tail     = "/usr/bin/tail"
+    rm     = "/bin/rm"          ; lvm   = "/sbin/lvm"       ; qvm_run  = "/usr/bin/qvm-run"
+    tee    = "/usr/bin/tee"     ; sync  = "/bin/sync"       ; dmsetup  = "/sbin/dmsetup"
+    chattr = "/usr/bin/chattr"  ; xargs = "/usr/bin/xargs"  ; sha256sum= "/usr/bin/sha256sum"
+    cmp    = "/usr/bin/cmp"     ; gzip  = "/bin/gzip"       ; diff     = "/usr/bin/diff"
     mountpoint = "/bin/mountpoint"    ; thin_delta = "/usr/sbin/thin_delta"
     blkdiscard = "/sbin/blkdiscard"   ; nice       = "/usr/bin/nice"
 
@@ -1093,7 +1091,7 @@ def get_configs(opts):
         tmpmeta   = big_tmpdir+"/var"    ; os.makedirs(tmpmeta+bkdir)
         aset_from = ArchiveSet(arch_name, tmpmeta+topdir)
         arch_init(aset_from)
-        return aset_from
+        return aset_from, dest
     else:
         aset    = ArchiveSet(arch_name, metadir+topdir, children=load_children)
  
@@ -1122,9 +1120,11 @@ def get_configs_remote():
     new_aset = ArchiveSet(aset.name, os.path.dirname(aset.path), children=0)
 
     # Initial auth successful! Fetch + auth volume metadata...
-    recv_list= [(x.split()[0]+"/volinfo", ArchiveSet.max_volinfosz)
-                 for x in new_aset.conf["volumes"].values()]
+    recv_list= [(x+"/volinfo", ArchiveSet.max_volinfosz)
+                 for x in new_aset.conf["volumes"].keys()]
     fetch_file_blobs(recv_list)
+    os.chdir(aset.path)
+    do_exec([[CP.chattr, "+c"] + list(new_aset.conf["volumes"].keys())])
     new_aset = ArchiveSet(aset.name, os.path.dirname(aset.path), children=1,
                           prior_auth=new_aset)
 
@@ -1144,7 +1144,6 @@ def get_configs_remote():
         if exists(metadir+bkdir) :  shutil.rmtree(metadir+bkdir)
         new_path = metadir+topdir;  shutil.move(aset.path, new_path)
         new_aset = ArchiveSet(aset.name, new_path, prior_auth=new_aset)
-        dest.save()
     else:
         new_path = os.path.dirname(aset.path)
 
@@ -1319,7 +1318,7 @@ def helper_send():
 
 def helper_receive(lstf):
     stdout_write = sys.stdout.buffer.write   ; exists = os.path.exists   ; getsize= os.path.getsize
-    stdout_flush = sys.stdout.flush
+    stdout_flush = sys.stdout.flush          ; magic  = b"\\xff\\x11\\x15"
     for line in lstf:
         fname = line.strip()
         if not fname:   break
@@ -1327,7 +1326,7 @@ def helper_receive(lstf):
             fsize = getsize(fname)
         else:
             fsize = 0   ; i = sys.stderr.write("File not found: %s\\x0a" % fname)
-        stdout_write(fsize.to_bytes(4,"big"))
+        stdout_write(magic + fsize.to_bytes(4,"big"))
         if fsize:
             with open(fname,"rb") as dataf:
                 stdout_write(dataf.read(fsize))
@@ -1403,10 +1402,7 @@ if cmd == "merge":
         ln = lstf.readline().strip()
         if ln == "###":  break
         src_list.append(ln)
-    if "--finalize" in sys.argv:
-        helper_merge_finalize()
-    else:
-        helper_merge()
+    na = helper_merge_finalize() if "--finalize" in sys.argv else helper_merge()
 elif cmd == "receive":
     helper_receive(lstf if lstf else sys.stdin)
 elif cmd == "send":
@@ -1414,22 +1410,23 @@ elif cmd == "send":
 elif cmd == "dedup":
     ddcount = 0    ; substitutions = {}
     for line in lstf:
-        source, dest = line.split()   ; src_orig = source
+        source, dest = line.split()   ; src_orig = source    ; deststat = os.stat(dest)
+        ddcount += deststat.st_size
         if source in substitutions:   source = substitutions[source]
-        if os.stat(source).st_ino != os.stat(dest).st_ino:
+        if os.stat(source).st_ino != deststat.st_ino:
             try:
-                os.link(source, dest+"-lnk")    ; replace(dest+"-lnk", dest)    ; ddcount += 1
+                os.link(source, dest+"-lnk")    ; replace(dest+"-lnk", dest)
             except OSError as err:
                 if err.errno == 31:
                     # source has too many links; substitute
-                    substitutions[src_orig] = dest    ; continue
+                    substitutions[src_orig] = dest   ; ddcount -= deststat.st_size   ; continue
                 else:
                     if exists(dest+"-lnk"):   remove(dest+"-lnk")
                     print(err)   ; raise err
-    print(ddcount, "reduced.")
+    print(ddcount, "bytes reduced.")
     '''
         with open(tmpdir +"/rpc/dest_helper.py", "wb") as progf:
-            progf.write(bytes(dest_program, encoding="UTF=8"))
+            progf.write(bytes(dest_program, encoding="UTF-8"))
 
     #####>  End helper program  <#####
 
@@ -1469,7 +1466,7 @@ elif cmd == "dedup":
             try:
                 do_exec([self.run_args(cmd),
                         # sanitize remote output:
-                        ["cat","-v"],  ["tail","--bytes=2000"]
+                        [CP.cat,"-v"],  [CP.tail,"--bytes=2000"]
                         ],
                         out=tmpdir+"/dest-state.log", infile=tmpdir+"/rpc/dest_helper.py")
                 online = True
@@ -1602,8 +1599,8 @@ def update_dest(archive, pathlist=[], volumes=[], sessions=[], ext="", delete=Fa
         return
 
     do_exec([[CP.tar,"-cf","-","--no-recursion","--verbatim-files-from","--files-from", "-"],
-             dest.run_args([dcd + " && tar -xf -"]
-                                    + [" && mv '"+x+ext+"' '"+x+"'" for x in update_list if ext])
+             dest.run_args([dcd + "  && tar -xf -"]
+                                + [" && mv '"+x+ext+"' '"+x+"'" for x in update_list if ext])
             ], inlines=[x+ext for x in update_list], cwd=lcd)
 
 
@@ -1616,8 +1613,11 @@ def fetch_file_blobs(recv_list, ext=""):
     recvp = subprocess.Popen(cmd, stdout=subprocess.PIPE, stdin=subprocess.PIPE)
     recvp.stdin.write(("".join((x+"\n" for x,y in recv_list))).encode("UTF-8"))
     recvp.stdin.flush()    ; rc = recvp.poll()
+    magic = b"\xff\x11\x15"
+
     for fname, fsz in list(recv_list):
         if rc is not None:   raise RuntimeError("Process terminated early.")
+        assert recvp.stdout.read(3) == magic
         # Read chunk size
         untrusted_size = int.from_bytes(recvp.stdout.read(4),"big")
         if untrusted_size > fsz or not untrusted_size:
@@ -1900,6 +1900,8 @@ def send_volume(datavol, localtime, ses_tags, send_all):
 
     # Set current dir and make new session folder
     os.chdir(metadir+bkdir)    ; os.makedirs(sdir+"-tmp")
+    do_exec([[CP.chattr, "+c", sdir+"-tmp"]])
+
 
     if aset.datacrypto:
         crypto  = True
@@ -1923,7 +1925,7 @@ def send_volume(datavol, localtime, ses_tags, send_all):
 
         vf_seek = vf.seek; vf_read = vf.read   ; BytesIO = io.BytesIO
         gethash = hash_funcs[aset.hashtype]    ; b64enc  = base64.urlsafe_b64encode
-        b2int   = int.from_bytes
+        b2int   = int.from_bytes               ; islice  = itertools.islice
 
 
         # Feed delta bmap to inner loop in pieces segmented by large zero delimeter.
@@ -2058,7 +2060,6 @@ def send_volume(datavol, localtime, ses_tags, send_all):
             fpath = sdir+"-tmp/"+f         ; tarf.add(fpath+".tmp", arcname=fpath)
         tarf.add(vol.vid+"/volinfo.tmp")   ; tarf.add(aset.confname+".tmp")
 
-        #print("Ending tar process ", end="")
         tarf.close()    ; untar.stdin.close()
         try:
             untar.wait(timeout=60)
@@ -2107,7 +2108,7 @@ def send_volume(datavol, localtime, ses_tags, send_all):
 
 # Build deduplication hash index and list
 
-def init_dedup_index5(listfile=""):
+def init_dedup_index(listfile=""):
 
     ctime      = time.perf_counter()    ; makelist = bool(listfile)
     addrsplit  = -address_split[1]
@@ -2180,15 +2181,18 @@ def init_dedup_index5(listfile=""):
 
 def dedup_existing():
 
-    print("Building deduplication index...")
+    print("Building deduplication index...", end="")
     init_dedup_index("dedup.lst.gz")
 
-    print("Linking...")
-    do_exec([dest.run_args([dest.cd + bkdir
+    print(" linking...", end="", flush=True)
+    do_exec( [dest.run_args([dest.cd + bkdir
                +" && /bin/cat >"+tmpdir+"-rpc/dest.lst.gz"
                +" && /usr/bin/python3 "+tmpdir+"-rpc/dest_helper.py dedup"
-               ])
+               ]),
+              [CP.cat,"-v"],  [CP.tail,"--bytes=2000"]
             ], infile=tmpdir+"/dedup.lst.gz", out=tmpdir+"/arch-dedup.log")
+    print(" done.")
+    if options.verbose:   print("".join(open(tmpdir+"/arch-dedup.log","r")))
 
 
 # Controls flow of monitor and send_volume procedures:
@@ -2226,9 +2230,7 @@ def monitor_send(datavols, selected=[], monitor_only=True):
     ses_tags = []
     if options.tag and options.tag == [""] and not options.unattended and not monitor_only:
         print("Enter tag info as 'tagID[, tag description]'. Blank to end input.")
-        while True:
-            ans = ask_input("[%d]: " % (len(ses_tags)+1)).strip()
-            if not ans:   break
+        while ans := ask_input("[%d]: " % (len(ses_tags)+1)).strip():
             tag = ArchiveSession.tag_parse(ans, delim=",")
             if not tag:   continue
             ses_tags.append(tag)
@@ -2713,10 +2715,10 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False, verify_only
         if ans.lower() not in {"y","yes"}:
             x_it(0,"")
 
-    volsize     = vol.sessions[select_ses].volsize   ; volf = None
+    volsize     = vol.sessions[select_ses].volsize   ; magic       = b"\xff\x11\x15"
     chdigits    = max_address.bit_length() // 4      ; chformat    = "x%0"+str(chdigits)+"x"
     lchunk_addr = vol.last_chunk_addr(volsize)       ; last_chunkx = chformat % lchunk_addr
-    addrsplit   = -address_split[1]                  ; rc = None
+    addrsplit   = -address_split[1]                  ; rc = volf = None
 
     # Collect session manifests
     incl_ses = []
@@ -2856,6 +2858,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False, verify_only
                 print("%s/%s/%s" % (ses, faddr[1:addrsplit], faddr), flush=True, file=gv_stdin)
 
         # Read chunk size
+        assert getvol.stdout.read(3) == magic
         untrusted_size = int.from_bytes(getvol.stdout.read(4),"big")
 
         # allow for slight expansion from compression algo
@@ -3194,7 +3197,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4.0alpha2"   ; prog_date = "20220807"
+prog_version          = "0.4.0alpha2"   ; prog_date = "20220818"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
@@ -3324,7 +3327,6 @@ if zstd:   compressors["zstd"] = (zstd, 3, lambda data, lvl: zstd.compress(data,
 hash_funcs       = {"sha256" : hashlib.sha256,
                     "blake2b": functools.partial(hashlib.blake2b, digest_size=hash_bits//8)}
 
-init_dedup_index = [None, init_dedup_index5][options.dedup]
 monitor_only     = options.action == "monitor" # gather metadata without backing up
 
 # Create ArchiveSet and Destination objects with get_configs().
