@@ -11,7 +11,7 @@
 import sys, signal, os, stat, shutil, subprocess, time, datetime
 import re, mmap, bz2, zlib, gzip, tarfile, io, fcntl, tempfile
 import argparse, configparser, hashlib, hmac, functools, uuid
-import getpass, base64, platform, resource, itertools, heapq
+import getpass, base64, platform, resource, itertools
 import xml.etree.ElementTree
 from array import array         ; from urllib.parse import urlparse
 
@@ -311,7 +311,9 @@ class ArchiveVolume:
 
         Ses = ArchiveSession
         if debug:  print("\n", vid, "-", name)
-        if path and not exists(path):   os.makedirs(path)    ; do_exec([[CP.chattr, "+c", path]])
+        if path and not exists(path):   os.makedirs(path)
+        if exists(path):
+            do_exec([[CP.chattr, "-c", path, self.mapfile]], check=False) #### remove
         if path and hashval != "0":
             with open(pjoin(path,"volinfo"), "rb") as f:
                 fsize = os.fstat(f.fileno()).st_size
@@ -448,6 +450,8 @@ class ArchiveVolume:
 
     def decode_manifests(self, sesnames, force=False):
         for ses in (self.sessions[x] for x in sesnames):
+            if ses.path and force:
+                os.makedirs(ses.path, exist_ok=True)    ; do_exec([[CP.chattr, "+c", ses.path]])
             self.decode_one_manifest(ses, force=force)
 
 
@@ -1125,7 +1129,7 @@ def get_configs_remote():
     fetch_file_blobs(recv_list)
     os.chdir(aset.path)
     do_exec([[CP.chattr, "+c"] + list(new_aset.conf["volumes"].keys())])
-    new_aset = ArchiveSet(aset.name, os.path.dirname(aset.path), children=1,
+    new_aset = ArchiveSet(aset.name, os.path.dirname(aset.path), children=1, allvols=True,
                           prior_auth=new_aset)
 
     # Fetch + auth session metadata... use list flattener
@@ -1133,7 +1137,7 @@ def get_configs_remote():
                (vol.sessions.values() for vol in new_aset.vols.values()) for x in sub]
     fetch_file_blobs([(new_aset.vols[y].vid+"/"+x+"/info",
                        ArchiveSet.max_infosz) for x,y in ses_list])
-    new_aset = ArchiveSet(new_aset.name, os.path.dirname(new_aset.path), children=2,
+    new_aset = ArchiveSet(new_aset.name, os.path.dirname(new_aset.path), children=2, allvols=True,
                           prior_auth=new_aset)
 
     fetch_file_blobs([(new_aset.vols[y].vid+"/"+x+"/manifest.z",
@@ -3197,7 +3201,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4.0alpha2"   ; prog_date = "20220818"
+prog_version          = "0.4.0alpha2"   ; prog_date = "20220819"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
