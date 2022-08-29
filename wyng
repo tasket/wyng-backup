@@ -531,7 +531,7 @@ def lvm_meta_snapshot(arch, action, pool=None):
     the_pool = pool if pool else arch.poolname    ; vgpools  = volgroups[arch.vgname].poolnames
 
     for pool in vgpools & vgpools if not pool and action == "release" else {the_pool}:
-         poolname = pool.replace("-","--")
+        poolname = pool.replace("-","--")
         do_exec([[CP.dmsetup,"message", vgname+"-"+poolname+"-tpool",
                 "0", action+"_metadata_snap"]], check=checkerr)
 
@@ -2756,7 +2756,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.3.2"         ; prog_date = "20220818"
+prog_version          = "0.3.3"         ; prog_date = "20220829"
 format_version        = 2               ; debug     = False       ; tmpdir = None
 
 
