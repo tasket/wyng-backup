@@ -675,13 +675,13 @@ def arch_check(vol_list=None, startup=False):
                     +"s|^\S+\s+x(\S{" +str(address_split[0])+ "})(\S+)|"+sesname+"/\\1/x\\1\\2|",
                     manifest],
                     [CP.gzip, "-c", "-4"],
-                    dest_run_args(desttype, ["cat >"+tmpdir+"-rpc/dest.lst.gz"])]
+                    dest_run_args(desttype, ["cat >"+desttmpdir+"-rpc/dest.lst.gz"])]
             do_exec(cmd1)
 
             cmd2 = dest_run_args(desttype,
                     [destcd + bkdir+"/"+volname
-                    +" && exec 2>>"+tmpdir+"-rpc/receive.log"
-                    +" && python3 "+tmpdir+"-rpc/dest_helper.py receive"
+                    +" && exec 2>>"+desttmpdir+"-rpc/receive.log"
+                    +" && python3 "+desttmpdir+"-rpc/dest_helper.py receive"
                     ])
             getses = subprocess.Popen(cmd2, stdout=subprocess.PIPE)
 
@@ -771,7 +771,7 @@ def get_configs_remote():
             x_it(0,"Stopped.")
 
     do_exec([dest_run_args(desttype, [destcd + bkdir
-                    +" && "+CP.python+" "+tmpdir+"-rpc/dest_helper.py get-configs "
+                    +" && "+CP.python+" "+desttmpdir+"-rpc/dest_helper.py get-configs "
                     +(options.volumes[0] if len(options.volumes)>0 and not make_local else "")]),
              [CP.tar, "-xzf", "-"]], cwd=aset.path)
 
@@ -826,7 +826,7 @@ def detect_internal_state():
     '''#  Copyright Christopher Laprise 2018-2021
 #  Licensed under GNU General Public License v3. See github.com/tasket/wyng-backup
 import os, sys, signal, shutil, subprocess, gzip, tarfile
-cmd = sys.argv[1]   ; tmpdir = "''' + tmpdir + '''-rpc"   ; msync = "--sync" in sys.argv
+cmd = sys.argv[1]   ; tmpdir = "''' + desttmpdir + '''-rpc"   ; msync = "--sync" in sys.argv
 exists = os.path.exists    ; replace = os.replace    ; remove = os.remove
 
 def fssync(path):
@@ -1012,7 +1012,7 @@ def detect_dest_state(destsys):
             dargs = dest_run_map["qubes"][:-1] + [destsys.split(":")[0]]
 
             cmd = dargs + [shell_prefix \
-                  +CP.rm+" -rf "+tmpdir+"-rpc  &&  mkdir -p "+tmpdir+"-rpc"
+                  +CP.rm+" -rf "+desttmpdir+"-rpc  &&  mkdir -p "+desttmpdir+"-rpc"
                   ]
             do_exec([cmd])
 
@@ -1022,8 +1022,8 @@ def detect_dest_state(destsys):
                 +"' && cd '"+aset.destmountpoint+"/"+aset.destdir+topdir+"'"
 
                 # send helper program to remote dest
-                +"  && rm -rf "+tmpdir+"-rpc  &&  mkdir -p "+tmpdir+"-rpc"
-                +"  && cat >"+tmpdir+"-rpc/dest_helper.py"
+                +"  && rm -rf "+desttmpdir+"-rpc  &&  mkdir -p "+desttmpdir+"-rpc"
+                +"  && cat >"+desttmpdir+"-rpc/dest_helper.py"
 
                 # test write access and hardlinks
                 +"  && touch archive.dat || echo 'wyng_read_only'"
@@ -1182,14 +1182,14 @@ def dest_run_args(dest_type, commands, trap=False):
     if dest_type in {"qubes","qubes-ssh"}:
         do_exec([[CP.qvm_run, "--no-color-stderr", "--no-color-output", "-p",
                   (destsys if dest_type == "qubes" else destsys.split(":")[0]),
-                  CP.mkdir+" -p "+tmpdir+"-rpc"
-                  +" && "+CP.cat+" >"+pjoin(tmpdir+"-rpc",remotetmp)
+                  CP.mkdir+" -p "+desttmpdir+"-rpc"
+                  +" && "+CP.cat+" >"+pjoin(desttmpdir+"-rpc",remotetmp)
                 ]], infile=pjoin(tmpdir,remotetmp))
         if dest_type == "qubes":
-            add_cmd = [CP.sh+" "+pjoin(tmpdir+"-rpc",remotetmp)]
+            add_cmd = [CP.sh+" "+pjoin(desttmpdir+"-rpc",remotetmp)]
         elif dest_type == "qubes-ssh":
             add_cmd = [CP.ssh+" "+" ".join(ssh_opts)+" "+destsys.split(":")[1]
-                       +' "$('+CP.cat+' '+pjoin(tmpdir+"-rpc",remotetmp)+')"']
+                       +' "$('+CP.cat+' '+pjoin(desttmpdir+"-rpc",remotetmp)+')"']
 
     elif dest_type == "ssh":
         #add_cmd = [' "$(cat '+pjoin(tmpdir,remotetmp)+')"']
@@ -1473,9 +1473,9 @@ def send_volume(datavol, localtime, ses_tags, send_all):
     # Use tar to stream files to destination
     stream_started = False
     untar_cmd = [destcd + " && mkdir -p ."+bkdir
-                 + " && exec >>"+tmpdir+"-rpc/send.log 2>&1"
+                 + " && exec >>"+desttmpdir+"-rpc/send.log 2>&1"
                  + " && "+destcd+bkdir + " && echo "+datavol
-                 + " && python3 "+tmpdir+"-rpc/dest_helper.py send"
+                 + " && python3 "+desttmpdir+"-rpc/dest_helper.py send"
                  + (" --sync" if options.maxsync else "")]
 
     # Open source volume and its delta bitmap as r, session manifest as w.
@@ -1734,8 +1734,8 @@ def dedup_existing():
 
     print("Linking...")
     do_exec([dest_run_args(desttype, [destcd + bkdir
-               +" && /bin/cat >"+tmpdir+"-rpc/dest.lst.gz"
-               +" && /usr/bin/python3 "+tmpdir+"-rpc/dest_helper.py dedup"
+               +" && /bin/cat >"+desttmpdir+"-rpc/dest.lst.gz"
+               +" && /usr/bin/python3 "+desttmpdir+"-rpc/dest_helper.py dedup"
                ])
             ], infile=tmpdir+"/dedup.lst.gz", out=tmpdir+"/arch-dedup.log")
 
@@ -2160,9 +2160,9 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
         os.replace("../in_process.tmp", "../in_process")
 
     # Start merge operation on dest
-    retcode = dest_run([destcd + bkdir+"/"+datavol + " && python3 "
-                        + tmpdir+"-rpc/dest_helper.py merge"
-                        + (" --resume" if resume else "") + (" --sync" if options.maxsync else "")
+    retcode = dest_run([destcd + bkdir+"/"+datavol
+                        +" && python3 "+desttmpdir+"-rpc/dest_helper.py merge"
+                        +(" --resume" if resume else "") + (" --sync" if options.maxsync else "")
                         ],
                         check=False, out=">>"+tmpdir+"/merge.log"
                       )
@@ -2180,8 +2180,9 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
 
     catch_signals()
     # Finalize merge operation on dest
-    dest_run([destcd + bkdir+"/"+datavol + " && python3 "
-                +tmpdir+"-rpc/dest_helper.py merge --finalize"+(" --resume" if resume else "")
+    dest_run([destcd + bkdir+"/"+datavol
+                +" && python3 "+desttmpdir+"-rpc/dest_helper.py merge --finalize"
+                +(" --resume" if resume else "")
                 +" && rm -rf ../in_process merge merge.lst.gz"
                 ],
                 trap=True, out=">>"+tmpdir+"/merge.log"
@@ -2334,7 +2335,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                 "s|^\S+\s+x(\S{" +str(address_split[0])+ "})(\S+)\s+(S_\S+)|\\3/\\1/x\\1\\2|;"],
                 [CP.gzip, "-c", "-4"
                 ],
-                dest_run_args(desttype, ["cat >"+tmpdir+"-rpc/dest.lst.gz"]),
+                dest_run_args(desttype, ["cat >"+desttmpdir+"-rpc/dest.lst.gz"]),
             ]
         do_exec(cmds)
 
@@ -2410,8 +2411,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     # Create retriever process using py program
     cmd = dest_run_args(desttype,
             [destcd + bkdir+"/"+datavol
-             +" && exec 2>>"+tmpdir+"-rpc/receive.log"
-             +" && python3 "+tmpdir+"-rpc/dest_helper.py receive"
+             +" && exec 2>>"+desttmpdir+"-rpc/receive.log"
+             +" && python3 "+desttmpdir+"-rpc/dest_helper.py receive"
             ])
     getvol   = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                      stdin =subprocess.PIPE if sparse else subprocess.DEVNULL)
@@ -2546,8 +2547,8 @@ def rename_volume(oldname, newname):
     catch_signals()
     if not aset.in_process:   set_in_process(["rename", oldname, newname])
     if volume.sessions:
-        rc = dest_run([ destcd + bkdir + " && cat >archive.ini.tmp && python3 "
-                    +tmpdir+("-rpc/dest_helper.py rename '%s' '%s'" % (oldname, newname)) ],
+        rc = dest_run([ destcd + bkdir + " && cat >archive.ini.tmp && python3 "+desttmpdir
+                      +("-rpc/dest_helper.py rename '%s' '%s'" % (oldname, newname)) ],
                         infile=aset.confpath+".tmp", check=False, trap=True)
         if rc not in (0, 40):
             raise RuntimeError("Destination exit code "+str(rc))
@@ -2743,7 +2744,7 @@ def x_it(code, text):
 def cleanup():
     if not debug:
         shutil.rmtree(big_tmpdir, ignore_errors=True)
-        for f in (big_tmpdir, tmpdir, tmpdir+"-rpc", tmpdir+"-old"):
+        for f in (big_tmpdir, tmpdir, tmpdir+"-old"):
             shutil.rmtree(f, ignore_errors=True)
     if error_cache:
         sys.stderr.write("Error on volume(s): " + ", ".join(error_cache) + "\n")
@@ -2756,7 +2757,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.3.3"         ; prog_date = "20220829"
+prog_version          = "0.3.3"         ; prog_date = "20220902"
 format_version        = 2               ; debug     = False       ; tmpdir = None
 
 
@@ -2904,6 +2905,7 @@ dest_online, dest_free, dest_in_process, dest_writable  = detect_dest_state(dest
 bkdir            = topdir+"/"+aset.name
 destpath         = os.path.normpath(pjoin(aset.destmountpoint,aset.destdir))
 destcd           = " cd '"+destpath+"'"
+desttmpdir       = tmpdir+os.getrandom(20).hex()
 
 # Check online status for certain commands.
 if not dest_writable and options.action in write_actions and not options.from_arch \
