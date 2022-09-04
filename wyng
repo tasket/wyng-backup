@@ -10,7 +10,7 @@
 #  editor width: 100  -----------------------------------------------------------------------------
 import sys, signal, os, stat, shutil, subprocess, time, datetime
 import re, mmap, bz2, zlib, gzip, tarfile, io, fcntl, tempfile
-import argparse, configparser, hashlib, functools, uuid
+import argparse, configparser, hashlib, functools, uuid, string
 import xml.etree.ElementTree    ; from itertools import islice
 from array import array         ; import resource
 
@@ -823,10 +823,11 @@ def detect_internal_state():
     #####>  Begin helper program  <#####
 
     dest_program = \
-    '''#  Copyright Christopher Laprise 2018-2021
+'''#  Copyright Christopher Laprise 2018-2021
 #  Licensed under GNU General Public License v3. See github.com/tasket/wyng-backup
 import os, sys, signal, shutil, subprocess, gzip, tarfile
-cmd = sys.argv[1]   ; tmpdir = "''' + desttmpdir + '''-rpc"   ; msync = "--sync" in sys.argv
+cmd = sys.argv[1]   ; msync = "--sync" in sys.argv
+tmpdir = os.path.dirname(os.path.abspath(sys.argv[0]))
 exists = os.path.exists    ; replace = os.replace    ; remove = os.remove
 
 def fssync(path):
@@ -992,7 +993,7 @@ elif cmd == "get-configs":
 
 
 def detect_dest_state(destsys):
-    global dest_run_map
+    global dest_run_map, desttmpdir
     dest_run_map     = {"internal": [CP.sh],
                         "ssh":      [CP.ssh] + ssh_opts + [destsys],
                         "qubes":    [CP.qvm_run, "--no-color-stderr", "--no-color-output",
@@ -1002,7 +1003,7 @@ def detect_dest_state(destsys):
                         }
 
     dest_in_proc  = False   ; dest_free = None    ; online = False
-    dest_writable = True
+    dest_writable = True    ; tmpdigits = 12      ; tmpprefix = "/tmp/wyngrpc-"
 
     if (options.action not in local_actions and destsys is not None) \
         or options.remap or options.from_arch:
@@ -1012,7 +1013,7 @@ def detect_dest_state(destsys):
             dargs = dest_run_map["qubes"][:-1] + [destsys.split(":")[0]]
 
             cmd = dargs + [shell_prefix \
-                  +CP.rm+" -rf "+desttmpdir+"-rpc  &&  mkdir -p "+desttmpdir+"-rpc"
+                  +CP.rm+" -rf "+tmpdir+"-rpc  &&  mkdir -p "+tmpdir+"-rpc"
                   ]
             do_exec([cmd])
 
@@ -1022,8 +1023,8 @@ def detect_dest_state(destsys):
                 +"' && cd '"+aset.destmountpoint+"/"+aset.destdir+topdir+"'"
 
                 # send helper program to remote dest
-                +"  && rm -rf "+desttmpdir+"-rpc  &&  mkdir -p "+desttmpdir+"-rpc"
-                +"  && cat >"+desttmpdir+"-rpc/dest_helper.py"
+                +"  && tdir=$(mktemp -d " + tmpprefix + ("X"*tmpdigits) + ") && echo $tdir"
+                +"  && cat >$tdir/dest_helper.py"
 
                 # test write access and hardlinks
                 +"  && touch archive.dat || echo 'wyng_read_only'"
@@ -1053,6 +1054,11 @@ def detect_dest_state(destsys):
                     parts = ln.split()    ; dest_free = int(parts[1]) * int(parts[2])
                 elif ln.startswith("wyng_read_only"):
                     dest_writable = False
+                elif ln.startswith(tmpprefix):
+                    desttmpdir = ln.strip()
+        if not desttmpdir or len(desttmpdir) != len(tmpprefix)+tmpdigits \
+        or not set(desttmpdir[5:]) <= set(string.ascii_letters + string.digits + "-"):
+            raise ValueError("Missing or malformed tmp dir: "+repr(desttmpdir))
 
     return dest_free is not None, dest_free, dest_in_proc, dest_writable
 
@@ -1182,14 +1188,14 @@ def dest_run_args(dest_type, commands, trap=False):
     if dest_type in {"qubes","qubes-ssh"}:
         do_exec([[CP.qvm_run, "--no-color-stderr", "--no-color-output", "-p",
                   (destsys if dest_type == "qubes" else destsys.split(":")[0]),
-                  CP.mkdir+" -p "+desttmpdir+"-rpc"
-                  +" && "+CP.cat+" >"+pjoin(desttmpdir+"-rpc",remotetmp)
+                  CP.mkdir+" -p "+tmpdir+"-rpc"
+                  +" && "+CP.cat+" >"+pjoin(tmpdir+"-rpc",remotetmp)
                 ]], infile=pjoin(tmpdir,remotetmp))
         if dest_type == "qubes":
-            add_cmd = [CP.sh+" "+pjoin(desttmpdir+"-rpc",remotetmp)]
+            add_cmd = [CP.sh+" "+pjoin(tmpdir+"-rpc",remotetmp)]
         elif dest_type == "qubes-ssh":
             add_cmd = [CP.ssh+" "+" ".join(ssh_opts)+" "+destsys.split(":")[1]
-                       +' "$('+CP.cat+' '+pjoin(desttmpdir+"-rpc",remotetmp)+')"']
+                       +' "$('+CP.cat+' '+pjoin(tmpdir+"-rpc",remotetmp)+')"']
 
     elif dest_type == "ssh":
         #add_cmd = [' "$(cat '+pjoin(tmpdir,remotetmp)+')"']
@@ -2757,7 +2763,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.3.3"         ; prog_date = "20220902"
+prog_version          = "0.3.3"         ; prog_date = "20220903"
 format_version        = 2               ; debug     = False       ; tmpdir = None
 
 
@@ -2905,7 +2911,7 @@ dest_online, dest_free, dest_in_process, dest_writable  = detect_dest_state(dest
 bkdir            = topdir+"/"+aset.name
 destpath         = os.path.normpath(pjoin(aset.destmountpoint,aset.destdir))
 destcd           = " cd '"+destpath+"'"
-desttmpdir       = tmpdir+os.getrandom(20).hex()
+desttmpdir       = None
 
 # Check online status for certain commands.
 if not dest_writable and options.action in write_actions and not options.from_arch \
