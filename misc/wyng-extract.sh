@@ -8,7 +8,7 @@
 set -eo pipefail
 LC_ALL=C
 
-echo "Wyng archive extractor, V0.3.x 20210802"
+echo "Wyng archive extractor, V0.3.x 20220905"
 
 hashw=64;  addrw=17;  delimw=1;  uniqw=$(( hashw + delimw + addrw ))
 
@@ -122,7 +122,7 @@ if [ -n "$opt_list" ]; then exit 0; fi
 
   case $compr in
     zstd)  DECOMPRESS="zstdcat";    COMPRESS="zstd --no-check -T2 -$compr_level";
-           zstd -V | grep -q v1.4 || { echo Requires zstd v1.4; exit 1; };;
+           zstd -V | grep -q 'v1\.4\.' || { echo Requires zstd v1.4; exit 1; };;
     zlib)  DECOMPRESS="unpigz -cz"; COMPRESS="pigz -z -$compr_level";;
     bz2)   DECOMPRESS="bzcat";      COMPRESS="bzip2 -$compr_level";;
   esac
