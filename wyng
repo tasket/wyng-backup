@@ -63,6 +63,8 @@ class ArchiveSet:
         for name in cp["var"].keys():
             setattr(self, name, int(cp["var"][name]) \
                                 if name in self.a_ints else cp["var"][name])
+        if self.compression == "zstd" and not zstd.version().startswith("1.4."):
+            x_it(1,"python3-zstd version 1.4.x is required.")
 
         # load volume metadata objects
         for key in cp["volumes"]:

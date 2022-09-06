@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # wyng-extract.sh  -  Simple disk image extractor for Wyng archives.
-#  Copyright Christopher Laprise 2018-2021 / tasket@protonmail.com
+#  Copyright Christopher Laprise 2018-2022 / tasket@protonmail.com
 #  Licensed under GNU General Public License v3. See file 'LICENSE'.
 
 
@@ -121,7 +121,8 @@ if [ -n "$opt_list" ]; then exit 0; fi
   echo "Volume size = $volsize bytes."
 
   case $compr in
-    zstd)  DECOMPRESS="zstdcat";    COMPRESS="zstd -T2 -$compr_level";;
+    zstd)  DECOMPRESS="zstdcat";    COMPRESS="zstd --no-check -T2 -$compr_level";
+           zstd -V | grep -q v1.4 || { echo Requires zstd v1.4; exit 1; };;
     zlib)  DECOMPRESS="unpigz -cz"; COMPRESS="pigz -z -$compr_level";;
     bz2)   DECOMPRESS="bzcat";      COMPRESS="bzip2 -$compr_level";;
   esac
