@@ -121,7 +121,7 @@ if [ -n "$opt_list" ]; then exit 0; fi
   echo "Volume size = $volsize bytes."
 
   case $compr in
-    zstd)  DECOMPRESS="zstdcat";    COMPRESS="zstd --no-check -T2 -$compr_level";
+    zstd)  DECOMPRESS="zstdcat -q"; COMPRESS="zstd -q --rm --no-check -T2 -$compr_level";
            zstd -V | grep -q 'v1\.4\.' || { echo Requires zstd v1.4; exit 1; };;
     zlib)  DECOMPRESS="unpigz -cz"; COMPRESS="pigz -z -$compr_level";;
     bz2)   DECOMPRESS="bzcat";      COMPRESS="bzip2 -$compr_level";;
@@ -169,16 +169,16 @@ if [ -n "$opt_list" ]; then exit 0; fi
       cd CHK
 
       # Compress chunk files
-      find . -name '*[0-9][0-4]'  |  xargs -r "$COMPRESS"  ||  touch ../cmprfail  &
-      find . -name '*[0-9][5-9]'  |  xargs -r "$COMPRESS"  ||  touch ../cmprfail  &
+      find . -name '*[0-9][0-4]'  |  xargs -r $COMPRESS  ||  touch ../cmprfail  &
+      find . -name '*[0-9][5-9]'  |  xargs -r $COMPRESS  ||  touch ../cmprfail  &
       wait
       if [ -e ../cmprfail ]; then
         echo "Compression error."; exit 1
       fi
 
       # Hash the chunk files, remove extension, convert 2nd col to hex fname
-      find . -type f -printf '%f\n' \
-      |  xargs -r "$HASH_CHECK"  |  sed -E 's|\..+$||'  |  sort -k2,2  \
+      find . -type f -print    |  sed -E 's|^\.\/||' \
+      |  xargs -r $HASH_CHECK  |  sed -E 's|\..+$||'  |  sort -k2,2  \
       |  awk -v i="$i" -v cs="$chunksize" '{ printf "%s x%.16x\n", $1, $2 * cs + i }' \
       >>../local-manifest
 
