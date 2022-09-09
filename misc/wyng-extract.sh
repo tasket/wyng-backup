@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/ash
 
 # wyng-extract.sh  -  Simple disk image extractor for Wyng archives.
 #  Copyright Christopher Laprise 2018-2022 / tasket@protonmail.com
@@ -8,7 +8,7 @@
 set -eo pipefail
 LC_ALL=C
 
-echo "Wyng archive extractor, V0.3.x 20220905"
+echo "Wyng archive extractor, V0.3.1 20210908"
 
 hashw=64;  addrw=17;  delimw=1;  uniqw=$(( hashw + delimw + addrw ))
 
@@ -26,7 +26,7 @@ done
 shift $(( OPTIND - 1 ))
 
 if [ -n "$outopt" ]; then
-  outvol=`realpath "$outopt"`
+  outvol="$outopt"
 elif [ -z "$opt_check" ] && [ -z "$opt_list" ]; then
   opterr=1
 fi
@@ -60,29 +60,29 @@ if [ -e $tmpdir ]; then mv $tmpdir $tmpdir.old; fi
 rm -rf $tmpdir $tmpdir.old  &&  mkdir $tmpdir
 
 
-( cd "$voldir";  curdir=`pwd`
+  cd "$voldir";  curdir=$(pwd)
 
   # Check that format version is 1 or 2
-  arch_ver=`grep '^format_ver =' volinfo | awk '{print $3}'`
+  arch_ver=$(grep '^format_ver =' volinfo | awk '{print $3}')
   case $arch_ver in
     1|2)  format_ver=$arch_ver;;
     *)    echo "Error: Did not find a compatible format.";  exit 1;;
   esac
 
   echo "Getting metadata for volume $volname."
-  ln=`grep -E '^last =' volinfo`;   read one two s_last <<<"$ln"
+  ln=$(grep -E '^last =' volinfo);   s_last=$(echo "$ln" | cut -d " " -f3)
   cp volinfo $tmpdir;  sed -E '/\[volumes/q' ../archive.ini >$tmpdir/archive.ini
 
   # Add session column to manifests and create symlinks using sequence number.
-  if [ -z "$sestag" ]; then sestag=${s_last:2}; fi
+  if [ -z "$sestag" ]; then sestag=$(echo "$s_last" | cut -c3-); fi
   session=$s_last
-  while [ ! ${session,,} = 'none' ]; do
-    ln=`grep '^previous =' $session/info`;  read one two s_prev <<<"$ln"
-    if [ -z "$sesnames" ] && [ ! "${session:2}" = "$sestag" ]; then session=$s_prev;  continue; fi
+  while [ ! "$session" = 'none' ] && [ ! "$session" = 'None' ]; do
+    ln=$(grep '^previous =' "$session"/info);  s_prev=$(echo "$ln" | cut -d " " -f3)
+    if [ -z "$sesnames" ] && [ ! "$(echo "$session" | cut -c3-)" = "$sestag" ]; then session=$s_prev;  continue; fi
 
-    ln=`grep '^sequence =' $session/info`;  read one two sequence <<<"$ln"
-    sed 's|$| S_'$sequence'|'  $session/manifest  >$tmpdir/m_$sequence
-    ln -s "$curdir/$session" $tmpdir/S_$sequence
+    ln=$(grep '^sequence =' "$session"/info);  sequence=$(echo "$ln" | cut -d " " -f3)
+    sed 's|$| S_'"$sequence"'|'  "$session"/manifest  >$tmpdir/m_"$sequence"
+    ln -s "$curdir/$session" $tmpdir/S_"$sequence"
 
     sesnames="$session $sesnames";  session=$s_prev
   done
@@ -90,34 +90,34 @@ rm -rf $tmpdir $tmpdir.old  &&  mkdir $tmpdir
   # List sessions and exit.
   if [ -n "$opt_list" ]; then
     for ses in $sesnames; do
-      echo ${ses:2};  sed -n 's|^tag |  tag |;T;p' $ses/info
+      echo "$ses"| cut -c3-
+      sed -n 's|^tag |  tag |;T;p' "$ses"/info
     done
     exit 0
   fi
 
   if [ -z "$sesnames" ]; then echo "Error: Session not found."; exit 1; fi
   echo -n "$sesnames"  >$tmpdir/sesnames
-)
 
 
 if [ -n "$opt_list" ]; then exit 0; fi
 
 
-( cd $tmpdir
+  cd $tmpdir
 
   # Get a list of manifest files, sorted by sequence in filename, as 'm_last' and 'm_therest'.
-  ln=`find . -name 'm_*' -exec basename '{}' \; | sort --reverse -V | tr '\n' ' '`
-  read m_last m_therest <<<"$ln"
-  read sesnames  <<< `cat sesnames`
+  ln=$(find . -name 'm_*' -exec basename '{}' \; | sort -r -V | tr '\n' ' ')
+  m_last=$(echo "$ln" | cut -d " " -f1);    m_therest=$(echo "$ln" | cut -d " " -f2-)
+  sesnames=$(cat sesnames)
 
   # Get volume size, chunk size, compression, hash type and last chunk address.
-  ln=`grep -E '^volsize =' S_${m_last#m_}/info`;  read one two volsize <<<"$ln"
-  ln=`grep -E '^vgname ='  archive.ini`;          read one two vgname <<<"$ln"
-  ln=`grep -E '^chunksize ='  archive.ini`;       read one two chunksize <<<"$ln"
-  ln=`grep -E '^compression ='  archive.ini`;     read one two compr <<<"$ln"
-  ln=`grep -E '^compr_level ='  archive.ini`;     read one two compr_level <<<"$ln"
-  ln=`grep -E '^hashtype ='  archive.ini`;        read one two hashtype <<<"$ln"
-  lastchunk=`printf '%016x' $(( ($volsize - 1) - (($volsize - 1) % $chunksize) ))`
+  ln=$(grep -E '^volsize =' S_"${m_last#m_}"/info);  volsize=$(echo "$ln" | cut -d " " -f3)
+  ln=$(grep -E '^vgname ='  archive.ini);            vgname=$(echo "$ln" | cut -d " " -f3)
+  ln=$(grep -E '^chunksize ='  archive.ini);         chunksize=$(echo "$ln" | cut -d " " -f3)
+  ln=$(grep -E '^compression ='  archive.ini);       compr=$(echo "$ln" | cut -d " " -f3)
+  ln=$(grep -E '^compr_level ='  archive.ini);       compr_level=$(echo "$ln" | cut -d " " -f3)
+  ln=$(grep -E '^hashtype ='  archive.ini);          hashtype=$(echo "$ln" | cut -d " " -f3)
+  lastchunk=$(printf '%016x' $(( ($volsize - 1) - (($volsize - 1) % $chunksize) )))
   echo "Volume size = $volsize bytes."
 
   case $compr in
@@ -140,9 +140,9 @@ if [ -n "$opt_list" ]; then exit 0; fi
   # which is then compared vs Wyng archive manifests.
   chunks=1024 # batch size
   megachunksize=$(( chunksize * chunks ))
-  truncate --size $chunksize ZERO
+  truncate -s "$chunksize" ZERO
   $COMPRESS -c ZERO >ZERO.c
-  ln=`$HASH_CHECK ZERO.c`;  read zhash two <<<"$ln"
+  ln=$($HASH_CHECK ZERO.c);  zhash=$(echo "$ln"| cut -d " " -f1)
   mkdir CHK
 
   if [ -n "$opt_sparse" ]; then
@@ -153,21 +153,24 @@ if [ -n "$opt_list" ]; then exit 0; fi
 
     # Make local vol correct size for comparison
     if [ ! -b "$outvol" ]; then
-      truncate --size $volsize "$outvol"
+      truncate -s "$volsize" "$outvol"
+      echo "truncating to $volsize $outvol"
     elif lvm lvdisplay "$outvol" >/dev/null; then
-      lvm lvresize -L ${volsize}B "$outvol" 2>/dev/null
+      lvm lvresize -L "${volsize}B" "$outvol" 2>/dev/null
+      echo "resizing to $volside $outvol"
     fi
-
-    for ((i=0; i<volsize; i=i+megachunksize)); do
+    
+    i=0
+    while [ "$i" -lt "$volsize" ]; do
       echo -en "Hashing volume $i \r"
-      dd if="$outvol" bs=$chunksize count=$chunks skip=$i iflag=skip_bytes status=none \
-      |  split -d -a 5 -b $chunksize - CHK/
+      dd if="$outvol" bs="$chunksize" count=$chunks skip=$i iflag=skip_bytes status=none \
+      |  split -d -a 5 -b "$chunksize" - CHK/
 
       cd CHK
 
       # Compress chunk files
-      find . -name '*[0-9][0-4]'  |  xargs -r $COMPRESS  ||  touch ../cmprfail  &
-      find . -name '*[0-9][5-9]'  |  xargs -r $COMPRESS  ||  touch ../cmprfail  &
+      find . -name '*[0-9][0-4]'  |  xargs -r "$COMPRESS"  ||  touch ../cmprfail  &
+      find . -name '*[0-9][5-9]'  |  xargs -r "$COMPRESS"  ||  touch ../cmprfail  &
       wait
       if [ -e ../cmprfail ]; then
         echo "Compression error."; exit 1
@@ -175,23 +178,24 @@ if [ -n "$opt_list" ]; then exit 0; fi
 
       # Hash the chunk files, remove extension, convert 2nd col to hex fname
       find . -type f -printf '%f\n' \
-      |  xargs -r $HASH_CHECK  |  sed -E 's|\..+$||'  |  sort -k2,2  \
+      |  xargs -r "$HASH_CHECK"  |  sed -E 's|\..+$||'  |  sort -k2,2  \
       |  awk -v i="$i" -v cs="$chunksize" '{ printf "%s x%.16x\n", $1, $2 * cs + i }' \
       >>../local-manifest
 
       cd ..;   rm -f CHK/*
+      i=$(( i+megachunksize ))
     done
 
     echo -en "\nCreating diff index..."
-    sort -um -k2,2 $m_last $m_therest  |  sed -E '/ x'$lastchunk'/q; s|^0\s+|'$zhash' |' \
+    sort -um -k2,2 "$m_last" "$m_therest"  |  sed -E '/ x'"$lastchunk"'/q; s|^0\s+|'"$zhash"' |' \
     |  sort -ms -k2,2 - local-manifest  |  uniq -u -w $uniqw  |  sort -um -k2,2  \
-    |  sed -E 's|^'$zhash'|0|'  \
+    |  sed -E 's|^'"$zhash"'|0|'  \
     >diff-manifest
 
     if [ -n "$opt_diff" ]; then
       echo '---'
       cat diff-manifest
-      exit $(( `wc -l diff-manifest | cut -d ' ' -f1` > 0 ))
+      exit $(( $(wc -l diff-manifest | cut -d ' ' -f1) > 0 ))
     fi
 
     # Create a zerofill manifest for the extraction merge-sort.
@@ -202,7 +206,7 @@ if [ -n "$opt_list" ]; then exit 0; fi
     # final step uses zeros for sparse seeking. Needs optimizing.
     echo -en "\nFilling zeros..."
     sed -E 's|^0\s+(\S+)\s*.*|0\1|; t; d' diff-manifest  \
-    |  xargs -i -r $HOLEPUNCH -z -l $chunksize -o {} "$outvol"
+    |  xargs -i -r $HOLEPUNCH -z -l "$chunksize" -o {} "$outvol"
 
     echo -en "\nChecking volume hashes..."
     sed -E '/^0 x/ d; s|'"$mregex"'|\1 \4/\2/x\2\3|;' diff-manifest  \
@@ -229,10 +233,10 @@ if [ -n "$opt_list" ]; then exit 0; fi
   # Set local volume to correct size.
   if [ ! -b "$outvol" ]; then
     if [ -z "$opt_sparse" ]; then rm -f "$outvol"; fi
-    truncate --size $volsize "$outvol"
+    truncate -s "$volsize" "$outvol"
   elif lvm lvdisplay "$outvol" >/dev/null; then
     if [ -z "$opt_sparse" ]; then blkdiscard "$outvol"; fi
-    lvm lvresize -L ${volsize}B "$outvol" 2>/dev/null || true
+    lvm lvresize -L "${volsize}B" "$outvol" 2>/dev/null || true
   fi
   if [ ! -e "$outvol" ]; then
     echo "Error: Output/save path does not exist!"
@@ -244,11 +248,12 @@ if [ -n "$opt_list" ]; then exit 0; fi
   sort -um -k2,2 $m_last $m_therest  |  sed -E "/ x$lastchunk/q" \
   |  sed -E 's|^0 x.*|ZERO|; t; s|'"$mregex"'|\4/\2/x\2\3|'  \
   |  xargs $DECOMPRESS -f  \
-  |  dd of="$outvol"  obs=$chunksize conv=sparse,notrunc,nocreat
+  |  dd of="$outvol"  obs="$chunksize" conv=sparse,notrunc,nocreat
 
   sync
-)
+
 
 echo
 echo "OK"
 rm -r $tmpdir
+
