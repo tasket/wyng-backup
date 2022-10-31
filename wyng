@@ -1104,13 +1104,13 @@ def get_configs(opts):
         # Prepare a temporary metadata dir and init aset with it
         tmpmeta   = big_tmpdir+"/var"    ; os.makedirs(tmpmeta+bkdir)
         aset_from = ArchiveSet(arch_name, tmpmeta+topdir, dest)
-        arch_init(aset_from)
+        arch_init(aset_from, opts)
         return aset_from, dest
 
     aset = ArchiveSet(arch_name, metadir+topdir, dest, children=load_children)
  
     if opts.action == "arch-init" and aset.updated_at is None:
-        arch_init(aset)
+        arch_init(aset, opts)
     elif opts.action == "arch-init":
         x_it(1, "Archive already initialized for "+aset.name)
     if aset.updated_at is None:
