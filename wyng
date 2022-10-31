@@ -3224,6 +3224,8 @@ lockpath = "/var/lock/"+prog_name
 try:
     lockf = open(lockpath, "w")
     fcntl.lockf(lockf, fcntl.LOCK_EX|fcntl.LOCK_NB)
+except PermissionError:
+    x_it(1, "ERROR: No writting permission on /var/lock/ . Run wyng as root.")
 except IOError:
     x_it(1, "ERROR: "+prog_name+" is already running.")
 
