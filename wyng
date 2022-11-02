@@ -35,7 +35,7 @@ class ArchiveSet:
         self.in_process  = get_in_process(self.path)
         # persisted:
         self.chunksize   = bkchunksize * 2
-        self.compression = "zlib"
+        self.compression = "zstd" if zstd else "zlib"
         self.compr_level = str(compressors[self.compression][1])
         self.hashtype    = "blake2b" if "blake2b" in hash_funcs else "sha256"
         self.vgname      = None
@@ -595,9 +595,6 @@ def arch_init(aset):
         compression = compression.strip()   ; compr_level = compr_level.strip()
         if compression not in compressors.keys() or not is_num(compr_level):
             x_it(1, "Invalid compression spec.")
-        if compression == "zstd":
-            print("Warning: zstd does not support reproducible output; future zstd updates may "
-                  "prevent Wyng from deduplicating data.")
         aset.compression = compression      ; aset.compr_level = compr_level
         compressors[compression][2](b"test", compr_level)
 
@@ -2773,7 +2770,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.3.5"         ; prog_date = "20221101"
+prog_version          = "0.3.5"         ; prog_date = "20221102"
 format_version        = 2               ; debug     = False       ; tmpdir = None
 
 
@@ -2785,6 +2782,8 @@ lockpath = "/var/lock/"+prog_name
 try:
     lockf = open(lockpath, "w")
     fcntl.lockf(lockf, fcntl.LOCK_EX|fcntl.LOCK_NB)
+except PermissionError:
+    x_it(1, "ERROR: No writing permission on %s.  Run %s as root." % (lockpath,prog_name))
 except IOError:
     x_it(1, "ERROR: "+prog_name+" is already running.")
 
