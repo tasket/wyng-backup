@@ -1227,7 +1227,7 @@ class Destination:
 
         # save locations change
         if dspec and dname:
-            locs[dname] = opts.dest
+            locs[dname] = dspec
             self.save_locations(locs)    ; del(locs)
 
 
@@ -3221,7 +3221,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4.0alpha2"   ; prog_date = "20221101"
+prog_version          = "0.4.0alpha2"   ; prog_date = "20221102"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
