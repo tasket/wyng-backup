@@ -1083,7 +1083,8 @@ def get_configs(opts):
     arch_name = "default"    ; bkdir = topdir + "/" + arch_name
     load_children = 1 if opts.action in ("arch-delete","delete","add") else 2
 
-    dest = Destination(opts.from_arch if opts.from_arch else opts.dest, opts.dest_name)
+    dspec = opts.from_arch if opts.from_arch else opts.dest
+    dest = Destination(dspec, opts.dest_name, opts.dest)
     if (opts.action not in local_actions and dest.sys is not None) \
     or opts.remap or opts.from_arch:
         dest.detect_state(arch_name, opts.dedup)
@@ -1178,7 +1179,7 @@ class Destination:
 
     magic       = b"\xff\x11\x15"
 
-    def __init__(self, dspec, dname):
+    def __init__(self, dspec, dname, dest):
 
         # fetch locations list, dest spec
         dest_url = dspec    ; locs = self.load_locations()
@@ -1221,7 +1222,7 @@ class Destination:
 
         # save locations change
         if dspec and dname:
-            locs[dname] = opts.dest
+            locs[dname] = dest
             self.save_locations(locs)    ; del(locs)
 
 
