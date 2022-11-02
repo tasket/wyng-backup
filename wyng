@@ -35,7 +35,7 @@ class ArchiveSet:
         self.in_process  = get_in_process(self.path)
         # persisted:
         self.chunksize   = bkchunksize * 2
-        self.compression = "zstd" if zstd else "zlib"
+        self.compression = "zlib"
         self.compr_level = str(compressors[self.compression][1])
         self.hashtype    = "blake2b" if "blake2b" in hash_funcs else "sha256"
         self.vgname      = None
@@ -595,7 +595,11 @@ def arch_init(aset):
         compression = compression.strip()   ; compr_level = compr_level.strip()
         if compression not in compressors.keys() or not is_num(compr_level):
             x_it(1, "Invalid compression spec.")
+        if compression == "zstd":
+            print("Warning: zstd does not support reproducible output; future zstd updates may "
+                  "prevent Wyng from deduplicating data.")
         aset.compression = compression      ; aset.compr_level = compr_level
+        compressors[compression][2](b"test", compr_level)
 
     if options.chfactor:
         # accepts an exponent from 1 to 6
@@ -1041,12 +1045,12 @@ def detect_dest_state(destsys):
                 +"  echo 'wyng_in_process'; fi }"
                 ]
         try:
-            do_exec([dest_run_args(desttype, cmd),
-                     # sanitize remote output:
-                     [CP.cat,"-v"],  [CP.tail,"--bytes=2000"]
-                    ],
-                    out=tmpdir+"/dest-state.log", infile=tmpdir+"/rpc/dest_helper.py")
-            online = True
+            online = \
+                not do_exec([dest_run_args(desttype, cmd),
+                            # sanitize remote output:
+                            [CP.cat,"-v"],  [CP.tail,"--bytes=2000"]],
+                            pipefail=True,
+                            out=tmpdir+"/dest-state.log", infile=tmpdir+"/rpc/dest_helper.py")
         except subprocess.CalledProcessError:
             online = False
 
@@ -1114,7 +1118,7 @@ def get_in_process(archpath=""):
 # selected by beginning 'out' path with '>>'.
 # List of commands may include 'None' instead of a child list; these will be ignored.
 
-def do_exec(commands, cwd=None, check=True, out="", infile="", text=False):
+def do_exec(commands, cwd=None, check=True, out="", infile="", text=False, pipefail=False):
     ftype   = "t" if text else "b"
     outmode = "a" if out.startswith(">>") else "w"
     out = out.lstrip(">>")
@@ -1164,7 +1168,8 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", text=False):
     if err and check:
         raise subprocess.CalledProcessError(err.returncode, err.args)
 
-    return procs[-1].returncode
+    rclist = [0] + list(filter(bool if pipefail else str, ( x.returncode for x in procs )))
+    return rclist[-1]
 
 
 # Run system commands on destination
@@ -1494,7 +1499,7 @@ def send_volume(datavol, localtime, ses_tags, send_all):
          open(sdir+"-tmp/manifest", "w") as hashf,             \
          open("/dev/zero" if send_all else vol.mapfile+"-tmp","rb") as bmapf:
 
-        vf_seek = vf.seek; vf_read = vf.read
+        vf_seek = vf.seek; vf_read = vf.read  ; compare_digest = hmac.compare_digest
         gethash = hash_funcs[aset.hashtype]   ; BytesIO = io.BytesIO
 
         # Show progress in increments determined by 1000/checkpt_pct
@@ -1556,7 +1561,7 @@ def send_volume(datavol, localtime, ses_tags, send_all):
                     bhash  = gethash(buf)   ; hexhash = bhash.hexdigest()
 
                     # Skip when current and prior chunks are the same
-                    if fman_hash == hexhash:  continue
+                    if compare_digest(fman_hash, hexhash):  continue
 
                 # Start tar stream
                 if not stream_started:
@@ -2768,7 +2773,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.3.4"         ; prog_date = "20220907"
+prog_version          = "0.3.5"         ; prog_date = "20221101"
 format_version        = 2               ; debug     = False       ; tmpdir = None
 
 
