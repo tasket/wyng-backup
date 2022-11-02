@@ -90,6 +90,7 @@ The `--dest` argument includes the destination type, remote system (where applic
 and file path.  The `-n` or `--dest-name` argument tells Wyng to associate the dest location
 with the name "default" which will be automatically used for future Wyng commands.
 
+It is required to specify the location of an archive for all actions unless destination name `default` was previously defined with `-n default`.  
 
 ## Operation
 
