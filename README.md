@@ -278,6 +278,8 @@ wyng add vm-untrusted-private
 ```
 Adds a new entry to the list of volumes configured for backup.
 
+The entry needs to be **volume name**, not a **VM name**.  You can find your volume names with `sudo lvs`.
+
 
 #### delete
 ```
