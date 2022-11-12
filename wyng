@@ -3003,13 +3003,6 @@ def rename_volume(oldname, newname):
         vg = aset.vgname    ; lv_remove(vg, newname+ext)
         if lv_exists(vg, oldname+ext):   lv_rename(vg, oldname+ext, newname+ext)
 
-    full_aset = ArchiveSet(aset.name, aset.path, aset.dest, allvols=True, prior_auth=aset)
-    if len(full_aset.vols[newname].sessions) \
-    and compare_files(full_aset, pathlist=[full_aset.confname], volumes=[full_aset.vols[newname]]):
-        x_it(1, "Error: Local and archive metadata differ.")
-
-    return full_aset
-
 
 def add_volume(datavol, desc):
     if not lv_exists(aset.vgname, datavol):   print("Warning:", datavol, "does not exist.")
@@ -3417,12 +3410,16 @@ if aset.in_process and dest.online and not options.from_arch \
         print("Completing prior operation in progress:", " ".join(aset.in_process[0:2]))
 
         if aset.in_process[0] == "delete":
-            delete_volume(aset.in_process[1])
+            vname = aset.in_process[1]
+            delete_volume(vname)
         elif aset.in_process[0] == "merge":
-            merge_sessions(aset.in_process[1], aset.in_process[4].split(":|"),
+            vname = aset.in_process[1]
+            merge_sessions(vname, aset.in_process[4].split(":|"),
                         aset.in_process[3], clear_sources=bool(aset.in_process[2]))
 
-        aset = ArchiveSet(aset.name, aset.path, aset.dest, allvols=True, prior_auth=aset)
+        aset = ArchiveSet(aset.name, metadir+topdir, aset.dest, allvols=True, prior_auth=aset)
+        if compare_files(aset, pathlist=[aset.confname], volumes=[aset.vols[vname]]):
+            x_it(1, "Error: Local and archive metadata differ.")
 
 # Display archive update time as local time
 arch_dt_raw = datetime.datetime.fromtimestamp(float(aset.updated_at), datetime.timezone.utc)
