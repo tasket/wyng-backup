@@ -317,15 +317,15 @@ class ArchiveVolume:
         Ses = ArchiveSession
         if debug:  print("\n", vid, "-", name)
         if path and not exists(path):   os.makedirs(path)
-        if exists(path):
-            do_exec([[CP.chattr, "-c", path, self.mapfile]], check=False) #### remove
         if path and hashval != "0":
             with open(pjoin(path,"volinfo"), "rb") as f:
                 fsize = os.fstat(f.fileno()).st_size
                 if fsize > ArchiveSet.max_volinfosz:   raise ValueError("volinfo too large")
                 buf = f.read(fsize)
             if archive.mcrypto:   buf = archive.mcrypto.decrypt(buf)
-            assert hmac.compare_digest(hashval, archive.b64hash(buf))
+            if not hmac.compare_digest(hashval, archive.b64hash(buf)):
+                raise ValueError("Volume %s hash %s, expected %s" \
+                                 % (vid, archive.b64hash(buf), hashval))
             if debug:   print(archive.decompress(buf).decode("UTF-8"))
             with io.StringIO(archive.decompress(buf).decode("UTF-8")) as f:
                 for ln in f:
@@ -480,12 +480,15 @@ class ArchiveSession:
         self.manifesthash = None
 
         if path and hashval != "0":
+            if debug:   print(name, ":", path)
             with open(pjoin(path,"info"), "rb") as sf:
                 fsize = os.fstat(sf.fileno()).st_size
                 if fsize > ArchiveSet.max_infosz:   raise ValueError("info too large")
                 buf = sf.read(fsize)
             if arch.mcrypto:   buf = arch.mcrypto.decrypt(buf)
-            assert hmac.compare_digest(hashval, arch.b64hash(buf))
+            if not hmac.compare_digest(hashval, arch.b64hash(buf)):
+                raise ValueError("Session %s hash %s, expected %s" \
+                                 % (name, arch.b64hash(buf), hashval))
             with io.StringIO(arch.decompress(buf).decode("UTF-8")) as sf:
                 for ln in sf:
                     if ln.strip() == "uuid =":  continue
@@ -2482,7 +2485,7 @@ def autoprune(datavol, needed_space=0, apmode="off", include=set()):
                 to_prune.append(ses)
 
         if removed_ct:
-            print(" Removed", removed_ct)
+            if options.verbose:   print(datavol+": Removed", removed_ct)
             dest.get_free(tmpdir+"/merge.log")    ; os.remove(tmpdir+"/merge.log")
 
         if skipped and apmode != "off":   continue # while
@@ -3103,11 +3106,11 @@ def show_list(selected_vols):
     elif not selected_vols and not len(options.volumes):
         print("\nConfigured Volumes [%s/%s]\n" % (aset.vgname, aset.poolname))
         maxwidth = max(len(x.name) for x in aset.vols.values())
-        fmt    = "%7.2f GB  %s  %-" + str(maxwidth+5) + "s  %s"
+        fmt    = "%7.2f GB  (%5d)  %s  %-" + str(maxwidth+5) + "s  %s"
         for vname in sorted(x.name for x in aset.vols.values()):
             vol = aset.vols[vname]   ; sname = vol.sesnames[-1][2:] if len(vol.sesnames) else " "
             if options.verbose:
-                print(fmt % ((vol.volsize() / 1024**3), vol.vid, vname, sname))
+                print(fmt % ((vol.volsize() / 1024**3), len(vol.sessions), vol.vid, vname, sname))
                 if vol.desc:   print("  desc:", vol.desc)
             else:
                 print(vname)
@@ -3221,7 +3224,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4.0alpha2"   ; prog_date = "20221102"
+prog_version          = "0.4.0alpha2"   ; prog_date = "20221111"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
@@ -3394,13 +3397,6 @@ if dest.online and options.action not in ("arch-init","arch-check","arch-delete"
 
 
 
-# Display archive update time as local time
-arch_dt_raw = datetime.datetime.fromtimestamp(float(aset.updated_at), datetime.timezone.utc)
-arch_dt     = arch_dt_raw.astimezone().isoformat(sep=u" ")
-sys.stderr.write("Encrypted " if (aset.mcrypto and aset.datacrypto) else "Unencrypted ")
-sys.stderr.write("archive last updated %s (%s)\n\n" % (arch_dt[:-6], arch_dt[-6:]))
-if options.verbose:   sys.stderr.write("Dest location: %s\n" % dest.spec)
-
 # Handle unfinished in_process:
 # Functions supported here must not internally use global variable inputs that are unique to
 # a runtime invocation (i.e. the 'options' objects), or they must test such variables
@@ -3425,6 +3421,15 @@ if aset.in_process and dest.online and not options.from_arch \
         elif aset.in_process[0] == "merge":
             merge_sessions(aset.in_process[1], aset.in_process[4].split(":|"),
                         aset.in_process[3], clear_sources=bool(aset.in_process[2]))
+
+        aset = ArchiveSet(aset.name, aset.path, aset.dest, allvols=True, prior_auth=aset)
+
+# Display archive update time as local time
+arch_dt_raw = datetime.datetime.fromtimestamp(float(aset.updated_at), datetime.timezone.utc)
+arch_dt     = arch_dt_raw.astimezone().isoformat(sep=u" ")
+sys.stderr.write("Encrypted " if (aset.mcrypto and aset.datacrypto) else "Unencrypted ")
+sys.stderr.write("archive last updated %s (%s)\n\n" % (arch_dt[:-6], arch_dt[-6:]))
+if options.verbose:   sys.stderr.write("Dest location: %s\n" % dest.spec)
 
 # Check volume args against config
 exclude_vols  = set(options.volex.split(","))
@@ -3459,7 +3464,6 @@ elif options.action == "prune":
 
     for dv in dvs:
         if dv in datavols:
-            print("Pruning", dv)
             if options.session:
                 prune_sessions(dv, options.session.split(","))
             elif options.autoprune.lower() in ("on","min","full"):
