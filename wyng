@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# editor width: 100   -----------------------------------------------------------------------------
 
 
 ###  Wyng – Logical volume backup tool
@@ -6,8 +7,13 @@
 ###  Licensed under GNU General Public License v3. See file 'LICENSE'.
 
 
+# Return codes:
+# 1 - Fatal error
+# 2 - Error on specific volume(s)
+# 3 - Auth error
+# 4 - Timeout
 
-#  editor width: 100  -----------------------------------------------------------------------------
+
 import sys, signal, os, stat, shutil, subprocess, time, datetime
 import re, mmap, bz2, zlib, gzip, tarfile, io, fcntl, tempfile
 import argparse, configparser, hashlib, hmac, functools, uuid
@@ -47,7 +53,7 @@ class ArchiveSet:
     attr_ints   = {"format_ver","chunksize","mci_count","dataci_count"}
 
     def __init__(self, name, top, dest, ext="", allvols=False, children=2,
-                 passphrase=None, prior_auth=None):
+                 pass_agent=0, passphrase=None, prior_auth=None):
         self.dest        = dest
         self.name        = name
         self.path        = pjoin(top,name)
@@ -56,6 +62,7 @@ class ArchiveSet:
         self.modeprefix  = b"ci = "
         self.mcrypto     = mcrypto = None
         self.datacrypto  = datacrypto = None
+        self.agent_proc  = None
         self.vols        = {}
         self.dedupindex  = {}
         self.dedupsessions = []
@@ -113,16 +120,27 @@ class ArchiveSet:
         if self.ci_mode != b"00" and not mcrypto:
             ci_types = DataCryptography.crypto_codes[self.ci_mode]
             if debug:   print("metadata cipher =", ci_types[1])
-            if not passphrase:   passphrase = ask_passphrase()
-            assert passphrase and passphrase != bytes(len(passphrase))
-            self.mcrypto = mcrypto = DataCryptography(ci_types[1], self.confpath+".salt",
-                                       slot=1, passphrase=passphrase[:])
+
+            # Access a key agent, if available for this UID and archive URL
+            agent_name = "wyng-agent-" + str(os.getuid()) + hashlib.blake2b(
+                           bytes(self.dest.spec, encoding="UTF-8"), digest_size=16).hexdigest()
+            agentkeys  = agent_get(agent_name, pass_agent)
+            if not passphrase and not agentkeys:   passphrase = ask_passphrase()
+            if passphrase:
+                assert passphrase != bytes(len(passphrase))
+            elif not agentkeys:
+                raise ValueError("No authentication input.")
+            passphrase_s1 = passphrase[:] if passphrase else None
+
+            self.mcrypto = mcrypto = DataCryptography(ci_types[1], self.confpath+".salt", slot=1,
+                                    passphrase=passphrase_s1, agentkeys=agentkeys)
 
         # initial decryption + auth
         try:
             if mcrypto:   buf = mcrypto.decrypt(buf)
-        except Exception as e:
-            sys.stderr.write("Error: Could not decrypt/authenticate archive.\n")
+        except ValueError as e:
+            if "MAC check failed" in e.args:
+                print(e)   ; x_it(3, "Error: Could not decrypt/authenticate archive.\n")
             raise e
 
         # read attributes from archive.ini
@@ -138,14 +156,21 @@ class ArchiveSet:
         #if self.compression == "zstd" and not zstd.version().startswith("1.4."):
         #    x_it(1,"python3-zstd version 1.4.x is required.")
 
+        self.compress    = compressors[self.compression][2]
+        self.decompress  = compressors[self.compression][0].decompress
+        self.gethash     = hash_funcs[self.hashtype]
+
         # init data crypto
         if mcrypto and not self.datacrypto:
             if not float(self.updated_at) < time.time():
                 raise ValueError("Current time is less than archive timestamp!")
-            assert passphrase and passphrase != bytes(len(passphrase))
             self.datacrypto = datacrypto \
-                = DataCryptography(self.data_cipher, mcrypto.keyfile, slot=0,
-                                   passphrase=passphrase, cadence=20)
+                = DataCryptography(self.data_cipher, mcrypto.keyfile, slot=0, cadence=20,
+                                   passphrase=passphrase, agentkeys=agentkeys)
+
+            # persist keys to allow future invocations w/o passphrase input
+            if pass_agent > 0 and not agentkeys:
+                agent_make(agent_name, pass_agent, [datacrypto.key, mcrypto.key])
 
         if mcrypto:
         # use higest known counter values:
@@ -153,10 +178,6 @@ class ArchiveSet:
         # above values in archive.ini (anti-DoS). Possibly warn or prompt user.
             mcrypto.counter    = self.mci_count    = max(mcrypto.counter, self.mci_count)
             datacrypto.counter = self.dataci_count = max(datacrypto.counter, self.dataci_count)
-
-        self.compress    = compressors[self.compression][2]
-        self.decompress  = compressors[self.compression][0].decompress
-        self.gethash     = hash_funcs[self.hashtype]
 
         # load volume metadata objects
         convlist = []
@@ -572,6 +593,73 @@ class ArchiveSession:
 # END class ArchiveSet, ArchiveVolume, ArchiveSession
 
 
+def agent_helper_write():
+    agent_program = '''#  Copyright Christopher Laprise 2018-2023
+#  Licensed under GNU General Public License v3. See github.com/tasket/wyng-backup
+import os, sys, signal, shutil, subprocess
+
+def clear_array(ar):
+    for ii in range(len(ar)):   ar[ii] = 0
+
+def sighandler(a,b):  pass
+
+## MAIN ##
+cmd = sys.argv[1]   ; agent_name = sys.argv[2]   ; magic  = b"\\xff\\x11\\x15"
+exists = os.path.exists    ; USR1 = signal.SIGUSR1
+
+signal.signal(USR1, sighandler)   ; signal.siginterrupt(USR1, True)
+keys = []   ; inread = sys.stdin.buffer.read
+duration = min(inread(1)[0], 60) * 60
+try:
+    for slot in range(2):
+        keys.append(bytearray(inread(inread(1)[0])))   ; assert inread(3) == magic
+    while signal.sigtimedwait({USR1}, duration):
+        with open("/tmp/"+agent_name,"wb") as npipe:
+            for key in keys:
+                npipe.write(magic + len(key).to_bytes(1,"big") + key); npipe.flush()
+except Exception as e:
+    sys.stderr.write(repr(e))
+finally:
+    for key in keys:   clear_array(key)
+    os.remove("/tmp/"+agent_name)
+'''
+    with open(tmpdir +"/agent_helper.py", "wb") as progf:
+        progf.write(bytes(agent_program, encoding="UTF-8"))
+
+
+def agent_get(aname, duration):
+    ps = subprocess.check_output([CP.ps, "-u"+str(os.getuid()), "-o", "pid,command"], text=True)
+    findp  = [x for x in ps.splitlines() if (aname in x and "agent_helper.py store" in x)]
+    if not findp:   return None
+    pid    = int(findp[0].split()[0])   ;  os_kill(pid, signal.SIGUSR1)
+    result = []   ; catch_signals(["ALRM"], iflag=True) ;   signal.alarm(10)
+    try:
+        with open("/tmp/"+aname, "rb") as npipe:
+            for slot in range(2):
+                if m := npipe.read(3) != Destination.magic:
+                    raise ValueError("*Magic not found, got "+repr(m))
+                result.append(key := bytearray(npipe.read(ksz := npipe.read(1)[0])))
+                if len(key) != ksz:   raise ValueError("Key length")
+    except (TimeoutError, ValueError) as e:
+        for k in result:   clear_array(k)
+        result = None    ; os_kill(pid)
+    finally:
+        if duration < 1:   os_kill(pid)
+        signal.alarm(0)  ; catch_signals(None)
+        return result
+
+
+def agent_make(aname, duration, keys):
+    if exists("/tmp/"+aname):   os.remove("/tmp/"+aname)
+    os.mkfifo("/tmp/"+aname, mode=0o600)
+    p = subprocess.Popen([CP.python, tmpdir+"/agent_helper.py","store",aname], text=False,
+                          shell=False, stdin=subprocess.PIPE, stdout=spDEVNULL) #, stderr=spDEVNULL)
+    p.stdin.write(min(duration,60).to_bytes(1,"big"))
+    for k in keys:  p.stdin.write(len(k).to_bytes(1,"big") + k + Destination.magic)
+    p.poll(); p.stdin.flush(); p.stdin.close()
+    return p
+
+
 # DataCryptography(): Handle crypto functions and state for volume data
 
 class DataCryptography:
@@ -589,7 +677,7 @@ class DataCryptography:
                        b"40":  ("xchacha20-poly1305", "xchacha20-poly1305")}
 
 
-    def __init__(self, ci_type, keyfile, slot, passphrase, cadence=1, init=False):
+    def __init__(self, ci_type, keyfile, slot, passphrase, agentkeys=None, cadence=1, init=False):
         assert passphrase is None or type(passphrase) == bytearray
         assert cadence > 0
 
@@ -604,18 +692,7 @@ class DataCryptography:
         self.timer   = time.time        ; self.get_rnd  = get_random_bytes
 
         if ci_type == "aes-256-cbc":
-            # FIX: Probably requires IV encryption with different non-data key
-            raise NotImplementedError("Needs work")
-            if not (platform.machine() == "x86_64" and "aes" in cpu_flags):
-                print("Warning: x86_64 + AES crypto sidechannel resistance not detected.")
-            self.key_sz  = kbits//8                ; self.max_count = 2**48-64 # <--blocks
-            self.iv_sz   = 16                      ; self.buf_start = self.iv_sz
-            self.blk_sz  = Cipher_AES.block_size   ; self.ps_mask = self.blk_sz-1
-            self.mode    = Cipher_AES.MODE_CBC     ; self.AES_new = Cipher_AES.new
-            self.countsz = self.max_count.bit_length() // 8
-            self.rndivsz = self.iv_sz - self.countsz
-            self.encrypt = self._enc_aes_256_cbc_rndpad
-            self.decrypt = self._dec_aes_256_cbc_rndpad
+            raise NotImplementedError()
 
         elif ci_type == "aes-256-siv":
             if not (platform.machine() == "x86_64" and "aes" in cpu_flags):
@@ -663,7 +740,13 @@ class DataCryptography:
             keyfile.seek(self.slot_offset)    ; ctbytes = keyfile.read(self.countsz)
             self.counter = self.ctstart = cadence - 1 + int.from_bytes(ctbytes, "big")
             salt         = keyfile.read(self.key_sz)   ; assert len(salt) == self.key_sz
-            self.key     = self.derive_key(salt, passphrase)
+
+            if agentkeys:
+                self.key = agentkeys[slot]
+            else:
+                self.key = self.derive_key(salt, passphrase)
+            assert len(self.key) == self.key_sz and type(self.key) is bytearray
+
 
     def __del__(self):
         if self.counter and self.counter > self.ctstart:   self.save_counter()
@@ -685,31 +768,6 @@ class DataCryptography:
     def save_counter(self):
         self.keyfile.seek(self.slot_offset)
         self.keyfile.write(self.counter.to_bytes(self.countsz, "big"))
-
-    # Encrypt aes-256-cbc:
-    # A random 'bolster' block is added as a prefix to the plaintext buffer;
-    # A random padding is also used and 'buf' must be prefixed by len % blk_sz (1 byte)
-    def _enc_aes_256_cbc_rndpad(self, buf):
-        blk_sz = self.blk_sz    ; pad_sz = blk_sz - (len(buf) % blk_sz) & self.ps_mask
-        if pad_sz:   buf += self.get_rnd(pad_sz)
-
-        plaintxt= self.get_rnd(blk_sz) + buf    ; self.counter += len(plaintxt) // blk_sz
-        if self.counter > self.max_count:   raise ValueError("Key exhaustion.")
-        iv      = self.get_rnd(self.rndivsz) + self.counter.to_bytes(self.countsz, "big")
-        cipher  = self.AES_new(self.key, self.mode, iv=iv)
-        buf     = cipher.encrypt(plaintxt) + pad_sz.to_bytes(1,"big")
-        self.save_counter()
-        return iv + buf
-
-    # Decrypt aes-256-cbc:
-    def _dec_aes_256_cbc_rndpad(self, untrusted_buf):
-        iv = untrusted_buf[:self.iv_sz]    ; blk_sz = self.blk_sz
-        pad_sz = untrusted_buf[-1] & self.ps_mask
-
-        cipher = self.AES_new(self.key, self.mode, iv)
-        untrusted_buf = cipher.decrypt(untrusted_buf[self.iv_sz:-1])
-
-        return  untrusted_buf[blk_sz: -pad_sz if pad_sz else None]
 
     # Encrypt aes-256-siv:
     def _enc_aes_256_siv(self, buf):
@@ -779,6 +837,7 @@ class CP:
     tee    = "/usr/bin/tee"     ; sync  = "/bin/sync"       ; dmsetup  = "/sbin/dmsetup"
     chattr = "/usr/bin/chattr"  ; xargs = "/usr/bin/xargs"  ; sha256sum= "/usr/bin/sha256sum"
     cmp    = "/usr/bin/cmp"     ; gzip  = "/bin/gzip"       ; diff     = "/usr/bin/diff"
+    ps     = "/usr/bin/ps"
     thin_delta = "/usr/sbin/thin_delta"
     blkdiscard = "/sbin/blkdiscard"   ; ionice     = "/usr/bin/ionice"
 
@@ -860,7 +919,7 @@ def get_lv_path_pool(path):
     try:
         p = subprocess.run([CP.lvm, "lvs", "--separator=::", "--noheadings",
                             "--options=lv_name,pool_lv,vg_name", path], check=True,
-                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                            stdout=subprocess.PIPE, stderr=spDEVNULL)
     except:
         return "", "", ""
     else:
@@ -887,7 +946,7 @@ def lv_remove(vgname, lvname, sync=True, check=False):
                + CP.lvm + " lvremove -f " + vgname+"/"+lvname]
         if not (sync or clean):   cmds = [CP.ionice, "-c3"] + cmds
         p = subprocess.Popen(cmds, shell=False,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                             stdout=spDEVNULL, stderr=spDEVNULL)
         if not sync and len(procs) < maxprocs:
             procs.append(p)
         else:
@@ -1116,7 +1175,8 @@ def get_configs(opts):
         arch_init(aset_from, opts)
         return aset_from, dest
 
-    aset = ArchiveSet(arch_name, metadir+topdir, dest, children=load_children)
+    aset = ArchiveSet(arch_name, metadir+topdir, dest, children=load_children,
+                      pass_agent=opts.pass_agent)
  
     if opts.action == "arch-init" and aset.updated_at is None:
         arch_init(aset, opts)
@@ -1137,7 +1197,8 @@ def get_configs_remote(dest, aname, recv_dir):
 
     # Instantiate ArchiveSet to authenticate archive.ini
     for fname, fsz in recv_list:   os.replace(recv_dir+"/"+fname+".auth_req", recv_dir+"/"+fname)
-    new_aset = ArchiveSet(aname, os.path.dirname(recv_dir), dest, children=0)
+    new_aset = ArchiveSet(aname, os.path.dirname(recv_dir), dest, children=0,
+                          pass_agent=options.pass_agent)
 
     # Initial auth successful! Fetch + auth volume metadata...
     recv_list= [(x+"/volinfo", ArchiveSet.max_volinfosz)
@@ -1233,6 +1294,8 @@ class Destination:
             locs[dname] = dspec
             self.save_locations(locs)    ; del(locs)
 
+        self.write_helper_program()
+
 
     def get_free(self, fpath): ## Enh: add sanitize
         for ln in open(fpath,"r").readlines():
@@ -1298,20 +1361,19 @@ class Destination:
     def write_helper_program(self):
 
         dest_program = \
-'''#  Copyright Christopher Laprise 2018-2022
+'''#  Copyright Christopher Laprise 2018-2023
 #  Licensed under GNU General Public License v3. See github.com/tasket/wyng-backup
-import os, sys, signal, shutil, subprocess, gzip, tarfile
-cmd = sys.argv[1]   ; msync = "--sync" in sys.argv
-tmpdir = os.path.dirname(os.path.abspath(sys.argv[0]))  
-exists = os.path.exists    ; replace = os.replace    ; remove = os.remove
+import os, sys, time, signal, shutil, subprocess, gzip, tarfile
 
 def fssync(path):
     if msync:   subprocess.Popen(["sync","-f",path])
 
-def catch_signals():
-    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGQUIT, signal.SIGABRT, signal.SIGALRM,
-                signal.SIGTSTP, signal.SIGUSR1):
-        signal.signal(sig, signal.SIG_IGN)    ; signal.siginterrupt(sig, False)
+def catch_signals(sel=["INT","TERM","QUIT","ABRT","ALRM","TSTP","USR1"], iflag=False):
+    for sval in (getattr(signal,"SIG"+x) for x in sel):
+        signal.signal(sval, handle_signal) ; signal.siginterrupt(sval, iflag)
+
+def handle_signal(sig, frame):
+    if sig == signal.SIGALRM:   raise IOError("Timeout ALRM")
 
 def helper_send():
     mkdirs = os.makedirs    ; hlink = os.link    ; dirname = os.path.dirname
@@ -1333,12 +1395,12 @@ def helper_send():
 
 def helper_receive(lstf):
     stdout_write = sys.stdout.buffer.write   ; exists = os.path.exists   ; getsize= os.path.getsize
-    stdout_flush = sys.stdout.flush          ; magic  = b"\\xff\\x11\\x15"
+    stdout_flush = sys.stdout.buffer.flush   ; magicm = magic
     for line in lstf:
         fname = line.strip()
         if not fname:   break
         fsize = getsize(fname) if exists(fname) else 0
-        stdout_write(magic + fsize.to_bytes(4,"big"))
+        stdout_write(magicm + fsize.to_bytes(4,"big"))
         if fsize:
             with open(fname,"rb") as dataf:   stdout_write(dataf.read(fsize))
         stdout_flush()
@@ -1401,11 +1463,15 @@ def helper_merge_finalize():
     print("wyng_check_free", shutil.disk_usage(".").free, flush=True)
 
 ## MAIN ##
+cmd = sys.argv[1]   ; msync = "--sync" in sys.argv   ; magic  = b"\\xff\\x11\\x15"
+tmpdir = os.path.dirname(os.path.abspath(sys.argv[0]))  
+exists = os.path.exists    ; replace = os.replace    ; remove = os.remove
 if "--finalize" in sys.argv:   catch_signals()
-if cmd not in ("merge","merge-finalize","send","rename") and exists(tmpdir+"/dest.lst.gz"):
+if cmd in ("receive","dedup") and exists(tmpdir+"/dest.lst.gz"):
     lstf = gzip.open(tmpdir+"/dest.lst.gz", "rt")
 else:
     lstf = None
+
 if cmd == "merge":
     if not exists("../archive.ini") or not exists("volinfo"):
         print("Error: Not in volume dir.")   ; sys.exit(40)
@@ -1442,13 +1508,13 @@ elif cmd == "dedup":
         with open(tmpdir +"/rpc/dest_helper.py", "wb") as progf:
             progf.write(bytes(dest_program, encoding="UTF-8"))
 
-    #####>  End helper program  <#####
+    #####>  End dest_helper program  <#####
 
 
     def detect_state(self, aset_name, dedup):
 
         tmpdigits = 12      ; tmpprefix = "/tmp/wyngrpc-"
-        self.write_helper_program()
+        #self.write_helper_program()
 
         if self.dtype == "qubes-ssh":
             # fix: possibly remove dargs and use dest.run()
@@ -1517,14 +1583,14 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", inlines=[], text=
     outmode = "a" if out.startswith(">>") else "w"    ; out = out.lstrip(">>")
     if cwd and out and out[0] != "/":   out = pjoin(cwd,out)
     outfunc = gzip.open if out.endswith(".gz") else open
-    outf    = outfunc(out, outmode+ftype) if out else subprocess.DEVNULL
+    outf    = outfunc(out, outmode+ftype) if out else spDEVNULL
 
     if inlines:
         inf = subprocess.PIPE  #io.StringIO("\n".join(inlines)+"\n")
     else:
         if cwd and infile and infile[0] != "/":   infile = pjoin(cwd,infile)
         infunc  = gzip.open if infile.endswith(".gz") else open
-        inf     = infunc(infile, "r"+ftype) if infile else subprocess.DEVNULL
+        inf     = infunc(infile, "r"+ftype) if infile else spDEVNULL
 
     errf = open(tmpdir+"/err.log", "a")  ; print("--+--", file=errf)
     commands = [x for x in commands if x is not None]
@@ -2016,8 +2082,8 @@ def send_volume(datavol, localtime, ses_tags, send_all):
                 # Start tar stream
                 if not stream_started:
                     untar = subprocess.Popen(dest.run_args(untar_cmd),
-                            stdin =subprocess.PIPE,    stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL)
+                            stdin =subprocess.PIPE,    stdout=spDEVNULL,
+                            stderr=spDEVNULL)
                     tarf = tarfile.open(mode="w|", fileobj=untar.stdin)
                     tarf_addfile = tarf.addfile        ; TarInfo = tarfile.TarInfo
                     stream_started = True              ; LNKTYPE = tarfile.LNKTYPE
@@ -2724,22 +2790,25 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False, verify_only
             select_ses = "S_"+select_ses
 
         if select_ses not in sessions:
-            x_it(1, "No match for specified session criteria.")
+            err_out("No match for specified session criteria.")
+            return None
 
     elif len(sessions) > 0:
         select_ses = sessions[-1]
     else:
-        x_it(1, "No sessions available.")
+        err_out("No sessions available.")
+        return None
 
     if diff and remap and select_ses != sessions[-1]:
-        x_it(1, "Cannot use prior session for remap.")
+        err_out("Cannot use prior session for remap.")
+        return None
 
     if save_path and exists(save_path) and attended:
         print("\n!! This will", "overwrite" if sparse_write else "erase all",
               "existing data in",save_path,"!!")
         ans = ask_input("   Are you sure? [y/N]: ")
         if ans.lower() not in {"y","yes"}:
-            x_it(0,"")
+            return None
 
     volsize     = vol.sessions[select_ses].volsize   ; magic       = dest.magic
     chdigits    = max_address.bit_length() // 4      ; chformat    = "x%0"+str(chdigits)+"x"
@@ -2756,7 +2825,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False, verify_only
     if not options.from_arch \
     and compare_files(aset, volumes=[vol], sessions=[vol.sessions[x] for x in incl_ses],
                       manifest=True):
-        x_it(1, "Error: Local and archive metadata differ.")
+        err_out("Error: Local and archive metadata differ.")
+        return None
     vol.decode_manifests(incl_ses, force=True)
 
     # Merge manifests and send to archive system:
@@ -2791,7 +2861,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False, verify_only
             save_type = "logical volume"
             if not lv_exists(vg,lv):
                 if vg != vgname:
-                    x_it(1, "Cannot auto-create volume: Volume group does not match config.")
+                    err_out("Cannot auto-create volume: Volume group does not match config.")
+                    return None
                 print("Creating '%s' in thin pool [%s/%s]." % (lv, vg, aset.poolname))
                 do_exec([[CP.lvm, "lvcreate", "-kn", "-ay", "-V", str(volsize)+"b",
                           "--thin", "-n", lv, vg+"/"+aset.poolname]])
@@ -2803,9 +2874,10 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False, verify_only
             if not sparse_write:   do_exec([[CP.blkdiscard, save_path]])
             volf = open(save_path, "w+b")
         elif save_path.startswith("/dev/"):
-            x_it(1,"Cannot create new volume from ambiguous /dev path."
-                 " Please create the volume before using 'receive', or specify"
-                 " --save-to=/dev/volgroup/lv in case of a thin LV.")
+            err_out("Cannot create new volume from ambiguous /dev path."
+                    " Please create the volume before using 'receive', or specify"
+                    " --save-to=/dev/volgroup/lv in case of a thin LV.")
+            return None
         else: # file
             save_type = "file"
             volf = open(save_path, "w+b")
@@ -2814,7 +2886,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False, verify_only
 
     elif diff:
         if not lv_exists(vgname, datavol):
-            x_it(1, "Local volume must exist for diff.")
+            err_out("Local volume must exist for diff.")
+            return None
         if remap:
             lv_remove(vgname, snap1vol)
             do_exec([[CP.lvm,"lvcreate", "-pr", "-kn", "-ay", "--addtag=wyng",
@@ -2833,8 +2906,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False, verify_only
                 snap1vol = datavol
 
             if volsize != l_vols[snap1vol].lv_size:
-                x_it(1, "Volume sizes differ:"
-                    "\n  Archive = %d \n  Local   = %d" % (volsize, l_vols[snap1vol].lv_size))
+                err_out("Volume sizes differ:\n  Archive = %d \n  Local   = %d"
+                        % (volsize, l_vols[snap1vol].lv_size))   ; return None
 
         volf  = open(pjoin("/dev",vgname,snap1vol), "rb")
 
@@ -2852,7 +2925,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False, verify_only
              +" && python3 "+dest.dtmp+"/dest_helper.py receive"
             ])
     getvol   = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                     stdin =subprocess.PIPE if sparse else subprocess.DEVNULL)
+                                     stdin =subprocess.PIPE if sparse else spDEVNULL)
     gv_stdin = io.TextIOWrapper(getvol.stdin, encoding="utf-8") if sparse else None
 
     # Open manifest then receive, check and save data
@@ -2967,7 +3040,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False, verify_only
             do_exec([[CP.lvm, "lvcreate", "-pr", "-kn", "-ay",
                 "--addtag=wyng", "--addtag="+vol.last,
                 "--addtag=arch-"+aset.uuid, "-s", vgname+"/"+datavol, "-n", snap1vol]])
-            print("  Initial snapshot created for", datavol)
+            if debug:   print("  Initial snapshot created for", datavol)
             init_deltamap(vol, vol.mapfile, vol.mapsize())
         elif returned_home:
             print("Restored from older session: Volume may be out of"
@@ -2978,7 +3051,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False, verify_only
         if diff_count > 0 and options.action != "send":
             print("\nNext 'send' will bring this volume into sync.")
     elif diff_count:
-        error_cache.append(datavol)
+        return None
 
     return bcount
 
@@ -3167,22 +3240,27 @@ def is_num(val):
         return True
 
 
-def catch_signals(action="do"):
-    if action is not None and len(signal_handlers):   print("Already catching")   ; return
-    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGQUIT, signal.SIGABRT, signal.SIGALRM,
-                signal.SIGHUP, signal.SIGTSTP, signal.SIGUSR1):
-        if action is None:
-            signal.signal(sig, signal_handlers[sig])       ; del(signal_handlers[sig])
-        else:
-            signal_handlers[sig] = signal.getsignal(sig)   ; signal.signal(sig, handle_signal)
-            signal.siginterrupt(sig, False)
+def os_kill(pid, sig=signal.SIGTERM):
+    try:
+        os.kill(pid, sig)
+    except ProcessLookupError:
+        pass
 
-    if action is None:
-        while len(signals_caught):   os.kill(os.getpid(), signals_caught.pop(0))
+
+def catch_signals(sel=["INT","TERM","QUIT","ABRT","ALRM","TSTP","USR1","USR2"], iflag=False):
+    # Remove existing handlers
+    for sig in list(signal_handlers):   signal.signal(sig, signal_handlers.pop(sig))
+    # Set handler on requested signals
+    for sig in (getattr(signal,"SIG"+x) for x in (sel if sel else [])):
+        signal_handlers[sig] = signal.getsignal(sig)   ; signal.signal(sig, handle_signal)
+        signal.siginterrupt(sig, iflag)
+
+    while not sel and signals_caught:   os.kill(os.getpid(), signals_caught.pop(0))
 
 
 def handle_signal(signum, frame):
     sys.stderr.write(" *** Caught signal "+str(signum))
+    if signum == signal.SIGALRM:  raise TimeoutError("SIGALRM")
     if signum not in signals_caught:   signals_caught.append(signum)
 
 
@@ -3193,9 +3271,13 @@ def ask_input(text):
 
 # Exit with simple message
 def x_it(code, text):
-    sys.stderr.write(text+"\n")
+    err_out(text)
     if tmpdir:   cleanup()
     sys.exit(code)
+
+
+def err_out(text):
+    sys.stdout.write(text+"\n")
 
 
 def cleanup():
@@ -3207,7 +3289,7 @@ def cleanup():
         for f in (big_tmpdir, tmpdir):
             shutil.rmtree(f, ignore_errors=True)
     if error_cache:
-        sys.stderr.write("Error on volume(s): " + ", ".join(error_cache) + "\n")
+        err_out("Error on volume(s): " + ", ".join(error_cache))
         sys.exit(2)
 
 
@@ -3217,7 +3299,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4.0alpha2"   ; prog_date = "20221111"
+prog_version          = "0.4.0alpha2"   ; prog_date = "20230128"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
@@ -3255,7 +3337,7 @@ hash_bits             = 256
 os.environ["LC_ALL"]  = "C"    ; shell_prefix   = "set -e && export LC_ALL=C\n"
 
 alphanumsym = "^[a-zA-Z0-9\+\._-]+$"
-pjoin       = os.path.join    ; exists = os.path.exists
+pjoin       = os.path.join    ; exists = os.path.exists    ; spDEVNULL = subprocess.DEVNULL
 
 local_actions         = ("monitor","list","version")
 write_actions         = ("add","send","prune","delete","rename","arch-delete","arch-deduplicate")
@@ -3266,6 +3348,8 @@ parser = argparse.ArgumentParser(description="")
 parser.add_argument("action", choices=local_actions+dest_actions, help="Action to take")
 parser.add_argument("-u", "--unattended", action="store_true", default=False,
                     help="Non-interactive, supress prompts")
+parser.add_argument("--pass-agent", type=int, default=0,
+                    help="Minutes to remember passphrase")
 parser.add_argument("--all-before", dest="allbefore", action="store_true", default=False,
                     help="Select all sessions before --session date-time.")
 parser.add_argument("--all", action="store_true", default=False)
@@ -3305,6 +3389,7 @@ parser.add_argument("--volume-desc", dest="voldesc", default="",
 parser.add_argument("volumes", nargs="*")
 options = parser.parse_args()    ; options.action = options.action.lower()
 
+monitor_only     = options.action == "monitor"
 # Set stdout to devnull if --quiet is specified
 debug = options.debug    ; assert not (options.quiet and (options.verbose or debug))
 if debug:   options.verbose = True
@@ -3335,6 +3420,7 @@ shutil.rmtree("/tmp/"+prog_name+"-debug", ignore_errors=True)
 shutil.rmtree(big_tmpdir, ignore_errors=True)
 os.makedirs(tmpdir+"/rpc")
 if admin_permission:   os.makedirs(big_tmpdir, exist_ok=True)
+agent_helper_write()
 
 
 ## General Configuration ##
@@ -3349,7 +3435,6 @@ if zstd:   compressors["zstd"] = (zstd, 3, lambda data, lvl: zstd.compress(data,
 hash_funcs       = {"sha256" : hashlib.sha256,
                     "blake2b": functools.partial(hashlib.blake2b, digest_size=hash_bits//8)}
 
-monitor_only     = options.action == "monitor" # gather metadata without backing up
 
 # Create ArchiveSet and Destination objects with get_configs().
 # Passphrase input happens here; no stdin before this point!
@@ -3424,9 +3509,9 @@ if aset.in_process and dest.online and not options.from_arch \
 # Display archive update time as local time
 arch_dt_raw = datetime.datetime.fromtimestamp(float(aset.updated_at), datetime.timezone.utc)
 arch_dt     = arch_dt_raw.astimezone().isoformat(sep=u" ")
-sys.stderr.write("Encrypted " if (aset.mcrypto and aset.datacrypto) else "Unencrypted ")
-sys.stderr.write("archive last updated %s (%s)\n\n" % (arch_dt[:-6], arch_dt[-6:]))
-if options.verbose:   sys.stderr.write("Dest location: %s\n" % dest.spec)
+sys.stderr.write("Encrypted " if (aset.mcrypto and aset.datacrypto) else "Un-encrypted ")
+sys.stderr.write("archive: %s\n" % dest.spec)
+sys.stderr.write("Last updated %s (%s)\n\n" % (arch_dt[:-6], arch_dt[-6:]))
 
 # Check volume args against config
 exclude_vols  = set(options.volex.split(","))
@@ -3468,19 +3553,22 @@ elif options.action == "prune":
 
 
 elif options.action == "receive":
-    if len(selected_vols) != 1:
-        x_it(1, "Specify one volume for receive.")
+    if len(selected_vols) != 1 and options.saveto:
+        x_it(1, "Specify one volume for receive --save-to.")
     if options.session and len(options.session.split(",")) > 1:
         x_it(1, "Specify only one session for receive.")
-    receive_volume(selected_vols[0], select_ses="" if not options.session else options.session,
-                   save_path=options.saveto if options.saveto else "")
+
+    for dv in selected_vols:
+        count = receive_volume(dv, select_ses="" if not options.session else options.session,
+                               save_path=options.saveto if options.saveto else "")
+        if count is None:   error_cache.append(dv)
 
 
 elif options.action == "verify":
     if options.session and len(options.session.split(",")) > 1:
         x_it(1, "Specify one session for verify.")
 
-    for dv in selected_vols:
+    for dv in datavols if options.all else selected_vols:
         receive_volume(dv,
                     select_ses="" if not options.session else options.session.split(",")[0],
                     verify_only=1, save_path="")
@@ -3494,7 +3582,7 @@ elif options.action == "diff":
 
 
 elif options.action == "list":
-    show_list(selected_vols)
+    show_list(datavols if options.all else selected_vols)
 
 
 elif options.action == "add":
