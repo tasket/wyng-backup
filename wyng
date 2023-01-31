@@ -14,7 +14,7 @@
 # 4 - Timeout
 
 
-import sys, signal, os, stat, shutil, subprocess, time, datetime
+import sys, signal, os, stat, shutil, subprocess as SPr, time, datetime
 import re, mmap, bz2, zlib, gzip, tarfile, io, fcntl, tempfile
 import argparse, configparser, hashlib, hmac, functools, uuid
 import getpass, base64, platform, resource, itertools, string
@@ -596,7 +596,7 @@ class ArchiveSession:
 def agent_helper_write():
     agent_program = '''#  Copyright Christopher Laprise 2018-2023
 #  Licensed under GNU General Public License v3. See github.com/tasket/wyng-backup
-import os, sys, signal, shutil, subprocess
+import os, sys, signal
 
 def clear_array(ar):
     for ii in range(len(ar)):   ar[ii] = 0
@@ -628,7 +628,7 @@ finally:
 
 
 def agent_get(aname, duration):
-    ps = subprocess.check_output([CP.ps, "-u"+str(os.getuid()), "-o", "pid,command"], text=True)
+    ps = SPr.check_output([CP.ps, "-u"+str(os.getuid()), "-o", "pid,command"], text=True)
     findp  = [x for x in ps.splitlines() if (aname in x and "agent_helper.py store" in x)]
     if not findp:   return None
     pid    = int(findp[0].split()[0])   ;  os_kill(pid, signal.SIGUSR1)
@@ -652,8 +652,8 @@ def agent_get(aname, duration):
 def agent_make(aname, duration, keys):
     if exists("/tmp/"+aname):   os.remove("/tmp/"+aname)
     os.mkfifo("/tmp/"+aname, mode=0o600)
-    p = subprocess.Popen([CP.python, tmpdir+"/agent_helper.py","store",aname], text=False,
-                          shell=False, stdin=subprocess.PIPE, stdout=spDEVNULL) #, stderr=spDEVNULL)
+    p = SPr.Popen([CP.python, tmpdir+"/agent_helper.py","store",aname], text=False,
+                          shell=False, stdin=SPr.PIPE, stdout=SPr.DEVNULL) #, stderr=SPr.DEVNULL)
     p.stdin.write(min(duration,60).to_bytes(1,"big"))
     for k in keys:  p.stdin.write(len(k).to_bytes(1,"big") + k + Destination.magic)
     p.poll(); p.stdin.flush(); p.stdin.close()
@@ -907,7 +907,7 @@ def vg_exists(vgname):
     if not volgroups:   return False
     try:
         do_exec([[CP.lvm, "vgdisplay", vgname]])
-    except subprocess.CalledProcessError:
+    except SPr.CalledProcessError:
         return False
     else:
         return True
@@ -917,9 +917,9 @@ def vg_exists(vgname):
 def get_lv_path_pool(path):
     if not volgroups:   return "", "", ""
     try:
-        p = subprocess.run([CP.lvm, "lvs", "--separator=::", "--noheadings",
+        p = SPr.run([CP.lvm, "lvs", "--separator=::", "--noheadings",
                             "--options=lv_name,pool_lv,vg_name", path], check=True,
-                            stdout=subprocess.PIPE, stderr=spDEVNULL)
+                            stdout=SPr.PIPE, stderr=SPr.DEVNULL)
     except:
         return "", "", ""
     else:
@@ -945,8 +945,8 @@ def lv_remove(vgname, lvname, sync=True, check=False):
                + (CP.blkdiscard + " /dev/" + vgname+"/"+lvname + " ; ") if optsync else ""
                + CP.lvm + " lvremove -f " + vgname+"/"+lvname]
         if not (sync or clean):   cmds = [CP.ionice, "-c3"] + cmds
-        p = subprocess.Popen(cmds, shell=False,
-                             stdout=spDEVNULL, stderr=spDEVNULL)
+        p = SPr.Popen(cmds, shell=False,
+                             stdout=SPr.DEVNULL, stderr=SPr.DEVNULL)
         if not sync and len(procs) < maxprocs:
             procs.append(p)
         else:
@@ -975,7 +975,7 @@ def lvm_meta_snapshot(arch, action, pool=None):
 
 # Try to sync only selected filesystem
 def fssync(path):
-    if options.maxsync:   subprocess.Popen([CP.sync,"-f",path])
+    if options.maxsync:   SPr.Popen([CP.sync,"-f",path])
 
 
 def ask_passphrase(verify=False, recur=0):
@@ -1363,10 +1363,10 @@ class Destination:
         dest_program = \
 '''#  Copyright Christopher Laprise 2018-2023
 #  Licensed under GNU General Public License v3. See github.com/tasket/wyng-backup
-import os, sys, time, signal, shutil, subprocess, gzip, tarfile
+import os, sys, time, signal, shutil, subprocess as SPr, gzip, tarfile
 
 def fssync(path):
-    if msync:   subprocess.Popen(["sync","-f",path])
+    if msync:   SPr.Popen(["sync","-f",path])
 
 def catch_signals(sel=["INT","TERM","QUIT","ABRT","ALRM","TSTP","USR1"], iflag=False):
     for sval in (getattr(signal,"SIG"+x) for x in sel):
@@ -1548,7 +1548,7 @@ elif cmd == "dedup":
                             [CP.cat,"-v"],  [CP.tail,"--bytes=2000"]],
                             pipefail=True,
                             out=tmpdir+"/dest-state.log", infile=tmpdir+"/rpc/dest_helper.py")
-        except subprocess.CalledProcessError:
+        except SPr.CalledProcessError:
             online = False
 
         if online:
@@ -1583,14 +1583,14 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", inlines=[], text=
     outmode = "a" if out.startswith(">>") else "w"    ; out = out.lstrip(">>")
     if cwd and out and out[0] != "/":   out = pjoin(cwd,out)
     outfunc = gzip.open if out.endswith(".gz") else open
-    outf    = outfunc(out, outmode+ftype) if out else spDEVNULL
+    outf    = outfunc(out, outmode+ftype) if out else SPr.DEVNULL
 
     if inlines:
-        inf = subprocess.PIPE  #io.StringIO("\n".join(inlines)+"\n")
+        inf = SPr.PIPE  #io.StringIO("\n".join(inlines)+"\n")
     else:
         if cwd and infile and infile[0] != "/":   infile = pjoin(cwd,infile)
         infunc  = gzip.open if infile.endswith(".gz") else open
-        inf     = infunc(infile, "r"+ftype) if infile else spDEVNULL
+        inf     = infunc(infile, "r"+ftype) if infile else SPr.DEVNULL
 
     errf = open(tmpdir+"/err.log", "a")  ; print("--+--", file=errf)
     commands = [x for x in commands if x is not None]
@@ -1598,8 +1598,8 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", inlines=[], text=
     # Start each command, linking them via pipes
     procs = []
     for i, clist in enumerate(commands):
-        p = subprocess.Popen(clist, cwd=cwd, stdin=inf if i==0 else procs[i-1].stdout,
-                             stdout=outf if i==len(commands)-1 else subprocess.PIPE,
+        p = SPr.Popen(clist, cwd=cwd, stdin=inf if i==0 else procs[i-1].stdout,
+                             stdout=outf if i==len(commands)-1 else SPr.PIPE,
                              stderr=errf)
         if len(procs):  procs[-1].stdout.close()
         procs.append(p)
@@ -1613,7 +1613,7 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", inlines=[], text=
             if not finish and retcode is None:
                 try:
                     p1.wait(timeout=2)
-                except subprocess.TimeoutExpired:
+                except SPr.TimeoutExpired:
                     timeout = True
                     continue
                 retcode = p1.returncode   ; finish = True
@@ -1629,7 +1629,7 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", inlines=[], text=
     for f in [inf, outf, errf]:
         if type(f) is not int: f.close()
     if err and check:
-        raise subprocess.CalledProcessError(err.returncode, err.args)
+        raise SPr.CalledProcessError(err.returncode, err.args)
 
     rclist = [0] + list(filter(bool if pipefail else str, ( x.returncode for x in procs )))
     return rclist[-1]
@@ -1667,7 +1667,7 @@ def compare_files(arch, pathlist=[], volumes=[], sessions=[], clear=True, manife
     result = do_exec([[CP.cmp] + files], check=False) > 0
     if result and debug:
         print("'diff %s %s' output:" % tuple(files))
-        subprocess.call([CP.diff] + files)
+        SPr.call([CP.diff] + files)
 
     return result
 
@@ -1696,7 +1696,7 @@ def fetch_file_blobs(recv_list, recv_dir, dest, ext="", skip0=False, verifier=No
              +" && exec 2>>"+dest.dtmp+"/receive.log"
              +" && python3 "+dest.dtmp+"/dest_helper.py receive"
             ])
-    recvp = subprocess.Popen(cmd, stdout=subprocess.PIPE, stdin=subprocess.PIPE)
+    recvp = SPr.Popen(cmd, stdout=SPr.PIPE, stdin=SPr.PIPE)
     recvp.stdin.write(("".join((x+"\n" for x,y in recv_list))).encode("UTF-8"))
     recvp.stdin.flush()    ; rc = recvp.poll()
     magic = dest.magic
@@ -1738,7 +1738,7 @@ def prepare_snapshots(datavols):
     '''
 
     print("Preparing snapshots...")
-    incr_vols, complete_vols = set(), set()    ; vgname = aset.vgname
+    incr_vols, complete_vols = [], []    ; vgname = aset.vgname
     if not vg_exists(vgname):
         print("Warning: Volume group '%s' does not exist." % vgname)
     for datavol in datavols:
@@ -1800,7 +1800,7 @@ def prepare_snapshots(datavols):
         if not exists(mapfile) or not lv_exists(vgname, snap1vol):
             if not monitor_only:
                 print("  Pairing snapshot for", datavol)
-                complete_vols.add(datavol)
+                complete_vols.append(datavol)
             else:
                 print("  Skipping %s; No paired snapshot." % datavol)    ; continue
 
@@ -1812,9 +1812,9 @@ def prepare_snapshots(datavols):
 
         # Volume is OK, add to list of vols.
         if datavol not in complete_vols and vol.sessions:
-            incr_vols.add(datavol)
+            incr_vols.append(datavol)
         else:
-            complete_vols.add(datavol)
+            complete_vols.append(datavol)
 
     return incr_vols, complete_vols
 
@@ -2081,9 +2081,9 @@ def send_volume(datavol, localtime, ses_tags, send_all):
 
                 # Start tar stream
                 if not stream_started:
-                    untar = subprocess.Popen(dest.run_args(untar_cmd),
-                            stdin =subprocess.PIPE,    stdout=spDEVNULL,
-                            stderr=spDEVNULL)
+                    untar = SPr.Popen(dest.run_args(untar_cmd),
+                            stdin =SPr.PIPE,    stdout=SPr.DEVNULL,
+                            stderr=SPr.DEVNULL)
                     tarf = tarfile.open(mode="w|", fileobj=untar.stdin)
                     tarf_addfile = tarf.addfile        ; TarInfo = tarfile.TarInfo
                     stream_started = True              ; LNKTYPE = tarfile.LNKTYPE
@@ -2154,7 +2154,7 @@ def send_volume(datavol, localtime, ses_tags, send_all):
         tarf.close()    ; untar.stdin.close()
         try:
             untar.wait(timeout=60)
-        except subprocess.TimeoutExpired:
+        except SPr.TimeoutExpired:
             print("Warning: tar process timeout.")
             retcode = 99
             untar.kill()
@@ -2296,7 +2296,7 @@ def monitor_send(datavols, monitor_only=True):
     for prg in (CP.lvm, CP.dmsetup, CP.thin_delta ):
         if not shutil.which(prg):  raise RuntimeError("Required command not found: "+prg)
     try:
-        p = subprocess.check_output([CP.thin_delta, "-V"])
+        p = SPr.check_output([CP.thin_delta, "-V"])
     except:
         p = b""
     ver = p[:5].decode("UTF-8").strip()    ; target_ver = "0.7.4"
@@ -2341,14 +2341,14 @@ def monitor_send(datavols, monitor_only=True):
 
     if not monitor_only:
         cmpvols = [x for x in aset.vols.values()
-                         if x.name in incrementals | send_alls and x.sessions]
+                         if x.name in incrementals + send_alls and x.sessions]
         cmpses  = [v.sessions[v.sesnames[-1]] for v in cmpvols]
         if compare_files(aset, volumes=cmpvols, sessions=cmpses):
             x_it(1, "Error: Local and archive metadata differ.")
 
         print("\nSending backup session %s to '%s'." % (localtime, dest.spec))
 
-    for datavol in sorted(incrementals | send_alls):
+    for datavol in incrementals + send_alls:
         vol = aset.vols[datavol]    ; updated = False
         print(" ", "Scan" if monitor_only else "Send", "volume      | ", datavol, flush=True,end="")
 
@@ -2924,8 +2924,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False, verify_only
              +" && exec 2>>"+dest.dtmp+"/receive.log"
              +" && python3 "+dest.dtmp+"/dest_helper.py receive"
             ])
-    getvol   = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                     stdin =subprocess.PIPE if sparse else spDEVNULL)
+    getvol   = SPr.Popen(cmd, stdout=SPr.PIPE,
+                                     stdin =SPr.PIPE if sparse else SPr.DEVNULL)
     gv_stdin = io.TextIOWrapper(getvol.stdin, encoding="utf-8") if sparse else None
 
     # Open manifest then receive, check and save data
@@ -3337,7 +3337,7 @@ hash_bits             = 256
 os.environ["LC_ALL"]  = "C"    ; shell_prefix   = "set -e && export LC_ALL=C\n"
 
 alphanumsym = "^[a-zA-Z0-9\+\._-]+$"
-pjoin       = os.path.join    ; exists = os.path.exists    ; spDEVNULL = subprocess.DEVNULL
+pjoin       = os.path.join    ; exists = os.path.exists
 
 local_actions         = ("monitor","list","version")
 write_actions         = ("add","send","prune","delete","rename","arch-delete","arch-deduplicate")
@@ -3516,11 +3516,13 @@ sys.stderr.write("Last updated %s (%s)\n\n" % (arch_dt[:-6], arch_dt[-6:]))
 # Check volume args against config
 exclude_vols  = set(options.volex.split(","))
 datavols      = sorted(set(aset.vols.keys())  - exclude_vols)
-selected_vols = sorted(set(options.volumes[:]))
+selected_vols = options.volumes[:]
 for vol in selected_vols[:]:
+    if selected_vols.count(vol) > 1:
+        selected_vols.remove(vol)
     if vol not in aset.vols and options.action not in {"add","delete","rename","send"}:
         print("Volume "+vol+" not configured; Skipping.")
-        del(selected_vols[selected_vols.index(vol)])
+        selected_vols.remove(vol)
 
 
 # Process Commands:
