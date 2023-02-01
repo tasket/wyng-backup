@@ -1797,24 +1797,19 @@ def prepare_snapshots(datavols):
         # Handle circumstances where a new mapping is needed. New volume or vol has history
         # but .tick and/or deltamap are still missing after above checks.
         # In this case 'send' can determine any differences w prior backups.
-        if not exists(mapfile) or not lv_exists(vgname, snap1vol):
-            if not monitor_only:
-                print("  Pairing snapshot for", datavol)
-                complete_vols.append(datavol)
-            else:
-                print("  Skipping %s; No paired snapshot." % datavol)    ; continue
+        if vol.sessions and exists(mapfile) and lv_exists(vgname, snap1vol):
+            incr_vols.append(datavol)
+        elif not monitor_only:
+            print("  Pairing snapshot for", datavol)
+            complete_vols.append(datavol)
+        else:
+            print("  Skipping %s; No paired snapshot." % datavol)    ; continue
 
         # Make fresh snap2vol
         lv_remove(vgname, snap2vol)
         tags =["--addtag=delta"] if monitor_only else []
         do_exec([[CP.lvm, "lvcreate", "-pr", "-kn", "-ay", "--addtag=wyng"] + tags
                         + ["--addtag=arch-"+aset.uuid, "-s", vgname+"/"+datavol, "-n",snap2vol]])
-
-        # Volume is OK, add to list of vols.
-        if datavol not in complete_vols and vol.sessions:
-            incr_vols.append(datavol)
-        else:
-            complete_vols.append(datavol)
 
     return incr_vols, complete_vols
 
