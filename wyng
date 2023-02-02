@@ -2956,12 +2956,17 @@ if aset.in_process and dest_online and not options.from_arch \
         print("Completing prior operation in progress:", " ".join(aset.in_process[0:2]))
 
         if aset.in_process[0] == "delete":
-            delete_volume(aset.in_process[1])
+            vname = aset.in_process[1]   ; delete_volume(vname)
         elif aset.in_process[0] == "rename":
-            aset = rename_volume(aset.in_process[1], aset.in_process[2])
+            vname = aset.in_process[2]   ; rename_volume(aset.in_process[1], vname)
         elif aset.in_process[0] == "merge":
-            merge_sessions(aset.in_process[1], aset.in_process[4].split("/"),
+            vname = aset.in_process[1]
+            merge_sessions(vname, aset.in_process[4].split("/"),
                         aset.in_process[3], clear_sources=bool(aset.in_process[2]))
+
+        aset = ArchiveSet(aset.name, metadir+topdir, allvols=True)
+        if compare_files(pathlist=[aset.confname], volumes=[aset.vols[vname]]):
+            x_it(1, "Error: Local and archive metadata differ.")
 
     else:
         print("Unknown prior operation in progress:", aset.in_process[0:2])
