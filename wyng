@@ -1033,7 +1033,7 @@ def detect_dest_state(destsys):
                 +"  && cat >$tdir/dest_helper.py"
 
                 # test write access and hardlinks
-                +"  && touch archive.dat || echo 'wyng_read_only'"
+                +"  && { touch archive.dat || echo 'wyng_read_only'; }"
                 +(" && ln -f archive.dat .hardlink" if options.dedup else "")
 
                 # check free space and in_process status on remote
@@ -2770,7 +2770,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.3.5"         ; prog_date = "20221102"
+prog_version          = "0.3.6"         ; prog_date = "20230221"
 format_version        = 2               ; debug     = False       ; tmpdir = None
 
 
