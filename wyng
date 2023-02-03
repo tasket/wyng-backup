@@ -10,7 +10,7 @@
 #  editor width: 100  -----------------------------------------------------------------------------
 import sys, signal, os, stat, shutil, subprocess, time, datetime
 import re, mmap, bz2, zlib, gzip, tarfile, io, fcntl, tempfile
-import argparse, configparser, hashlib, functools, uuid, string
+import argparse, configparser, hashlib, functools, uuid, string, struct
 import xml.etree.ElementTree    ; from itertools import islice
 from array import array         ; import resource
 
@@ -408,6 +408,32 @@ class CP:
     cmp  = "/usr/bin/cmp"    ; gzip  = "/bin/gzip"       ; diff     = "/usr/bin/diff"
     mountpoint = "/bin/mountpoint"    ; thin_delta = "/usr/sbin/thin_delta"
     blkdiscard = "/sbin/blkdiscard"   ; nice       = "/usr/bin/nice"
+
+
+class LowLevelIO:
+    import ctypes, ctypes.util
+    libc = ctypes.CDLL(ctypes.util.find_library("c"))
+
+    FALLOC_FL_KEEP_SIZE      = 0x01             ; FALLOC_FL_PUNCH_HOLE    = 0x02
+    FALLOC_FL_COLLAPSE_RANGE = 0x08             ; FALLOC_FL_ZERO_RANGE    = 0x10
+    FALLOC_FL_INSERT_RANGE   = 0x20             ; FALLOC_FL_UNSHARE_RANGE = 0x40
+    FALLOC_FL_PUNCH_FULL     = FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE
+
+    BLKDISCARD               = 0x1277           ; BLKDISCARDZEROES        = 0x127c
+
+    fallocate = libc.fallocate
+    fallocate.restype = ctypes.c_int
+    fallocate.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int64, ctypes.c_int64]
+
+    # Note: file_punch_hole() and block_discard_chunk() have the same arg signature...
+    def file_punch_hole(self, fn, start, length):
+        return self.fallocate(fn, self.FALLOC_FL_PUNCH_FULL, start, length)
+
+    def block_discard_chunk(self, fn, start, length):
+        try:
+            return fcntl.ioctl(fn, self.BLKDISCARD, struct.pack("LL", start, length))
+        except Exception as e:
+            return None
 
 
 class Lvm_VolGroup:
@@ -1033,7 +1059,7 @@ def detect_dest_state(destsys):
                 +"  && cat >$tdir/dest_helper.py"
 
                 # test write access and hardlinks
-                +"  && touch archive.dat || echo 'wyng_read_only'"
+                +"  && { touch archive.dat || echo 'wyng_read_only'; }"
                 +(" && ln -f archive.dat .hardlink" if options.dedup else "")
 
                 # check free space and in_process status on remote
@@ -2356,8 +2382,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     if save_path:
         # Decode dev path semantics and match to vg/lv if possible. Otherwise, open
         # simple block dev or file.
-        save_type = "block device"
-        returned_home = False    ; lv, pool, vg = get_lv_path_pool(save_path)
+        save_type = "block device"   ; punch_hole   = low_level_io.block_discard_chunk
+        returned_home = False        ; lv, pool, vg = get_lv_path_pool(save_path)
         if not lv and vg_exists(os.path.dirname(save_path)):
             # Got vg path, lv does not exist
             lv = os.path.basename(save_path)
@@ -2378,16 +2404,15 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
         if exists(save_path) and stat.S_ISBLK(os.stat(save_path).st_mode):
             if not sparse_write:   do_exec([[CP.blkdiscard, save_path]])
-            volf = open(save_path, "w+b")
+            volf = open(save_path, "r+b")
         elif save_path.startswith("/dev/"):
             x_it(1,"Cannot create new volume from ambiguous /dev path."
                  " Please create the volume before using 'receive', or specify"
                  " --save-to=/dev/volgroup/lv in case of a thin LV.")
         else: # file
-            save_type = "file"
-            volf = open(save_path, "w+b")
-            if not sparse_write:   volf.truncate(0)   ; volf.flush()
-            volf.truncate(volsize)    ; volf.flush()
+            save_type = "file"   ; punch_hole = low_level_io.file_punch_hole
+            fopenmode = "r+b" if sparse_write and exists(save_path) else "wb"
+            volf = open(save_path, fopenmode)   ; volf.truncate(volsize)
 
     elif diff:
         if not lv_exists(vgname, datavol):
@@ -2416,7 +2441,9 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         volf  = open(pjoin("/dev",vgname,snap1vol), "rb")
 
 
-    if volf:   volf_read = volf.read    ; volf_write = volf.write    ; volf_seek = volf.seek
+    if volf:
+        volf_read = volf.read     ; volf_write = volf.write    ; volf_seek = volf.seek
+        volfno    = volf.fileno() ; fcntl.lockf(volf, fcntl.LOCK_EX|fcntl.LOCK_NB)
 
     print("Receiving" if save_path else "Scanning", "volume:", datavol, select_ses[2:])
     if save_path:    print("Saving to %s '%s'" % (save_type, save_path))
@@ -2432,7 +2459,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     gv_stdin = io.TextIOWrapper(getvol.stdin, encoding="utf-8") if sparse else None
 
     # Open manifest then receive, check and save data
-    addr = bcount = diff_count = 0
+    addr = bcount = diff_count = 0    ; buf = b''
     for mfline in open(manifest, "r"):
         if addr >= lchunk_addr:   break
         cksum, faddr, ses = mfline.split()    ; addr = int(faddr[1:], 16)
@@ -2440,11 +2467,13 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         if verbose:   print("%.2f%%" % (addr/volsize*100), end="\x0d")
 
         # Process zeros quickly
-        if cksum.strip() == "0":
+        if cksum == "0":
             if save_path:
                 volf_seek(addr)
                 if sparse_write and volf_read(chunksize) != zeros:
+                    # Note: punch_hole() might not work, write zeros first anyway
                     volf_seek(addr)    ; volf_write(zeros)    ; diff_count += chunksize
+                    punch_hole(volfno, addr, chunksize)
             elif diff:
                 volf_seek(addr)    ; diff_count += diff_compare(zeros,True)
 
@@ -2577,13 +2606,6 @@ def rename_volume(oldname, newname):
     for ext in (".tick",".tock"):
         vg = aset.vgname    ; lv_remove(vg, newname+ext)
         if lv_exists(vg, oldname+ext):   lv_rename(vg, oldname+ext, newname+ext)
-
-    full_aset = ArchiveSet(aset.name, metadir+topdir, allvols=True)
-    if len(full_aset.vols[newname].sessions) \
-    and compare_files(pathlist=[confname], volumes=[full_aset.vols[newname]]):
-        x_it(1, "Error: Local and archive metadata differ.")
-
-    return full_aset
 
 
 # Remove a volume from the archive
@@ -2770,7 +2792,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.3.5"         ; prog_date = "20221102"
+prog_version          = "0.3.7"         ; prog_date = "20230201"
 format_version        = 2               ; debug     = False       ; tmpdir = None
 
 
@@ -2894,6 +2916,8 @@ os.makedirs(big_tmpdir, exist_ok=True)
 ## General Configuration ##
 
 signal_handlers  = {}    ; signals_caught = []    ; error_cache = []
+
+low_level_io     = LowLevelIO()
 
 # Dict of compressors in the form: (library, default_compress_level, compress_func)
 compressors      =    {"zlib":   (zlib, 4, zlib.compress),
