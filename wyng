@@ -9,7 +9,7 @@
 
 #  editor width: 100  -----------------------------------------------------------------------------
 import sys, signal, os, stat, shutil, subprocess, time, datetime
-import re, mmap, bz2, zlib, gzip, tarfile, io, fcntl, tempfile
+import re, mmap, bz2, zlib, gzip, hmac, tarfile, io, fcntl, tempfile
 import argparse, configparser, hashlib, functools, uuid, string
 import xml.etree.ElementTree    ; from itertools import islice
 from array import array         ; import resource
