@@ -2792,7 +2792,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.3.7"         ; prog_date = "20230201"
+prog_version          = "0.3.10"        ; prog_date = "20230205"
 format_version        = 2               ; debug     = False       ; tmpdir = None
 
 
