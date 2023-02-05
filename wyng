@@ -9,7 +9,7 @@
 
 # Return codes:
 # 1 - Fatal error
-# 2 - Error on specific volume(s)
+# 2 - Completed, error on specific volume(s)
 # 3 - Auth error
 # 4 - Timeout
 
@@ -2729,7 +2729,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
     catch_signals()
     if retcode == 50:
         # Initialization didn't complete, so reload aset and abort
-        aset = get_configs(options)
+        aset, dest = get_configs(options)
         aset.set_in_process(None)
         for f in ("merge.lst.gz","volinfo.tmp",target+"/info.tmp"):
             if exists(f):  os.remove(f)
@@ -3322,7 +3322,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4.0alpha2"   ; prog_date = "20230201"
+prog_version          = "0.4.0alpha2"   ; prog_date = "20230204"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
