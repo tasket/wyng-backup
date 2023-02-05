@@ -9,7 +9,7 @@
 
 #  editor width: 100  -----------------------------------------------------------------------------
 import sys, signal, os, stat, shutil, subprocess, time, datetime
-import re, mmap, bz2, zlib, gzip, tarfile, io, fcntl, tempfile
+import re, mmap, bz2, zlib, gzip, hmac, tarfile, io, fcntl, tempfile
 import argparse, configparser, hashlib, functools, uuid, string, struct
 import xml.etree.ElementTree    ; from itertools import islice
 from array import array         ; import resource
@@ -622,7 +622,7 @@ def arch_init(aset):
         if compression not in compressors.keys() or not is_num(compr_level):
             x_it(1, "Invalid compression spec.")
         aset.compression = compression      ; aset.compr_level = compr_level
-        compressors[compression][2](b"test", compr_level)
+        compressors[compression][2](b"test", int(compr_level))
 
     if options.chfactor:
         # accepts an exponent from 1 to 6
