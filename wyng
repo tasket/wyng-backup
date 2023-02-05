@@ -596,7 +596,7 @@ def arch_init(aset):
         if compression not in compressors.keys() or not is_num(compr_level):
             x_it(1, "Invalid compression spec.")
         aset.compression = compression      ; aset.compr_level = compr_level
-        compressors[compression][2](b"test", compr_level)
+        compressors[compression][2](b"test", int(compr_level))
 
     if options.chfactor:
         # accepts an exponent from 1 to 6
