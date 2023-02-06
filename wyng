@@ -988,13 +988,13 @@ def lv_rename(vgname, vol1, vol2):
 # Reserve or release lvm thinpool metadata snapshot.
 # arch must be a configured ArchiveSet; action must be "reserve" or "release".
 # Specifying "release" without "pool=" will attempt to release all pools.
-def lvm_meta_snapshot(arch, action, pool=None):
-    if arch.vgname not in volgroups:   return
-    vgname   = arch.vgname.replace("-","--")      ; checkerr = action == "reserve"
-    the_pool = pool if pool else arch.poolname    ; vgpools  = volgroups[arch.vgname].poolnames
+def lvm_meta_snapshot(action, vg, pool=None):
+    if vg not in volgroups:   return
+    vgname   = vg.replace("-","--")               ; checkerr = action == "reserve"
+    vgpools  = volgroups[vg].poolnames
 
-    for pool in vgpools & vgpools if not pool and action == "release" else {the_pool}:
-        poolname = pool.replace("-","--")
+    for pl in vgpools if not pool and action == "release" else {pool}:
+        poolname = pl.replace("-","--")
         do_exec([[CP.dmsetup,"message", vgname+"-"+poolname+"-tpool",
                 "0", action+"_metadata_snap"]], check=checkerr)
 
@@ -1057,7 +1057,7 @@ def arch_init(aset, opts):
     else:
         x_it(1,"Error: Invalid cipher option.")
 
-    print(); print("Encryption    :", aset.data_cipher)
+    print(f"\nEncryption    : {ci[0]} ({ci[1]})")
 
     if opts.hashtype:
         if opts.hashtype not in hash_funcs:
@@ -1079,7 +1079,7 @@ def arch_init(aset, opts):
         #    print("Warning: zstd does not support reproducible output; future zstd updates may "
         #          "prevent Wyng from deduplicating data.")
         aset.compression = compression      ; aset.compr_level = compr_level
-        compressors[compression][2](b"test", compr_level)
+        compressors[compression][2](b"test", int(compr_level))
 
     print("Compression   : %s:%s" % (aset.compression, aset.compr_level))
 
@@ -1173,7 +1173,7 @@ def check_manifest_sequence(datavol, sesnames):
 # Get global configuration settings:
 
 def get_configs(opts):
-    global dest
+    #### global dest
     arch_name = "default"    ; bkdir = topdir + "/" + arch_name
     load_children = 1 if opts.action in ("arch-delete","delete","add") else 2
 
@@ -1292,7 +1292,7 @@ class Destination:
         if not dest_url.isprintable():   x_it(1,"Error: [^control] not allowed in dest.")
         dparts      = urlparse(dest_url)    ; self.dtype = dtype = dparts.scheme
         if dtype not in self.url_types:
-            x_it(1,"'%s' not an accepted type." % destsys)
+            x_it(1,"'%s' not an accepted type." % dtype)
         if (dtype == "file" and (dparts.netloc or not dparts.path)) \
         or (dtype in ("ssh","qubes","qubes-ssh") and not dparts.netloc) \
         or (dtype == "qubes-ssh" and not all(dparts.netloc.partition(":"))) :
@@ -1317,6 +1317,7 @@ class Destination:
 
         # save locations change
         if dspec and dname:
+            print(f"Naming this URL '{dname}'.")
             locs[dname] = dspec
             self.save_locations(locs)    ; del(locs)
 
@@ -1386,8 +1387,7 @@ class Destination:
 
     def write_helper_program(self):
 
-        dest_program = \
-'''#  Copyright Christopher Laprise 2018-2023
+        dest_program = '''#  Copyright Christopher Laprise 2018-2023
 #  Licensed under GNU General Public License v3. See github.com/tasket/wyng-backup
 import os, sys, time, signal, shutil, subprocess as SPr, gzip, tarfile
 
@@ -1499,9 +1499,12 @@ else:
     lstf = None
 
 if cmd == "merge":
+    src_list = []    ; resume = "--resume" in sys.argv    ; mtpath = sys.argv[2]
     if not exists("../archive.ini") or not exists("volinfo"):
         print("Error: Not in volume dir.")   ; sys.exit(40)
-    src_list = []    ; resume = "--resume" in sys.argv
+    if resume and not (exists("merge.lst.gz") and exists("merge")):
+        print("Error: Remote dir not initialized.")
+        sys.exit(50 if exists(mtpath) else 40)
     lstf = gzip.open("merge.lst.gz", "rt")
     merge_target, target = lstf.readline().split()
     while True:
@@ -1857,7 +1860,7 @@ def get_lvm_deltas(datavols):
             raise RuntimeError("LV pool '%s/%s' does not exist." % (vgname, apool))
 
         try:
-            lvm_meta_snapshot(aset, "reserve", pool=apool)
+            lvm_meta_snapshot("reserve", aset.vgname, pool=apool)
             for datavol in datavols:
                 if l_vols[datavol].pool_lv != apool:   continue
                 snap1vol = datavol + ".tick"    ; snap2vol = datavol + ".tock"
@@ -1871,7 +1874,7 @@ def get_lvm_deltas(datavols):
             sys.stderr.write("ERROR running thin_delta process.\n")
             raise e
         finally:
-            lvm_meta_snapshot(aset, "release", pool=apool)
+            lvm_meta_snapshot("release", aset.vgname, pool=apool)
 
     catch_signals(None)
 
@@ -2720,7 +2723,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
 
     # Start merge operation on dest
     retcode = dest.run([dest.cd + destvol + " && python3 "
-                        + dest.dtmp+"/dest_helper.py merge"
+                        + dest.dtmp+"/dest_helper.py merge "+merge_target
                         + (" --resume" if resume else "") + (" --sync" if options.maxsync else "")
                         ],
                         check=False, out=">>"+tmpdir+"/merge.log"
@@ -2729,12 +2732,13 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
     catch_signals()
     if retcode == 50:
         # Initialization didn't complete, so reload aset and abort
-        aset, dest = get_configs(options)
+        aset, _ = get_configs(options)
         aset.set_in_process(None)
         for f in ("merge.lst.gz","volinfo.tmp",target+"/info.tmp"):
             if exists(f):  os.remove(f)
         dest.run([dest.cd + destvol + " && rm -rf merge merge.lst.gz"], check=False)
-        x_it(retcode, "Error: Merge could not initialize!")
+        err_out("Error: Merge could not initialize!")
+        if not resume:   sys.exit(1)
     elif retcode != 0:
         x_it(retcode, "Error: Remote exited!")
 
@@ -2929,7 +2933,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False, verify_only
                 err_out("Volume sizes differ:\n  Archive = %d \n  Local   = %d"
                         % (volsize, l_vols[snap1vol].lv_size))   ; return None
 
-        volf  = open(pjoin("/dev",vgname,snap1vol), "rb")
+        volf  = open(pjoin("/dev",vgname,snap1vol), "r+b")
 
 
     if volf:
@@ -3065,10 +3069,6 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False, verify_only
                 "--addtag=arch-"+aset.uuid, "-s", vgname+"/"+datavol, "-n", snap1vol]])
             if debug:   print("  Initial snapshot created for", datavol)
             init_deltamap(vol, vol.mapfile, vol.mapsize())
-        elif returned_home:
-            print("Restored from older session: Volume may be out of"
-                " sync with archive until '%s --remap diff %s' is run!"
-                % (prog_name, datavol))
     if remap:
         bmapf.close()
         if diff_count > 0 and options.action != "send":
@@ -3322,7 +3322,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4.0alpha2"   ; prog_date = "20230204"
+prog_version          = "0.4.0alpha2"   ; prog_date = "20230206"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
@@ -3473,7 +3473,7 @@ if options.from_arch:
 # Get LVM listings
 volgroups, l_vols= {}, {}    ; get_lvm_vgs()
 if aset.vgname in volgroups:   l_vols = volgroups[aset.vgname].lvs
-lvm_meta_snapshot(aset, "release")
+lvm_meta_snapshot("release", aset.vgname)
 
 
 
