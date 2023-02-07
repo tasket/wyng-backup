@@ -2,7 +2,7 @@
 
 
 ###  Wyng – Logical volume backup tool
-###  Copyright Christopher Laprise 2018-2021 / tasket@protonmail.com
+###  Copyright Christopher Laprise 2018-2023 / tasket@protonmail.com
 ###  Licensed under GNU General Public License v3. See file 'LICENSE'.
 
 
@@ -556,10 +556,10 @@ def lv_rename(vgname, vol1, vol2):
 def lvm_meta_snapshot(arch, action, pool=None):
     if arch.vgname not in volgroups:   return
     vgname   = arch.vgname.replace("-","--")      ; checkerr = action == "reserve"
-    the_pool = pool if pool else arch.poolname    ; vgpools  = volgroups[arch.vgname].poolnames
+    the_pool = pool or arch.poolname              ; vgpools  = volgroups[arch.vgname].poolnames
 
-    for pool in vgpools & vgpools if not pool and action == "release" else {the_pool}:
-        poolname = pool.replace("-","--")
+    for pl in vgpools if not pool and action == "release" else {the_pool}:
+        poolname = pl.replace("-","--")
         do_exec([[CP.dmsetup,"message", vgname+"-"+poolname+"-tpool",
                 "0", action+"_metadata_snap"]], check=checkerr)
 
@@ -852,7 +852,7 @@ def detect_internal_state():
     #####>  Begin helper program  <#####
 
     dest_program = \
-'''#  Copyright Christopher Laprise 2018-2021
+'''#  Copyright Christopher Laprise 2018-2023
 #  Licensed under GNU General Public License v3. See github.com/tasket/wyng-backup
 import os, sys, signal, shutil, subprocess, gzip, tarfile
 cmd = sys.argv[1]   ; msync = "--sync" in sys.argv
@@ -1035,7 +1035,7 @@ def detect_dest_state(destsys):
                         }
 
     dest_in_proc  = online = False   ; dest_free = desttmpdir = None
-    dest_writable = True    ; tmpdigits = 12      ; tmpprefix = "/tmp/wyngrpc-"
+    dest_writable = True    ; tmpdigits = 12      ; tmpprefix = "/tmp/wyngrpc/"
 
     if (options.action not in local_actions and destsys is not None) \
         or options.remap or options.from_arch:
@@ -1055,6 +1055,7 @@ def detect_dest_state(destsys):
                 +"' && cd '"+aset.destmountpoint+"/"+aset.destdir+topdir+"'"
 
                 # send helper program to remote dest
+                +"  && mkdir -p " +tmpprefix + " && chmod 777 " + tmpprefix
                 +"  && tdir=$(mktemp -d " + tmpprefix + ("X"*tmpdigits) + ") && echo $tdir"
                 +"  && cat >$tdir/dest_helper.py"
 
@@ -1089,7 +1090,7 @@ def detect_dest_state(destsys):
                 elif ln.startswith(tmpprefix):
                     desttmpdir = ln.strip()
         if not desttmpdir or len(desttmpdir) != len(tmpprefix)+tmpdigits \
-        or not set(desttmpdir[5:]) <= set(string.ascii_letters + string.digits + "-"):
+        or not set(desttmpdir[5:]) <= set(string.ascii_letters + string.digits + "/"):
             raise ValueError("Missing or malformed tmp dir: "+repr(desttmpdir))
 
     return dest_free is not None, dest_free, dest_in_proc, dest_writable, desttmpdir
@@ -2438,7 +2439,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                 x_it(1, "Volume sizes differ:"
                     "\n  Archive = %d \n  Local   = %d" % (volsize, l_vols[snap1vol].lv_size))
 
-        volf  = open(pjoin("/dev",vgname,snap1vol), "rb")
+        volf  = open(pjoin("/dev",vgname,snap1vol), "r+b")
 
 
     if volf:
@@ -2564,10 +2565,6 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                 "--addtag=arch-"+aset.uuid, "-s", vgname+"/"+datavol, "-n", snap1vol]])
             print("  Initial snapshot created for", datavol)
             init_deltamap(vol, vol.mapfile, vol.mapsize())
-        elif returned_home:
-            print("Restored from older session: Volume may be out of"
-                " sync with archive until '%s --remap diff %s' is run!"
-                % (prog_name, datavol))
     elif diff:
         if remap:
             bmapf.close()
@@ -2792,7 +2789,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.3.10"        ; prog_date = "20230205"
+prog_version          = "0.3.11"        ; prog_date = "20230206"
 format_version        = 2               ; debug     = False       ; tmpdir = None
 
 
