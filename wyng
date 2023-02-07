@@ -9,7 +9,7 @@
 
 # Return codes:
 # 1 - Fatal error
-# 2 - Completed, error on specific volume(s)
+# 2 - Error on specific volume(s)
 # 3 - Auth error
 # 4 - Timeout
 
@@ -90,6 +90,7 @@ class ArchiveSet:
         cp["var"], cp["volumes"], cp["in_process"]  =  {},{},{}
 
         # halt configuration if this is a new or temp config
+        os.makedirs(self.path, exist_ok=True)
         if not exists(self.confpath+ext):
             self.uuid = str(uuid.uuid4())
             return
@@ -213,7 +214,7 @@ class ArchiveSet:
 
     def save_conf(self, ext=""):
         c = self.conf['var']    ; c.clear()    ; mcrypto = self.mcrypto
-        c['uuid']        = self.uuid if self.uuid else str(uuid.uuid4())
+        c['uuid']        = self.uuid or str(uuid.uuid4())
         c['updated_at']  = self.updated_at = str(time.time())
         c['format_ver']  = str(format_version)
         c['chunksize']   = str(self.chunksize)
@@ -296,7 +297,7 @@ class ArchiveSet:
     def encode_file(self, fname, fdest=None, get_digest=True, compress=True):
         # Enh: optimize memory use
         mcrypto = self.mcrypto    ; digest = None
-        destname= fdest if fdest else fname+(".z" if compress else "")
+        destname= fdest or fname+(".z" if compress else "")
 
         with  open(fname,"r+b") as inf,   mmap.mmap(inf.fileno(), 0) as inmap:
             inbuf = bytes(inmap) if self.compression == "zstd" else inmap
@@ -309,7 +310,7 @@ class ArchiveSet:
 
     def decode_file(self, fname, fdest=None, digest=None, max_sz=16000000):
         # Enh: optimize memory use
-        destname= fdest if fdest else (fname[:-2] if fname.endswith(".z") else fname)
+        destname= fdest or (fname[:-2] if fname.endswith(".z") else fname)
         mcrypto = self.mcrypto         ; buf_start = mcrypto.buf_start if mcrypto else 0
 
         with  open(fname,"r+b") as inf,   mmap.mmap(inf.fileno(), 0) as inmap:
@@ -678,8 +679,10 @@ class DataCryptography:
 
 
     def __init__(self, ci_type, keyfile, slot, passphrase, agentkeys=None, cadence=1, init=False):
+        if tuple(time.gmtime(0))[:6] != (1970, 1, 1, 0, 0, 0):
+            x_it(1, "System time epoch is not 1970-01-01.")
         assert passphrase is None or type(passphrase) == bytearray
-        assert cadence > 0
+        assert type(cadence) is int and cadence > 0
 
         if not issubclass(type(keyfile), io.IOBase):
             if not exists(keyfile) and init:   open(keyfile, "wb").close()
@@ -1038,7 +1041,6 @@ def arch_init(aset, opts):
     if opts.from_arch:
         return
 
-    os.makedirs(aset.path, exist_ok=True)
     aset.data_cipher = opts.encrypt.lower()
     # Fix: duplicates code in aset... move to aset class.
     if aset.data_cipher in (x[0] for x in DataCryptography.crypto_codes.values()): 
@@ -1057,7 +1059,7 @@ def arch_init(aset, opts):
     else:
         x_it(1,"Error: Invalid cipher option.")
 
-    print(f"\nEncryption    : {ci[0]} ({ci[1]})")
+    print(); print(f"Encryption    : {aset.data_cipher} ({ci})")
 
     if opts.hashtype:
         if opts.hashtype not in hash_funcs:
@@ -1096,14 +1098,15 @@ def arch_init(aset, opts):
 
 # Check/verify an entire archive
 
-def arch_check(vol_list=None, startup=False):
+def arch_check(aset, vol_list=None, startup=False):
+    dest     = aset.dest
     gethash  = hash_funcs[aset.hashtype]   ; chunksize = aset.chunksize
     attended = not options.unattended      ; stray_dirs= []
     compare_digest = hmac.compare_digest   ; b64enc    = base64.urlsafe_b64encode
 
     decrypt  = aset.datacrypto.decrypt if aset.datacrypto else None
 
-    vol_list = vol_list if vol_list else list(aset.vols.keys())
+    vol_list = vol_list or list(aset.vols.keys())
     vol_dirs = set((x.name for x in os.scandir(aset.path) \
                             if x.is_dir() and x.name.startswith("Vol_")))
 
@@ -1139,7 +1142,7 @@ def arch_check(vol_list=None, startup=False):
         # Check ses sequence number is unique and combined manifests are correct
         print("  Checking indexes,", end="", flush=True) ; mset = []
         assert len(vol.sessions) == len(set((x.sequence for x in vol.sessions.values())))
-        for ses in vol.sesnames:   mset.append(ses)    ; check_manifest_sequence(volname, mset)
+        for ses in vol.sesnames:   mset.append(ses)    ; check_manifest_sequence(vol, mset)
 
         # Check hashes of each session individually
         print(" data:")
@@ -1149,13 +1152,13 @@ def arch_check(vol_list=None, startup=False):
                 continue # Enh: use seq
 
             if attended:   print(" ", sesname[2:], end="... ", flush=True)
-            bcount = receive_volume(vol.name, select_ses=sesname[2:], verify_only=2)
+            bcount = receive_volume(vol, select_ses=sesname[2:], verify_only=2)
             #if attended:   print(bcount, "bytes OK")
 
 
-def check_manifest_sequence(datavol, sesnames):
-    vol = aset.vols[datavol]     ; volsize = vol.sessions[sesnames[-1]].volsize
-    with open(merge_manifests(datavol, msessions=sesnames, addcol=False), "r") as mrgf:
+def check_manifest_sequence(vol, sesnames):
+    volsize = vol.sessions[sesnames[-1]].volsize    ; aset = vol.archive
+    with open(merge_manifests(vol, msessions=sesnames, addcol=False), "r") as mrgf:
         for addr in range(0, volsize, aset.chunksize):
             ln = mrgf.readline().strip()
             if not ln:   break
@@ -1170,14 +1173,13 @@ def check_manifest_sequence(datavol, sesnames):
         raise ValueError("Manifest range stopped short at", addr)
 
 
-# Get global configuration settings:
+# Get configuration settings:
 
 def get_configs(opts):
-    #### global dest
-    arch_name = "default"    ; bkdir = topdir + "/" + arch_name
+    arch_name = "default"
     load_children = 1 if opts.action in ("arch-delete","delete","add") else 2
 
-    dest = Destination(opts.from_arch if opts.from_arch else opts.dest, opts.dest_name)
+    dest = Destination(opts.from_arch or opts.dest, opts.dest_name)
     if (opts.action not in local_actions and dest.sys is not None) \
     or opts.remap or opts.from_arch:
         dest.detect_state(arch_name, opts.dedup)
@@ -1196,10 +1198,10 @@ def get_configs(opts):
 
     if opts.from_arch:
         # Prepare a temporary metadata dir and init aset with it
-        tmpmeta   = big_tmpdir+"/var"    ; os.makedirs(tmpmeta+bkdir)
+        tmpmeta   = big_tmpdir+"/var"
         aset_from = ArchiveSet(arch_name, tmpmeta+topdir, dest)
         arch_init(aset_from, opts)
-        return aset_from, dest
+        return aset_from
 
     aset = ArchiveSet(arch_name, metadir+topdir, dest, children=load_children,
                       pass_agent=opts.pass_agent)
@@ -1211,7 +1213,7 @@ def get_configs(opts):
     if aset.updated_at is None:
         x_it(1,"Archive not found.")
 
-    return aset, dest
+    return aset
 
 
 def get_configs_remote(dest, aname, recv_dir):
@@ -1324,19 +1326,18 @@ class Destination:
         self.write_helper_program()
 
 
+    def remove_dtmp(self):
+        if self.online:
+            self.run([f"cd $(dirname {self.dtmp}) && rm -rf $(basename {self.dtmp})"],
+                     timeout=10)
+
     def get_free(self, fpath): ## Enh: add sanitize
         for ln in open(fpath,"r").readlines():
             if ln.startswith("wyng_check_free"):  self.free = int(ln.split()[1])
 
-    # Run system commands on destination
-
-    def run(self, commands, dest_type=None,
-            infile="", inlines=None, out="", check=True, trap=False):
-
-        if dest_type is None:   dest_type = self.dtype
-
-        cmd = self.run_args(commands, trap=trap)
-        return do_exec([cmd], infile=infile, inlines=inlines, out=out, check=check)
+    def save_locations(self, locs):
+        with open(vardir+"/dests", "w") as fl:
+            for x, y in locs.items():   print(x, y, file=fl)
 
     def load_locations(self):
         if not exists(vardir+"/dests"):   return {}
@@ -1345,19 +1346,28 @@ class Destination:
 
         return loc
 
-    def save_locations(self, locs):
-        with open(vardir+"/dests", "w") as fl:
-            for x, y in locs.items():   print(x, y, file=fl)
+    # Run system commands on destination
+
+    def run(self, commands, direct=False, timeout=None,
+            infile="", inlines=None, out="", check=True, trap=False):
+
+        if direct:
+            cmd = self.run_map[self.dtype] + commands
+        else:
+            cmd = self.run_args(commands, trap=trap)
+
+        return do_exec([cmd], infile=infile, inlines=inlines, out=out,
+                       check=check, timeout=timeout)
 
     # Build command lists that can be shunted to remote systems.
     # The input commands are stored in a temp file and a standard command that
     # runs the temp file is returned.
 
-    def run_args(self, commands, trap=False):
-        trapcmd = "trap '' INT TERM QUIT ABRT ALRM TSTP USR1\n" if trap else ""
-        dest_type = self.dtype
+    def run_args(self, commands, trap=False, dest_type=None):
+        dest_type = dest_type or self.dtype
+        trapcmd   = "trap '' INT TERM QUIT ABRT ALRM TSTP USR1\n" if trap else ""
         # shunt commands to tmp file
-        with tempfile.NamedTemporaryFile(dir=tmpdir, delete=False) as tmpf:
+        with tempfile.NamedTemporaryFile(dir=tmpdir+"/rpc", delete=False) as tmpf:
             cmd = bytes(trapcmd + shell_prefix
                         + " ".join(commands) + "\n", encoding="UTF-8")
             tmpf.write(cmd)
@@ -1366,23 +1376,82 @@ class Destination:
         if dest_type in {"qubes","qubes-ssh"}:
             do_exec([[CP.qvm_run, "--no-color-stderr", "--no-color-output", "-p",
                     (self.sys if dest_type == "qubes" else self.sys.split(":")[0]),
-                    CP.mkdir+" -p "+tmpdir
-                    +" && "+CP.cat+" >"+pjoin(tmpdir,remotetmp)
-                    ]], infile=pjoin(tmpdir,remotetmp))
+                    CP.cat+" >/tmp/wyngrpc/"+remotetmp
+                    ]], infile=pjoin(tmpdir,"rpc",remotetmp))
             if dest_type == "qubes":
-                add_cmd = [CP.sh+" "+pjoin(tmpdir,remotetmp)]
+                add_cmd = [CP.sh+" /tmp/wyngrpc/"+remotetmp]
             else:
                 add_cmd = [CP.ssh+" "+" ".join(self.ssh_opts)+" "+self.sys.split(":")[1]
-                        +' "$('+CP.cat+' '+pjoin(tmpdir,remotetmp)+')"']
+                        +' "$('+CP.cat+' /tmp/wyngrpc/'+remotetmp+')"']
 
         elif dest_type == "ssh":
             #add_cmd = [' "$(cat '+pjoin(tmpdir,remotetmp)+')"']
             add_cmd = [cmd]
 
         elif dest_type == "file":
-            add_cmd = [pjoin(tmpdir,remotetmp)]
+            add_cmd = [pjoin(tmpdir,"rpc",remotetmp)]
 
         return self.run_map[dest_type] + add_cmd
+
+
+    def detect_state(self, aset_name, dedup):
+
+        if self.dtype == "qubes-ssh":
+            # fix: possibly remove dargs and use dest.run()
+            dargs = self.run_map["qubes"][:-1] + [self.sys.split(":")[0]]
+
+            cmd = dargs + [shell_prefix + "mkdir -p /tmp/wyngrpc"]
+            do_exec([cmd])
+
+        tmpprefix = "/tmp/wyngrpc/"    ; tmpdigits = 12
+        rdir = "'"+self.path+topdir+"/"+aset_name+"'"
+        cmd  = ["mkdir -p "+rdir+" && cd "+rdir
+
+                # send helper program to remote dest
+                +"  && mkdir -p " +tmpprefix + " && chmod 777 " + tmpprefix
+                +"  && tdir=$(mktemp -d " + tmpprefix + ("X"*tmpdigits) + ") && echo $tdir"
+                +"  && cat >$tdir/dest_helper.py"
+
+                # check free space and archive.ini status on remote
+                +"  && echo -n 'wyng_check_free ' && stat -f -c '%a %S' ."
+                +"  && echo -n 'wyng_archive_ini '"
+                +"  && { if [ -e archive.ini ]; then sha256sum archive.ini; else echo none; fi }"
+
+                # test write access and hardlinks
+                +"  && touch archive.dat && echo 'wyng_writable'"
+                +(" && ln -f archive.dat .hardlink" if dedup else "")
+                ]
+        try:
+            online = \
+                not do_exec([self.run_args(cmd),
+                            # sanitize remote output:
+                            [CP.cat,"-v"],  [CP.tail,"--bytes=2000"]],
+                            pipefail=True,
+                            out=tmpdir+"/dest-state.log", infile=tmpdir+"/rpc/dest_helper.py")
+        except SPr.CalledProcessError as e:
+            online = False    ; err_out(repr(e))
+
+        if online:
+            for ln in open(tmpdir+"/dest-state.log","r"):
+                if ln.startswith("wyng_archive_ini"):
+                    self.archive_ini_hash = ln.split()[1]
+                elif ln.startswith("wyng_check_free"):
+                    parts = ln.split()    ; self.free = int(parts[1]) * int(parts[2])
+                elif ln.startswith("wyng_writable"):
+                    self.writable = True
+                elif ln.startswith(tmpprefix):
+                    self.dtmp = ln.strip()
+
+            if not self.dtmp or len(self.dtmp) != len(tmpprefix)+tmpdigits \
+            or not set(self.dtmp[5:]) <= set(string.ascii_letters + string.digits + "/"):
+                raise ValueError("Missing or malformed tmp dir: "+repr(self.dtmp))
+        else:
+            for log in ("/dest-state.log", "/err.log"):
+                if exists(tmpdir+log):
+                    do_exec([ [CP.cat,"-v",tmpdir+log],  [CP.tail,"--bytes=2000"] ],
+                            out=sys.stderr)
+
+        self.online = self.free is not None
 
 
     def write_helper_program(self):
@@ -1540,64 +1609,6 @@ elif cmd == "dedup":
     #####>  End dest_helper program  <#####
 
 
-    def detect_state(self, aset_name, dedup):
-
-        tmpdigits = 12      ; tmpprefix = "/tmp/wyngrpc-"
-        #self.write_helper_program()
-
-        if self.dtype == "qubes-ssh":
-            # fix: possibly remove dargs and use dest.run()
-            dargs = self.run_map["qubes"][:-1] + [self.sys.split(":")[0]]
-
-            cmd = dargs + [shell_prefix \
-                +CP.rm+" -rf "+tmpdir+"  &&  mkdir -p "+tmpdir
-                ]
-            do_exec([cmd])
-
-        rdir = "'"+self.path+topdir+"/"+aset_name+"'"
-        cmd = ["mkdir -p "+rdir+" && cd "+rdir
-
-                # send helper program to remote dest
-                +"  && tdir=$(mktemp -d " + tmpprefix + ("X"*tmpdigits) + ") && echo $tdir"
-                +"  && cat >$tdir/dest_helper.py"
-
-                # check free space and archive.ini status on remote
-                +"  && echo -n 'wyng_check_free ' && stat -f -c '%a %S' ."
-                +"  && echo -n 'wyng_archive_ini '"
-                +"  && { if [ -e archive.ini ]; then sha256sum archive.ini; else echo none; fi }"
-
-                # test write access and hardlinks
-                +"  && touch archive.dat && echo 'wyng_writable'"
-                +(" && ln -f archive.dat .hardlink" if dedup else "")
-                ]
-        try:
-            online = \
-                not do_exec([self.run_args(cmd),
-                            # sanitize remote output:
-                            [CP.cat,"-v"],  [CP.tail,"--bytes=2000"]],
-                            pipefail=True,
-                            out=tmpdir+"/dest-state.log", infile=tmpdir+"/rpc/dest_helper.py")
-        except SPr.CalledProcessError:
-            online = False
-
-        if online:
-            with open(tmpdir+"/dest-state.log","r") as logf:
-                for ln in logf:
-                    if ln.startswith("wyng_archive_ini"):
-                        self.archive_ini_hash = ln.split()[1]
-                    elif ln.startswith("wyng_check_free"):
-                        parts = ln.split()    ; self.free = int(parts[1]) * int(parts[2])
-                    elif ln.startswith("wyng_writable"):
-                        self.writable = True
-                    elif ln.startswith(tmpprefix):
-                        self.dtmp = ln.strip()
-            if not self.dtmp or len(self.dtmp) != len(tmpprefix)+tmpdigits \
-            or not set(self.dtmp[5:]) <= set(string.ascii_letters + string.digits + "-"):
-                raise ValueError("Missing or malformed tmp dir: "+repr(self.dtmp))
-
-        self.online = self.free is not None
-
-
 # Run system commands with pipes, without shell:
 # 'commands' is a list of lists, each element a command line.
 # If multiple command lines, then they are piped together.
@@ -1607,12 +1618,15 @@ elif cmd == "dedup":
 # List of commands may include 'None' instead of a child list; these will be ignored.
 
 def do_exec(commands, cwd=None, check=True, out="", infile="", inlines=[], text=False,
-            pipefail=False):
+            pipefail=False, timeout=None):
     ftype   = "t" if text else "b"
-    outmode = "a" if out.startswith(">>") else "w"    ; out = out.lstrip(">>")
-    if cwd and out and out[0] != "/":   out = pjoin(cwd,out)
-    outfunc = gzip.open if out.endswith(".gz") else open
-    outf    = outfunc(out, outmode+ftype) if out else SPr.DEVNULL
+    if issubclass(type(out), io.IOBase):
+        outf = out
+    else:
+        outmode = "a" if out.startswith(">>") else "w"    ; out = out.lstrip(">>")
+        if cwd and out and out[0] != "/":   out = pjoin(cwd,out)
+        outfunc = gzip.open if out.endswith(".gz") else open
+        outf    = outfunc(out, outmode+ftype) if out else SPr.DEVNULL
 
     if inlines:
         inf = SPr.PIPE  #io.StringIO("\n".join(inlines)+"\n")
@@ -1625,7 +1639,7 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", inlines=[], text=
     commands = [x for x in commands if x is not None]
 
     # Start each command, linking them via pipes
-    procs = []
+    procs = []    ; start_t = time.time()
     for i, clist in enumerate(commands):
         p = SPr.Popen(clist, cwd=cwd, stdin=inf if i==0 else procs[i-1].stdout,
                              stdout=outf if i==len(commands)-1 else SPr.PIPE,
@@ -1633,17 +1647,23 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", inlines=[], text=
         if len(procs):  procs[-1].stdout.close()
         procs.append(p)
 
-    if inlines:   procs[0].communicate(("\n".join(inlines)+"\n").encode("UTF-8"))
+    try:
+        if inlines:   procs[0].communicate(("\n".join(inlines)+"\n").encode("UTF-8"),
+                                            timeout=timeout)
+    except SPr.TimeoutExpired:
+        pass
+
     # Monitor and control processes
+
     while True:
-        err = None    ; finish = timeout = False
+        err = None    ; finish = to_flag = False
         for p1 in reversed(procs):
             retcode = p1.poll()
             if not finish and retcode is None:
                 try:
-                    p1.wait(timeout=2)
+                    p1.communicate(timeout=2)
                 except SPr.TimeoutExpired:
-                    timeout = True
+                    to_flag = True
                     continue
                 retcode = p1.returncode   ; finish = True
                 if check and (retcode != 0):
@@ -1652,7 +1672,7 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", inlines=[], text=
                 p1.terminate()
                 continue
 
-        if err or not timeout:
+        if err or not to_flag or (timeout and time.time() - start_t > timeout):
             break
 
     for f in [inf, outf, errf]:
@@ -1670,7 +1690,7 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", inlines=[], text=
 # Returns False if local and dest hashes match.
 
 def compare_files(arch, pathlist=[], volumes=[], sessions=[], clear=True, manifest=False):
-    cmp_list = tmpdir+"/compare-files.lst"
+    dest = arch.dest    ; cmp_list = tmpdir+"/compare-files.lst"
     if clear and exists(cmp_list):  os.remove(cmp_list)
     realvols  = [x for x in volumes if len(x.sessions) and not x.meta_checked]
     realses   = [x for x in sessions if not x.meta_checked]
@@ -1757,7 +1777,7 @@ def fetch_file_blobs(recv_list, recv_dir, dest, ext="", skip0=False, verifier=No
 # Prepare snapshots and check consistency with metadata.
 # Must run get_lvm_vgs() again after this.
 
-def prepare_snapshots(datavols):
+def prepare_snapshots(aset, datavols):
 
     ''' Normal precondition will have a snap1vol already in existence in addition
     to the local datavol. Here we create a fresh snap2vol so we can compare
@@ -1847,7 +1867,8 @@ def prepare_snapshots(datavols):
 # Runs the 'thin_delta' tool to output diffs between vol's old and new snapshots.
 # Result can be read as an xml file by update_delta_digest().
 
-def get_lvm_deltas(datavols):
+def get_lvm_deltas(aset, datavols):
+    #Enh: construct 'poolset' as vg,pool pairs; change vgname handling to track 'apool'
     vgname   = aset.vgname.replace("-","--")
     poolset  = set(l_vols[x].pool_lv for x in datavols)
     if options.verbose:   print("Acquiring deltas.")
@@ -1860,7 +1881,7 @@ def get_lvm_deltas(datavols):
             raise RuntimeError("LV pool '%s/%s' does not exist." % (vgname, apool))
 
         try:
-            lvm_meta_snapshot("reserve", aset.vgname, pool=apool)
+            lvm_meta_snapshot("reserve", l_vols[apool].vg_name, pool=apool)
             for datavol in datavols:
                 if l_vols[datavol].pool_lv != apool:   continue
                 snap1vol = datavol + ".tick"    ; snap2vol = datavol + ".tock"
@@ -1874,7 +1895,7 @@ def get_lvm_deltas(datavols):
             sys.stderr.write("ERROR running thin_delta process.\n")
             raise e
         finally:
-            lvm_meta_snapshot("release", aset.vgname, pool=apool)
+            lvm_meta_snapshot("release", l_vols[apool].vg_name, pool=apool)
 
     catch_signals(None)
 
@@ -1884,7 +1905,7 @@ def get_lvm_deltas(datavols):
 # for volume block ranges until a 'send' command is successfully completed and
 # the mapfile is cleared.
 
-def update_delta_digest(datavol):
+def update_delta_digest(aset, datavol):
 
     vol         = aset.vols[datavol]         ; chunksize  = aset.chunksize
     snap1vol    = vol.name + ".tick"         ; snap2vol   = vol.name + ".tock"
@@ -1991,7 +2012,7 @@ def send_volume(datavol, localtime, ses_tags, send_all):
     if len(vol.sessions):
         # Our chunks are usually smaller than LVM's, so generate a full manifest to detect
         # significant amount of unchanged chunks that are flagged in the delta bmap.
-        fullmanifest = open(merge_manifests(datavol), "r")
+        fullmanifest = open(merge_manifests(vol), "r")
         fullmanifest_readline = fullmanifest.readline
     else:
         fullmanifest = None
@@ -2190,7 +2211,7 @@ def send_volume(datavol, localtime, ses_tags, send_all):
 
         if ses.volsize != prior_size and len(vol.sessions) > 1:
             os.link(ses.path+"/manifest.tmp", ses.path+"/manifest")
-            check_manifest_sequence(datavol, vol.sesnames)
+            check_manifest_sequence(vol, vol.sesnames)
 
         # Finalize on VM/remote
         catch_signals()
@@ -2223,7 +2244,7 @@ def send_volume(datavol, localtime, ses_tags, send_all):
 
 # Build deduplication hash index and list
 
-def init_dedup_index(listfile=""):
+def init_dedup_index(aset, listfile=""):
 
     ctime      = time.perf_counter()    ; makelist = bool(listfile)
     addrsplit  = -address_split[1]
@@ -2294,10 +2315,11 @@ def init_dedup_index(listfile=""):
 
 # Deduplicate data already in archive
 
-def dedup_existing():
+def dedup_existing(aset):
 
     print("Building deduplication index...", end="")
-    init_dedup_index("dedup.lst.gz")
+    init_dedup_index(aset, "dedup.lst.gz")
+    dest = aset.dest
 
     print(" linking...", end="", flush=True)
     do_exec( [dest.run_args([dest.cd + bkdir
@@ -2330,7 +2352,7 @@ def monitor_send(datavols, monitor_only=True):
     localtime = time.strftime("%Y%m%d-%H%M%S")
 
     incrementals, send_alls \
-        = prepare_snapshots(datavols)
+        = prepare_snapshots(aset, datavols)
 
     get_lvm_vgs(aset.vgname)
     if aset.vgname not in volgroups.keys():
@@ -2358,10 +2380,10 @@ def monitor_send(datavols, monitor_only=True):
             ses_tags.append(tag)
 
     if len(incrementals) > 0:
-        get_lvm_deltas(incrementals)
+        get_lvm_deltas(aset, incrementals)
 
     if options.dedup:
-        init_dedup_index()
+        init_dedup_index(aset)
 
     if not monitor_only:
         cmpvols = [x for x in aset.vols.values()
@@ -2376,7 +2398,7 @@ def monitor_send(datavols, monitor_only=True):
         vol = aset.vols[datavol]    ; updated = False
         print(" ", "Scan" if monitor_only else "Send", "volume      | ", datavol, flush=True,end="")
 
-        if datavol in incrementals:   updated = update_delta_digest(datavol)
+        if datavol in incrementals:   updated = update_delta_digest(aset, datavol)
         if monitor_only:   continue
 
         if datavol in send_alls or updated:
@@ -2566,7 +2588,7 @@ def autoprune(datavol, needed_space=0, apmode="off", include=set()):
                         to_prune.clear()    ; skipped = True    ; continue
 
                     target_s = vol.sesnames[vol.sesnames.index(to_prune[-1]) + 1]
-                    merge_sessions(datavol, to_prune, target_s, clear_sources=True)
+                    merge_sessions(vol, to_prune, target_s, clear_sources=True)
 
                     for i in to_prune:   sessions[sessions.index(i)] = None
                     include -= set(to_prune)    ; removed_ct += len(to_prune);   to_prune.clear()
@@ -2592,9 +2614,9 @@ def autoprune(datavol, needed_space=0, apmode="off", include=set()):
 # Accepts a list of session names in ascending order (or else uses all sessions in the volume)
 # and merges the manifests. Setting 'addcol' will add a colunm showing the session dir name.
 
-def merge_manifests(datavol, msessions=None, mtarget=None, addcol=False):
+def merge_manifests(volume, msessions=None, mtarget=None, addcol=False):
     # Enh: implement mtarget to support merge_sessions()
-    volume    = aset.vols[datavol]
+    aset      = volume.archive
     msessions = volume.sesnames if not msessions else msessions
     sespaths  = [ os.path.basename(volume.sessions[x].path) for x in msessions ]
     tmp       = big_tmpdir if volume.volsize() > 128000000000 else tmpdir
@@ -2629,13 +2651,11 @@ def merge_manifests(datavol, msessions=None, mtarget=None, addcol=False):
 # Merge sessions together. Starting from first session results in a target
 # that contains an updated, complete volume. Other starting points can
 # form the basis for a pruning operation.
-# Specify the data volume (datavol), source sessions (sources), and
+# Specify the data volume, source sessions (sources), and
 # target. Caution: clear_sources is destructive.
 
-def merge_sessions(datavol, sources, target, clear_sources=False):
-    global aset
-
-    volume     = aset.vols[datavol]    ; resume = bool(aset.in_process)
+def merge_sessions(volume, sources, target, clear_sources=False):
+    aset       = volume.archive    ; dest = aset.dest    ; resume = bool(aset.in_process)
     chdigits   = max_address.bit_length() // 4 # 4bits per digit
     chformat   = "x%0"+str(chdigits)+"x"
     m_tmp      = tmpdir if volume.volsize() < 128000000000 else big_tmpdir
@@ -2705,7 +2725,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
 
     if not resume:
         # Set archive in_process state to "merge"
-        aset.set_in_process(["merge", datavol, str(clear_sources), target, sources],
+        aset.set_in_process(["merge", volume.name, str(clear_sources), target, sources],
                             tmp=False, todest=False)
 
     # Update & send new metadata and process lists to dest
@@ -2732,7 +2752,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
     catch_signals()
     if retcode == 50:
         # Initialization didn't complete, so reload aset and abort
-        aset, _ = get_configs(options)
+        aset = ArchiveSet(aset.name, aset.path, aset.dest, prior_auth=aset)
         aset.set_in_process(None)
         for f in ("merge.lst.gz","volinfo.tmp",target+"/info.tmp"):
             if exists(f):  os.remove(f)
@@ -2771,7 +2791,7 @@ def merge_sessions(datavol, sources, target, clear_sources=False):
 # can be used to resync volume with archive if the deltamap or snapshots
 # are lost or if the local volume reverted to an earlier state.
 
-def receive_volume(datavol, select_ses="", save_path="", diff=False, verify_only=0):
+def receive_volume(vol, select_ses="", save_path="", diff=False, verify_only=0):
 
     def diff_compare(dbuf,z):
         if dbuf != volf.read(chunksize):
@@ -2783,12 +2803,12 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False, verify_only
         else:
             return 0
 
-    verbose     = not options.quiet and verify_only != 2
+    verbose     = not options.quiet and verify_only != 2    ; debug = options.debug
     attended    = not options.unattended          ; remap     = options.remap
-    sparse      = options.sparse                  ; chunksize = aset.chunksize
-    sparse_write= options.sparse_write or sparse  ; debug     = options.debug
+    sparse      = options.sparse                  ; sparse_write = options.sparse_write or sparse
+    dest        = (aset := vol.archive).dest      ; chunksize = aset.chunksize
     vgname      = aset.vgname                     ; zeros     = bytes(chunksize)
-    vol         = aset.vols[datavol]              ; snap1vol  = datavol+".tick"
+    datavol     = vol.name                        ; snap1vol  = datavol+".tick"
     gethash     = hash_funcs[aset.hashtype]       ; sessions  = vol.sesnames
     compress    = compressors[aset.compression][2]  ; compresslevel = int(aset.compr_level)
     decompress  = compressors[aset.compression][0].decompress
@@ -2815,7 +2835,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False, verify_only
             select_ses = "S_"+select_ses
 
         if select_ses not in sessions:
-            err_out("No match for specified session criteria.")
+            err_out(f"No volume {datavol} in session {select_ses}.")
             return None
 
     elif len(sessions) > 0:
@@ -2858,7 +2878,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False, verify_only
     # sed is used to expand chunk info into a path and filter out any entries
     # beyond the current last chunk, then piped to cat on destination.
     # Note address_split is used to bisect filename to construct the subdir.
-    manifest = merge_manifests(datavol, msessions=incl_ses, addcol=True)
+    manifest = merge_manifests(vol, msessions=incl_ses, addcol=True)
 
     if not sparse:
         cmds = [[CP.sed, "-E", "/"+last_chunkx+"/q", manifest],  ## Enh: detect vol_shrank
@@ -3174,7 +3194,7 @@ def show_list(selected_vols):
     # Print list of sessions grouped by tag. First, organize by tag:
     if options.tag:
         print("\nTag Assignments")    ; ltags = {}
-        for dv in selected_vols if selected_vols else datavols:
+        for dv in selected_vols or datavols:
             vol = aset.vols[dv]
             for tag, tses in vol.tags.items():
                 #tset = ( dv+" / "+x[2:] for x in tses )
@@ -3308,6 +3328,7 @@ def cleanup():
         shutil.rmtree("/tmp/"+prog_name+"-debug", ignore_errors=True)
         shutil.move(tmpdir, "/tmp/"+prog_name+"-debug")
     if not debug:
+        dest.remove_dtmp()
         shutil.rmtree(big_tmpdir, ignore_errors=True)
         for f in (big_tmpdir, tmpdir):
             shutil.rmtree(f, ignore_errors=True)
@@ -3322,16 +3343,13 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4.0alpha2"   ; prog_date = "20230206"
+prog_version          = "0.4wip000"     ; prog_date = "20230207"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
 
 if sys.hexversion < 0x3080000:
     x_it(1, "Python ver. 3.8 or greater required.")
-
-if tuple(time.gmtime(0))[:6] != (1970, 1, 1, 0, 0, 0):
-    x_it(1, "System time epoch is not 1970-01-01.")
 
 # Allow only one instance at a time
 lockpath = "/var/lock/"+prog_name
@@ -3464,7 +3482,7 @@ hash_funcs       = {"sha256" : hashlib.sha256,
 # Create ArchiveSet and Destination objects with get_configs().
 # Passphrase input happens here; no stdin before this point!
 aset = dest = None
-aset, dest  = get_configs(options)
+aset = get_configs(options)    ; dest = aset.dest
 bkdir       = topdir+"/"+aset.name
 
 if options.from_arch:
@@ -3494,7 +3512,7 @@ if dest.online and options.action not in ("arch-init","arch-check","arch-delete"
         # local copy is consistent, so update destination:
         update_dest(aset, pathlist=[aset.confname]) # Fix: expand checks from here....
 
-    arch_check([], startup=True)
+    arch_check(aset, [], startup=True)
 
 
 
@@ -3524,8 +3542,10 @@ if aset.in_process and dest.online and not options.from_arch \
             delete_volume(vname)
         elif aset.in_process[0] == "merge":
             vname = aset.in_process[1]
-            merge_sessions(vname, aset.in_process[4].split(":|"),
+            merge_sessions(aset.vols[vname], aset.in_process[4].split(":|"),
                         aset.in_process[3], clear_sources=bool(aset.in_process[2]))
+    else:
+        raise ValueError("Bad in_process descriptor: "+repr(aset.in_process[0]))
 
         aset = ArchiveSet(aset.name, metadir+topdir, aset.dest, allvols=True, prior_auth=aset)
         if compare_files(aset, pathlist=[aset.confname], volumes=[aset.vols[vname]]):
@@ -3534,9 +3554,10 @@ if aset.in_process and dest.online and not options.from_arch \
 # Display archive update time as local time
 arch_dt_raw = datetime.datetime.fromtimestamp(float(aset.updated_at), datetime.timezone.utc)
 arch_dt     = arch_dt_raw.astimezone().isoformat(sep=u" ")
-sys.stderr.write("Encrypted " if (aset.mcrypto and aset.datacrypto) else "Un-encrypted ")
-sys.stderr.write("archive: %s\n" % dest.spec)
-sys.stderr.write("Last updated %s (%s)\n\n" % (arch_dt[:-6], arch_dt[-6:]))
+
+print("Encrypted" if (aset.mcrypto and aset.datacrypto) else "Un-encrypted",
+      "archive:", dest.spec,
+      "\nLast updated %s (%s)\n" % (arch_dt[:-6], arch_dt[-6:]))
 
 # Check volume args against config
 exclude_vols  = set(options.volex.split(","))
@@ -3553,17 +3574,17 @@ for vol in selected_vols[:]:
 # Process Commands:
 
 if options.action   == "monitor":
-    monitor_send(selected_vols if selected_vols else datavols, monitor_only=True)
+    monitor_send(selected_vols or datavols, monitor_only=True)
 
 
 elif options.action == "send":
-    monitor_send(selected_vols if selected_vols else datavols, monitor_only=False)
+    monitor_send(selected_vols or datavols, monitor_only=False)
 
 
 elif options.action == "prune":
     if options.autoprune.lower() == "off" and not options.session:
         x_it(1, "Must specify --autoprune or --session for prune.")
-    dvs = selected_vols if selected_vols else datavols
+    dvs = selected_vols or datavols
 
     if not options.unattended and len(dvs):
         print("This operation will delete session(s) from the archive;")
@@ -3586,8 +3607,8 @@ elif options.action == "receive":
         x_it(1, "Specify only one session for receive.")
 
     for dv in selected_vols:
-        count = receive_volume(dv, select_ses="" if not options.session else options.session,
-                               save_path=options.saveto if options.saveto else "")
+        count = receive_volume(aset.vols[dv], select_ses=options.session or "",
+                                              save_path=options.saveto or "")
         if count is None:   error_cache.append(dv)
 
 
@@ -3596,16 +3617,17 @@ elif options.action == "verify":
         x_it(1, "Specify one session for verify.")
 
     for dv in datavols if options.all else selected_vols:
-        receive_volume(dv,
+        count = receive_volume(aset.vols[dv],
                     select_ses="" if not options.session else options.session.split(",")[0],
                     verify_only=1, save_path="")
+        if count is None:   error_cache.append(dv)
 
 
 elif options.action == "diff":
     if len(selected_vols) != 1:
         x_it(1, "Specify one volume for diff.")
     if selected_vols:
-        receive_volume(selected_vols[0], save_path="", diff=True)
+        receive_volume(aset.vols[selected_vols[0]], save_path="", diff=True)
 
 
 elif options.action == "list":
@@ -3647,7 +3669,7 @@ elif options.action == "arch-init":
 
 
 elif options.action == "arch-check":
-    arch_check(options.volumes)
+    arch_check(aset, options.volumes)
 
 
 elif options.action == "arch-delete":
