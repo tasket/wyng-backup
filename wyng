@@ -324,7 +324,7 @@ class ArchiveSet:
 class ArchiveVolume:
 
     __slots__ = ("vid","name","archive","path","vgname","mapfile","sessions","sesnames",
-                 "last","meta_checked","tags","desc","changed_bytes")
+                 "_seslist","last","meta_checked","tags","desc","changed_bytes")
 
     def __init__(self, archive, vid, hashval, path, vgname, name=None, children=2):
         self.vid       = vid                       ; self.tags    = {}
@@ -362,7 +362,7 @@ class ArchiveVolume:
         if not self.name: raise ValueError("Vol name missing")
 
         # session name list sorted by sequence field
-        seslist = list(self.sessions.values()) if children > 1 else []
+        self._seslist = seslist = list(self.sessions.values()) if children > 1 else []
         seslist.sort(key=lambda x: x.sequence)
         self.sesnames = sesnames = [y.name for y in seslist]
         if sesnames:   self.last = sesnames[-1]
@@ -596,34 +596,45 @@ class ArchiveSession:
 
 
 def agent_helper_write():
-    agent_program = '''#  Copyright Christopher Laprise 2018-2023
+    agent_program = r'''#  Copyright Christopher Laprise 2018-2023
 #  Licensed under GNU General Public License v3. See github.com/tasket/wyng-backup
-import os, sys, signal
+import os, sys, signal, time
 
-def clear_array(ar):
-    for ii in range(len(ar)):   ar[ii] = 0
+def sighandler(s,f):
+    if s == ALRM:   raise TimeoutError("SIGALRM")
 
-def sighandler(a,b):  pass
+def do_mkpipe():
+    if exists("/tmp/"+agent_name):   os.remove("/tmp/"+agent_name)
+    os.mkfifo("/tmp/"+agent_name, mode=0o600)
+
+class KeyHandler:
+    def __init__(self):
+        self.keys = []
+
+    def __del__(self):
+        for key in self.keys:
+            for ii in range(len(key)):   key[ii] = 0
+        os.remove("/tmp/"+agent_name)
 
 ## MAIN ##
-cmd = sys.argv[1]   ; agent_name = sys.argv[2]   ; magic  = b"\\xff\\x11\\x15"
-exists = os.path.exists    ; USR1 = signal.SIGUSR1
+cmd    = sys.argv[1]      ; agent_name = sys.argv[2]   ; magic  = b"\xff\x11\x15"
+exists = os.path.exists   ; USR1 = signal.SIGUSR1      ; ALRM   = signal.SIGALRM
+for s in (USR1,ALRM):   signal.signal(s, sighandler)   ; signal.siginterrupt(s, True)
+signal.alarm(10)          ; KH   = KeyHandler()        ; inread = sys.stdin.buffer.read
 
-signal.signal(USR1, sighandler)   ; signal.siginterrupt(USR1, True)
-keys = []   ; inread = sys.stdin.buffer.read
-duration = min(inread(1)[0], 60) * 60
-try:
-    for slot in range(2):
-        keys.append(bytearray(inread(inread(1)[0])))   ; assert inread(3) == magic
-    while signal.sigtimedwait({USR1}, duration):
+do_mkpipe()    ; duration = min(inread(1)[0], 60) * 60
+for slot in range(2):
+    KH.keys.append(bytearray(inread(inread(1)[0])))   ; assert inread(3) == magic
+
+while True:
+    try:
+        signal.alarm(0)   ; signal.sigtimedwait({USR1}, duration)   ; signal.alarm(10)
         with open("/tmp/"+agent_name,"wb") as npipe:
-            for key in keys:
-                npipe.write(magic + len(key).to_bytes(1,"big") + key); npipe.flush()
-except Exception as e:
-    sys.stderr.write(repr(e))
-finally:
-    for key in keys:   clear_array(key)
-    os.remove("/tmp/"+agent_name)
+            for key in KH.keys:
+                npipe.write(b''.join((magic, len(key).to_bytes(1,"big"), key)))
+            time.sleep(0.5)
+    except TimeoutError:
+        print("timeout")    ; do_mkpipe()    ; continue
 '''
     with open(tmpdir +"/agent_helper.py", "wb") as progf:
         progf.write(bytes(agent_program, encoding="UTF-8"))
@@ -652,8 +663,6 @@ def agent_get(aname, duration):
 
 
 def agent_make(aname, duration, keys):
-    if exists("/tmp/"+aname):   os.remove("/tmp/"+aname)
-    os.mkfifo("/tmp/"+aname, mode=0o600)
     p = SPr.Popen([CP.python, tmpdir+"/agent_helper.py","store",aname], text=False,
                           shell=False, stdin=SPr.PIPE, stdout=SPr.DEVNULL) #, stderr=SPr.DEVNULL)
     p.stdin.write(min(duration,60).to_bytes(1,"big"))
@@ -1139,11 +1148,19 @@ def arch_check(aset, vol_list=None, startup=False):
                 dest.run([dest.cd+aset.bkdir + " && rm -rf " + vol.vid+"/"+sdir.name])
                 shutil.rmtree(vol.path+"/"+sdir.name, ignore_errors=True)
 
+        # Check session sequencing
+        seslist = vol._seslist
+        for si, ses in enumerate(seslist[1:]):
+            if ses.previous != seslist[si].name:
+                raise ValueError(f"Prev Out of sequence: {ses.name} -> {seslist[si].name}")
+            if ses.sequence == seslist[si].sequence:
+                raise ValueError(f"Duplicate sequence {ses.sequence} in {ses.name}")
+        vol._seslist = None
+
         if startup:   continue
 
-        # Check ses sequence number is unique and combined manifests are correct
+        # Check all combined manifests are correct
         print("  Checking indexes,", end="", flush=True) ; mset = []
-        assert len(vol.sessions) == len(set((x.sequence for x in vol.sessions.values())))
         for ses in vol.sesnames:   mset.append(ses)    ; check_manifest_sequence(vol, mset)
 
         # Check hashes of each session individually
@@ -1455,7 +1472,7 @@ class Destination:
 
     def write_helper_program(self):
 
-        dest_program = '''#  Copyright Christopher Laprise 2018-2023
+        dest_program = r'''#  Copyright Christopher Laprise 2018-2023
 #  Licensed under GNU General Public License v3. See github.com/tasket/wyng-backup
 import os, sys, time, signal, shutil, subprocess as SPr, gzip, tarfile
 
@@ -1557,7 +1574,7 @@ def helper_merge_finalize():
     print("wyng_check_free", shutil.disk_usage(".").free, flush=True)
 
 ## MAIN ##
-cmd = sys.argv[1]   ; msync = "--sync" in sys.argv   ; magic  = b"\\xff\\x11\\x15"
+cmd = sys.argv[1]   ; msync = "--sync" in sys.argv   ; magic  = b"\xff\x11\x15"
 tmpdir = os.path.dirname(os.path.abspath(sys.argv[0]))  
 exists = os.path.exists    ; replace = os.replace    ; remove = os.remove
 if "--finalize" in sys.argv:   catch_signals()
@@ -1602,7 +1619,7 @@ elif cmd == "dedup":
                     print(err)   ; raise err
     print(ddcount, "bytes reduced.")
     print("wyng_check_free", shutil.disk_usage(".").free, flush=True)
-    '''
+'''
         with open(tmpdir +"/rpc/dest_helper.py", "wb") as progf:
             progf.write(bytes(dest_program, encoding="UTF-8"))
 
@@ -1889,7 +1906,7 @@ def get_lvm_deltas(aset, datavols):
                 cmds = [[CP.thin_delta, "-m",   "--thin1=" + l_vols[snap1vol].thin_id,
                                                 "--thin2=" + l_vols[snap2vol].thin_id,
                                         "/dev/mapper/"+vgname+"-"+poolname+"_tmeta"],
-                        [CP.grep, "-v", "^\s*<same .*\/>$"]
+                        [CP.grep, "-v", r"^\s*<same .*\/>$"]
                         ]
                 do_exec(cmds,  out=tmpdir+"/delta."+datavol)
         except Exception as e:
@@ -2639,7 +2656,7 @@ def merge_manifests(volume, msessions=None, mtarget=None, addcol=False):
 
         # fix: extrapolate path with filename
         do_exec([[CP.xargs, "-0", "-a", slist[0],
-                  CP.awk, '{sub("/manifest","",FILENAME); print $0, FILENAME > "'
+                  CP.awk, r'{sub("/manifest","",FILENAME); print $0, FILENAME > "'
                             +tmp+'/m/"FILENAME}']], cwd=volume.path)
     else:
         cdir  = volume.path     ; slsort  = slist[0]
@@ -2688,7 +2705,7 @@ def merge_sessions(volume, sources, target, clear_sources=False):
             for ses in merge_sources:
                 if clear_sources:   print(ses, file=lstf)    ; manifests.append("man."+ses)
                 volume.decode_one_manifest(volume.sessions[ses])
-                do_exec([[CP.sed, "-E", "s|$| "+ses+"|", ses+"/manifest"
+                do_exec([[CP.sed, "-E", r"s|$| "+ses+r"|", ses+"/manifest"
                         ]], out=m_tmp+"/man."+ses)
             print("###", file=lstf)
 
@@ -2699,29 +2716,29 @@ def merge_sessions(volume, sources, target, clear_sources=False):
                 pjoin(volume.path, merge_target, "manifest")]],
                 out="manifest.two", cwd=m_tmp)
         # Make final manifest without extra column.
-        do_exec([[CP.awk, "$2<="+lc_filter+" {print $1, $2}", m_tmp+"/manifest.two"]],
+        do_exec([[CP.awk, r"$2<="+lc_filter+r" {print $1, $2}", m_tmp+"/manifest.two"]],
                 out=target+"/manifest.tmp")
 
         # Output manifest filenames in the sftp-friendly form:
         # 'rename src_session/subdir/xaddress target/subdir/xaddress'
         # then pipe to destination and run dest_helper.py.
         do_exec([
-                [CP.awk, "$2<="+lc_filter] if vol_shrank else None,
+                [CP.awk, r"$2<="+lc_filter] if vol_shrank else None,
                 [CP.sed, "-E",
 
-                "s|^0 x(\S{" + str(address_split[0]) + "})(\S+)\s+(S_\S+)|"
-                "-rm "+merge_target+"/\\1/x\\1\\2|; t; "
+                r"s|^0 x(\S{" +str(address_split[0])+ r"})(\S+)\s+(S_\S+)|"
+                r"-rm " +merge_target+ r"/\1/x\1\2|; t; "
 
-                "s|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)\s+(S_\S+)|"
-                "rename \\3/\\1/x\\1\\2 "+merge_target+"/\\1/x\\1\\2|"
+                r"s|^\S+\s+x(\S{" +str(address_split[0])+ r"})(\S+)\s+(S_\S+)|"
+                r"rename \3/\1/x\1\2 " +merge_target+ r"/\1/x\1\2|"
                 ]
                 ], infile=m_tmp+"/manifest.one", out=">>merge.lst")
 
         if vol_shrank:
             # If volume size shrank in this period then make trim list.
-            do_exec([[CP.awk, "$2>"+lc_filter, m_tmp+"/manifest.two"],
-                     [CP.sed, "-E", "s|^\S+\s+x(\S{" + str(address_split[0]) + "})(\S+)|"
-                                    "-rm "+merge_target+"/\\1/x\\1\\2|"]
+            do_exec([[CP.awk, r"$2>"+lc_filter, m_tmp+"/manifest.two"],
+                     [CP.sed, "-E", r"s|^\S+\s+x(\S{" + str(address_split[0]) + r"})(\S+)|"
+                                    r"-rm " + merge_target + r"/\1/x\1\2|"]
                     ], out=">>merge.lst")
 
         do_exec([[CP.gzip, "-f", "merge.lst"]])
@@ -2884,9 +2901,9 @@ def receive_volume(vol, select_ses="", save_path="", diff=False, verify_only=0):
     manifest = merge_manifests(vol, msessions=incl_ses, addcol=True)
 
     if not sparse:
-        cmds = [[CP.sed, "-E", "/"+last_chunkx+"/q", manifest],  ## Enh: detect vol_shrank
-                [CP.sed, "-E", "/^0\s/ d; "
-                "s|^\S+\s+x(\S{" +str(address_split[0])+ "})(\S+)\s+(S_\S+)|\\3/\\1/x\\1\\2|;"],
+        cmds = [[CP.sed, "-E", r"/" +last_chunkx+ r"/q", manifest],  ## Enh: detect vol_shrank
+                [CP.sed, "-E", r"/^0\s/ d; "
+                r"s|^\S+\s+x(\S{" +str(address_split[0])+ r"})(\S+)\s+(S_\S+)|\3/\1/x\1\2|;"],
                 [CP.gzip, "-c", "-4"
                 ],
                 dest.run_args(["cat >"+dest.dtmp+"/dest.lst.gz"]),
@@ -3350,7 +3367,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4wip001"     ; prog_date = "20230207"
+prog_version          = "0.4wip002"     ; prog_date = "20230208"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
@@ -3444,7 +3461,7 @@ if options.quiet and options.action not in ("list","version"):
     options.unattended = True
     sys.stdout = open(os.devnull, "w")
 
-print("%s %s release %s" % (prog_name.capitalize(), prog_version, prog_date))
+print("%s %s release %s" % (prog_name.capitalize(), prog_version, prog_date), flush=True)
 
 if options.action in write_actions+("arch-init","monitor") and not admin_permission:
     x_it(1, "Must be root/admin user for %s." % options.action)
@@ -3561,7 +3578,7 @@ arch_dt     = arch_dt_raw.astimezone().isoformat(sep=u" ")
 
 print("Encrypted" if (aset.mcrypto and aset.datacrypto) else "Un-encrypted",
       "archive:", dest.spec,
-      "\nLast updated %s (%s)\n" % (arch_dt[:-6], arch_dt[-6:]))
+      "\nLast updated %s (%s)\n" % (arch_dt[:-6], arch_dt[-6:]), flush=True)
 
 # Check volume args against config
 exclude_vols  = set(options.volex.split(","))
