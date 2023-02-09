@@ -628,11 +628,12 @@ for slot in range(2):
 
 while True:
     try:
-        signal.alarm(0)   ; signal.sigtimedwait({USR1}, duration)   ; signal.alarm(10)
+        signal.alarm(0)   ; res = signal.sigtimedwait({USR1}, duration)   ; signal.alarm(10)
+        if res is None:   break
         with open("/tmp/"+agent_name,"wb") as npipe:
             for key in KH.keys:
-                npipe.write(b''.join((magic, len(key).to_bytes(1,"big"), key)))
-            time.sleep(0.5)
+                npipe.write(magic + len(key).to_bytes(1,"big"))   ; npipe.write(key)
+            npipe.flush()    ; time.sleep(0.5)
     except TimeoutError:
         print("timeout")    ; do_mkpipe()    ; continue
 '''
@@ -1942,7 +1943,8 @@ def update_delta_digest(aset, datavol, monitor_only):
 
     # Setup access to deltamap as an mmap object.
     with open(vol.mapfile, "r+b") as bmapf:
-        snap_ceiling = max(snap1size, snap2size) // bs    ; chunkblocks = chunksize // bs
+        snap_ceiling = max(snap1size, snap2size) // block_size
+        chunkblocks  = chunksize // block_size
         bmap_size    = vol.mapsize(max(snap1size, snap2size))
         bmapf.truncate(bmap_size)    ; bmapf.flush()
         bmap_mm      = mmap.mmap(bmapf.fileno(), 0)
@@ -3367,7 +3369,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4wip002"     ; prog_date = "20230208"
+prog_version          = "0.4wip002"     ; prog_date = "20230209"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
@@ -3388,12 +3390,12 @@ except IOError:
 cpu_flags = [x for x in open("/proc/cpuinfo") if x.startswith("flags")] [0].split()[1:]
 
 # Disk block size:
-bs                    = 512
+block_size            = 512
 # LVM min blocks = 128 = 64kBytes:
 lvm_block_factor      = 128
 # Smallest archive chunk size = 64kBytes:
-bkchunksize           = 1 * lvm_block_factor * bs
-assert bkchunksize % (lvm_block_factor * bs) == 0
+bkchunksize           = 1 * lvm_block_factor * block_size
+assert bkchunksize % (lvm_block_factor * block_size) == 0
 max_address           = 0xffffffffffffffff # 64bits
 # for 64bits, a subdir split of 9+7 allows =< 4096 files per dir:
 address_split         = [len(hex(max_address))-2-7, 7]
