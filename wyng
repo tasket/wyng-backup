@@ -598,7 +598,7 @@ class ArchiveSession:
 def agent_helper_write():
     agent_program = r'''#  Copyright Christopher Laprise 2018-2023
 #  Licensed under GNU General Public License v3. See github.com/tasket/wyng-backup
-import os, sys, signal, time
+import os, sys, signal
 
 def sighandler(s,f):
     if s == ALRM:   raise TimeoutError("SIGALRM")
@@ -617,12 +617,12 @@ class KeyHandler:
         os.remove("/tmp/"+agent_name)
 
 ## MAIN ##
-cmd    = sys.argv[1]      ; agent_name = sys.argv[2]   ; magic  = b"\xff\x11\x15"
-exists = os.path.exists   ; USR1 = signal.SIGUSR1      ; ALRM   = signal.SIGALRM
-for s in (USR1,ALRM):   signal.signal(s, sighandler)   ; signal.siginterrupt(s, True)
-signal.alarm(10)          ; KH   = KeyHandler()        ; inread = sys.stdin.buffer.read
+cmd    = sys.argv[1]      ; agent_name = sys.argv[2]     ; inread = sys.stdin.buffer.read
+KH     = KeyHandler()     ; magic  = b"\xff\x11\x15"     ; exists = os.path.exists
+SIGINT = signal.SIGINT    ; USR1   = signal.SIGUSR1      ; ALRM   = signal.SIGALRM
+for s in (SIGINT,USR1,ALRM):   signal.signal(s, sighandler)   ; signal.siginterrupt(s, True)
 
-do_mkpipe()    ; duration = min(inread(1)[0], 60) * 60
+signal.alarm(10)    ; do_mkpipe()    ; duration = min(inread(1)[0], 60) * 60
 for slot in range(2):
     KH.keys.append(bytearray(inread(inread(1)[0])))   ; assert inread(3) == magic
 
@@ -633,7 +633,6 @@ while True:
         with open("/tmp/"+agent_name,"wb") as npipe:
             for key in KH.keys:
                 npipe.write(magic + len(key).to_bytes(1,"big"))   ; npipe.write(key)
-            npipe.flush()    ; time.sleep(0.5)
     except TimeoutError:
         print("timeout")    ; do_mkpipe()    ; continue
 '''
@@ -658,14 +657,14 @@ def agent_get(aname, duration):
         for k in result:   clear_array(k)
         result = None    ; os_kill(pid)
     finally:
-        if duration < 1:   os_kill(pid)
+        if duration == -1:   os_kill(pid)
         signal.alarm(0)  ; catch_signals(None)
         return result
 
 
 def agent_make(aname, duration, keys):
     p = SPr.Popen([CP.python, tmpdir+"/agent_helper.py","store",aname], text=False,
-                          shell=False, stdin=SPr.PIPE, stdout=SPr.DEVNULL) #, stderr=SPr.DEVNULL)
+                          shell=False, stdin=SPr.PIPE, stdout=SPr.DEVNULL, stderr=SPr.DEVNULL)
     p.stdin.write(min(duration,60).to_bytes(1,"big"))
     for k in keys:  p.stdin.write(len(k).to_bytes(1,"big") + k + Destination.magic)
     p.poll(); p.stdin.flush(); p.stdin.close()
@@ -1842,8 +1841,8 @@ def prepare_snapshots(aset, datavols, monitor_only):
                 # Recover interrupted snapshot rotation
                 lv_rename(vgname, snap2vol, snap1vol)
 
-            if lv_exists(vgname, snap1vol) \
-            and (    (vol.map_used() == 0 and "delta" in " ".join(l_vols[snap1vol].tags))
+            if lv_exists(vgname, snap1vol) and "delta" in " ".join(l_vols[snap1vol].tags) \
+            and (     vol.map_used() == 0 
                   or (vol.map_used() > 0 and
                       "delta-"+str(os.path.getmtime(vol.mapfile)) not in l_vols[snap1vol].tags
                       )
@@ -3170,10 +3169,10 @@ def delete_volume(aset, dv):
               "for volume", dv)
 
         ans = ask_input("Are you sure? [y/N]: ")
-        if ans.lower() not in {"y","yes"}:
-            x_it(0,"")
+        if ans.lower() not in {"y","yes"}:   x_it(0,"")
+        print()
 
-    print("\nDeleting volume", dv, "from archive.")
+    print("Deleting volume", dv, "from archive.")
     catch_signals()
     if not aset.in_process:       aset.set_in_process(["delete", dv])
     dvid = aset.delete_volume_meta(dv)
@@ -3316,7 +3315,7 @@ def catch_signals(sel=["INT","TERM","QUIT","ABRT","ALRM","TSTP","USR1","USR2"], 
     # Remove existing handlers
     for sig in list(signal_handlers):   signal.signal(sig, signal_handlers.pop(sig))
     # Set handler on requested signals
-    for sig in (getattr(signal,"SIG"+x) for x in (sel if sel else [])):
+    for sig in (getattr(signal,"SIG"+x) for x in (sel or [])):
         signal_handlers[sig] = signal.getsignal(sig)   ; signal.signal(sig, handle_signal)
         signal.siginterrupt(sig, iflag)
 
@@ -3369,7 +3368,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4wip002"     ; prog_date = "20230209"
+prog_version          = "0.4alpha2"     ; prog_date = "20230209"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
@@ -3457,7 +3456,7 @@ parser.add_argument("volumes", nargs="*")
 options = parser.parse_args()    ; options.action = options.action.lower()
 
 # Set stdout to devnull if --quiet is specified
-debug = options.debug    ; assert not (options.quiet and (options.verbose or debug))
+debug = options.debug    #; assert not (options.quiet and (options.verbose or debug))
 if debug:   options.verbose = True
 if options.quiet and options.action not in ("list","version"):
     options.unattended = True
