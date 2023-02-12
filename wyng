@@ -234,13 +234,14 @@ class ArchiveSet:
         self.conf['in_process'] = { x: ln if type(ln) is str else ":|".join(ln)
                                           for x,ln in enumerate(self.in_process) }
 
-        os.makedirs(self.path, exist_ok=True)
+        os.makedirs(self.path, exist_ok=True)    ; etag = b''
         with io.StringIO() as fs:
             self.conf.write(fs)    ; fs.flush()
             buf = gzip.compress(fs.getvalue().encode("UTF-8"), 4)
-        if mcrypto:   buf = mcrypto.encrypt(buf)
+        if mcrypto:   etag, buf = mcrypto.encrypt(buf)
         with open(self.confpath+ext, "wb") as f:
-            f.write(self.confprefix + self.modeprefix + self.ci_mode + b"\n" + buf)
+            f.write(b''.join((self.confprefix, self.modeprefix, self.ci_mode, b"\n")))
+            f.write(etag)    ; f.write(buf)
 
     # Set or clear state for the archive as 'in_process' in case of interruption during write.
     # Format is list containing strings or list of strings. For latter, ':|' is the delimiter.
@@ -297,15 +298,15 @@ class ArchiveSet:
 
     def encode_file(self, fname, fdest=None, get_digest=True, compress=True):
         # Enh: optimize memory use
-        mcrypto = self.mcrypto    ; digest = None
+        mcrypto = self.mcrypto    ; digest = None    ; etag = b''
         destname= fdest or fname+(".z" if compress else "")
 
         with  open(fname,"r+b") as inf,   mmap.mmap(inf.fileno(), 0) as inmap:
             inbuf = bytes(inmap) if self.compression == "zstd" else inmap
             mbuf  = self.compress(inbuf, int(self.compr_level)) if compress else inbuf
             if get_digest:   digest = self.b64hash(mbuf)
-            if mcrypto:      mbuf = mcrypto.encrypt(mbuf)
-            open(destname,"wb").write(mbuf)
+            if mcrypto:      etag, mbuf = mcrypto.encrypt(mbuf)
+            with open(destname,"wb") as f:   f.write(etag); f.write(mbuf)
 
         return digest
 
@@ -372,7 +373,7 @@ class ArchiveVolume:
 
 
     def save_volinfo(self, ext=""):
-        os.makedirs(self.path, exist_ok=True)   ; fname = "volinfo"
+        os.makedirs(self.path, exist_ok=True)   ; fname = "volinfo"   ; etag = b''
         with io.StringIO() as f:
             print("name =", self.name, file=f)
             print("desc =", self.desc, file=f)
@@ -383,10 +384,10 @@ class ArchiveVolume:
                                         int(self.archive.compr_level))
             self.archive.conf["volumes"][self.vid] = self.archive.b64hash(buf)
 
-        if self.archive.mcrypto:   buf = self.archive.mcrypto.encrypt(buf)
+        if self.archive.mcrypto:   etag, buf = self.archive.mcrypto.encrypt(buf)
         with open(pjoin(self.path,fname+ext), "wb") as f:
-            f.write(buf)
-            f.flush()    ; os.fsync(f.fileno())
+            f.write(etag)  ; f.write(buf)
+            f.flush()      ; os.fsync(f.fileno())
         self.archive.save_conf(ext)
 
     def volname_check(vname): # Fix: move to LocalStorage class
@@ -573,7 +574,7 @@ class ArchiveSession:
             if len(voltags[tag]) == 0:    del(voltags[tag])
 
     def save_info(self, ext=""):
-        assert self.path   ; fname = "info"   ; arch = self.volume.archive
+        assert self.path   ; etag = b''   ; fname = "info"   ; arch = self.volume.archive
         self.manifesthash = arch.encode_file(self.path+"/manifest"+ext,
                                              fdest=self.path+"/manifest.z"+ext)
         with io.StringIO() as f:
@@ -585,10 +586,10 @@ class ArchiveSession:
                                 int(arch.compr_level))
             self.hashval = arch.b64hash(buf)
 
-        if arch.mcrypto:   buf = arch.mcrypto.encrypt(buf)
+        if arch.mcrypto:   etag, buf = arch.mcrypto.encrypt(buf)
         with open(pjoin(self.path,fname+ext), "wb") as f:
-            f.write(buf)
-            f.flush()    ; os.fsync(f.fileno())
+            f.write(etag)  ; f.write(buf)
+            f.flush()      ; os.fsync(f.fileno())
         self.saved = self.loaded = True
         self.volume.save_volinfo(ext)
 
@@ -805,16 +806,18 @@ class DataCryptography:
         self.counter += 1
         if self.counter > self.max_count:   raise ValueError("Key exhaustion.")
         # Nonce composed from: 32bit current time offset + 80bit rnd + 80bit counter
-        nonce  = (int(self.timer()) - self.time_headroom).to_bytes(self.timesz, "big") \
-               + self.get_rnd(self.randomsz) \
-               + self.counter.to_bytes(self.countsz, "big")
+        nonce  = b''.join(( (int(self.timer()) - self.time_headroom).to_bytes(self.timesz, "big"),
+                            self.get_rnd(self.randomsz),
+                            self.counter.to_bytes(self.countsz, "big")
+                 ))
         cipher = self.ChaCha20_new(key=self.key, nonce=nonce)
         buf    = cipher.encrypt(buf)
         if self.counter % self.ctcadence == 0:   self.save_counter()
-        return  nonce + buf
+        return  nonce, buf
 
     # Decrypt [X]ChaCha20:
-    def _dec_chacha20(self, untrusted_buf):
+    def _dec_chacha20(self, buf):
+        untrusted_buf = memoryview(buf)
         nonce  = untrusted_buf[:self.nonce_sz]
         cipher = self.ChaCha20_new(key=self.key, nonce=nonce)
         return cipher.decrypt(untrusted_buf[self.nonce_sz:])
@@ -824,16 +827,18 @@ class DataCryptography:
         self.counter += 1
         if self.counter > self.max_count:   raise ValueError("Key exhaustion.")
         # Nonce composed from: 32bit current time offset + 80bit rnd + 80bit counter
-        nonce  = (int(self.timer()) - self.time_headroom).to_bytes(self.timesz, "big") \
-               + self.get_rnd(self.randomsz) \
-               + self.counter.to_bytes(self.countsz, "big")
+        nonce  = b''.join(( (int(self.timer()) - self.time_headroom).to_bytes(self.timesz, "big"),
+                            self.get_rnd(self.randomsz),
+                            self.counter.to_bytes(self.countsz, "big")
+                 ))
         cipher = self.ChaCha20_Poly1305_new(key=self.key, nonce=nonce)
         buf, ci_tag = cipher.encrypt_and_digest(buf)
         if self.counter % self.ctcadence == 0:   self.save_counter()
-        return  nonce + ci_tag + buf
+        return  b''.join((nonce, ci_tag)), buf
 
     # Decrypt [X]ChaCha20-Poly1305:
-    def _dec_chacha20_poly1305(self, untrusted_buf):
+    def _dec_chacha20_poly1305(self, buf):
+        untrusted_buf = memoryview(buf)
         nonce  = untrusted_buf[:self.nonce_sz]
         ci_tag = untrusted_buf[self.nonce_sz:self.buf_start]
         cipher = self.ChaCha20_Poly1305_new(key=self.key, nonce=nonce)
@@ -1018,19 +1023,18 @@ def fssync(path):
     if options.maxsync:   SPr.Popen([CP.sync,"-f",path])
 
 
-def ask_passphrase(verify=False, recur=0):
-    if recur > 5:   x_it(1, "Max retries on input.")
-    passphrase  = bytearray(getpass.getpass("Enter passphrase: "), encoding="UTF-8")
-    if verify and not options.unattended:
-        if len(passphrase) < 10:
-            print("Passphrase must be 10 or more characters.")
-            clear_array(passphrase)
-            passphrase = ask_passphrase(verify=True, recur=recur+1)
-        passphrase2 = bytearray(getpass.getpass("Re-enter passphrase: "), encoding="UTF-8")
-        if passphrase != passphrase2:
-            clear_array(passphrase)    ; passphrase=None
-            x_it(1, "Entries do not match.")
-        clear_array(passphrase2)
+def ask_passphrase(prompt="Enter passphrase: ", verify=False):
+    for ii in range(3):
+        passphrase  = bytearray(getpass.getpass(prompt), encoding="UTF-8")
+        if not verify or len(passphrase) >= 10:   break
+        print("Passphrase must be 10 or more characters.")   ; clear_array(passphrase)
+        if ii == 2 or options.unattended:   x_it(1, "")
+    if options.unattended:   return passphrase
+    passphrase2 = bytearray(getpass.getpass("Re-enter passphrase: "), encoding="UTF-8")
+    if passphrase != passphrase2:
+        clear_array(passphrase)   ; clear_array(passphrase2)
+        x_it(1, "Entries do not match.")
+    clear_array(passphrase2)
     return passphrase
 
 
@@ -1062,7 +1066,8 @@ def arch_init(aset, opts):
             ##if opts.unattended:   x_it(1, "Enter passphrase interactively.")
             # Security Enh: Possibly use mmap+mlock to store passphrase/key values,
             #               and wipe them from RAM after use.
-            passphrase      = ask_passphrase(verify=True)
+            passphrase      = ask_passphrase(prompt="Enter new encryption passphrase: ",
+                                             verify=True)
             aset.mcrypto    = DataCryptography(ci[1], aset.confpath+".salt", slot=1,
                                             passphrase=passphrase[:], init=True)
             aset.datacrypto = DataCryptography(aset.data_cipher, aset.mcrypto.keyfile, slot=0,
@@ -1070,7 +1075,7 @@ def arch_init(aset, opts):
     else:
         x_it(1,"Error: Invalid cipher option.")
 
-    print(); print(f"Encryption    : {aset.data_cipher} ({ci})")
+    print(); print(f"Encryption    : {aset.data_cipher} ({ci[1]})")
 
     if opts.hashtype:
         if opts.hashtype not in hash_funcs:
@@ -2064,6 +2069,7 @@ def send_volume(vol, localtime, ses_tags, send_all):
         encrypt = aset.datacrypto.encrypt
     else:
         crypto  = False
+        etag    = b''
 
 
     # Use tar to stream files to destination
@@ -2193,11 +2199,12 @@ def send_volume(vol, localtime, ses_tags, send_all):
                 else:
                     # Encrypt the data chunk
                     if crypto:
-                        buf = encrypt(buf)
+                        etag, buf = encrypt(buf)
 
                     # Send data chunk to the archive
-                    tar_info.size = len(buf)
-                    tarf_addfile(tarinfo=tar_info, fileobj=BytesIO(buf))
+                    fileobj = BytesIO()
+                    tar_info.size = fileobj.write(etag) + fileobj.write(buf)   ; fileobj.seek(0)
+                    tarf_addfile(tarinfo=tar_info, fileobj=fileobj)
                     bcount += len(buf)    ; counter += 1
 
             # Advance addr, except when minibmap is zero len.
@@ -3353,7 +3360,7 @@ def cleanup():
         shutil.rmtree("/tmp/"+prog_name+"-debug", ignore_errors=True)
         shutil.move(tmpdir, "/tmp/"+prog_name+"-debug")
     if not debug:
-        dest.remove_dtmp()
+        if dest:   dest.remove_dtmp()
         shutil.rmtree(big_tmpdir, ignore_errors=True)
         for f in (big_tmpdir, tmpdir):
             shutil.rmtree(f, ignore_errors=True)
@@ -3368,9 +3375,10 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4alpha2"     ; prog_date = "20230209"
+prog_version          = "0.4wip003"     ; prog_date = "20230212"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
+aset = dest = None
 
 
 if sys.hexversion < 0x3080000:
