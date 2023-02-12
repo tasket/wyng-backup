@@ -1018,19 +1018,18 @@ def fssync(path):
     if options.maxsync:   SPr.Popen([CP.sync,"-f",path])
 
 
-def ask_passphrase(verify=False, recur=0):
-    if recur > 5:   x_it(1, "Max retries on input.")
-    passphrase  = bytearray(getpass.getpass("Enter passphrase: "), encoding="UTF-8")
-    if verify and not options.unattended:
-        if len(passphrase) < 10:
-            print("Passphrase must be 10 or more characters.")
-            clear_array(passphrase)
-            passphrase = ask_passphrase(verify=True, recur=recur+1)
-        passphrase2 = bytearray(getpass.getpass("Re-enter passphrase: "), encoding="UTF-8")
-        if passphrase != passphrase2:
-            clear_array(passphrase)    ; passphrase=None
-            x_it(1, "Entries do not match.")
-        clear_array(passphrase2)
+def ask_passphrase(prompt="Enter passphrase: ", verify=False):
+    for ii in range(3):
+        passphrase  = bytearray(getpass.getpass(prompt), encoding="UTF-8")
+        if not verify or len(passphrase) >= 10:   break
+        print("Passphrase must be 10 or more characters.")   ; clear_array(passphrase)
+        if ii == 2 or options.unattended:   x_it(1, "")
+    if options.unattended:   return passphrase
+    passphrase2 = bytearray(getpass.getpass("Re-enter passphrase: "), encoding="UTF-8")
+    if passphrase != passphrase2:
+        clear_array(passphrase)   ; clear_array(passphrase2)
+        x_it(1, "Entries do not match.")
+    clear_array(passphrase2)
     return passphrase
 
 
@@ -1062,7 +1061,8 @@ def arch_init(aset, opts):
             ##if opts.unattended:   x_it(1, "Enter passphrase interactively.")
             # Security Enh: Possibly use mmap+mlock to store passphrase/key values,
             #               and wipe them from RAM after use.
-            passphrase      = ask_passphrase(verify=True)
+            passphrase      = ask_passphrase(prompt="Enter new encryption passphrase: ",
+                                             verify=True)
             aset.mcrypto    = DataCryptography(ci[1], aset.confpath+".salt", slot=1,
                                             passphrase=passphrase[:], init=True)
             aset.datacrypto = DataCryptography(aset.data_cipher, aset.mcrypto.keyfile, slot=0,
@@ -1070,7 +1070,7 @@ def arch_init(aset, opts):
     else:
         x_it(1,"Error: Invalid cipher option.")
 
-    print(); print(f"Encryption    : {aset.data_cipher} ({ci})")
+    print(); print(f"Encryption    : {aset.data_cipher} ({ci[1]})")
 
     if opts.hashtype:
         if opts.hashtype not in hash_funcs:
@@ -3353,7 +3353,7 @@ def cleanup():
         shutil.rmtree("/tmp/"+prog_name+"-debug", ignore_errors=True)
         shutil.move(tmpdir, "/tmp/"+prog_name+"-debug")
     if not debug:
-        dest.remove_dtmp()
+        if dest:   dest.remove_dtmp()
         shutil.rmtree(big_tmpdir, ignore_errors=True)
         for f in (big_tmpdir, tmpdir):
             shutil.rmtree(f, ignore_errors=True)
@@ -3368,9 +3368,10 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4alpha2"     ; prog_date = "20230209"
+prog_version          = "0.4alpha2"     ; prog_date = "20230212"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
+aset = dest = None
 
 
 if sys.hexversion < 0x3080000:
