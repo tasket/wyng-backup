@@ -2,7 +2,7 @@
 
 
 ###  Wyng – Logical volume backup tool
-###  Copyright Christopher Laprise 2018-2021 / tasket@protonmail.com
+###  Copyright Christopher Laprise 2018-2023 / tasket@protonmail.com
 ###  Licensed under GNU General Public License v3. See file 'LICENSE'.
 
 
@@ -10,7 +10,7 @@
 #  editor width: 100  -----------------------------------------------------------------------------
 import sys, signal, os, stat, shutil, subprocess, time, datetime
 import re, mmap, bz2, zlib, gzip, hmac, tarfile, io, fcntl, tempfile
-import argparse, configparser, hashlib, functools, uuid, string
+import argparse, configparser, hashlib, functools, uuid, string, struct
 import xml.etree.ElementTree    ; from itertools import islice
 from array import array         ; import resource
 
@@ -410,6 +410,32 @@ class CP:
     blkdiscard = "/sbin/blkdiscard"   ; nice       = "/usr/bin/nice"
 
 
+class LowLevelIO:
+    import ctypes, ctypes.util
+    libc = ctypes.CDLL(ctypes.util.find_library("c"))
+
+    FALLOC_FL_KEEP_SIZE      = 0x01             ; FALLOC_FL_PUNCH_HOLE    = 0x02
+    FALLOC_FL_COLLAPSE_RANGE = 0x08             ; FALLOC_FL_ZERO_RANGE    = 0x10
+    FALLOC_FL_INSERT_RANGE   = 0x20             ; FALLOC_FL_UNSHARE_RANGE = 0x40
+    FALLOC_FL_PUNCH_FULL     = FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE
+
+    BLKDISCARD               = 0x1277           ; BLKDISCARDZEROES        = 0x127c
+
+    fallocate = libc.fallocate
+    fallocate.restype = ctypes.c_int
+    fallocate.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int64, ctypes.c_int64]
+
+    # Note: file_punch_hole() and block_discard_chunk() have the same arg signature...
+    def file_punch_hole(self, fn, start, length):
+        return self.fallocate(fn, self.FALLOC_FL_PUNCH_FULL, start, length)
+
+    def block_discard_chunk(self, fn, start, length):
+        try:
+            return fcntl.ioctl(fn, self.BLKDISCARD, struct.pack("LL", start, length))
+        except Exception as e:
+            return None
+
+
 class Lvm_VolGroup:
     def __init__(self, name):
         self.name  = name
@@ -530,10 +556,10 @@ def lv_rename(vgname, vol1, vol2):
 def lvm_meta_snapshot(arch, action, pool=None):
     if arch.vgname not in volgroups:   return
     vgname   = arch.vgname.replace("-","--")      ; checkerr = action == "reserve"
-    the_pool = pool if pool else arch.poolname    ; vgpools  = volgroups[arch.vgname].poolnames
+    the_pool = pool or arch.poolname              ; vgpools  = volgroups[arch.vgname].poolnames
 
-    for pool in vgpools & vgpools if not pool and action == "release" else {the_pool}:
-        poolname = pool.replace("-","--")
+    for pl in vgpools if not pool and action == "release" else {the_pool}:
+        poolname = pl.replace("-","--")
         do_exec([[CP.dmsetup,"message", vgname+"-"+poolname+"-tpool",
                 "0", action+"_metadata_snap"]], check=checkerr)
 
@@ -826,7 +852,7 @@ def detect_internal_state():
     #####>  Begin helper program  <#####
 
     dest_program = \
-'''#  Copyright Christopher Laprise 2018-2021
+'''#  Copyright Christopher Laprise 2018-2023
 #  Licensed under GNU General Public License v3. See github.com/tasket/wyng-backup
 import os, sys, signal, shutil, subprocess, gzip, tarfile
 cmd = sys.argv[1]   ; msync = "--sync" in sys.argv
@@ -1009,7 +1035,7 @@ def detect_dest_state(destsys):
                         }
 
     dest_in_proc  = online = False   ; dest_free = desttmpdir = None
-    dest_writable = True    ; tmpdigits = 12      ; tmpprefix = "/tmp/wyngrpc-"
+    dest_writable = True    ; tmpdigits = 12      ; tmpprefix = "/tmp/wyngrpc/"
 
     if (options.action not in local_actions and destsys is not None) \
         or options.remap or options.from_arch:
@@ -1029,6 +1055,7 @@ def detect_dest_state(destsys):
                 +"' && cd '"+aset.destmountpoint+"/"+aset.destdir+topdir+"'"
 
                 # send helper program to remote dest
+                +"  && mkdir -p " +tmpprefix + " && chmod 777 " + tmpprefix
                 +"  && tdir=$(mktemp -d " + tmpprefix + ("X"*tmpdigits) + ") && echo $tdir"
                 +"  && cat >$tdir/dest_helper.py"
 
@@ -1063,7 +1090,7 @@ def detect_dest_state(destsys):
                 elif ln.startswith(tmpprefix):
                     desttmpdir = ln.strip()
         if not desttmpdir or len(desttmpdir) != len(tmpprefix)+tmpdigits \
-        or not set(desttmpdir[5:]) <= set(string.ascii_letters + string.digits + "-"):
+        or not set(desttmpdir[5:]) <= set(string.ascii_letters + string.digits + "/"):
             raise ValueError("Missing or malformed tmp dir: "+repr(desttmpdir))
 
     return dest_free is not None, dest_free, dest_in_proc, dest_writable, desttmpdir
@@ -2356,8 +2383,8 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     if save_path:
         # Decode dev path semantics and match to vg/lv if possible. Otherwise, open
         # simple block dev or file.
-        save_type = "block device"
-        returned_home = False    ; lv, pool, vg = get_lv_path_pool(save_path)
+        save_type = "block device"   ; punch_hole   = low_level_io.block_discard_chunk
+        returned_home = False        ; lv, pool, vg = get_lv_path_pool(save_path)
         if not lv and vg_exists(os.path.dirname(save_path)):
             # Got vg path, lv does not exist
             lv = os.path.basename(save_path)
@@ -2378,16 +2405,15 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
 
         if exists(save_path) and stat.S_ISBLK(os.stat(save_path).st_mode):
             if not sparse_write:   do_exec([[CP.blkdiscard, save_path]])
-            volf = open(save_path, "w+b")
+            volf = open(save_path, "r+b")
         elif save_path.startswith("/dev/"):
             x_it(1,"Cannot create new volume from ambiguous /dev path."
                  " Please create the volume before using 'receive', or specify"
                  " --save-to=/dev/volgroup/lv in case of a thin LV.")
         else: # file
-            save_type = "file"
-            volf = open(save_path, "w+b")
-            if not sparse_write:   volf.truncate(0)   ; volf.flush()
-            volf.truncate(volsize)    ; volf.flush()
+            save_type = "file"   ; punch_hole = low_level_io.file_punch_hole
+            fopenmode = "r+b" if sparse_write and exists(save_path) else "wb"
+            volf = open(save_path, fopenmode)   ; volf.truncate(volsize)
 
     elif diff:
         if not lv_exists(vgname, datavol):
@@ -2413,10 +2439,12 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                 x_it(1, "Volume sizes differ:"
                     "\n  Archive = %d \n  Local   = %d" % (volsize, l_vols[snap1vol].lv_size))
 
-        volf  = open(pjoin("/dev",vgname,snap1vol), "rb")
+        volf  = open(pjoin("/dev",vgname,snap1vol), "r+b")
 
 
-    if volf:   volf_read = volf.read    ; volf_write = volf.write    ; volf_seek = volf.seek
+    if volf:
+        volf_read = volf.read     ; volf_write = volf.write    ; volf_seek = volf.seek
+        volfno    = volf.fileno() ; fcntl.lockf(volf, fcntl.LOCK_EX|fcntl.LOCK_NB)
 
     print("Receiving" if save_path else "Scanning", "volume:", datavol, select_ses[2:])
     if save_path:    print("Saving to %s '%s'" % (save_type, save_path))
@@ -2432,7 +2460,7 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
     gv_stdin = io.TextIOWrapper(getvol.stdin, encoding="utf-8") if sparse else None
 
     # Open manifest then receive, check and save data
-    addr = bcount = diff_count = 0
+    addr = bcount = diff_count = 0    ; buf = b''
     for mfline in open(manifest, "r"):
         if addr >= lchunk_addr:   break
         cksum, faddr, ses = mfline.split()    ; addr = int(faddr[1:], 16)
@@ -2440,11 +2468,13 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
         if verbose:   print("%.2f%%" % (addr/volsize*100), end="\x0d")
 
         # Process zeros quickly
-        if cksum.strip() == "0":
+        if cksum == "0":
             if save_path:
                 volf_seek(addr)
                 if sparse_write and volf_read(chunksize) != zeros:
+                    # Note: punch_hole() might not work, write zeros first anyway
                     volf_seek(addr)    ; volf_write(zeros)    ; diff_count += chunksize
+                    punch_hole(volfno, addr, chunksize)
             elif diff:
                 volf_seek(addr)    ; diff_count += diff_compare(zeros,True)
 
@@ -2535,10 +2565,6 @@ def receive_volume(datavol, select_ses="", save_path="", diff=False):
                 "--addtag=arch-"+aset.uuid, "-s", vgname+"/"+datavol, "-n", snap1vol]])
             print("  Initial snapshot created for", datavol)
             init_deltamap(vol, vol.mapfile, vol.mapsize())
-        elif returned_home:
-            print("Restored from older session: Volume may be out of"
-                " sync with archive until '%s --remap diff %s' is run!"
-                % (prog_name, datavol))
     elif diff:
         if remap:
             bmapf.close()
@@ -2577,13 +2603,6 @@ def rename_volume(oldname, newname):
     for ext in (".tick",".tock"):
         vg = aset.vgname    ; lv_remove(vg, newname+ext)
         if lv_exists(vg, oldname+ext):   lv_rename(vg, oldname+ext, newname+ext)
-
-    full_aset = ArchiveSet(aset.name, metadir+topdir, allvols=True)
-    if len(full_aset.vols[newname].sessions) \
-    and compare_files(pathlist=[confname], volumes=[full_aset.vols[newname]]):
-        x_it(1, "Error: Local and archive metadata differ.")
-
-    return full_aset
 
 
 # Remove a volume from the archive
@@ -2770,7 +2789,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.3.8"         ; prog_date = "20230205"
+prog_version          = "0.3.11"        ; prog_date = "20230206"
 format_version        = 2               ; debug     = False       ; tmpdir = None
 
 
@@ -2895,6 +2914,8 @@ os.makedirs(big_tmpdir, exist_ok=True)
 
 signal_handlers  = {}    ; signals_caught = []    ; error_cache = []
 
+low_level_io     = LowLevelIO()
+
 # Dict of compressors in the form: (library, default_compress_level, compress_func)
 compressors      =    {"zlib":   (zlib, 4, zlib.compress),
                        "bz2" :   (bz2,  9, bz2.compress)}
@@ -2956,12 +2977,17 @@ if aset.in_process and dest_online and not options.from_arch \
         print("Completing prior operation in progress:", " ".join(aset.in_process[0:2]))
 
         if aset.in_process[0] == "delete":
-            delete_volume(aset.in_process[1])
+            vname = aset.in_process[1]   ; delete_volume(vname)
         elif aset.in_process[0] == "rename":
-            aset = rename_volume(aset.in_process[1], aset.in_process[2])
+            vname = aset.in_process[2]   ; rename_volume(aset.in_process[1], vname)
         elif aset.in_process[0] == "merge":
-            merge_sessions(aset.in_process[1], aset.in_process[4].split("/"),
+            vname = aset.in_process[1]
+            merge_sessions(vname, aset.in_process[4].split("/"),
                         aset.in_process[3], clear_sources=bool(aset.in_process[2]))
+
+        aset = ArchiveSet(aset.name, metadir+topdir, allvols=True)
+        if compare_files(pathlist=[aset.confname], volumes=[aset.vols[vname]]):
+            x_it(1, "Error: Local and archive metadata differ.")
 
     else:
         print("Unknown prior operation in progress:", aset.in_process[0:2])
