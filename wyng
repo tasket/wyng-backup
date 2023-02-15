@@ -859,7 +859,7 @@ class CP:
     tee    = "/usr/bin/tee"     ; sync  = "/bin/sync"       ; dmsetup  = "/sbin/dmsetup"
     chattr = "/usr/bin/chattr"  ; xargs = "/usr/bin/xargs"  ; sha256sum= "/usr/bin/sha256sum"
     cmp    = "/usr/bin/cmp"     ; gzip  = "/bin/gzip"       ; diff     = "/usr/bin/diff"
-    ps     = "/usr/bin/ps"
+    ps     = "/usr/bin/ps"      ; uniq  = "/usr/bin/uniq"   ; filefrag = "/usr/sbin/filefrag"
     thin_delta = "/usr/sbin/thin_delta"
     blkdiscard = "/sbin/blkdiscard"   ; ionice     = "/usr/bin/ionice"
 
@@ -1980,6 +1980,110 @@ def update_delta_digest(aset, datavol, monitor_only):
     catch_signals()
     map_updated = dnewchunks+dfreedblocks+anynew+vol.map_used() > 0
     if monitor_only:
+        rotate_snapshots(vol, rotate=map_updated,
+                              delta_time=str(os.path.getmtime(vol.mapfile)))
+        print(("\r  %d ch, %d dis" % (dnewchunks, dfreedblocks//chunksize))
+                if map_updated else "\r  No changes   ")
+
+    if dnewchunks:   vol.changed_bytes_add(dnewchunks*chunksize, save=True)
+    catch_signals(None)
+    return map_updated
+
+
+def get_reflink_deltas(aset, datavols):
+    pathname = aset.vgname    ; procs=[]
+    if options.verbose:   print("Acquiring deltas.")
+    for vol in (aset.vols[x] for x in datavols):
+        for ext, fpath in ((y[0], pathname+"/"+vol.name+y[1])
+                          for y in (("11",".tick"), ("22",".tock"))):
+            if not exists(fpath):  #Fixme: also check reflink support for path
+                raise RuntimeError("Volume path '%s' does not exist." % fpath)
+            cmds = [[CP.filefrag, "-vs", "-b4096", fpath],
+                    # remove non-table data, punctuation, extra columns:
+                    #[CP.tail, "-n", "+4"], [CP.tr, "-d.:"],
+                    #[CP.awk, r"{print " +ext+ r", $2, $3, $4, $5, $6}"]
+                    [CP.sed, "-En", r"'/found$/q; /^\s*[a-zA-Z]/d; s/[.:]//g; "
+                     r"s/^\s*[0-9]+\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+([0-9]+).*"
+                     r"/\1 \2 \3 \4 \5/p"],
+                    ]
+            do_exec(cmds, out=tmpdir+"/delta."+vol.vid+ext)
+            #Enh: maybe use dev+inode as fname
+
+        do_exec([ [CP.sort, "-m", "-k2n,2"] + [tmpdir+"/delta."+vol.vid+x for x in ("11","22")],
+                  [CP.uniq, "-u", "-f1"]
+                 ],
+                    out=tmpdir+"/delta."+vol.vid
+                )
+
+
+def update_delta_digest_reflink(aset, datavol, monitor_only):
+
+    vol         = aset.vols[datavol]         ; chunksize  = aset.chunksize
+    snap1vol    = vol.name + ".tick"         ; snap2vol   = vol.name + ".tock"
+    snap1size   = l_vols[snap1vol].lv_size   ; snap2size = l_vols[snap2vol].lv_size
+    assert len(vol.sessions) and exists(vol.mapfile)
+
+    # Get xml parser and initialize vars
+    dtree       = xml.etree.ElementTree.parse(tmpdir+"/delta."+datavol).getroot()
+    dblocksize  = 4096 // block_size
+    dnewchunks  = isnew  = anynew = dfreedblocks = 0
+
+    # Check for volume size increase;
+    # Chunks from 'markall_pos' onward will be marked for backup.
+    next_chunk_addr  = vol.last_chunk_addr() + chunksize
+    markall_pos = (next_chunk_addr//chunksize//8) if snap2size-1 >= next_chunk_addr else None
+
+    # Setup access to deltamap as an mmap object.
+    with open(vol.mapfile, "r+b") as bmapf, open(tmpdir+"/delta."+vol.vid, "r") as deltaf:
+        snap_ceiling = max(snap1size, snap2size) // block_size    ; highwater = 0
+        chunkblocks  = chunksize // block_size
+        bmap_size    = vol.mapsize(max(snap1size, snap2size))
+        bmapf.truncate(bmap_size)    ; bmapf.flush()
+        bmap_mm      = mmap.mmap(bmapf.fileno(), 0)
+
+        # Cycle through the merged 'filefrag' metadata, marking bits in bmap_mm as needed.
+        # Entries carry a block position 'blockbegin' and the length of changed blocks.
+        # 'snap_ceiling' is used to discard ranges beyond current vol size.
+        for dln in deltaf:
+            #if dln.endswith("found\n"):   continue
+            side, blockbegin, _, _, _, blocklen = map(int, dln.split())
+            blockbegin *= dblocksize
+            blocklen   *= dblocksize
+            blockend    = min(blockbegin+blocklen, snap_ceiling)
+            if blockend <= highwater:   continue
+            highwater   = blockend
+
+            #if delta.tag in ("different", "right_only"):
+            isnew = anynew = 1
+
+            # Fix: compare 'AA' output with final output to find freed blocks
+
+            #elif delta.tag == "left_only":
+            #    isnew = 0    ; dfreedblocks += blockend - blockbegin
+            #else: # superfluous tag
+            #    continue
+
+            # 'blockpos' iterates over disk blocks.
+            # dblocksize (local) & chunksize (dest) may be somewhat independant of each other.
+            for blockpos in range(blockbegin, blockend):
+                volsegment = blockpos // chunkblocks
+                bmap_pos = volsegment // 8    ; b = 1 << (volsegment%8)
+                if not bmap_mm[bmap_pos] & b:
+                    bmap_mm[bmap_pos] |= b    ; dnewchunks += isnew
+
+        if markall_pos is not None:
+            # If volsize increased, flag the corresponding bmap area as changed.
+            if monitor_only:  print("  Volume size has increased.")
+            for pos in range(markall_pos, bmap_size):  bmap_mm[pos] = 0xff
+            dnewchunks += (bmap_size - markall_pos) * 8
+
+        del(bmap_mm)
+        if dnewchunks+dfreedblocks:   bmapf.flush()    ; os.fsync(bmapf.fileno())
+
+    catch_signals()
+    map_updated = dnewchunks+dfreedblocks+anynew+vol.map_used() > 0
+    if monitor_only:
+        raise NotImplementedError() #FIXME ###
         rotate_snapshots(vol, rotate=map_updated,
                               delta_time=str(os.path.getmtime(vol.mapfile)))
         print(("\r  %d ch, %d dis" % (dnewchunks, dfreedblocks//chunksize))
