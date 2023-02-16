@@ -1994,37 +1994,42 @@ def get_reflink_deltas(aset, datavols):
     pathname = aset.vgname    ; procs=[]
     if options.verbose:   print("Acquiring deltas.")
     for vol in (aset.vols[x] for x in datavols):
+        deltapath = tmpdir+"/delta."+vol.vid    ; cmds = []
         for ext, fpath in ((y[0], pathname+"/"+vol.name+y[1])
                           for y in (("11",".tick"), ("22",".tock"))):
             if not exists(fpath):  #Fixme: also check reflink support for path
                 raise RuntimeError("Volume path '%s' does not exist." % fpath)
-            cmds = [[CP.filefrag, "-vs", "-b4096", fpath],
+            # filefrag output: file extent ranges, their 'physical' block ranges, extent length
+            # sort -m will merge this output from two vols (file extent #s are pre-sorted)
+            # uniq -u will filter-out exact extent/phys/len matches between the two vols
+            # The result will be a list of extent ranges that have changed.
+            cmds.append([[CP.filefrag, "-vs", "-b4096", fpath],
                     # remove non-table data, punctuation, extra columns:
-                    #[CP.tail, "-n", "+4"], [CP.tr, "-d.:"],
-                    #[CP.awk, r"{print " +ext+ r", $2, $3, $4, $5, $6}"]
                     [CP.sed, "-En", r"'/found$/q; /^\s*[a-zA-Z]/d; s/[.:]//g; "
                      r"s/^\s*[0-9]+\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+([0-9]+).*"
-                     r"/\1 \2 \3 \4 \5/p"],
-                    ]
-            do_exec(cmds, out=tmpdir+"/delta."+vol.vid+ext)
-            #Enh: maybe use dev+inode as fname
+                     r"/" +ext+ r" \1 \2 \3 \4 \5/p"],
+                    ])
+        do_exec(cmds[0], out=deltapath+"11")
+        #Enh: maybe use dev+inode as fname
 
-        do_exec([ [CP.sort, "-m", "-k2n,2"] + [tmpdir+"/delta."+vol.vid+x for x in ("11","22")],
-                  [CP.uniq, "-u", "-f1"]
+        do_exec(cmds[1] +
+                [ [CP.sort, "-m", "-k2n,2", deltapath+"11", "-")],
+                  [CP.uniq, "-u", "-f1"],
+                  [CP.gzip, "-2"]
                  ],
-                    out=tmpdir+"/delta."+vol.vid
+                    out=deltapath
                 )
+        os.remove(deltapath+"11")
 
 
 def update_delta_digest_reflink(aset, datavol, monitor_only):
 
     vol         = aset.vols[datavol]         ; chunksize  = aset.chunksize
     snap1vol    = vol.name + ".tick"         ; snap2vol   = vol.name + ".tock"
-    snap1size   = l_vols[snap1vol].lv_size   ; snap2size = l_vols[snap2vol].lv_size
+    snap1size   = l_vols[snap1vol].lv_size   ; snap2size = l_vols[snap2vol].lv_size #FIXME ###
     assert len(vol.sessions) and exists(vol.mapfile)
 
     # Get xml parser and initialize vars
-    dtree       = xml.etree.ElementTree.parse(tmpdir+"/delta."+datavol).getroot()
     dblocksize  = 4096 // block_size
     dnewchunks  = isnew  = anynew = dfreedblocks = 0
 
@@ -2034,7 +2039,7 @@ def update_delta_digest_reflink(aset, datavol, monitor_only):
     markall_pos = (next_chunk_addr//chunksize//8) if snap2size-1 >= next_chunk_addr else None
 
     # Setup access to deltamap as an mmap object.
-    with open(vol.mapfile, "r+b") as bmapf, open(tmpdir+"/delta."+vol.vid, "r") as deltaf:
+    with open(vol.mapfile, "r+b") as bmapf, gzip.open(tmpdir+"/delta."+vol.vid, "r") as deltaf:
         snap_ceiling = max(snap1size, snap2size) // block_size    ; highwater = 0
         chunkblocks  = chunksize // block_size
         bmap_size    = vol.mapsize(max(snap1size, snap2size))
