@@ -1995,7 +1995,7 @@ def get_reflink_deltas(aset, datavols):
     if options.verbose:   print("Acquiring deltas.")
     for vol in (aset.vols[x] for x in datavols):
         deltapath = tmpdir+"/delta."+vol.vid    ; cmds = []
-        for ext, fpath in ((y[0], pathname+"/"+vol.name+y[1])
+        for side, fpath in ((y[0], pathname+"/"+vol.name+y[1])
                           for y in (("11",".tick"), ("22",".tock"))):
             if not exists(fpath):  #Fixme: also check reflink support for path
                 raise RuntimeError("Volume path '%s' does not exist." % fpath)
@@ -2003,17 +2003,24 @@ def get_reflink_deltas(aset, datavols):
             # sort -m will merge this output from two vols (file extent #s are pre-sorted)
             # uniq -u will filter-out exact extent/phys/len matches between the two vols
             # The result will be a list of extent ranges that have changed.
-            cmds.append([[CP.filefrag, "-vs", "-b4096", fpath],
-                    # remove non-table data, punctuation, extra columns:
-                    [CP.sed, "-En", r"'/found$/q; /^\s*[a-zA-Z]/d; s/[.:]//g; "
-                     r"s/^\s*[0-9]+\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+([0-9]+).*"
-                     r"/" +ext+ r" \1 \2 \3 \4 \5/p"],
-                    ])
+
+            cmds.append([ [CP.filefrag, "-vs", "-b4096", fpath],
+            # Remove non-table data, punctuation, extra columns:
+            # The column header and last line are checked for matching format.
+              [CP.sed, "-En", r"$bEND; y/:./  /; "
+               r"1,/^\s*ext\s+logical_offset\s+physical_offset\s+length\s+expected\s+flags/{h;b}; "
+               r"s/^\s*[0-9]+\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+([0-9]+).*"
+               r"/" +side+ r" \1 \2 \3 \4 \5/p; t; q100; "
+               r":END; /found$/!q90; g; /^\s*ext\s+logical/!q80"
+               ],
+            ])
+        # Save output from first volume to a file
         do_exec(cmds[0], out=deltapath+"11")
         #Enh: maybe use dev+inode as fname
 
+        # Pipe output from second volume to 'sort' and include first result
         do_exec(cmds[1] +
-                [ [CP.sort, "-m", "-k2n,2", deltapath+"11", "-")],
+                [ [CP.sort, "-m", "-k2n,2", deltapath+"11", "-"],
                   [CP.uniq, "-u", "-f1"],
                   [CP.gzip, "-2"]
                  ],
@@ -2050,7 +2057,6 @@ def update_delta_digest_reflink(aset, datavol, monitor_only):
         # Entries carry a block position 'blockbegin' and the length of changed blocks.
         # 'snap_ceiling' is used to discard ranges beyond current vol size.
         for dln in deltaf:
-            #if dln.endswith("found\n"):   continue
             side, blockbegin, _, _, _, blocklen = map(int, dln.split())
             blockbegin *= dblocksize
             blocklen   *= dblocksize
@@ -2061,7 +2067,7 @@ def update_delta_digest_reflink(aset, datavol, monitor_only):
             #if delta.tag in ("different", "right_only"):
             isnew = anynew = 1
 
-            # Fix: compare 'AA' output with final output to find freed blocks
+            # Fix: compare '11' output with final output to find freed blocks
 
             #elif delta.tag == "left_only":
             #    isnew = 0    ; dfreedblocks += blockend - blockbegin
