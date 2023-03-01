@@ -12,6 +12,8 @@
 # 2 - Error on specific volume(s)
 # 3 - Auth error
 # 4 - Timeout
+# 5 - Destination not ready
+# 6 - Archive not found
 
 
 import sys, signal, os, stat, shutil, subprocess as SPr, time, datetime
@@ -639,14 +641,14 @@ while True:
         progf.write(bytes(agent_program, encoding="UTF-8"))
 
 
-def agent_get(aname, duration):
+def agent_get(agname, duration):
     ps = SPr.check_output([CP.ps, "-u"+str(os.getuid()), "-o", "pid,command"], text=True)
-    findp  = [x for x in ps.splitlines() if (aname in x and "agent_helper.py store" in x)]
+    findp  = [x for x in ps.splitlines() if (agname in x and "agent_helper.py store" in x)]
     if not findp:   return None
     pid    = int(findp[0].split()[0])   ;  os_kill(pid, signal.SIGUSR1)
     result = []   ; catch_signals(["ALRM"], iflag=True) ;   signal.alarm(10)
     try:
-        with open("/tmp/"+aname, "rb") as npipe:
+        with open("/tmp/"+agname, "rb") as npipe:
             for slot in range(2):
                 if m := npipe.read(3) != Destination.magic:
                     raise ValueError("*Magic not found, got "+repr(m))
@@ -661,8 +663,8 @@ def agent_get(aname, duration):
         return result
 
 
-def agent_make(aname, duration, keys):
-    p = SPr.Popen([CP.python, tmpdir+"/agent_helper.py","store",aname], text=False,
+def agent_make(agname, duration, keys):
+    p = SPr.Popen([CP.python, tmpdir+"/agent_helper.py","store",agname], text=False,
                           shell=False, stdin=SPr.PIPE, stdout=SPr.DEVNULL, stderr=SPr.DEVNULL)
     p.stdin.write(min(duration,60).to_bytes(1,"big"))
     for k in keys:  p.stdin.write(len(k).to_bytes(1,"big") + k + Destination.magic)
@@ -1022,12 +1024,12 @@ def ask_passphrase(prompt="Enter passphrase: ", verify=False):
         passphrase  = bytearray(getpass.getpass(prompt), encoding="UTF-8")
         if not verify or len(passphrase) >= 10:   break
         print("Passphrase must be 10 or more characters.")   ; clear_array(passphrase)
-        if ii == 2 or options.unattended:   x_it(1, "")
+        if ii == 2 or options.unattended:   x_it(3, "Passphrase required.")
     if options.unattended or not verify:   return passphrase
     passphrase2 = bytearray(getpass.getpass("Re-enter passphrase: "), encoding="UTF-8")
     if passphrase != passphrase2:
         clear_array(passphrase)   ; clear_array(passphrase2)
-        x_it(1, "Entries do not match.")
+        x_it(3, "Entries do not match.")
     clear_array(passphrase2)
     return passphrase
 
@@ -1205,12 +1207,12 @@ def get_configs(opts):
     # Check online status for certain commands.
     if not dest.online and (opts.remap or opts.from_arch \
     or opts.action not in local_actions) and not (opts.action == "delete" and opts.clean):
-        x_it(1, "Destination not ready to receive commands.")
+        x_it(5, "Destination not ready to receive commands.")
     if not dest.writable and opts.action in write_actions and not opts.from_arch \
     and not (opts.action == "delete" and opts.clean):
-        x_it(1, "Destination not writable.")
+        x_it(5, "Destination not writable.")
     if dest.archive_ini_hash == "none" and opts.action not in local_actions+("arch-init",):
-        x_it(1,"Archive not found at '%s'" % dest.spec)
+        x_it(6, "Archive not found at '%s'" % dest.spec)
 
     #### Test dest.archive_ini_hash here:
 
@@ -1229,7 +1231,7 @@ def get_configs(opts):
     elif opts.action == "arch-init":
         x_it(1, "Archive already initialized for "+aset.name)
     if aset.updated_at is None:
-        x_it(1,"Archive not found.")
+        x_it(6, "Archive not found.")
 
     return aset
 
@@ -1304,7 +1306,7 @@ class Destination:
                 x_it(1,"Error: [^control], [space], and ',^=' not allowed in dest-name.")
             if not dest_url and dname in locs:
                 dest_url = locs[dname]
-        elif not dspec and "default" in locs:
+        elif not dspec and "default" in locs and not options.metadir:
             dest_url = locs["default"]
 
         # parse and validate dest spec
@@ -1379,9 +1381,9 @@ class Destination:
     # runs the temp file is returned.
 
     def run_args(self, commands, trap=False, dest_type=None):
-        dest_type = dest_type or self.dtype
+        dest_type = dest_type or self.dtype    ; tmpprefix = "/tmp/wyngrpc/"
         trapcmd   = "trap '' INT TERM QUIT ABRT ALRM TSTP USR1\n" if trap else ""
-        # shunt commands to tmp file
+        # shunt commands to local tmp file
         with tempfile.NamedTemporaryFile(dir=tmpdir+"/rpc", delete=False) as tmpf:
             cmd = bytes(trapcmd + shell_prefix
                         + " ".join(commands) + "\n", encoding="UTF-8")
@@ -1391,13 +1393,14 @@ class Destination:
         if dest_type in {"qubes","qubes-ssh"}:
             do_exec([[CP.qvm_run, "--no-color-stderr", "--no-color-output", "-p",
                     (self.sys if dest_type == "qubes" else self.sys.split(":")[0]),
-                    CP.cat+" >/tmp/wyngrpc/"+remotetmp
+                    (CP.mkdir+" -p "+tmpprefix+"; " if not self.dtmp else "")
+                    +CP.cat+" >"+tmpprefix+remotetmp
                     ]], infile=pjoin(tmpdir,"rpc",remotetmp))
             if dest_type == "qubes":
-                add_cmd = [CP.sh+" /tmp/wyngrpc/"+remotetmp]
+                add_cmd = [CP.sh+" "+tmpprefix+remotetmp]
             else:
                 add_cmd = [CP.ssh+" "+" ".join(self.ssh_opts)+" "+self.sys.split(":")[1]
-                        +' "$('+CP.cat+' /tmp/wyngrpc/'+remotetmp+')"']
+                        +' "$('+CP.cat+' '+tmpprefix+remotetmp+')"']
 
         elif dest_type == "ssh":
             #add_cmd = [' "$(cat '+pjoin(tmpdir,remotetmp)+')"']
@@ -1410,31 +1413,31 @@ class Destination:
 
 
     def detect_state(self, dedup):
+        tmpprefix = "/tmp/wyngrpc/"    ; tmpdigits = 12
+        rdir = "'"+self.path+topdir+"/"+self.aname+"'"
 
         if self.dtype == "qubes-ssh":
             # fix: possibly remove dargs and use dest.run()
             dargs = self.run_map["qubes"][:-1] + [self.sys.split(":")[0]]
 
-            cmd = dargs + [shell_prefix + "mkdir -p /tmp/wyngrpc"]
+            cmd = dargs + [shell_prefix + "mkdir -p " + tmpprefix]
             do_exec([cmd])
 
-        tmpprefix = "/tmp/wyngrpc/"    ; tmpdigits = 12
-        rdir = "'"+self.path+topdir+"/"+self.aname+"'"
-        cmd  = ["mkdir -p "+rdir+" && cd "+rdir
+        cmd  = [r"mkdir -p "+rdir+r" && cd "+rdir
 
                 # send helper program to remote dest
-                +"  && mkdir -p " +tmpprefix + " && chmod 777 " + tmpprefix
-                +"  && tdir=$(mktemp -d " + tmpprefix + ("X"*tmpdigits) + ") && echo $tdir"
-                +"  && cat >$tdir/dest_helper.py"
+                +r"  && mkdir -p " +tmpprefix + r" && chmod 777 " + tmpprefix
+                +r"  && tdir=$(mktemp -d " + tmpprefix + ("X"*tmpdigits) + r") && echo $tdir"
+                +r"  && cat >$tdir/dest_helper.py"
 
                 # check free space and archive.ini status on remote
-                +"  && echo -n 'wyng_check_free ' && stat -f -c '%a %S' ."
-                +"  && echo -n 'wyng_archive_ini '"
-                +"  && { if [ -e archive.ini ]; then sha256sum archive.ini; else echo none; fi }"
+                +r"  && echo -n 'wyng_check_free ' && stat -f -c '%a %S' ."
+                +r"  && echo -n 'wyng_archive_ini '"
+                +r"  && { if [ -e archive.ini ]; then sha256sum archive.ini; else echo none; fi }"
 
                 # test write access and hardlinks
-                +"  && touch archive.dat && echo 'wyng_writable'"
-                +(" && ln -f archive.dat .hardlink" if dedup else "")
+                +r"  && touch archive.dat && echo 'wyng_writable'"
+                +(r" && ln -f archive.dat .hardlink" if dedup else "")
                 ]
         try:
             online = \
@@ -1462,9 +1465,10 @@ class Destination:
                 raise ValueError("Missing or malformed tmp dir: "+repr(self.dtmp))
         else:
             for log in ("/dest-state.log", "/err.log"):
-                if exists(tmpdir+log):
-                    do_exec([ [CP.cat,"-v",tmpdir+log],  [CP.tail,"--bytes=2000"] ],
-                            out=sys.stderr)
+                if exists(tmpdir+log) and verbose:
+                    do_exec([ [CP.cat,"-v",tmpdir+log],  [CP.tail,"--bytes=2000"],
+                              [CP.tee, tmpdir+log+"-out" ] ])
+                    err_out(open(tmpdir+log+"-out", "r").read())
 
         self.online = self.free is not None
 
@@ -3367,7 +3371,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4alpha2"     ; prog_date = "20230213"
+prog_version          = "0.4alpha2"     ; prog_date = "20230225"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 aset = dest = None
@@ -3457,6 +3461,7 @@ options = parser.parse_args()    ; options.action = options.action.lower()
 
 # Set stdout to devnull if --quiet is specified
 debug = options.debug    #; assert not (options.quiet and (options.verbose or debug))
+verbose = options.verbose or debug
 if debug:   options.verbose = True
 if options.quiet and options.action not in ("list","version"):
     options.unattended = True
@@ -3532,7 +3537,8 @@ if dest.online and options.action not in ("arch-init","arch-check","arch-delete"
             #raise NotImplementedError(".tmp recovery")
 
         # local copy is consistent, so update destination:
-        update_dest(aset, pathlist=[aset.confname]) # Fix: expand checks from here....
+        #update_dest(aset, pathlist=[aset.confname]) # Fix: expand checks from here....
+        raise RuntimeError("archive.ini mis-match")
 
     arch_check(aset, [], startup=True)
 
@@ -3691,7 +3697,7 @@ elif options.action == "arch-init":
 
 
 elif options.action == "arch-check":
-    arch_check(aset, options.volumes)
+    arch_check(aset, datavols)
 
 
 elif options.action == "arch-delete":
