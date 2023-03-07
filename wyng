@@ -2005,14 +2005,15 @@ def get_reflink_deltas(aset, datavols):
             # The result will be a list of extent ranges that have changed.
 
             cmds.append([ [CP.filefrag, "-vs", "-b4096", fpath],
-            # Remove non-table data, punctuation, extra columns:
-            # The column header and last line are checked for matching format.
-              [CP.sed, "-En", r"$bEND; y/:./  /; "
-               r"1,/^\s*ext\s+logical_offset\s+physical_offset\s+length\s+expected\s+flags/{h;b}; "
-               r"s/^\s*[0-9]+\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+([0-9]+).*"
-               r"/" +side+ r" \1 \2 \3 \4 \5/p; t; q100; "
-               r":END; /found$/!q90; g; /^\s*ext\s+logical/!q80"
-               ],
+            # awk checks the expected filefrag format and removes extra cols & punctuation.
+            # May need to filter out 'delalloc' entries.
+            # check /sys/fs/btrfs/ID/generation before & after; should match.
+              [CP.awk, r'BEGIN {PAT="^\\s*ext:\\s+logical_offset:\\s+physical_offset:\\s+length:"}'
+                       r' NR==1, $0 ~ PAT {HEADER=$0; next}'
+                       r' END {if (!(HEADER ~ PAT && $0 ~ /extents? found$/)) exit 2}'
+                       r' /^\s*[0-9]+:/ {gsub(/\.|:/, " ", $0);'
+                                        r' print '+side+', $2, $3, $4, $5}'
+               ]
             ])
         # Save output from first volume to a file
         do_exec(cmds[0], out=deltapath+"11")
