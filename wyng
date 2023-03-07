@@ -12,13 +12,16 @@
 # 2 - Error on specific volume(s)
 # 3 - Auth error
 # 4 - Timeout
+# 5 - Destination not ready
+# 6 - Archive not found
+# 7 - Local storage not ready
 
 
 import sys, signal, os, stat, shutil, subprocess as SPr, time, datetime
 import re, mmap, bz2, zlib, gzip, tarfile, io, fcntl, tempfile
 import argparse, configparser, hashlib, hmac, functools, uuid
 import getpass, base64, platform, resource, itertools, string, struct
-import xml.etree.ElementTree
+import xml.etree.ElementTree, ctypes, ctypes.util
 from array import array         ; from urllib.parse import urlparse
 
 try:
@@ -145,7 +148,7 @@ class ArchiveSet:
             if mcrypto:   buf = mcrypto.decrypt(buf)
         except ValueError as e:
             if "MAC check failed" in e.args:
-                print(e)   ; x_it(3, "Error: Could not decrypt/authenticate archive.\n")
+                x_it(3, "Error: Could not decrypt/authenticate archive.\n")
             raise e
 
         # read attributes from archive.ini
@@ -196,24 +199,20 @@ class ArchiveSet:
             #if children: ## and (allvols or self.in_process or options.from_arch or \
             ##(len(options.volumes)==0 or key in options.volumes or options.dedup)):
                 # instantiate:
-            if value.startswith("Vol_") and " " in value.strip(): #### convert older alpha
-                vid, hashval = value.strip().split(" ", maxsplit=1)
-                vname = key; convlist.append(vname)
-            else:
-                vid = key; hashval = value; vname = None
+            vid = key; hashval = value; vname = None
 
             #loadses = allvols or self.in_process or options.from_arch or options.dedup or
             volume  = self.Volume(self, vid, hashval, pjoin(self.path,vid),
                                     self.vgname, name=vname, children=children)
             self.vols[volume.name] = volume
 
-        if convlist and dest.writable: #### convert older alpha
-            cp["volumes"].clear()
-            for v in self.vols.values():   v.save_volinfo()
-            try:
-                update_dest(self, pathlist=[self.confname], volumes=list(self.vols.values()))
-            except:
-                x_it(1,"convert error")
+        # datacrypto may not have AE, so test data chunk against a volinfo hash
+        for vol, vf in ((x, x.path+"/vi.dat") for x in self.vols if datacrypto):
+            if exists(vf):
+                if not hmac.compare_digest(vol.hashval,
+                                           self.b64hash(datacrypto.decrypt(open(vf,"rb").read())))
+                    x_it(3, "Error: Data hash check failed.")
+                break
 
 
     def save_conf(self, ext=""):
@@ -324,10 +323,18 @@ class ArchiveSet:
             assert hmac.compare_digest(digest, self.b64hash(mbuf))
             open(destname,"wb").write(self.decompress(mbuf))
 
+    def set_local(self, localpath):
+        vgp = opts.local.split("/")
+        if len(vgp) != 2:   raise ValueError("Local: 'volgroup/pool' required.")
+        self.vgname, self.poolname = vgp
+        if self.vgname not in volgroups \
+        or self.poolname not in volgroups[self.vgname][self.poolname]:
+            print("Warning: {localpath} not present.")
+
 
 class ArchiveVolume:
 
-    __slots__ = ("vid","name","archive","path","vgname","mapfile","sessions","sesnames",
+    __slots__ = ("vid","name","hashval","archive","path","vgname","mapfile","sessions","sesnames",
                  "_seslist","last","meta_checked","tags","desc","changed_bytes")
 
     def __init__(self, archive, vid, hashval, path, vgname, name=None, children=2):
@@ -335,6 +342,7 @@ class ArchiveVolume:
         self.archive   = archive                   ; self.path    = path
         self.vgname    = vgname                    ; self.mapfile = path+"/deltamap"
         self.last      = "None"                    ; self.meta_checked = False
+        self.hashval   = hashval
         # persisted here:
         self.name      = name                      ; self.desc      = ""
         self.sessions  = {}                        ; self.sesnames= []
@@ -387,7 +395,11 @@ class ArchiveVolume:
                                         int(self.archive.compr_level))
             self.archive.conf["volumes"][self.vid] = self.archive.b64hash(buf)
 
-        if self.archive.mcrypto:   etag, buf = self.archive.mcrypto.encrypt(buf)
+        if self.archive.mcrypto:
+            # First encrypt as data, for data cipher verification at startup
+            open(pjoin(self.path,"vi.dat", "wb").write(b''.join(self.archive.datacrypto.encrypt(buf)))
+            # encrypt as metadata
+            etag, buf = self.archive.mcrypto.encrypt(buf)
         with open(pjoin(self.path,fname+ext), "wb") as f:
             f.write(etag)  ; f.write(buf)
             f.flush()      ; os.fsync(f.fileno())
@@ -644,14 +656,14 @@ while True:
         progf.write(bytes(agent_program, encoding="UTF-8"))
 
 
-def agent_get(aname, duration):
+def agent_get(agname, duration):
     ps = SPr.check_output([CP.ps, "-u"+str(os.getuid()), "-o", "pid,command"], text=True)
-    findp  = [x for x in ps.splitlines() if (aname in x and "agent_helper.py store" in x)]
+    findp  = [x for x in ps.splitlines() if (agname in x and "agent_helper.py store" in x)]
     if not findp:   return None
     pid    = int(findp[0].split()[0])   ;  os_kill(pid, signal.SIGUSR1)
     result = []   ; catch_signals(["ALRM"], iflag=True) ;   signal.alarm(10)
     try:
-        with open("/tmp/"+aname, "rb") as npipe:
+        with open("/tmp/"+agname, "rb") as npipe:
             for slot in range(2):
                 if m := npipe.read(3) != Destination.magic:
                     raise ValueError("*Magic not found, got "+repr(m))
@@ -666,11 +678,11 @@ def agent_get(aname, duration):
         return result
 
 
-def agent_make(aname, duration, keys):
-    p = SPr.Popen([CP.python, tmpdir+"/agent_helper.py","store",aname], text=False,
+def agent_make(agname, duration, keys):
+    p = SPr.Popen([CP.python, tmpdir+"/agent_helper.py","store",agname], text=False,
                           shell=False, stdin=SPr.PIPE, stdout=SPr.DEVNULL, stderr=SPr.DEVNULL)
-    p.stdin.write(min(duration,60).to_bytes(1,"big"))
-    for k in keys:  p.stdin.write(len(k).to_bytes(1,"big") + k + Destination.magic)
+    pwrite = p.stdin.write   ; pwrite(min(duration,60).to_bytes(1,"big"))
+    for k in keys:   pwrite(len(k).to_bytes(1,"big"))   ; pwrite(k)   ; pwrite(Destination.magic)
     p.poll(); p.stdin.flush(); p.stdin.close()
     return p
 
@@ -860,24 +872,61 @@ class CP:
     chattr = "/usr/bin/chattr"  ; xargs = "/usr/bin/xargs"  ; sha256sum= "/usr/bin/sha256sum"
     cmp    = "/usr/bin/cmp"     ; gzip  = "/bin/gzip"       ; diff     = "/usr/bin/diff"
     ps     = "/usr/bin/ps"      ; uniq  = "/usr/bin/uniq"   ; filefrag = "/usr/sbin/filefrag"
-    thin_delta = "/usr/sbin/thin_delta"
-    blkdiscard = "/sbin/blkdiscard"   ; ionice     = "/usr/bin/ionice"
+    thin_delta = "/usr/sbin/thin_delta"    ; cp     = "/bin/cp"
+    blkdiscard = "/sbin/blkdiscard"        ; ionice = "/usr/bin/ionice"
+    btrfs      = "/usr/sbin/btrfs" if exists("/usr/sbin/btrfs") else "/bin/btrfs"
 
 
-class LowLevelIO:
-    import ctypes, ctypes.util
-    libc = ctypes.CDLL(ctypes.util.find_library("c"))
+# Manage local (source) data volumes, thin lvm and reflink image files
+
+class LocalStorage:
+    stypes  = { "tlvm":  LvmVolume,   "rlnk": ReflinkVolume }
 
     FALLOC_FL_KEEP_SIZE      = 0x01             ; FALLOC_FL_PUNCH_HOLE    = 0x02
     FALLOC_FL_COLLAPSE_RANGE = 0x08             ; FALLOC_FL_ZERO_RANGE    = 0x10
     FALLOC_FL_INSERT_RANGE   = 0x20             ; FALLOC_FL_UNSHARE_RANGE = 0x40
     FALLOC_FL_PUNCH_FULL     = FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE
-
     BLKDISCARD               = 0x1277           ; BLKDISCARDZEROES        = 0x127c
 
-    fallocate = libc.fallocate
+    fallocate = ctypes.CDLL(ctypes.util.find_library("c")).fallocate
     fallocate.restype = ctypes.c_int
     fallocate.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int64, ctypes.c_int64]
+
+    def __init__(self, localpath_t, arch_vols=[], clean=False, sync=False,
+                 require_online=False):
+        self.gc_procs     = []
+        self.clean        = clean
+        self.sync         = sync
+        self.lvols, lvols = {}
+        self.pooltype     = None
+        self.path         = None
+        self.lvpool       = None
+        self.online       = False
+        #self.volgroups = {}
+
+        if localpath_t[0] is None and localpath_t[1].startswith("/"):
+            self.pooltype   = "rlnk"
+            self.path       = localpath_t[1]
+            #Fix: test for btrfs or xfs here!
+            self.online     = exists(self.path)
+        elif LvmVolume.vgexists("/dev/"+localpath_t[0]):
+            self.pooltype   = "tlvm"
+            self.path       = "/dev/"+localpath_t[0]
+            self.lvpool     = localpath_t[1]
+            if self.online := LvmVolume.vg_exists(self.path):   self.get_lvm_cache()
+        elif require_online:
+            raise ValueError("Indeterminate local path.")
+
+        if require_online and not self.online:
+            x_it(7, "Local storage is offline.")
+
+        _LocVol = stypes[self.pooltype]
+        for avol in arch_vols:
+            if avol not in lvols:   lvols[avol] = vol = _LocVol(self, avol)
+            if vol.snap1 not in lvols:   lvols[vol.snap1] = _LocVol(self, vol.snap1)
+            if vol.snap2 not in lvols:   lvols[vol.snap2] = _LocVol(self, vol.snap2)
+        #lvm_meta_snapshot("release", aset.vgname)
+
 
     # Note: file_punch_hole() and block_discard_chunk() have the same arg signature...
     def file_punch_hole(self, fn, start, length):
@@ -889,136 +938,228 @@ class LowLevelIO:
         except Exception as e:
             return None
 
+    # Retrieves survey of all LVs as vgs[].lvs[] dicts
+    def get_lvm_cache(self):
+        delim = ":::"
+        if not admin_permission:   return
+        if not shutil.which(CP.lvm):   sys.stderr.write("LVM not available.\n"); return
+        do_exec([[CP.lvm, "lvs", "--units=b", "--noheadings", "--separator="+delim,
+                    "--options=" + ",".join(LvmVolume.colnames), self.path]],
+                out=tmpdir+"/volumes.lst")
 
-class Lvm_VolGroup:
-    def __init__(self, name):
-        self.name  = name
-        self.lvs   = {}
-        self.poolnames = set()
-        self.gc_procs = []
-        self.clean = options.clean
+        for ln in open(tmpdir+"/volumes.lst", "r"):
+            lv = LvmVolume(self, "", members=ln.strip().split(delim))
+            self.lvols[lv.name] = lv
+            ##if lv.pool_lv:   volgroups[vgname].poolnames.add(lv.pool_lv)
+
+        ##l_vols = volgroups[vg_to_lvols].lvs if vg_to_lvols in volgroups else {}
 
     def __del__(self):
         if self.clean:
             for p in self.gc_procs:   p.wait()
 
 
-class Lvm_Volume:
-    colnames  = ["vg_name","lv_name","lv_attr","lv_size","lv_time","lv_uuid",
-                 "pool_lv","thin_id","tags"]
-    attr_ints = ["lv_size"]
-    __slots__ = colnames
+# Base class for local volumes; do not instantiate.
 
-    def __init__(self, members):
-        for attr in self.colnames:
-            val = members[self.colnames.index(attr)]
+class LocalVolume:
+    maxname   = 255    ; maxdir = 4096 - maxname
+    __slots__ = ("maxname","maxdir","storage","lockfile","dir","path",
+                 "name","snap1","snap2")
+
+    def _my_init(self, storage, name):
+        self.storage   = storage                        ; self.lockfile = None
+        self.pdir      = storage.path.rstrip("/")+"/"   ; self.path     = self.pdir+name
+        self.name      = name
+        #self.stat      = os.stat(self.fname, follow_symlinks=True)
+
+    def lock(self, mode="r+b"):
+        self.lockfile = lf = open(self.path, mode)
+        fcntl.lockf(lf, fcntl.LOCK_EX|fcntl.LOCK_NB)
+        return lf
+
+    def unlock(self):
+        if self.lockfile:   self.lockfile.close()
+
+    def rotate_snapshots(self, vname, rotate=True): ##, delta_time=""):
+        if rotate:
+            ##tags =["--addtag=delta-"+delta_time] if delta_time else []
+            ##do_exec([[CP.lvm,"lvchange","--addtag="+vol.last]+tags+[aset.vgname+"/"+snap2vol]])
+            self.storage[self.snap1].delete()
+            self.storage[self.snap2].rename(self.snap1)
+            os.fsync(self.pdir+self.snap1)
+        else:
+            self.storage[self.snap2].delete(sync=False)
+
+        return self.storage[self.snap1].getstat().st_ctime
+
+    def set_mode_bits(self, modebits):
+        raise NotImplementedError()
+
+    def getstat(self):
+        return os.stat(self.path)
+
+    def exists(self):
+        return exists(self.path)
+
+
+class ReflinkVolume(LocalVolume):
+
+    def __init__(self, storage, name):
+        super()._my_init(storage, name)
+        self.snap1 = self.name+".wyng1"    ; self.snap2 = self.name+".wyng2"
+
+    def rename(self, newname):
+        #Fix: check new name size/fmt
+        os.replace(self.pdir+self.name, self.pdir+newname)
+        del(self.storage.lvols[self.name])
+        self.storage.lvols[newname] = ReflinkVolume(self.storage, newname)
+
+    def delete(self, sync=True, check=False):
+        self.unlock()
+        if exists(self.path):   os.remove(self.path)
+        del(self.storage.lvols[self.name])
+
+    def create(self, size=None, snapshotfrom=None):
+        if snapshotfrom:
+            do_exec([[CP.cp, "--reflink=always", self.pdir+snapshotfrom, self.path)]])
+        else:
+            open(self.path, "wb").truncate(size)
+        self.storage.lvols[self.name] = self
+
+    def get_ctime(self):
+        return int(os.path.getctime(self.path))
+
+    def resize(self, size):
+        open(self.path, "r+b").truncate(size)
+
+    def getsize(self):
+        return os.path.getsize(self.path)
+
+    def snapshot_btrfs_subvol(svpath):
+        dest = src+"/wyng_snapshot"
+        if exists(dest):
+            do_exec([[CP.btrfs, "subvolume", "delete", dest]])
+        do_exec([[CP.btrfs, "subvolume", "snapshot", "-r", svpath, dest]])
+        if debug:   print("Created subvol snapshot at", dest)
+
+    def get_btrfs_generation(sv_path):
+        res = SPr.check_output([CP.btrfs, "subvolume", "show", sv_path], check=True)
+        g = [x[1] for x in map(str.split, res.splitlines() if x[0]=="Generation:"][0]
+        if debug:   print("Generation:", g)
+        return int(g)
+
+
+class LvmVolume(LocalVolume):
+    colnames  = ("vg_name","lv_name","lv_path","lv_attr","lv_size","lv_uuid",
+                 "lv_time","pool_lv","thin_id","tags")
+    __slots__ = LocalVolume.__slots__ + colnames
+
+    def __init__(self, storage, name=None, members=[]):
+
+        for attr, val in zip(self.colnames, members):
             if attr == "tags":
                 setattr(self, attr, val.split(","))   ; uuid = None
+            elif attr == "lv_size":
+                setattr(self, attr, int(re.sub("[^0-9]", "", val)))
             else:
-                setattr(self, attr, int(re.sub("[^0-9]", "", val)) if attr \
-                    in self.attr_ints else val)
+                setattr(self, attr, val)
 
-        if uuid:   setattr(self, "lv_uuid", uuid)
-
-
-# Retrieves survey of all LVs as vgs[].lvs[] dicts
-
-def get_lvm_vgs(vg_to_lvols=None):
-    global volgroups, l_vols
-    l_vols.clear()    ; volgroups.clear()
-
-    if not admin_permission:   return
-    if not shutil.which(CP.lvm):   sys.stderr.write("LVM not available.\n"); return
-    do_exec([[CP.lvm, "lvs", "--units=b", "--noheadings", "--separator=::",
-                "--options=" + ",".join(Lvm_Volume.colnames)]],
-            out=tmpdir+"/volumes.lst")
-
-    with open(tmpdir+"/volumes.lst", "r") as vlistf:
-        for ln in vlistf:
-            members = ln.strip().split("::")
-            vgname = members[0] # Fix: use colname index
-            lvname = members[1]    ; lv = Lvm_Volume(members)
-            if vgname not in volgroups.keys():
-                volgroups[vgname] = Lvm_VolGroup(vgname)
-            volgroups[vgname].lvs[lvname] = lv
-            if lv.pool_lv:   volgroups[vgname].poolnames.add(lv.pool_lv)
-
-    if vg_to_lvols:  l_vols = volgroups[vg_to_lvols].lvs
+        ##if uuid:   setattr(self, "lv_uuid", uuid)
+        super()._my_init(self.storage, name or self.lv_name)
+        self.snap1 = self.name+".tick"    ; self.snap2 = self.name+".tock"
 
 
-def lv_exists(vgname, lvname):
-    return vgname in volgroups.keys() \
-            and lvname in volgroups[vgname].lvs.keys()
+    def rename(self, new_name):
+        do_exec([[CP.lvm, "lvrename", self.path, new_name]])
+        del(self.storage.lvols[self.name])
+        self.storage.lvols[newname] = LvmVolume(self.storage, newname)
+
+    def delete(self, sync=True, check=False):
+        # Enh: re-write with asyncio
+        sync = (optsync := options.maxsync) or sync    ; clean = options.clean
+        assert not (sync == False and check)
+
+        if self.exists():
+            procs = self.gc_procs    ; maxprocs = 16
+            if len(procs) == maxprocs:
+                for ii in reversed(range(len(procs))):
+                    retcode = procs[ii].returncode
+                    if retcode is not None:
+                        if clean and retcode != 0:
+                            raise CalledProcessError("lvremove failed "+str(retcode))
+                        del(procs[ii])
+
+            cmds = [CP.sh, "-c", CP.lvm + " lvchange -p rw " + vgname+"/"+lvname + " ; "
+                 + CP.lvm + " lvremove -f " + vgname+"/"+lvname]
+            if not (sync or clean):   cmds = [CP.ionice, "-c3"] + cmds
+            p = SPr.Popen(cmds, shell=False,
+                                stdout=SPr.DEVNULL, stderr=SPr.DEVNULL)
+            if not sync and len(procs) < maxprocs:
+                procs.append(p)
+            else:
+                retcode = p.wait()
+                if check and retcode != 0:   raise CalledProcessError("lvremove failed "+str(retcode))
+
+        del(self.storage.lvols[self.name])
+
+    def create(self, size=None, snapshotfroml=None):
+        vg = self.storage.path
+        #tags =["--addtag=delta"] if monitor_only else []
+        #Fix: check if it already exists
+        if snapshotfrom:
+            do_exec([[CP.lvm, "lvcreate", "-pr", "-kn", "-ay",
+                        "--addtag=wyng", "--addtag=arch-"+aset.uuid,
+                        "-s", vg+"/"+snapshotfrom, "-n", self.name]])
+        else:
+            do_exec([[CP.lvm, "lvcreate", "-kn", "-ay", "-V", str(volsize)+"b",
+                        "--thin", "-n", self.name, vg+"/"+self.storage.lvpool]])
+
+        self.storage.lvols[self.name] = self
+
+    def get_ctime(self):
+        return int(time.mktime(time.strptime(self.lv_time, r"%Y-%m-%d %H:%M:%S %z")))
+
+    def resize(self, size):
+        do_exec([[CP.lvm, "lvresize", "-L", str(size)+"b", "-f", self.path]])
+
+    def getsize(self):
+        return self.lv_size
+
+    # Reserve or release lvm thinpool metadata snapshot.
+    # action must be "reserve" or "release".
+    # Specifying "release" without "pool=" will attempt to release all pools.
+    def lvm_meta_snapshot(action, vg, pool):
+        ##if vg not in volgroups:   return
+        vgname   = vg.replace("-","--")               ; checkerr = action == "reserve"
+        ##vgpools  = volgroups[vg].poolnames
+
+        ##for pl in vgpools if not pool and action == "release" else {pool}:
+        poolname = pool.replace("-","--")
+        do_exec([[CP.dmsetup,"message", vgname+"-"+poolname+"-tpool",
+                "0", action+"_metadata_snap"]], check=checkerr)
 
 
-def vg_exists(vgname):
-    if not volgroups:   return False
-    try:
-        do_exec([[CP.lvm, "vgdisplay", vgname]])
-    except SPr.CalledProcessError:
-        return False
-    else:
-        return True
+    def vg_exists(vgname):  # change to 'get_type'
+        if not volgroups:   return False
+        try:
+            do_exec([[CP.lvm, "vgdisplay", vgname]])
+        except SPr.CalledProcessError:
+            return False
+        else:
+            return True
 
 
 # Converts a non-cannonical LV path to LV name plus pool and vg names.
 def get_lv_path_pool(path):
     if not volgroups:   return "", "", ""
     try:
-        p = SPr.run([CP.lvm, "lvs", "--separator=::", "--noheadings",
+        p = SPr.run([CP.lvm, "lvs", "--separator=:::", "--noheadings",
                             "--options=lv_name,pool_lv,vg_name", path], check=True,
                             stdout=SPr.PIPE, stderr=SPr.DEVNULL)
     except:
         return "", "", ""
     else:
-        return p.stdout.decode("utf-8").strip().split("::")
-
-
-def lv_remove(vgname, lvname, sync=True, check=False):
-    # Enh: re-write with asyncio
-    sync = (optsync := options.maxsync) or sync    ; clean = options.clean
-    assert not (sync == False and check)
-    if lv_exists(vgname, lvname):
-        del(volgroups[vgname].lvs[lvname])
-        procs = volgroups[vgname].gc_procs    ; maxprocs = 16
-        if len(procs) == maxprocs:
-            for ii in reversed(range(len(procs))):
-                retcode = procs[ii].returncode
-                if retcode is not None:
-                    if clean and retcode != 0:
-                        raise CalledProcessError("lvremove failed "+str(retcode))
-                    del(procs[ii])
-
-        cmds = [CP.sh, "-c", CP.lvm + " lvchange -p rw " + vgname+"/"+lvname + " ; "
-               + (CP.blkdiscard + " /dev/" + vgname+"/"+lvname + " ; ") if optsync else ""
-               + CP.lvm + " lvremove -f " + vgname+"/"+lvname]
-        if not (sync or clean):   cmds = [CP.ionice, "-c3"] + cmds
-        p = SPr.Popen(cmds, shell=False,
-                             stdout=SPr.DEVNULL, stderr=SPr.DEVNULL)
-        if not sync and len(procs) < maxprocs:
-            procs.append(p)
-        else:
-            retcode = p.wait()
-            if check and retcode != 0:   raise CalledProcessError("lvremove failed "+str(retcode))
-
-
-def lv_rename(vgname, vol1, vol2):
-    do_exec([[CP.lvm, "lvrename", vgname+"/"+vol1, vol2]])    ; lvs = volgroups[vgname].lvs
-    lvs[vol2] = lvs[vol1]    ; lvs[vol2].lv_name = vol2    ; del(lvs[vol1])
-
-
-# Reserve or release lvm thinpool metadata snapshot.
-# arch must be a configured ArchiveSet; action must be "reserve" or "release".
-# Specifying "release" without "pool=" will attempt to release all pools.
-def lvm_meta_snapshot(action, vg, pool=None):
-    if vg not in volgroups:   return
-    vgname   = vg.replace("-","--")               ; checkerr = action == "reserve"
-    vgpools  = volgroups[vg].poolnames
-
-    for pl in vgpools if not pool and action == "release" else {pool}:
-        poolname = pl.replace("-","--")
-        do_exec([[CP.dmsetup,"message", vgname+"-"+poolname+"-tpool",
-                "0", action+"_metadata_snap"]], check=checkerr)
+        return p.stdout.decode("utf-8").strip().split(":::")
 
 
 # Try to sync only selected filesystem
@@ -1031,12 +1172,12 @@ def ask_passphrase(prompt="Enter passphrase: ", verify=False):
         passphrase  = bytearray(getpass.getpass(prompt), encoding="UTF-8")
         if not verify or len(passphrase) >= 10:   break
         print("Passphrase must be 10 or more characters.")   ; clear_array(passphrase)
-        if ii == 2 or options.unattended:   x_it(1, "")
+        if ii == 2 or options.unattended:   x_it(3, "Passphrase required.")
     if options.unattended or not verify:   return passphrase
     passphrase2 = bytearray(getpass.getpass("Re-enter passphrase: "), encoding="UTF-8")
     if passphrase != passphrase2:
         clear_array(passphrase)   ; clear_array(passphrase2)
-        x_it(1, "Entries do not match.")
+        x_it(3, "Entries do not match.")
     clear_array(passphrase2)
     return passphrase
 
@@ -1048,13 +1189,10 @@ def clear_array(ar):
 # Initialize a new ArchiveSet:
 
 def arch_init(aset, opts):
-    if not opts.local or not opts.dest:
-        x_it(1,"--local and --dest are required together.")
+    if not opts.local:
+        x_it(1,"--local is required.")
 
-    if opts.local:
-        vgname, poolname = opts.local.split("/")
-        aset.vgname   = vgname
-        aset.poolname = poolname
+    aset.set_local(opts.local)
 
     aset.data_cipher = opts.encrypt.lower()
     # Fix: duplicates code in aset... move to aset class.
@@ -1132,7 +1270,7 @@ def arch_check(aset, vol_list=None, startup=False):
         # Enh: offer to remove/recoved strays
 
     # Remove orphan snapshots
-    for lv in list(l_vols.values()):
+    for lv in list(l_vols.values()): #### FIX
         if "wyng" in lv.tags and lv.lv_name.endswith((".tick",".tock")):
             basename = lv.lv_name[:-5]
             if options.clean and basename not in l_vols.keys():
@@ -1210,12 +1348,12 @@ def get_configs(opts):
     # Check online status for certain commands.
     if not dest.online and (opts.remap  \
     or opts.action not in local_actions) and not (opts.action == "delete" and opts.clean):
-        x_it(1, "Destination not ready to receive commands.")
+        x_it(5, "Destination not ready to receive commands.")
     if not dest.writable and opts.action in write_actions \
     and not (opts.action == "delete" and opts.clean):
-        x_it(1, "Destination not writable.")
+        x_it(5, "Destination not writable.")
     if dest.archive_ini_hash == "none" and opts.action not in local_actions+("arch-init",):
-        x_it(1,"Archive not found at '%s'" % dest.spec)
+        x_it(6,"Archive not found at '%s'" % dest.spec)
 
     #### Test dest.archive_ini_hash here:
 
@@ -1228,7 +1366,7 @@ def get_configs(opts):
     elif opts.action == "arch-init":
         x_it(1, "Archive already initialized for "+dest.spec)
     if aset.updated_at is None:
-        x_it(1,"Archive not found.")
+        x_it(6, "Archive not found.")
 
     return aset
 
@@ -1301,7 +1439,7 @@ class Destination:
                 x_it(1,"Error: [^control], [space], and ',^=' not allowed in dest-name.")
             if not dest_url and dname in locs:
                 dest_url = locs[dname]
-        elif not dspec and "default" in locs:
+        elif not dspec and "default" in locs and not options.metadir:  #### options
             dest_url = locs["default"]
 
         # parse and validate dest spec
@@ -1377,9 +1515,9 @@ class Destination:
     # runs the temp file is returned.
 
     def run_args(self, commands, trap=False, dest_type=None):
-        dest_type = dest_type or self.dtype
+        dest_type = dest_type or self.dtype    ; tmpprefix = "/tmp/wyngrpc/"
         trapcmd   = "trap '' INT TERM QUIT ABRT ALRM TSTP USR1\n" if trap else ""
-        # shunt commands to tmp file
+        # shunt commands to local tmp file
         with tempfile.NamedTemporaryFile(dir=tmpdir+"/rpc", delete=False) as tmpf:
             cmd = bytes(trapcmd + shell_prefix
                         + " ".join(commands) + "\n", encoding="UTF-8")
@@ -1388,14 +1526,15 @@ class Destination:
 
         if dest_type in {"qubes","qubes-ssh"}:
             do_exec([[CP.qvm_run, "--no-color-stderr", "--no-color-output", "-p",
-                    (self.sys if dest_type == "qubes" else self.sys.split(":")[0]),
-                    CP.cat+" >/tmp/wyngrpc/"+remotetmp
+                      (self.sys if dest_type == "qubes" else self.sys.split(":")[0]),
+                      (CP.mkdir+" -p "+tmpprefix+"; " if not self.dtmp else "")
+                      +CP.cat+" >"+tmpprefix+remotetmp
                     ]], infile=pjoin(tmpdir,"rpc",remotetmp))
             if dest_type == "qubes":
-                add_cmd = [CP.sh+" /tmp/wyngrpc/"+remotetmp]
+                add_cmd = [CP.sh+" "+tmpprefix+remotetmp]
             else:
                 add_cmd = [CP.ssh+" "+" ".join(self.ssh_opts)+" "+self.sys.split(":")[1]
-                        +' "$('+CP.cat+' /tmp/wyngrpc/'+remotetmp+')"']
+                        +' "$('+CP.cat+' '+tmpprefix+remotetmp+')"']
 
         elif dest_type == "ssh":
             #add_cmd = [' "$(cat '+pjoin(tmpdir,remotetmp)+')"']
@@ -1417,21 +1556,21 @@ class Destination:
             do_exec([cmd])
 
         tmpprefix = "/tmp/wyngrpc/"    ; tmpdigits = 12
-        cmd  = ["mkdir -p "+self.path+" && "+self.cd
+        cmd  = [r"mkdir -p "+self.path+r" && "+self.cd
 
                 # send helper program to remote dest
-                +"  && mkdir -p " +tmpprefix + " && chmod 777 " + tmpprefix
-                +"  && tdir=$(mktemp -d " + tmpprefix + ("X"*tmpdigits) + ") && echo $tdir"
-                +"  && cat >$tdir/dest_helper.py"
+                +r"  && mkdir -p " +tmpprefix + r" && chmod 777 " + tmpprefix
+                +r"  && tdir=$(mktemp -d " + tmpprefix + ("X"*tmpdigits) + r") && echo $tdir"
+                +r"  && cat >$tdir/dest_helper.py"
 
                 # check free space and archive.ini status on remote
-                +"  && echo -n 'wyng_check_free ' && stat -f -c '%a %S' ."
-                +"  && echo -n 'wyng_archive_ini '"
-                +"  && { if [ -e archive.ini ]; then sha256sum archive.ini; else echo none; fi }"
+                +r"  && echo -n 'wyng_check_free ' && stat -f -c '%a %S' ."
+                +r"  && echo -n 'wyng_archive_ini '"
+                +r"  && { if [ -e archive.ini ]; then sha256sum archive.ini; else echo none; fi }"
 
                 # test write access and hardlinks
-                +"  && touch archive.dat && echo 'wyng_writable'"
-                +(" && ln -f archive.dat .hardlink" if dedup else "")
+                +r"  && touch archive.dat && echo 'wyng_writable'"
+                +(r" && ln -f archive.dat .hardlink" if dedup else "")
                 ]
         try:
             online = \
@@ -1459,9 +1598,10 @@ class Destination:
                 raise ValueError("Missing or malformed tmp dir: "+repr(self.dtmp))
         else:
             for log in ("/dest-state.log", "/err.log"):
-                if exists(tmpdir+log):
-                    do_exec([ [CP.cat,"-v",tmpdir+log],  [CP.tail,"--bytes=2000"] ],
-                            out=sys.stderr)
+                if exists(tmpdir+log) and verbose:
+                    do_exec([ [CP.cat,"-v",tmpdir+log],  [CP.tail,"--bytes=2000"],
+                              [CP.tee, "--append", tmpdir+log+"-out" ] ])
+                    err_out(open(tmpdir+log+"-out", "r").read())
 
         self.online = self.free is not None
 
@@ -1818,8 +1958,7 @@ def prepare_snapshots(aset, datavols, monitor_only):
         vol      = aset.vols[datavol]   ; mapfile  = vol.mapfile
         snap1vol = datavol + ".tick"    ; snap2vol = datavol + ".tock"
 
-        if lv_exists(vgname, snap1vol) and "arch-"+aset.uuid not in l_vols[snap1vol].tags \
-        and "arch-" in " ".join(l_vols[snap1vol].tags):
+        if lv_exists(vgname, snap1vol) and "arch-"+aset.uuid not in l_vols[snap1vol].tags:
             if options.remap:
                 lv_remove(vgname, snap1vol)    ; print("  Removed mis-matched snapshot", snap1vol)
             else:
@@ -1944,6 +2083,7 @@ def update_delta_digest(aset, datavol, monitor_only):
         bmap_size    = vol.mapsize(max(snap1size, snap2size))
         bmapf.truncate(bmap_size)    ; bmapf.flush()
         bmap_mm      = mmap.mmap(bmapf.fileno(), 0)
+        tally=0 ####
 
         # Cycle through the 'thin_delta' metadata, marking bits in bmap_mm as needed.
         # Entries carry a block position 'blockbegin' and the length of changed blocks.
@@ -1955,8 +2095,10 @@ def update_delta_digest(aset, datavol, monitor_only):
             blockend   = min(blockbegin+blocklen, snap_ceiling)
             if delta.tag in ("different", "right_only"):
                 isnew = anynew = 1
+                if delta.tag == "right_only":   tally -= blocklen
             elif delta.tag == "left_only":
                 isnew = 0    ; dfreedblocks += blockend - blockbegin
+                tally += blocklen
             else: # superfluous tag
                 continue
 
@@ -1986,6 +2128,7 @@ def update_delta_digest(aset, datavol, monitor_only):
                 if map_updated else "\r  No changes   ")
 
     if dnewchunks:   vol.changed_bytes_add(dnewchunks*chunksize, save=True)
+    print("***", tally, dnewchunks*chunksize, dfreedblocks) ####
     catch_signals(None)
     return map_updated
 
@@ -1993,6 +2136,11 @@ def update_delta_digest(aset, datavol, monitor_only):
 def get_reflink_deltas(aset, datavols):
     pathname = aset.vgname    ; procs=[]
     if options.verbose:   print("Acquiring deltas.")
+    
+    # Make a read-only snapshot of relevant Btrfs pools here;
+    # record the snapshot gen#s from 'btrfs subvolume list';
+    # check /sys/fs/btrfs/uuid#/exclusive_operation.
+
     for vol in (aset.vols[x] for x in datavols):
         deltapath = tmpdir+"/delta."+vol.vid    ; cmds = []
         for side, fpath in ((y[0], pathname+"/"+vol.name+y[1])
@@ -2019,7 +2167,7 @@ def get_reflink_deltas(aset, datavols):
         do_exec(cmds[0], out=deltapath+"11")
         #Enh: maybe use dev+inode as fname
 
-        # Pipe output from second volume to 'sort' and include first result
+        # Pipe output from second volume to 'sort' and include first file
         do_exec(cmds[1] +
                 [ [CP.sort, "-m", "-k2n,2", deltapath+"11", "-"],
                   [CP.uniq, "-u", "-f1"],
@@ -2027,7 +2175,10 @@ def get_reflink_deltas(aset, datavols):
                  ],
                     out=deltapath
                 )
-        os.remove(deltapath+"11")
+        if not debug:   os.remove(deltapath+"11")
+
+        # Check here that Btrfs snapshot gen#s did not change.
+        # If changed: retry, x_it(7), use remap mode or pause/cancel the Btrfs op.
 
 
 def update_delta_digest_reflink(aset, datavol, monitor_only):
@@ -2048,7 +2199,8 @@ def update_delta_digest_reflink(aset, datavol, monitor_only):
 
     # Setup access to deltamap as an mmap object.
     with open(vol.mapfile, "r+b") as bmapf, gzip.open(tmpdir+"/delta."+vol.vid, "r") as deltaf:
-        snap_ceiling = max(snap1size, snap2size) // block_size    ; highwater = 0
+        snap_ceiling = max(snap1size, snap2size) // block_size
+        highwater    = tally = 0
         chunkblocks  = chunksize // block_size
         bmap_size    = vol.mapsize(max(snap1size, snap2size))
         bmapf.truncate(bmap_size)    ; bmapf.flush()
@@ -2059,14 +2211,15 @@ def update_delta_digest_reflink(aset, datavol, monitor_only):
         # 'snap_ceiling' is used to discard ranges beyond current vol size.
         for dln in deltaf:
             side, blockbegin, _, _, _, blocklen = map(int, dln.split())
-            blockbegin *= dblocksize
-            blocklen   *= dblocksize
-            blockend    = min(blockbegin+blocklen, snap_ceiling)
+            blockbegin  *= dblocksize
+            blocklen    *= dblocksize
+            tally += blocklen if side == 11 else -blocklen
+            blockend     = min(blockbegin + blocklen, snap_ceiling)
             if blockend <= highwater:   continue
-            highwater   = blockend
+            highwater    = blockend
 
             #if delta.tag in ("different", "right_only"):
-            isnew = anynew = 1
+            isnew = anynew = 1 #### FIX: reconcile with tally
 
             # Fix: compare '11' output with final output to find freed blocks
 
@@ -2564,17 +2717,6 @@ def init_deltamap(vol, bmfile, bmsize):
         bmapf.truncate(bmsize)    ; bmapf.flush()
 
 
-def rotate_snapshots(vol, rotate=True, delta_time=""):
-    snap1vol = vol.name+".tick"   ; snap2vol = vol.name+".tock"
-    if rotate:
-        tags =["--addtag=delta-"+delta_time] if delta_time else []
-        do_exec([[CP.lvm,"lvchange","--addtag="+vol.last]+tags+[aset.vgname+"/"+snap2vol]])
-        lv_remove(aset.vgname, snap1vol)    ; lv_rename(aset.vgname, snap2vol, snap1vol)
-    else:
-        lv_remove(aset.vgname, snap2vol, sync=False)
-
-
-
 # Prune backup sessions from an archive. Basis is a non-overwriting dir tree
 # merge starting with newest dirs and working backwards. Target of merge is
 # timewise the next session dir after the pruned dirs.
@@ -3031,7 +3173,7 @@ def receive_volume(vol, select_ses="", save_path="", diff=False, verify_only=0):
     if save_path:
         # Decode dev path semantics and match to vg/lv if possible. Otherwise, open
         # simple block dev or file.
-        save_type = "block device"   ; punch_hole   = low_level_io.block_discard_chunk
+        save_type = "block device"   ; punch_hole   = storage.block_discard_chunk ####
         returned_home = False        ; lv, pool, vg = get_lv_path_pool(save_path)
         if not lv and vg_exists(os.path.dirname(save_path)):
             # Got vg path, lv does not exist
@@ -3054,16 +3196,16 @@ def receive_volume(vol, select_ses="", save_path="", diff=False, verify_only=0):
 
         if exists(save_path) and stat.S_ISBLK(os.stat(save_path).st_mode):
             if not sparse_write:   do_exec([[CP.blkdiscard, save_path]])
-            volf = open(save_path, fopenmode:="r+b")
+            volf = open(save_path, "r+b")
         elif save_path.startswith("/dev/"):
-            err_out("Cannot create new volume from ambiguous /dev path."
+            err_out("Cannot create new volume from ambiguous /dev path.\n"
                     " Please create the volume before using 'receive', or specify"
-                    " --save-to=/dev/volgroup/lv in case of a thin LV.")
+                    " --save-to=/dev/volgroup/lv in case of an LVM thin lv.")
             return None
         else: # file
-            save_type = "file"   ; punch_hole = low_level_io.file_punch_hole
-            fopenmode = "r+b" if sparse_write and exists(save_path) else "wb"
-            volf = open(save_path, fopenmode)   ; volf.truncate(volsize)
+            save_type = "file"   ; punch_hole = storage.file_punch_hole
+            if not exists(save_path):   open(save_path, "wb").close()
+            volf = open(save_path, "r+b")   ; volf.truncate(volsize)
 
     elif diff:
         if not lv_exists(vgname, datavol):
@@ -3268,10 +3410,10 @@ def add_volume(aset, datavol, desc):
     os.replace(aset.confpath+".tmp", aset.confpath)
     catch_signals(None)
 
-    if lv_exists(aset.vgname, datavol+".tick") \
-    and "arch-"+aset.uuid not in volgroups[aset.vgname].lvs[datavol+".tick"].tags:
-        sys.stderr.write("Warning: Volume '%s' is already tracked"
-                            "by a Wyng snapshot from a different archive!\n" % datavol)
+    #if lv_exists(aset.vgname, datavol+".tick") \
+    #and "arch-"+aset.uuid not in volgroups[aset.vgname].lvs[datavol+".tick"].tags:
+        #sys.stderr.write("Warning: Volume '%s' is already tracked"
+                            #"by a Wyng snapshot from a different archive!\n" % datavol)
 
 
 # Remove a volume from the archive
@@ -3299,7 +3441,7 @@ def delete_volume(aset, dv):
         aset.dest.run([aset.dest.cd + "  && rm -rf '%s'" % dvid])
     catch_signals(None)
 
-    for ext in {".tick",".tock"}:
+    for ext in {".tick",".tock"}: #### FIX
         if lv_exists(aset.vgname, dv+ext) and (options.clean \
         or "arch-"+aset.uuid in volgroups[aset.vgname].lvs[dv+ext].tags):
             lv_remove(aset.vgname, dv+ext, check=True)
@@ -3573,6 +3715,7 @@ options = parser.parse_args()    ; options.action = options.action.lower()
 
 # Set stdout to devnull if --quiet is specified
 debug = options.debug    #; assert not (options.quiet and (options.verbose or debug))
+verbose = options.verbose or debug
 if debug:   options.verbose = True
 if options.quiet and options.action not in ("list","version"):
     options.unattended = True
@@ -3605,8 +3748,6 @@ agent_helper_write()
 
 signal_handlers  = {}    ; signals_caught = []    ; error_cache = []
 
-low_level_io     = LowLevelIO()
-
 # Dict of compressors in the form: (library, default_compress_level, compress_func)
 compressors      =    {"zlib":   (zlib, 4, zlib.compress),
                        "bz2" :   (bz2,  9, bz2.compress)}
@@ -3618,13 +3759,13 @@ hash_funcs       = {"sha256" : hashlib.sha256,
 
 # Create ArchiveSet and Destination objects with get_configs().
 # Passphrase input happens here; no stdin before this point!
-aset = get_configs(options)    ; dest = aset.dest
+aset    = get_configs(options)    ; dest = aset.dest
 
 # Get LVM listings
-volgroups, l_vols= {}, {}    ; get_lvm_vgs()
-if aset.vgname in volgroups:   l_vols = volgroups[aset.vgname].lvs
-lvm_meta_snapshot("release", aset.vgname)
+storage = LocalStorage((aset.volgroup, aset.pool) if aset.pool else (options.local, None))
+##if aset.vgname in volgroups:   l_vols = volgroups[aset.vgname].lvs
 
+if options.local:   aset.set_local(opts.local)
 
 
 
@@ -3642,9 +3783,10 @@ if dest.online and options.action not in ("arch-init","arch-check","arch-delete"
             #raise NotImplementedError(".tmp recovery")
 
         # local copy is consistent, so update destination:
-        update_dest(aset, pathlist=[aset.confname]) # Fix: expand checks from here....
+        #update_dest(aset, pathlist=[aset.confname]) # Fix: expand checks from here....
+        raise RuntimeError("archive.ini mis-match")
 
-    arch_check(aset, [], startup=True)
+    #arch_check(aset, [], startup=True) ###
 
 
 
@@ -3800,7 +3942,7 @@ elif options.action == "arch-init":
 
 
 elif options.action == "arch-check":
-    arch_check(aset, options.volumes)
+    arch_check(aset, datavols)
 
 
 elif options.action == "arch-delete":
