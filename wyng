@@ -940,15 +940,15 @@ class LocalStorage:
 
     # Retrieves survey of all LVs as vgs[].lvs[] dicts
     def get_lvm_cache(self):
-        delim = ":::"
+        delim = ":::"    ; colnames = LvmVolume.colnames
         if not admin_permission:   return
         if not shutil.which(CP.lvm):   sys.stderr.write("LVM not available.\n"); return
         do_exec([[CP.lvm, "lvs", "--units=b", "--noheadings", "--separator="+delim,
-                    "--options=" + ",".join(LvmVolume.colnames), self.path]],
+                    "--options=" + ",".join(colnames), self.path]],
                 out=tmpdir+"/volumes.lst")
 
         for ln in open(tmpdir+"/volumes.lst", "r"):
-            lv = LvmVolume(self, "", members=ln.strip().split(delim))
+            lv = LvmVolume(self, "", members=dict(zip(colnames, ln.strip().split(delim)))
             self.lvols[lv.name] = lv
             ##if lv.pool_lv:   volgroups[vgname].poolnames.add(lv.pool_lv)
 
@@ -962,8 +962,8 @@ class LocalStorage:
 # Base class for local volumes; do not instantiate.
 
 class LocalVolume:
-    maxname   = 255    ; maxdir = 4096 - maxname
-    __slots__ = ("maxname","maxdir","storage","lockfile","dir","path",
+    maxname   = 255    ; maxpath = 4096 - maxname
+    __slots__ = ("maxname","maxpath","storage","lockfile","dir","path",
                  "name","snap1","snap2")
 
     def _my_init(self, storage, name):
@@ -1010,16 +1010,19 @@ class ReflinkVolume(LocalVolume):
 
     def rename(self, newname):
         #Fix: check new name size/fmt
-        os.replace(self.pdir+self.name, self.pdir+newname)
+        self.unlock()
+        if exists(self.storage.pdir+new_name):   raise ValueError(newname+" already exists.")
+        if self.exists():
+            os.replace(self.pdir+self.name, self.pdir+newname)
         del(self.storage.lvols[self.name])
         self.storage.lvols[newname] = ReflinkVolume(self.storage, newname)
 
     def delete(self, sync=True, check=False):
         self.unlock()
-        if exists(self.path):   os.remove(self.path)
-        del(self.storage.lvols[self.name])
+        if self.exists():   os.remove(self.path)
 
     def create(self, size=None, snapshotfrom=None):
+        if self.exists():   raise ValueError(f"Volume {self.name} already exists.")
         if snapshotfrom:
             do_exec([[CP.cp, "--reflink=always", self.pdir+snapshotfrom, self.path)]])
         else:
@@ -1035,12 +1038,13 @@ class ReflinkVolume(LocalVolume):
     def getsize(self):
         return os.path.getsize(self.path)
 
-    def snapshot_btrfs_subvol(svpath):
-        dest = src+"/wyng_snapshot"
-        if exists(dest):
+    def snapshot_btrfs_subvol(svpath, delete=False):
+        if exists(dest := src+"/wyng_snapshot"):
             do_exec([[CP.btrfs, "subvolume", "delete", dest]])
+        if delete:   return None
         do_exec([[CP.btrfs, "subvolume", "snapshot", "-r", svpath, dest]])
         if debug:   print("Created subvol snapshot at", dest)
+        return self.get_btrfs_generation(sv_path)
 
     def get_btrfs_generation(sv_path):
         res = SPr.check_output([CP.btrfs, "subvolume", "show", sv_path], check=True)
@@ -1054,9 +1058,10 @@ class LvmVolume(LocalVolume):
                  "lv_time","pool_lv","thin_id","tags")
     __slots__ = LocalVolume.__slots__ + colnames
 
-    def __init__(self, storage, name=None, members=[]):
+    def __init__(self, storage, name=None, members={}):
 
-        for attr, val in zip(self.colnames, members):
+        self.lv_path = None
+        for attr, val in members:
             if attr == "tags":
                 setattr(self, attr, val.split(","))   ; uuid = None
             elif attr == "lv_size":
@@ -1068,11 +1073,13 @@ class LvmVolume(LocalVolume):
         super()._my_init(self.storage, name or self.lv_name)
         self.snap1 = self.name+".tick"    ; self.snap2 = self.name+".tock"
 
-
     def rename(self, new_name):
+        self.unlock()
+        if exists(self.storage.pdir+new_name):   raise ValueError(newname+" already exists.")
         do_exec([[CP.lvm, "lvrename", self.path, new_name]])
         del(self.storage.lvols[self.name])
-        self.storage.lvols[newname] = LvmVolume(self.storage, newname)
+        m = {x: getattr(self,x) for x in set(colnames) - {"lv_name","lv_path","thin_id"}}
+        self.storage.lvols[newname] = LvmVolume(self.storage, name=new_name, members=m)
 
     def delete(self, sync=True, check=False):
         # Enh: re-write with asyncio
@@ -1080,7 +1087,7 @@ class LvmVolume(LocalVolume):
         assert not (sync == False and check)
 
         if self.exists():
-            procs = self.gc_procs    ; maxprocs = 16
+            self.unlock()    ; procs = self.gc_procs    ; maxprocs = 16
             if len(procs) == maxprocs:
                 for ii in reversed(range(len(procs))):
                     retcode = procs[ii].returncode
@@ -1105,7 +1112,7 @@ class LvmVolume(LocalVolume):
     def create(self, size=None, snapshotfroml=None):
         vg = self.storage.path
         #tags =["--addtag=delta"] if monitor_only else []
-        #Fix: check if it already exists
+        if self.exists():   raise ValueError(f"Volume {self.name} already exists.")
         if snapshotfrom:
             do_exec([[CP.lvm, "lvcreate", "-pr", "-kn", "-ay",
                         "--addtag=wyng", "--addtag=arch-"+aset.uuid,
@@ -1127,10 +1134,9 @@ class LvmVolume(LocalVolume):
 
     # Reserve or release lvm thinpool metadata snapshot.
     # action must be "reserve" or "release".
-    # Specifying "release" without "pool=" will attempt to release all pools.
     def lvm_meta_snapshot(action, vg, pool):
         ##if vg not in volgroups:   return
-        vgname   = vg.replace("-","--")               ; checkerr = action == "reserve"
+        vgname   = vg.replace("-","--")     ; checkerr = action == "reserve"
         ##vgpools  = volgroups[vg].poolnames
 
         ##for pl in vgpools if not pool and action == "release" else {pool}:
@@ -3627,7 +3633,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4wip004"     ; prog_date = "20230213"
+prog_version          = "0.4wip005"     ; prog_date = "20230307"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 aset = dest = None
