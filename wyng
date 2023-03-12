@@ -325,12 +325,9 @@ class ArchiveSet:
             open(destname,"wb").write(self.decompress(mbuf))
 
     def set_local(self, localpath):
-        vgp = opts.local.split("/")
-        if len(vgp) != 2:   raise ValueError("Local: 'volgroup/pool' required.")
-        self.vgname, self.poolname = vgp
-        if self.vgname not in volgroups \
-        or self.poolname not in volgroups[self.vgname][self.poolname]:
-            print("Warning: {localpath} not present.")
+        res = LocalStorage.parse_local_path(localpath)
+        if not res:   x_it(7, "Ambiguous --local spec.")
+        _, self.vgname, self.poolname = res
 
 
 class ArchiveVolume:
@@ -498,7 +495,8 @@ class ArchiveVolume:
     def decode_manifests(self, sesnames, force=False):
         for ses in (self.sessions[x] for x in sesnames):
             if ses.path and force:
-                os.makedirs(ses.path, exist_ok=True)    ; do_exec([[CP.chattr, "+c", ses.path]])
+                os.makedirs(ses.path, exist_ok=True)
+                do_exec([[CP.chattr, "+c", ses.path]], check=False)
             self.decode_one_manifest(ses, force=force)
 
 
@@ -620,7 +618,7 @@ class ArchiveSession:
 # END class ArchiveSet, ArchiveVolume, ArchiveSession
 
 
-def agent_helper_write():
+def agent_helper_write(path):
     agent_program = r'''#  Copyright Christopher Laprise 2018-2023
 #  Licensed under GNU General Public License v3. See github.com/tasket/wyng-backup
 import os, sys, signal
@@ -661,7 +659,7 @@ while True:
     except TimeoutError:
         print("timeout")    ; do_mkpipe()    ; continue
 '''
-    with open(tmpdir +"/agent_helper.py", "wb") as progf:
+    with open(path+"/agent_helper.py", "wb") as progf:
         progf.write(bytes(agent_program, encoding="UTF-8"))
 
 
@@ -914,24 +912,24 @@ class LocalStorage:
         self.block_size   = 512
         self.path = self.pooltype = self.fstype = self.lvpool  = None
         self.lvols, lvols = {}, {}
-        # functions
-        self.acquire_deltas = get_lvm_deltas
-        self.process_deltas = update_delta_digest_lvm
-        self.prep_snapshots = prepare_snapshots_lvm
 
-        if LocalStorage.vg_exists("/dev/"+localpath_t[0]):
+        print(localpath_t) ####
+        if localpath_t[0]:
             self.pooltype       = "tlvm"
-            self.path           = "/dev/"+localpath_t[0]
+            self.path           = "/dev/"+localpath_t[0]+"/"
+            self.online         = LocalStorage.vg_exists(localpath_t[0]) and exists(self.path)
             self.lvpool         = localpath_t[1]
-            self.online         = True
+            self.acquire_deltas = get_lvm_deltas
+            self.process_deltas = update_delta_digest_lvm
+            self.prep_snapshots = prepare_snapshots_lvm
 
-        elif localpath_t[0] is None and localpath_t[1].startswith("/"):
+        elif not localpath_t[0] and localpath_t[1].startswith("/"):
             self.pooltype       = "rlnk"
             self.block_size     = 4096   # Test this with XFS ###
             self.path           = localpath_t[1]
             self.acquire_deltas = get_reflink_deltas
             self.process_deltas = update_delta_digest_reflink
-            self.prep_snapshots = prepare_snapshots_reflink
+            #self.prep_snapshots = prepare_snapshots_reflink
             self.online         = exists(self.path)
             if self.online:
                 if fs := LocalStorage.get_fs_type(self.path) in self.rltypes:   self.fstype = fs
@@ -950,17 +948,18 @@ class LocalStorage:
             self.LVolClass    = self.stypes[self.pooltype]
             self.path = self.path.rstrip("/")+"/"
             self.update_vol_list()
-            for avol in arch_vols:   self.new_vol(avol)
-        #lvm_meta_snapshot("release", aset.vgname)
+            for avol in arch_vols:   self.new_vol_entry(avol)
 
+        print("pooltype", self.pooltype, "not" if not self.online else "", "online") ####
+        print(self.path, self.lvpool)
 
     def __del__(self):
         if self.clean:
             for p in self.gc_procs:   p.wait()
 
 
-    def new_vol(self, newname):
-        if newname in self.lvols:   return
+    def new_vol_entry(self, newname):
+        if newname in (lvols := self.lvols):   return
         lvols[newname] = vol = self.LVolClass(self, newname)
         lvols[vol.snap1] = self.LVolClass(self, vol.snap1)
         lvols[vol.snap2] = self.LVolClass(self, vol.snap2)
@@ -1053,12 +1052,23 @@ class LocalStorage:
         else:
             return True
 
-    # static
     def get_fs_type(path):
         mtab = {x[1]: x[2] for x in map(str.split, open("/etc/mtab","r"))}
         while path not in mtab and path != "/":   path = os.path.dirname(path)
         print("fstype is", mtab[path]) ####
         return mtab[path]
+
+    def parse_local_path(localpath):
+        vgp = localpath.split("/")
+        if LocalStorage.vg_exists(vgp[0]) or (not localpath.startswith("/") and len(vgp)==2):
+            return ["logical volume"]+vgp
+        elif localpath.startswith("/dev") and exists(localpath) \
+        and stat.S_ISBLK(os.stat(localpath).st_mode):
+            return ("block device","",localpath)
+        elif localpath.startswith("/"):
+            return ("file","",localpath)
+        else:
+            return None
 
 
 # Base class for local volumes; do not instantiate.
@@ -1148,6 +1158,7 @@ class ReflinkVolume(LocalVolume):
         return int(os.path.getctime(self.path))
 
     def resize(self, size):
+        if not self.exists():   raise FileNotFoundError(self.path)
         open(self.path, "r+b").truncate(size)
 
     def getsize(self):
@@ -1470,6 +1481,8 @@ def get_configs(opts):
         x_it(1, "Archive already initialized for "+dest.spec)
     if aset.updated_at is None:
         x_it(6, "Archive not found.")
+    elif opts.local:
+        aset.set_local(opts.local)
 
     return aset
 
@@ -1489,7 +1502,7 @@ def get_configs_remote(dest, recv_dir):
     recv_list= [(x+"/volinfo", ArchiveSet.max_volinfosz)
                  for x in new_aset.conf["volumes"].keys()]
     fetch_file_blobs(recv_list, recv_dir, dest)
-    do_exec([[CP.chattr, "+c"] + list(new_aset.conf["volumes"].keys())], cwd=recv_dir)
+    do_exec([[CP.chattr, "+c"] + list(new_aset.conf["volumes"].keys())], cwd=recv_dir, check=False)
     new_aset = ArchiveSet(recv_dir, dest, children=1, allvols=True, prior_auth=new_aset)
 
     # Fetch + auth session metadata... use list flattener
@@ -1510,12 +1523,6 @@ def get_configs_remote(dest, recv_dir):
         new_aset = ArchiveSet(new_path, dest, prior_auth=new_aset)
     else:
         new_path = os.path.dirname(recv_dir)
-
-    # Configure final ArchiveSet object with imported config & current dest+local
-    update = False
-    if options.local:
-        vgname, poolname = options.local.split("/")
-        new_aset.vgname   = vgname    ; new_aset.poolname = poolname    ; update = True
 
     new_aset.just_fetched = True
     return new_aset
@@ -1576,8 +1583,6 @@ class Destination:
             print(f"Naming this URL '{dname}'.")
             locs[dname] = dspec
             self.save_locations(locs)    ; del(locs)
-
-        self.write_helper_program()
 
 
     def remove_dtmp(self):
@@ -1709,7 +1714,7 @@ class Destination:
         self.online = self.free is not None
 
 
-    def write_helper_program(self):
+    def write_helper_program(path):
 
         dest_program = r'''#  Copyright Christopher Laprise 2018-2023
 #  Licensed under GNU General Public License v3. See github.com/tasket/wyng-backup
@@ -1859,7 +1864,7 @@ elif cmd == "dedup":
     print(ddcount, "bytes reduced.")
     print("wyng_check_free", shutil.disk_usage(".").free, flush=True)
 '''
-        with open(tmpdir +"/rpc/dest_helper.py", "wb") as progf:
+        with open(path+"/dest_helper.py", "wb") as progf:
             progf.write(bytes(dest_program, encoding="UTF-8"))
 
     #####>  End dest_helper program  <#####
@@ -2421,7 +2426,7 @@ def send_volume(storage, vol, localtime, ses_tags, send_all):
 
     # Set current dir and make new session folder
     os.chdir(metadir+bkdir)    ; os.makedirs(sdir+"-tmp")
-    do_exec([[CP.chattr, "+c", sdir+"-tmp"]])
+    do_exec([[CP.chattr, "+c", sdir+"-tmp"]], check=False)
 
 
     if aset.datacrypto:
@@ -3191,23 +3196,23 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
         else:
             return 0
 
+    dest        = (aset := vol.archive).dest
     verbose     = not options.quiet and verify_only != 2    ; debug = options.debug
     attended    = not options.unattended          ; remap     = options.remap
     sparse      = options.sparse                  ; sparse_write = options.sparse_write or sparse
-    dest        = (aset := vol.archive).dest      ; chunksize = aset.chunksize
-    vgname      = aset.vgname                     ; zeros     = bytes(chunksize)
-    datavol     = vol.name                        ; snap1vol  = datavol+".tick"
-    gethash     = hash_funcs[aset.hashtype]       ; sessions  = vol.sesnames
-    compress    = compressors[aset.compression][2]  ; compresslevel = int(aset.compr_level)
+    chunksize   = aset.chunksize                  ; zeros     = bytes(chunksize)
+    sessions    = vol.sesnames
+    # functions
+    compress    = compressors[aset.compression][2]; compresslevel = int(aset.compr_level)
     decompress  = compressors[aset.compression][0].decompress
     decrypt     = aset.datacrypto.decrypt if aset.datacrypto else None
     compare_digest = hmac.compare_digest          ; b64enc    = base64.urlsafe_b64encode
-
+    gethash     = hash_funcs[aset.hashtype]
 
     if diff or verify_only:
         save_path = ""
     elif not save_path:
-        save_path = pjoin("/dev",vgname,datavol)
+        save_path = storage.path+vol.name
 
     # Set the session to retrieve
     if select_ses:
@@ -3223,7 +3228,7 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
             select_ses = "S_"+select_ses
 
         if select_ses not in sessions:
-            err_out(f"No volume {datavol} in session {select_ses}.")
+            err_out(f"No volume {vol.name} in session {select_ses}.")
             return None
 
     elif len(sessions) > 0:
@@ -3280,36 +3285,40 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
 
     # Prepare save volume
     if save_path:
-        # Decode dev path semantics and match to vg/lv if possible. Otherwise, open
-        # simple block dev or file.
-        save_type = "block device"   ; punch_hole   = storage.block_discard_chunk
-        returned_home = False        ; lv, pool, vg = get_lv_path_pool(save_path) ####
-        if not lv and LocalStorage.vg_exists(os.path.dirname(save_path)):
-            # Got vg path, lv does not exist
-            lv = os.path.basename(save_path)
-            vg = os.path.basename(os.path.dirname(save_path))
-        if vg:
-            # Does save path == original path?
-            returned_home = (lv== datavol) and (vg== aset.vgname)
-            save_type = "logical volume"
-            if not lv_exists(vg,lv):
-                if vg != vgname:
+        # Decode dev path semantics and match to vg/lv if possible.
+        save_type, path1, path2 = LocalStorage.parse_local_path(os.path.dirname(save_path))
+        save_storage = LocalStorage((path1, path2), require_online=True)
+        if not vol.name in storage.lvols:   storage.new_vol_entry(vol.name)
+        if not vol.name in save_storage.lvols:   save_storage.new_vol_entry(vol.name)
+        l_vol        = save_storage.lvols[vol.name]
+
+        # Does save path == original path?
+        returned_home = False #### save_path == storage.lvols[vol.name].path
+
+        punch_hole = storage.block_discard_chunk
+
+        if save_type == "logical volume":
+            lv, pool, vg = get_lv_path_pool(save_path)
+            if not exists(save_path):
+                if not path2 or path1 != aset.vgname:
                     err_out("Cannot auto-create volume: Volume group does not match config.")
                     return None
                 print("Creating '%s' in thin pool [%s/%s]." % (lv, vg, aset.poolname))
-                do_exec([[CP.lvm, "lvcreate", "-kn", "-ay", "-V", str(volsize)+"b",
-                          "--thin", "-n", lv, vg+"/"+aset.poolname]])
-            elif l_vols[lv].lv_size != volsize:
-                print("Re-sizing LV to %d bytes." % volsize)
-                do_exec([[CP.lvm, "lvresize", "-L", str(volsize)+"b", "-f", save_path]])
+                #### Fix:  translate to safe lvm name
+                l_vol.create(volsize, ro=False)
 
-        if exists(save_path) and stat.S_ISBLK(os.stat(save_path).st_mode):
+            elif l_vol.getsize() != volsize:
+                if debug:   print("Re-sizing LV to %d bytes." % volsize)
+                save_storage.lvols[vol.name].resize(volsize)
+
+        elif save_type == "block device":
             if not sparse_write:   do_exec([[CP.blkdiscard, save_path]])
             volf = open(save_path, "r+b")
+
         elif save_path.startswith("/dev/"):
             err_out("Cannot create new volume from ambiguous /dev path.\n"
                     " Please create the volume before using 'receive', or specify"
-                    " --save-to=/dev/volgroup/lv in case of an LVM thin lv.")
+                    " --save-to=/dev/volgroup/lv in case of a thin LVM volume.")
             return None
         else: # file
             save_type = "file"   ; punch_hole = storage.file_punch_hole
@@ -3317,31 +3326,34 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
             volf = open(save_path, "r+b")   ; volf.truncate(volsize)
 
     elif diff:
-        if not lv_exists(vgname, datavol):
+        l_vol = storage.lvols[vol.name]     ; snap1vol = l_vol.snap1
+        if not l_vol.exists():
             err_out("Local volume must exist for diff.")
             return None
         if remap:
-            lv_remove(vgname, snap1vol)
-            do_exec([[CP.lvm,"lvcreate", "-pr", "-kn", "-ay", "--addtag=wyng",
-                    "--addtag="+vol.last, "--addtag=delta",
-                    "--addtag=arch-"+aset.uuid, "-s", vgname+"/"+datavol, "-n", snap1vol]])
-            print("  Initial snapshot created for", datavol)
-            get_lvm_vgs(aset.vgname)
-            if not exists(vol.mapfile):
-                vol.init_deltamap(vol.mapfile, vol.mapsize())
-            bmapf = open(vol.mapfile, "r+b")
-            bmapf.truncate(vol.mapsize())    ; bmapf.flush()
-            bmap_mm = mmap.mmap(bmapf.fileno(), 0)
+            raise NotImplementedError()
+            #lv_remove(vgname, snap1vol)
+            #do_exec([[CP.lvm,"lvcreate", "-pr", "-kn", "-ay", "--addtag=wyng",
+                    #"--addtag="+vol.last, "--addtag=delta",
+                    #"--addtag=arch-"+aset.uuid, "-s", vgname+"/"+datavol, "-n", snap1vol]])
+            #print("  Initial snapshot created for", datavol)
+            #get_lvm_vgs(aset.vgname)
+            #if not exists(vol.mapfile):
+                #vol.init_deltamap(vol.mapfile, vol.mapsize())
+            #bmapf = open(vol.mapfile, "r+b")
+            #bmapf.truncate(vol.mapsize())    ; bmapf.flush()
+            #bmap_mm = mmap.mmap(bmapf.fileno(), 0)
         else:
-            if not lv_exists(vgname, snap1vol):
-                print("Snapshot '.tick' not available; Comparing with source volume instead.")
-                snap1vol = datavol
+            l_vol = storage.lvols[snap1vol]
+            #if not storage.lvols[snap1vol].exists():
+                #print("Snapshot '.tick' not available; Comparing with source volume instead.")
+                #snap1vol = l_vol
 
-            if volsize != l_vols[snap1vol].lv_size:
+            if volsize != l_vol.getsize():
                 err_out("Volume sizes differ:\n  Archive = %d \n  Local   = %d"
-                        % (volsize, l_vols[snap1vol].lv_size))   ; return None
+                        % (volsize, l_vol.getsize()))   ; return None
 
-        volf  = open(pjoin("/dev",vgname,snap1vol), "r+b")
+        volf  = open(l_vol.path, "r+b")
 
 
     if volf:
@@ -3349,7 +3361,7 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
         volfno    = volf.fileno() ; fcntl.lockf(volf, fcntl.LOCK_EX|fcntl.LOCK_NB)
 
     if verbose:
-        print("Receiving" if save_path else "Scanning", "volume:", datavol, select_ses[2:])
+        print("Receiving" if save_path else "Scanning", "volume:", vol.name, select_ses[2:])
         if save_path:    print("Saving to %s '%s'" % (save_type, save_path))
 
     # Create retriever process using py program
@@ -3471,11 +3483,8 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
     if save_path:
         os.sync()
         if returned_home and select_ses == sessions[-1]:
-            lv_remove(vgname, snap1vol)
-            do_exec([[CP.lvm, "lvcreate", "-pr", "-kn", "-ay",
-                "--addtag=wyng", "--addtag="+vol.last,
-                "--addtag=arch-"+aset.uuid, "-s", vgname+"/"+datavol, "-n", snap1vol]])
-            if debug:   print("  Initial snapshot created for", datavol)
+            save_storage.lvols[l_vol.snap1].create(snapshotfrom=vol.name)
+            if verbose:   print("  Snapshot created for", vol.name)
             vol.init_deltamap(vol.mapfile, vol.mapsize())
     if remap:
         bmapf.close()
@@ -3734,7 +3743,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4wip006"     ; prog_date = "20230310"
+prog_version          = "0.4wip007"     ; prog_date = "20230312"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 aset = dest = None
@@ -3840,7 +3849,8 @@ tmpdir_obj  = tempfile.TemporaryDirectory(prefix=prog_name)   ; tmpdir = tmpdir_
 os.makedirs(vardir, exist_ok=True)
 shutil.rmtree("/tmp/"+prog_name+"-debug", ignore_errors=True)
 os.makedirs(tmpdir+"/rpc")
-agent_helper_write()
+Destination.write_helper_program(tmpdir+"/rpc")
+agent_helper_write(tmpdir)
 
 
 ## General Configuration ##
@@ -3859,11 +3869,12 @@ hash_funcs       = {"sha256" : hashlib.sha256,
 # Create ArchiveSet and Destination objects with get_configs().
 # Passphrase input happens here; no stdin before this point!
 aset    = get_configs(options)    ; dest = aset.dest
-storage = LocalStorage((options.local, None) if options.local else (aset.vgname, aset.poolname))
+storage = LocalStorage((None, options.local) if options.local else (aset.vgname, aset.poolname),
+                       require_online= options.action in ("monitor","send","receive","diff"))
 assert ArchiveSet.min_chunksize % storage.block_size == 0
 
-if options.local:   aset.set_local(opts.local)
-
+##if options.local:   aset.set_local(opts.local)
+print(storage.pooltype, storage.path, storage.lvpool, storage.online) ####
 
 
 
@@ -3945,11 +3956,11 @@ for vol in selected_vols[:]:
 # Process Commands:
 
 if options.action   == "monitor":
-    monitor_send(aset, selected_vols or datavols, monitor_only=True)
+    monitor_send(storage, aset, selected_vols or datavols, monitor_only=True)
 
 
 elif options.action == "send":
-    monitor_send(aset, selected_vols or datavols, monitor_only=False)
+    monitor_send(storage, aset, selected_vols or datavols, monitor_only=False)
 
 
 elif options.action == "prune":
@@ -3978,8 +3989,8 @@ elif options.action == "receive":
         x_it(1, "Specify only one session for receive.")
 
     for dv in selected_vols:
-        count = receive_volume(aset.vols[dv], select_ses=options.session or "",
-                                              save_path=options.saveto or "")
+        count = receive_volume(storage, aset.vols[dv], select_ses=options.session or "",
+                                        save_path=options.saveto or "")
         if count is None:   error_cache.append(dv)
 
 
@@ -3988,7 +3999,7 @@ elif options.action == "verify":
         x_it(1, "Specify one session for verify.")
 
     for dv in datavols if options.all else selected_vols:
-        count = receive_volume(aset.vols[dv],
+        count = receive_volume(storage, aset.vols[dv],
                     select_ses="" if not options.session else options.session.split(",")[0],
                     verify_only=1, save_path="")
         if count is None:   error_cache.append(dv)
@@ -3998,7 +4009,7 @@ elif options.action == "diff":
     if len(selected_vols) != 1:
         x_it(1, "Specify one volume for diff.")
     if selected_vols:
-        receive_volume(aset.vols[selected_vols[0]], save_path="", diff=True)
+        receive_volume(storage, aset.vols[selected_vols[0]], save_path="", diff=True)
 
 
 elif options.action == "list":
@@ -4015,7 +4026,7 @@ elif options.action == "add":
 
 elif options.action == "rename":
     if len(options.volumes) != 2:  x_it(1,"Rename requires two volume names.")
-    rename_volume(aset, options.volumes[0], options.volumes[1])
+    rename_volume(storage, aset, options.volumes[0], options.volumes[1])
 
 
 elif options.action == "delete":
