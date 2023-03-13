@@ -288,7 +288,7 @@ class ArchiveSet:
         if exists(vpath):    shutil.rmtree(vpath)
         return vid
 
-    def rename_volume_meta(self, storage, datavol, newname, ext=""):
+    def rename_volume_meta(self, datavol, newname, ext=""):
         vol = self.vols[datavol]
         if newname in self.vols or self.Volume.volname_check(newname):   return False
 
@@ -406,12 +406,12 @@ class ArchiveVolume:
             f.flush()      ; os.fsync(f.fileno())
         self.archive.save_conf(ext)
 
-    def volname_check(storage, vname): # Fix: move to LocalStorage class
-        if not 0 < len(path) <= maxpath:
-            return f"Volume path/name length must be 1 - {self.maxpath}."
-        if not path.isprintable():
+    def volname_check(vname): # Fix: move to LocalStorage class
+        if not 0 < len(vname) <= ArchiveSet.volname_len:
+            return f"Volume path/name length must be 1 - {ArchiveSet.volname_len}."
+        if not vname.isprintable():
             return "Non-printable characters not allowed in volume names."
-        if any([x in (".","..") for x in path.strip().split("/")]):
+        if any([x in (".","..") for x in vname.strip().split("/")]):
             return "Bad volume name."
         return ""
 
@@ -884,6 +884,14 @@ class CP:
     btrfs      = "/usr/sbin/btrfs" if os.path.exists("/usr/sbin/btrfs") else "/bin/btrfs"
 
 
+
+
+
+
+
+
+
+
 # Manage local (source) data volumes, thin lvm and reflink image files and snapshots.
 # Volume names are mapped into the 'lvols' cache based on whether they are found
 # under the current --local path or if a volume name exists in the archive.
@@ -961,8 +969,9 @@ class LocalStorage:
     def new_vol_entry(self, newname):
         if newname in (lvols := self.lvols):   return
         lvols[newname] = vol = self.LVolClass(self, newname)
-        lvols[vol.snap1] = self.LVolClass(self, vol.snap1)
-        lvols[vol.snap2] = self.LVolClass(self, vol.snap2)
+        for sv in (vol.snap1, vol.snap2):
+            if sv:   lvols[sv] = self.LVolClass(self, sv)
+        return vol
 
     # Note: file_punch_hole() and block_discard_chunk() have the same arg signature...
     def file_punch_hole(self, fn, start, length):
@@ -1075,14 +1084,17 @@ class LocalStorage:
 
 class LocalVolume:
     maxname   = 255    ; maxpath = 4096 - maxname
-    __slots__ = ("storage","lockfile","dir","path",
-                 "name","snap1","snap2")
+    __slots__ = ("storage","lockfile","dir","path","name","snap1","snap2")
 
     def _my_init(self, storage, name):
         self.storage   = storage                        ; self.lockfile = None
         self.pdir      = storage.path.rstrip("/")+"/"   ; self.path     = self.pdir+name
         self.name      = name
-        #self.stat      = os.stat(self.fname, follow_symlinks=True)
+
+        if self.name.endswith(self.snap_ext):
+            self.snap1 = self.snap2 = None
+        else:
+            self.snap1 = self.name+self.snap_ext[0]    ; self.snap2 = self.name+self.snap_ext[1]
 
     def lock(self, mode="r+b"):
         self.lockfile = lf = open(self.path, mode)
@@ -1113,9 +1125,9 @@ class LocalVolume:
     def exists(self):
         return exists(self.path)
 
-    def check_pathname(self, path):
-        if not 0 < len(path) <= self.maxpath:
-            return f"Volume path/name length must be 1 - {self.maxpath}."
+    def check_pathname(path):
+        if not 0 < len(path) <= LocalVolume.maxpath:
+            return f"Volume path/name length must be 1 - {LocalVolume.maxpath}."
         if not path.isprintable():
             return "Non-printable characters not allowed in volume names."
         if any([x in (".","..") for x in path.strip().split("/")]):
@@ -1124,22 +1136,25 @@ class LocalVolume:
 
 class ReflinkVolume(LocalVolume):
 
+    snap_ext = (".wyng1",".wyng2")
+
     def __init__(self, storage, name):
         super()._my_init(storage, name)
-        if not self.name.endswith((".wyng1",".wyng2")):
-            self.snap1 = self.name+".wyng1"    ; self.snap2 = self.name+".wyng2"
 
-    def rename(self, newname):
-        for ext in (".wyng1",".wyng2"):
-            if self.name.endswith(ext) and not new_name.endswith(ext):
-                newname += ext
-        self.check_pathname(newname)
-        self.unlock()
-        if exists(self.storage.pdir+new_name):   raise ValueError(newname+" already exists.")
+    def rename(self, new_name):
+        overwrite = False
+        for ext in self.snap_ext:
+            if self.name.endswith(ext):
+                overwrite = True
+                if not new_name.endswith(ext):   new_name += ext
+        newvol = self.storage.new_vol_entry(new_name)
         if self.exists():
-            os.replace(self.pdir+self.name, self.pdir+newname)
+            if newvol.exists() and not overwrite:
+                raise ValueError(new_name+" already exists.")
+            os.makedirs(newvol.pdir, exist_ok=True)
+            self.unlock()    ; os.replace(self.path, newvol.path)
+
         del(self.storage.lvols[self.name])
-        self.storage.lvols[newname] = ReflinkVolume(self.storage, newname)
 
     def delete(self, sync=True, check=False):
         self.unlock()
@@ -1149,8 +1164,10 @@ class ReflinkVolume(LocalVolume):
         if self.exists():   raise ValueError(f"Volume {self.name} already exists.")
         os.makedirs(self.pdir, exist_ok=True)
         if snapshotfrom:
-            do_exec([[CP.cp, "--reflink=always", snapshotfrom, self.path]])
+            snap_path = self.storage.lvols[snapshotfrom].path
+            do_exec([[CP.cp, "--reflink=always", snap_path, self.path]])
         else:
+            assert size is not None
             open(self.path, "wb").truncate(size)
         self.storage.lvols[self.name] = self
 
@@ -1169,6 +1186,8 @@ class ReflinkVolume(LocalVolume):
 
 
 class LvmVolume(LocalVolume):
+
+    snap_ext  = (".wyng1",".wyng2")
     maxname   = 112    ; maxpath = maxname    ; alphanumsym = "^[a-zA-Z0-9\+\._-]+$"
     colnames  = ("vg_name","lv_name","lv_path","lv_attr","lv_size","lv_uuid",
                  "lv_time","pool_lv","thin_id","tags")
@@ -1187,19 +1206,24 @@ class LvmVolume(LocalVolume):
 
         ##if uuid:   setattr(self, "lv_uuid", uuid)
         super()._my_init(self.storage, name or self.lv_name)
-        if not self.name.endswith((".tick",".tock")):
-            self.snap1 = self.name+".tick"    ; self.snap2 = self.name+".tock"
 
     def rename(self, new_name):
-        for ext in (".tick",".tock"):
-            if self.name.endswith(ext) and not new_name.endswith(ext):
-                new_name += ext
-        self.unlock()
-        if exists(self.storage.pdir+new_name):   raise ValueError(newname+" already exists.")
-        do_exec([[CP.lvm, "lvrename", self.path, new_name]])
-        del(self.storage.lvols[self.name])
+        storage = self.storage    ; overwrite = False
+        for ext in self.snap_ext:
+            if self.name.endswith(ext):
+                overwrite = True
+                if not new_name.endswith(ext):   new_name += ext
         m = {x: getattr(self,x) for x in set(colnames) - {"lv_name","lv_path","thin_id"}}
-        self.storage.lvols[newname] = LvmVolume(self.storage, name=new_name, members=m)
+        storage.lvols[newname] = newvol = LvmVolume(storage, name=new_name, members=m)
+
+        if self.exists():
+            if newvol.exists():
+                if not overwrite:
+                    raise ValueError(newname+" already exists.")
+                else:
+                    newvol.delete()
+            self.unlock()    ; do_exec([[CP.lvm, "lvrename", self.path, new_name]])
+        del(storage.lvols[self.name])
 
     def delete(self, sync=True, check=False):
         # Enh: re-write with asyncio
@@ -1229,17 +1253,16 @@ class LvmVolume(LocalVolume):
 
         del(self.storage.lvols[self.name])
 
-    def create(self, size=None, snapshotfroml=None):
-        vg = self.storage.path
-        #tags =["--addtag=delta"] if monitor_only else []
+    def create(self, size=None, snapshotfrom=None, ro=True, addtags=[]):
+        vg = self.storage.path    ; rwmode = ["-pr"+("w" if not ro else "")]
         if self.exists():   raise ValueError(f"Volume {self.name} already exists.")
         if snapshotfrom:
-            do_exec([[CP.lvm, "lvcreate", "-pr", "-kn", "-ay",
-                        "--addtag=wyng", "--addtag=arch-"+aset.uuid,
+            do_exec([[CP.lvm, "lvcreate", "-kn", "-ay"] + rwmode + addtags + [
                         "-s", vg+"/"+snapshotfrom, "-n", self.name]])
         else:
-            do_exec([[CP.lvm, "lvcreate", "-kn", "-ay", "-V", str(volsize)+"b",
-                        "--thin", "-n", self.name, vg+"/"+self.storage.lvpool]])
+            assert size is not None
+            do_exec([[CP.lvm, "lvcreate", "-kn", "-ay", "-V", str(size)+"b"] + rwmode
+                      + addtags + ["--thin", "-n", self.name, vg+"/"+self.storage.lvpool]])
 
         self.storage.lvols[self.name] = self
 
@@ -1252,10 +1275,10 @@ class LvmVolume(LocalVolume):
     def getsize(self):
         return self.lv_size
 
-    def check_pathname(self, path):
+    def check_pathname(path):
         if res := super.check_pathname(path):
             return res
-        if re.match(self.alphanumsym, path) is None:
+        if re.match(LvmVolume.alphanumsym, path) is None:
             return "Only characters A-Z 0-9 . + _ - are allowed in LVM volume names."
         return ""
 
@@ -2046,55 +2069,56 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only):
     '''
 
     print("Preparing snapshots...")
-    incr_vols, complete_vols = [], []    ; vgname = aset.vgname    ; lvols = storage.lvols
+    incr_vols, complete_vols = [], []   ; vgname = aset.vgname      ; lvols = storage.lvols
 
     for datavol in datavols:
-        if not lvols[datavol].exists():
+        vol = aset.vols[datavol]        ; mapfile  = vol.mapfile    ; l_vol = lvols[datavol]
+
+        if not l_vol.exists():
             print("Warning: Local '%s' does not exist!" % datavol)
             continue
 
         if datavol not in aset.vols and not monitor_only:
             add_volume(aset, datavol, options.voldesc)
 
-        # 'mapfile' is the deltamap file, 'snapXvol' are the .tick and .tock snapshots.
-        # .tick holds vol state between send/monitor ops;
-        # .tock is new snapshot which is compared w .tick and then replaces it (send/monitor).
-        vol      = aset.vols[datavol]   ; mapfile  = vol.mapfile
-        snap1vol = datavol + ".tick"    ; snap2vol = datavol + ".tock"
-
-        if lvols[snap1vol].exists() and "arch-"+aset.uuid not in l_vols[snap1vol].tags:
+        # 'mapfile' is the deltamap file, 'snapX' are the Wyng snapshots.
+        # snap1 holds vol state between send/monitor ops;
+        # snap2 is new snapshot which is compared with snap1 and then replaces it (send/monitor).
+        
+        snap1, snap2 = l_vol.snap1, l_vol.snap2
+        if lvols[snap1].exists() and "arch-"+aset.uuid not in lvols[snap1].tags:
             if options.remap:
-                lv_remove(vgname, snap1vol)    ; print("  Removed mis-matched snapshot", snap1vol)
+                l_vol.delete    ; print("  Removed mis-matched snapshot", snap1)
             else:
-                print("  Skipping %s; LV snapshot is from a different archive." % datavol)
+                print("  Skipping %s; snapshot is from a different archive." % datavol)
                 continue
 
         # Make deltamap or initial snapshot if necessary. Try to recover paired state
         # by comparing snapshot UUIDs; a match means remap is unnecessary.
         if len(vol.sessions):
-            if lv_exists(vgname, snap1vol) and vol.last not in l_vols[snap1vol].tags \
-            and l_vols[snap1vol].lv_uuid != vol.sessions[vol.last].uuid:
-                lv_remove(vgname, snap1vol)    ; print("  Removed mis-matched snapshot", snap1vol)
+            if lvols[snap1].exists() and vol.last not in lvols[snap1].tags \
+            and lvols[snap1].lv_uuid != vol.sessions[vol.last].uuid:
+                lvols[snap1].delete()    ; print("  Removed mis-matched snapshot", snap1)
 
-            if not lv_exists(vgname, snap1vol) and lv_exists(vgname, snap2vol) \
-            and vol.last in l_vols[snap2vol].tags and "arch-"+aset.uuid in l_vols[snap2vol].tags:
+            if not lvols[snap1].exists() and lvols[snap2].exists() \
+            and vol.last in lvols[snap2].tags and "arch-"+aset.uuid in lvols[snap2].tags:
                 # Recover interrupted snapshot rotation
-                lv_rename(vgname, snap2vol, snap1vol)
+                lvols[snap2].rename(snap1)
 
-            if lv_exists(vgname, snap1vol) and "delta" in " ".join(l_vols[snap1vol].tags) \
+            if lvols[snap1].exists() and "delta" in " ".join(lvols[snap1].tags) \
             and (     vol.map_used() == 0 
                   or (vol.map_used() > 0 and
-                      "delta-"+str(os.path.getmtime(vol.mapfile)) not in l_vols[snap1vol].tags
+                      "delta-"+str(os.path.getmtime(vol.mapfile)) not in lvols[snap1].tags
                       )
                  ):
                 # Handle inadvertant mapfile snapshot mis-match
                 init_deltamap(vol, mapfile, vol.mapsize())
-                lv_remove(vgname, snap1vol)    ; print("  Removed mis-matched delta", snap1vol)
+                lvols[snap1].delete()    ; print("  Removed mis-matched delta", snap1vol)
 
-            if not exists(mapfile) and lv_exists(vgname, snap1vol) \
-            and vol.last in l_vols[snap1vol].tags \
-            and "delta" not in " ".join(l_vols[snap1vol].tags) \
-            and l_vols[snap1vol].lv_uuid == vol.sessions[vol.last].uuid: ####
+            if not exists(mapfile) and lvols[snap1].exists() \
+            and vol.last in lvols[snap1].tags \
+            and "delta" not in " ".join(lvols[snap1].tags) \
+            and lvols[snap1].lv_uuid == vol.sessions[vol.last].uuid: ####
                 # Latest session matches current snapshot; OK to make blank map.
                 vol.init_deltamap(mapfile, vol.mapsize())
 
@@ -2102,9 +2126,9 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only):
             print("  Skipping %s; No data." % datavol)    ; continue
 
         # Handle circumstances where a new mapping is needed. New volume or vol has history
-        # but .tick and/or deltamap are still missing after above checks.
+        # but snap1 and/or deltamap are still missing after above checks.
         # In this case 'send' can determine any differences w prior backups.
-        if vol.sessions and exists(mapfile) and lv_exists(vgname, snap1vol):
+        if vol.sessions and exists(mapfile) and lvols[snap1].exists():
             incr_vols.append(datavol)
         elif not monitor_only:
             print("  Pairing snapshot for", datavol)
@@ -2113,10 +2137,10 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only):
             print("  Skipping %s; No paired snapshot." % datavol)    ; continue
 
         # Make fresh snap2vol
-        lv_remove(vgname, snap2vol)
-        tags =["--addtag=delta"] if monitor_only else []
-        do_exec([[CP.lvm, "lvcreate", "-pr", "-kn", "-ay", "--addtag=wyng"] + tags
-                        + ["--addtag=arch-"+aset.uuid, "-s", vgname+"/"+datavol, "-n",snap2vol]])
+        lvols[snap2].delete()
+        tags = ["--addtag=wyng", "--addtag=arch-"+aset.uuid]
+        if monitor_only:   tags.append("--addtag=delta")
+        lvols[snap2].create(snapshotfrom=datavol, ro=True, addtags=tags)
 
     return incr_vols, complete_vols
 
@@ -2141,16 +2165,16 @@ def get_lvm_deltas(storage, datavols):
         try:
             storage.metadata_lock(apool)
             for datavol in datavols:
-                if lvols[datavol].pool_lv != apool:   continue
-                snap1vol = datavol + ".tick"    ; snap2vol = datavol + ".tock"
-                cmds = [[CP.thin_delta, "-m",   "--thin1=" + lvols[snap1vol].thin_id,
-                                                "--thin2=" + lvols[snap2vol].thin_id,
+                lv = lvols[datavol]
+                if lv.pool_lv != apool:   continue
+                cmds = [[CP.thin_delta, "-m",   "--thin1=" + lvols[lv.snap1].thin_id,
+                                                "--thin2=" + lvols[lv.snap2].thin_id,
                                         "/dev/mapper/"+vgname+"-"+poolname+"_tmeta"],
                         [CP.grep, "-v", r"^\s*<same .*\/>$"]
                         ]
                 do_exec(cmds,  out=tmpdir+"/delta."+datavol)
         except Exception as e:
-            sys.stderr.write("ERROR running thin_delta process.\n")
+            err_out("ERROR running thin_delta process.")
             raise e
         finally:
             storage.metadata_unlock(apool)
@@ -2293,9 +2317,9 @@ def get_reflink_deltas(storage, aset, datavols):
 
 def update_delta_digest_reflink(storage, aset, datavol, monitor_only):
 
-    lvols       = storage.lvols
+    lvols       = storage.lvols              ; l_vol      = lvols[datavol]
     vol         = aset.vols[datavol]         ; chunksize  = aset.chunksize
-    snap1vol    = vol.name + ".tick"         ; snap2vol   = vol.name + ".tock"
+    snap1vol    = l_vol.snap1                ; snap2vol   = l_vol.snap2
     snap1size   = lvols[snap1vol].lv_size    ; snap2size  = lvols[snap2vol].lv_size
     assert len(vol.sessions) and exists(vol.mapfile)
 
@@ -3285,6 +3309,9 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
 
     # Prepare save volume
     if save_path:
+        
+        # Enh: possibly combine --local and --save-to paths if specified together
+
         # Decode dev path semantics and match to vg/lv if possible.
         save_type, path1, path2 = LocalStorage.parse_local_path(os.path.dirname(save_path))
         save_storage = LocalStorage((path1, path2), require_online=True)
@@ -3344,10 +3371,10 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
             #bmapf.truncate(vol.mapsize())    ; bmapf.flush()
             #bmap_mm = mmap.mmap(bmapf.fileno(), 0)
         else:
-            l_vol = storage.lvols[snap1vol]
-            #if not storage.lvols[snap1vol].exists():
-                #print("Snapshot '.tick' not available; Comparing with source volume instead.")
-                #snap1vol = l_vol
+            if storage.lvols[snap1vol].exists():
+                l_vol = storage.lvols[snap1vol]
+            else:
+                print("Snapshot not available; Comparing with source volume instead.")
 
             if volsize != l_vol.getsize():
                 err_out("Volume sizes differ:\n  Archive = %d \n  Local   = %d"
@@ -3483,7 +3510,8 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
     if save_path:
         os.sync()
         if returned_home and select_ses == sessions[-1]:
-            save_storage.lvols[l_vol.snap1].create(snapshotfrom=vol.name)
+            tags = ["--addtag=wyng", "--addtag=arch-"+aset.uuid]
+            save_storage.lvols[l_vol.snap1].create(snapshotfrom=vol.name, addtags=tags)
             if verbose:   print("  Snapshot created for", vol.name)
             vol.init_deltamap(vol.mapfile, vol.mapsize())
     if remap:
@@ -3499,8 +3527,6 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
 # Rename a volume in the archive
 
 def rename_volume(storage, aset, oldname, newname):
-    #for prg in (CP.lvm, CP.blkdiscard):
-        #if not shutil.which(prg):  raise RuntimeError("Required command not found: "+prg)
 
     os.chdir(aset.path)    ; volume   = aset.vols[oldname]
     if not aset.rename_volume_meta(oldname, newname, ext=".tmp"):
@@ -3512,7 +3538,7 @@ def rename_volume(storage, aset, oldname, newname):
         os.replace(fl+".tmp", fl)
     catch_signals(None)
 
-    for lvol_name in (storage.lvols[dv].snap1, storage.lvols[dv].snap2):
+    for lvol_name in (storage.lvols[oldname].snap1, storage.lvols[oldname].snap2):
         storage.lvols[lvol_name].rename(newname)
 
 
@@ -3610,7 +3636,7 @@ def show_list(aset, selected_vols):
     if not aset.vols:
         print("No volumes.")    ; return
     elif not selected_vols and not len(options.volumes):
-        print("\nConfigured Volumes [%s/%s]\n" % (aset.vgname, aset.poolname))
+        print("\nVolumes:")
         maxwidth = max(len(x.name) for x in aset.vols.values())
         fmt    = "%7.2f GB  (%5d)  %s  %-" + str(maxwidth+5) + "s  %s"
         for vname in sorted(x.name for x in aset.vols.values()):
@@ -3619,7 +3645,7 @@ def show_list(aset, selected_vols):
                 print(fmt % ((vol.volsize() / 1024**3), len(vol.sessions), vol.vid, vname, sname))
                 if vol.desc:   print("  desc:", vol.desc)
             else:
-                print(vname)
+                print("",vname)
         return
 
     # Print list of sessions grouped by volume.
@@ -3743,7 +3769,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4wip007"     ; prog_date = "20230312"
+prog_version          = "0.4wip008"     ; prog_date = "20230313"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 aset = dest = None
@@ -3870,11 +3896,11 @@ hash_funcs       = {"sha256" : hashlib.sha256,
 # Passphrase input happens here; no stdin before this point!
 aset    = get_configs(options)    ; dest = aset.dest
 storage = LocalStorage((None, options.local) if options.local else (aset.vgname, aset.poolname),
-                       require_online= options.action in ("monitor","send","receive","diff"))
+                       require_online= options.action in ("monitor","send","receive","diff"),
+                       arch_vols=aset.vols.keys())
 assert ArchiveSet.min_chunksize % storage.block_size == 0
 
 ##if options.local:   aset.set_local(opts.local)
-print(storage.pooltype, storage.path, storage.lvpool, storage.online) ####
 
 
 
@@ -4006,10 +4032,10 @@ elif options.action == "verify":
 
 
 elif options.action == "diff":
-    if len(selected_vols) != 1:
-        x_it(1, "Specify one volume for diff.")
-    if selected_vols:
-        receive_volume(storage, aset.vols[selected_vols[0]], save_path="", diff=True)
+
+    for dv in datavols if options.all else selected_vols:
+        count = receive_volume(storage, aset.vols[dv], save_path="", diff=True)
+        if count is None:   error_cache.append(dv)
 
 
 elif options.action == "list":
