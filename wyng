@@ -1103,7 +1103,7 @@ class LocalVolume:
             ##do_exec([[CP.lvm,"lvchange","--addtag="+vol.last]+tags+[aset.vgname+"/"+snap2vol]])
             lvols[self.snap2].rename(self.snap1)
             os.fsync(open(self.pdir+self.snap1,"rb"))
-            t = self.get_time()    ; os.utime(timestamp_path, times=(t,t))
+            t = self.gettime()    ; os.utime(timestamp_path, times=(t,t))
             print("*T",t, timestamp_path) ####
             return t
         else:
@@ -3824,7 +3824,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4wip009"     ; prog_date = "20230316"
+prog_version          = "0.4wip010"     ; prog_date = "20230316"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 aset = dest = None
