@@ -47,31 +47,39 @@ Public release v0.3 with a range of features including:
 Alpha pre-release v0.4 which adds:
 
  - Authenticated encryption
+ 
+ - Btrfs and XFS local volumes
 
  - Metadata compression
 
 Wyng is released under a GPL license and comes with no warranties expressed or implied.
 
 
-Requirements & Setup
+v0.4 Requirements & Setup
 ---
 
 Before starting:
 
-* Thin-provisioning-tools, lvm2, and python >=3.5.4 must be present on the source system. For top
-performance, at least python 3.6 plus the `python3-zstd` package should be installed before
-creating an archive.
+* Python 3.8 or greater is required for basic operation.
 
-* The destination system (if different from source) should also have python, plus
-a basic Unix command set and filesystem (i.e. a typical Linux or BSD system).
+* For encryption and top performance, the _python3-pycryptodome_ and _python3-zstd_ packages
+should be installed, respectively.
 
-* Volumes to be backed-up must reside in an LVM thin-provisioned pool.
+* Volumes to be backed-up must reside locally in one of the following snapshot-capable
+storage types:  LVM thin-provisioned pool, Btrfs subvolume, or XFS filesystem.
 
-Wyng is currently distributed as a single Python executable with no complex
+* For backing up from LVM, _thin-provisioning-tools & lvm2_ must be present on the source system.
+
+* The destination system where the Wyng archive is stored (if different from source) should
+also have python3, plus a basic Unix command set and filesystem (i.e. a typical Linux or BSD
+system). Otherwise, FUSE may be used to access remote storage using sftp or s3 protocols
+without concern for python or Unix commands.
+
+Wyng is distributed as a single Python executable with no complex
 supporting modules or other program files; it can be placed in '/usr/local/bin'
 or another place of your choosing.
 
-Settings are initialized with `wyng arch-init`:
+Archives can be created with `wyng arch-init`:
 
 ```
 
@@ -81,7 +89,7 @@ wyng arch-init --local=vg/pool --dest=ssh://me@exmaple.com:/mnt/bkdrive -n defau
 
 wyng arch-init --local=vg/pool --dest=file:/home/user -n default
 
-wyng add my_big_volume
+wyng send my_big_volume
 
 
 ```
@@ -95,9 +103,7 @@ with the name "default" which will be automatically used for future Wyng command
 
 Run Wyng using the following commands and arguments in the form of:
 
-**wyng \<parameters> command [volume_name]**
-
-Please note that dashed parameters are always placed before the command.
+**wyng command \<parameters> [volume_name]**
 
 ### Command summary
 
@@ -105,16 +111,16 @@ Please note that dashed parameters are always placed before the command.
 |---------|---|
 | **list** _[volume_name]_    | List volumes or volume sessions.
 | **send** _[volume_name]_    | Perform a backup of enabled volumes.
-| **receive** _volume_name_   | Restore a volume from the archive.
-| **verify** _volume_name_    | Verify volumes' data integrity.
-| **prune** _[volume_name]_   | Remove older backup sessions to recover archive space.
+| **receive** _volume_name [*]_   | Restore volume(s) from the archive.
+| **verify** _volume_name [*]_    | Verify volumes' data integrity.
+| **prune** _[volume_name] [*]_   | Remove older backup sessions to recover archive space.
 | **monitor**                 | Collect volume change metadata & rotate snapshots.
-| **diff** _volume_name_      | Compare local volume with archived volume.
-| **add** _volume_name_       | Add a volume to the configuration.
+| **diff** _volume_name [*]_      | Compare local volume with archived volume.
+| **add** _volume_name [*]_       | Add a volume to the configuration.
 | **delete** _volume_name_    | Remove entire volume from config and archive.
 | **rename** _vol_name_ _new_name_  | Renames a volume in the archive.
 | **arch-init**               | Initialize archive configuration.
-| **arch-check** _[volume_name]_    | Thorough check of archive data & metadata
+| **arch-check** _[volume_name] [*]_    | Thorough check of archive data & metadata
 | **arch-delete**             | Remove data and metadata for all volumes.
 | **arch-deduplicate**        | Deduplicate existing data in archive.
 | **version**                 | Print the Wyng version and exit.
@@ -124,31 +130,32 @@ Please note that dashed parameters are always placed before the command.
 
 | _Option_                      | _Description_
 |-------------------------------|--------------
+--local=_vg/pool_  _...or..._    | (arch-init) Storage pool containing local volumes.
+--local=_/absolute/path_    | 
+--dest=_type:location_   | (arch-init) Destination of backup archive.
+--dest-name=, -n _name_  | Retrieve a dest location, or with --dest store location under _name_
 --session=_date-time[,date-time]_ | Select a session or session range by date-time or tag (receive, verify, prune).
---keep=_date-time_     | Specify date-time or tag of sessions to keep (prune).
+--volex=_volname_      | Exclude volumes (send, monitor, list, prune).
+--dedup, -d            | Use deduplication for send (see notes).
 --all-before           | Select all sessions before the specified _--session date-time_ (prune).
---autoprune=off        | Automatic pruning by calendar date. (experimental)
+--autoprune=off        | Automatic pruning by calendar date.
+--keep=_date-time_     | Specify date-time or tag of sessions to keep (prune).
+--tag=tagname[,desc]   | Use session tags (send, list).
 --save-to=_path_       | Save volume to _path_ (receive).
 --sparse               | Receive volume data sparsely (implies --sparse-write)
 --sparse-write         | Overwrite local data only where it differs (receive)
 --remap                | Remap volume during `send` or `diff`.
---from=_type:location_ | Retrieve from a specific unconfigured archive (receive, verify, list, arch-init).
---local=_vg/pool_      | (arch-init) Pool containing local volumes.
---dest=_type:location_ | (arch-init) Destination of backup archive.
---dest-name=, -n _name_  | Retrieve a dest location, or with --dest store location under _name_
---encrypt=_cipher_     | Set encryption type or 'off'
+--encrypt=_cipher_     | Set encryption type or 'off' (default: chacha20)
 --compression          | (arch-init) Set compression type:level.
 --hashtype             | (arch-init) Set hash algorithm: _sha256_ or _blake2b_.
 --chunk-factor         | (arch-init) Set archive chunk size.
---dedup, -d            | Use deduplication for send (see notes).
---clean                | Perform garbage collection (arch-check) or medata removal (delete).
 --meta-dir=_path_      | Use a different metadata dir than the default.
---volex=_volname[,*]_  | Exclude volumes (send, monitor, list, prune).
+--unattended, -u       | Don't prompt for interactive input.
+--clean                | Perform garbage collection (arch-check) or medata removal (delete).
 --force                | Needed for arch-delete.
 --verbose              | Increase details.
---quiet                | 
--u, --unattended       | Don't prompt for interactive input.
---tag=tagname[,desc]   | Use session tags (send, list).
+--quiet                | Shhh...
+--debug                | Debug mode
 
 #### send
 
@@ -192,17 +199,6 @@ if the save-to path is specified this way.
 For any save path, Wyng will try to discard old data before receiving unless `--sparse` or
 `--sparse-write` options are used.
 
-_Emergency and Recovery situations:_ The `--from` option may be used to
-receive from any Wyng archive that is not currently configured in the current
-system. It is specified just like the `--dest` option of `arch-init`, and the
-`--local` option may also be added to override the LVM settings:
-
-```
-
-wyng --from=ssh://user@192.168.1.2/mountpoint receive my-volume
-
-
-```
 
 #### verify
 
@@ -222,7 +218,7 @@ specific session, or two date-times representing a range:
 
 ```
 
-wyng --session=20180605-000000,20180701-140000 prune
+wyng prune --session=20180605-000000,20180701-140000
 
 
 ```
@@ -265,7 +261,7 @@ wyng diff vm-work-private
 Compare a local volume snapshot with the archive and report any differences.
 This is useful for diagnostics and can also be useful after a verification
 error has occurred. The `--remap` option will record any differences into the
-volume's current change map, resulting in those blocks being backed-up on
+volume's current change map, resulting in those blocks being scanned on
 the next `send`.
 
 
@@ -335,7 +331,7 @@ wyng arch-deduplicate
 Initialize a new backup archive configuration...
 ```
 
-wyng --local=myvg/mypool --dest=file:/mnt/backups -n default arch-init
+wyng arch-init --local=/mnt/btrfspool/volumes --dest=file:/mnt/backups -n default
 
 
 ```
@@ -343,18 +339,11 @@ wyng --local=myvg/mypool --dest=file:/mnt/backups -n default arch-init
 Initialize a new backup archive with storage parameters...
 ```
 
-wyng --local=myvg/mypool --dest=file:/mnt/backups --chunk-factor=3 --hashtype=blake2b arch-init
+wyng arch-init --local=myvg/mypool --dest=file:/mnt/backups --chunk-factor=3 --hashtype=blake2b
 
 
 ```
 
-Import a configuration from an existing archive...
-```
-
-wyng --from=file:/mnt/backups arch-init
-
-
-```
 
 #### arch-check
 
@@ -400,16 +389,12 @@ It accepts one of the following forms, always ending in a mountpoint path:
 |__qubes:__//vm-name[/path]                     | Qubes virtual machine
 |__qubes-ssh:__//vm-name:me@example.com[:port][/path]  | SSH server via a Qubes VM
 
-Note: --local and --dest are required if not using --from.
-
-`--from` accepts a URL like `--dest`, but retrieves the configuration from an existing archive.
-This imports the archive's configuration and can permanently save it as the
-local configuration. This option can also be used with: list, receive and verify commands.
-Note: You can override the archive's LVM settings by specifying `--local`.
+Note: --local and --dest are required.
 
 `--compression=zstd:3` accepts the form `type` or `type:level`. The three types available are
-the default `zstd`, plus `zlib` and `bz2`. Note that Wyng will only default to `zstd` when the
-'python3-zstd' package is installed; otherwise it will fall back to the less capable `zlib`.
+the default `zstd` (zstandard), plus `zlib` and `bz2` (bzip2). Note that Wyng will only default
+to `zstd` when the 'python3-zstd' package is installed; otherwise it will fall back to the less
+capable `zlib`.
 
 `--hashtype=blake2b` accepts a value of either _'sha256'_ or _'blake2b'_ (the default).
 The digest size used for blake2b is 256 bits.
@@ -425,7 +410,7 @@ that will store volumes larger than about 100GB.
 
 Note that _encrypt, compression, hashtype_ and _chunk-factor_ cannot be changed for an archive once it is initialized.
 
-### Options
+### General Options
 
 `--dest=URL`
 
@@ -455,15 +440,17 @@ with that tag, whereas a tag in a dual (range) spec will define an inclusive ran
 instance of the tag (when the tag is the first spec) or the last instance (when the tag is the
 second range spec). Also, date-times and tags may be used together in a range spec.
 
-`--volex=<volume>[,volume,*]`
+`--volex=<volume1> [--volex=<volume2> *]`
 
 Exclude one or more volumes from processing. May be used with commands that operate on multiple
 volumes in a single invocation, such as `send`.
 
+**Please note:** This had to be changed from the v0.3 option format which used a comma to
+specify multiple volumes.
+
 `--sparse-write`
 
-Used with `receive`, this option does _not_ prevent Wyng from overwriting existing local volumes!
-The sparse-write mode merely tells Wyng not to create a brand-new local volume for `receive`, and
+Used with `receive`, the sparse-write mode tells Wyng not to create a brand-new local volume and
 results in the data being sparsely written into the volume instead. This is useful if the existing
 local volume is a clone/snapshot of another volume and you wish to save local disk space. It is also
 best used when the backup/archive storage is local (i.e. fast USB drive or similar) and you don't
@@ -471,10 +458,11 @@ want the added CPU usage of full `--sparse` mode.
 
 `--sparse`
 
-The sparse mode can be used with the `receive` command to intelligently overwrite an existing
-local volume so that only the differences between the local and archived volumes will be fetched
-from the archive and written to the local volume. This results in reduced remote disk and network
-usage while receiving at the expense of some extra CPU usage on the local machine, and also uses
+The sparse mode can be used with the `receive` command to intelligently retreive and overwrite
+an existing
+local volume so that only the differences between local and archived volumes will be fetched
+from the archive and written to the local volume. This results in reduced network
+usage at the expense of some extra CPU usage on the local machine, and also uses
 less local disk space when snapshots are a factor (implies '--sparse-write`).
 
 `--dedup`, `-d`
@@ -513,7 +501,7 @@ __full__ removes all sessions that are due to expire according to above criteria
 
 `--tag=<tagname[,description]>`
 
-With `send`, attach a tagname of your choosing to the new backup session/snapshot; this may be
+With `send`, attach a tag name of your choosing to the new backup session/snapshot; this may be
 repeated on the command line to add multiple tags. Specifying an empty '' tag will cause Wyng
 to ask for one or more tags to be manually input; this also causes `list` to display tag
 information when listing sessions.
@@ -576,14 +564,3 @@ If you like Wyng or my other efforts, monetary contributions are welcome and can
 be made through [Liberapay](https://liberapay.com/tasket/donate)
 or [Patreon](https://www.patreon.com/tasket).
 
-
-
-External Links
----
-Some other tools that use LVM metadata:
-
-[lvmsync](https://github.com/mpalmer/lvmsync) (ruby). Synchronize logical volumes.
-
-[lvm-thin-sendrcv](https://github.com/davidbartonau/lvm-thin-sendrcv) (java). Synchronize logical volumes.
-
-[thinp-test-suite](https://github.com/jthornber/thinp-test-suite-deprecated) (ruby). POC backup program.
