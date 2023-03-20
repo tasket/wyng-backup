@@ -1452,7 +1452,7 @@ def arch_check(storage, aset, vol_list=None, startup=False):
                 continue # Enh: use seq
 
             if attended:   print(" ", sesname[2:], end="... ", flush=True)
-            bcount = receive_volume(vol, select_ses=sesname[2:], verify_only=2)
+            bcount = receive_volume(storage, vol, select_ses=sesname[2:], verify_only=2)
             #if attended:   print(bcount, "bytes OK")
 
 
