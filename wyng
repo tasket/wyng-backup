@@ -908,15 +908,15 @@ class LocalStorage:
         self.rltypes = { "btrfs", "xfs" }
 
         assert len(auuid) > 8
-        self.gc_procs     = []        ; self.locked = False    ; self.auuid      = auuid
-        self.clean        = clean     ; self.sync   = sync
-        self.path = self.pooltype = self.fstype = self.lvpool  = None
-        self.lvols, lvols = {}, {}
+        self.gc_procs  = []          ; self.locked  = False      ; self.auuid      = auuid
+        self.clean     = clean       ; self.sync    = sync
+        self.lvols     = {}          ; self.vgs_all = {}
+        self.path  = self.pooltype = self.fstype = self.lvpool  = None
 
         if localpath_t[0]:
             self.pooltype       = "tlvm"
             self.block_size     = 512
-            self.path           = "/dev/"+localpath_t[0]+"/"
+            self.path           = "/dev/"+localpath_t[0]+"/"    ; self.vgname = localpath_t[0]
             self.online         = LocalStorage.vg_exists(localpath_t[0]) and exists(self.path)
             self.lvpool         = localpath_t[1]
             self.acquire_deltas = get_lvm_deltas
@@ -1030,26 +1030,28 @@ class LocalStorage:
             if sv and sv not in lvols:   lvols[sv] = self.LVolClass(self, sv)
         return vol
 
-    # Retrieves survey of all LVs as vgs[].lvs[] dicts
+    # Create survey of all interesting volumes
     def update_vol_list(self, arch_vols):
         self.lvols.clear()
         if self.pooltype == "tlvm":   self.update_lvm_list()
         for avol in arch_vols:   self.new_vol_entry(avol)
 
+    # Retrieves survey of all LVM VGs/LVs
     def update_lvm_list(self):
         if not shutil.which(CP.lvm):   sys.stderr.write("LVM not available.\n"); return
 
-        delim = ":::"    ; colnames = LvmVolume.colnames
+        delim   = ":::"            ; colnames = LvmVolume.colnames
+        vgs_all = self.vgs_all     ; LvmVol   = LvmVolume
+
         do_exec([[CP.lvm, "lvs", "--units=b", "--noheadings", "--separator="+delim,
-                    "--options=" + ",".join(colnames), self.path.rstrip("/")]],
+                    "--options=" + ",".join(colnames)]],
                 out=tmpdir+"/volumes.lst")
 
         for ln in open(tmpdir+"/volumes.lst", "r"):
-            lv = LvmVolume(self, "", members=zip(colnames, ln.strip().split(delim)))
-            self.lvols[lv.name] = lv
-            ##if lv.pool_lv:   volgroups[vgname].poolnames.add(lv.pool_lv)
+            lv = LvmVol(self, "", members=zip(colnames, ln.strip().split(delim)))
+            vgs_all.setdefault(lv.vg_name, {})[lv.name] = lv
 
-        ##l_vols = volgroups[vg_to_lvols].lvs if vg_to_lvols in volgroups else {}
+        self.lvols = vgs_all[self.vgname]
 
     # static
     def vg_exists(vgname):
@@ -1065,7 +1067,7 @@ class LocalStorage:
         while path not in mtab and path != "/":   path = os.path.dirname(path)
         return mtab[path]
 
-    # accepts either a volgroup/pool or directory path and returns type, tpool, path
+    # accepts either a volgroup/pool or directory path and returns type, tpool, absolute path
     def parse_local_path(localpath):
         lvname, lvpool, vg, lvattr = LocalStorage.get_lv_path_pool(localpath)
         abspath = os.path.abspath(localpath)
@@ -1502,7 +1504,11 @@ def get_configs(opts):
     elif opts.action == "arch-init":
         x_it(1, "Archive already initialized for "+dest.spec)
     elif aset.updated_at is None:
-        aset = get_configs_remote(dest, aset.big_tmpdir+"/var") ####
+        if exists(metadir+ArchiveSet.bkdir+".old"):
+            shutil.rmtree(metadir+ArchiveSet.bkdir+".old")
+        if exists(metadir+ArchiveSet.bkdir):
+            os.replace(metadir+ArchiveSet.bkdir, metadir+ArchiveSet.bkdir+".old")
+        aset = get_configs_remote(dest, metadir)
 
     if aset.updated_at is None:
         x_it(6, "Archive not found.")
@@ -1512,42 +1518,39 @@ def get_configs(opts):
     return aset
 
 
-def get_configs_remote(dest, recv_dir):
-    make_local = options.action == "arch-init"
+# Fetch copy of archive metadata from remote/dest
+
+def get_configs_remote(dest, arch_dir):
+
+    recv_dir = arch_dir+ArchiveSet.bkdir
 
     recv_list = [(ArchiveSet.confname,  ArchiveSet.max_conf_sz),
                  (ArchiveSet.confname+".salt", DataCryptography.max_keyfile_sz)]
     fetch_file_blobs(recv_list, recv_dir, dest, ext=".auth_req", skip0=True)
 
     # Instantiate ArchiveSet to authenticate archive.ini
+    # Fix: rename after auth, not before ###
     for fname, fsz in recv_list:   os.replace(recv_dir+"/"+fname+".auth_req", recv_dir+"/"+fname)
-    new_aset = ArchiveSet(recv_dir, dest, children=0, pass_agent=options.pass_agent)
+    new_aset = ArchiveSet(arch_dir, dest, children=0, pass_agent=options.pass_agent)
 
     # Initial auth successful! Fetch + auth volume metadata...
     recv_list= [(x+"/volinfo", ArchiveSet.max_volinfosz)
                  for x in new_aset.conf["volumes"].keys()]
     fetch_file_blobs(recv_list, recv_dir, dest)
-    do_exec([[CP.chattr, "+c"] + list(new_aset.conf["volumes"].keys())], cwd=recv_dir, check=False)
-    new_aset = ArchiveSet(recv_dir, dest, children=1, allvols=True, prior_auth=new_aset)
+    do_exec([[CP.chattr, "+c"] + list(new_aset.conf["volumes"].keys())], cwd=arch_dir, check=False)
+    new_aset = ArchiveSet(arch_dir, dest, children=1, allvols=True, prior_auth=new_aset)
 
     # Fetch + auth session metadata... use list flattener
     ses_list =[(x.name, x.volume.name) for sub in
                (vol.sessions.values() for vol in new_aset.vols.values()) for x in sub]
-    fetch_file_blobs([(new_aset.vols[y].vid+"/"+x+"/info",
-                       ArchiveSet.max_infosz) for x,y in ses_list], recv_dir, dest)
-    new_aset = ArchiveSet(new_aset.path, dest, children=2, allvols=True, prior_auth=new_aset)
+    fetch_file_blobs([(new_aset.vols[y].vid+"/"+x+"/info", ArchiveSet.max_infosz)
+                                    for x,y in ses_list], recv_dir, dest)
+    new_aset = ArchiveSet(arch_dir, dest, children=2, allvols=True, prior_auth=new_aset)
 
     fetch_file_blobs([(new_aset.vols[y].vid+"/"+x+"/manifest.z",
                        new_aset.vols[y].sessions[x].manifest_max()) for x,y in ses_list],
                         recv_dir, dest)
     for vol in new_aset.vols.values():   vol.decode_manifests(vol.sesnames, force=True)
-
-    if make_local: #### ###
-        if exists(metadir+new_aset.bkdir) :  shutil.rmtree(metadir+new_aset.bkdir)
-        new_path = metadir    ; shutil.move(recv_dir, new_path) # might need to use dirname
-        new_aset = ArchiveSet(new_path, dest, prior_auth=new_aset)
-    else:
-        new_path = os.path.dirname(recv_dir)
 
     new_aset.just_fetched = True
     return new_aset
@@ -1648,6 +1651,7 @@ class Destination:
     # runs the temp file is returned.
 
     def run_args(self, commands, trap=False, dest_type=None):
+
         dest_type = dest_type or self.dtype    ; tmpprefix = "/tmp/wyngrpc/"
         trapcmd   = "trap '' INT TERM QUIT ABRT ALRM TSTP USR1\n" if trap else ""
         # shunt commands to local tmp file
@@ -2024,6 +2028,7 @@ def update_dest(arch, pathlist=[], volumes=[], sessions=[], ext="", delete=False
 
 
 def fetch_file_blobs(recv_list, recv_dir, dest, ext="", skip0=False, verifier=None):
+
     cmd = dest.run_args(
             [dest.cd
              +" && exec 2>>"+dest.dtmp+"/receive.log"
@@ -3665,18 +3670,30 @@ def delete_volume(storage, aset, dv):
     return
 
 
-# Remove Wyng metadata from local system
+# Remove Wyng snapshots and metadata from local system
 
-def remove_local_metadata(archive):
-    raise NotImplementedError() ####
-    for vg in volgroups.values():
-        for lv in list(vg.lvs.values()):
-            if lv.lv_name.endswith((".tick",".tock")) and "wyng" in lv.tags \
-            and (not archive or "arch-"+archive.uuid in lv.tags):
-                lv_remove(vg.name, lv.lv_name, check=True)
+def remove_local_metadata(storage, archive):
+
+    # Remove LVM snapshots
+    for lv in (x for vg in storage.vgs_all.values() for x in vg.values()):
+        if lv.is_arch_member() == "true" or (not archive and "wyng" in lv.tags.split(",") and
+                                             lv.name.endswith(lv.snap_ext)):
+            lv.delete()
+
+    # Remove reflink snapshots by scanning local dir
+    if storage.pooltype == "rlnk":
+        exts = ReflinkVolume.snap_ext    ; lvols = storage.lvols
+        if archive:
+            archpaths = [lvols[getattr(lvols[x], y)] for x in archive.vols.keys()
+                                                      for y in ("snap1","snap2")]
+        for ldir, _, files in os.walk(storage.path):
+            for fpath in (ldir+"/"+x for x in files if x.endswith(exts)):
+                if not archive or fpath not in archpaths:   os.remove(fpath)
 
     # Remove metadata dir(s)
-    shutil.rmtree(archive.path if archive else metadir+"/"+prog_name,
+    shutil.rmtree(metadir+"/"+prog_name, ignore_errors=True)
+    shutil.rmtree(archive.path if archive else metadir+"/"+ArchiveSet.bkdir, ignore_errors=True)
+    shutil.rmtree(archive.path if archive else metadir+"/"+ArchiveSet.bkdir+".old",
                   ignore_errors=True)
 
 
@@ -3843,7 +3860,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4wip012"     ; prog_date = "20230319"
+prog_version          = "0.4wip013"     ; prog_date = "20230320"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 aset = dest = None
@@ -3873,9 +3890,9 @@ os.environ["LC_ALL"]  = "C"    ; shell_prefix   = "set -e && export LC_ALL=C\n"
 
 pjoin       = os.path.join    ; exists = os.path.exists
 
-local_actions         = ("monitor","list","version")
+local_actions         = ("monitor","version")
 write_actions         = ("add","send","prune","delete","rename","arch-delete","arch-deduplicate")
-dest_actions          = ("receive","verify","diff","arch-check","arch-init") + write_actions
+dest_actions          = ("list","receive","verify","diff","arch-check","arch-init") + write_actions
 
 # Parse Arguments:
 parser = argparse.ArgumentParser(description="")
@@ -4139,7 +4156,7 @@ elif options.action == "delete":
                 x_it(0,"")
         elif not options.force:
             x_it(1, "Ignoring --clean without --force.")
-        remove_local_metadata(None if options.all else aset)
+        remove_local_metadata(storage, None if options.all else aset)
 
     else:
         delete_volume(storage, aset, selected_vols[0])
@@ -4168,7 +4185,7 @@ elif options.action == "arch-delete":
     for dv in list(aset.vols):   aset.delete_volume_meta(dv)
 
     # Remove local metadata and stray snapshots associated with archive
-    remove_local_metadata(aset)
+    remove_local_metadata(storage, aset)
 
     # Remove from destination
     print("\nDeleting entire archive...")
