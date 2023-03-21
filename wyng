@@ -386,7 +386,6 @@ class ArchiveVolume:
         os.makedirs(self.path, exist_ok=True)   ; fname = "volinfo"   ; etag = b''
         with io.StringIO() as f:
             print("name =", self.name, file=f)
-            #print("fshint =", self.fshint, file=f)
             print("desc =", self.desc, file=f)
             for ses in self.sessions.values():
                 if ses.saved:   print(ses.name, "=", ses.hashval, file=f)
@@ -397,7 +396,7 @@ class ArchiveVolume:
 
         if self.archive.mcrypto:
             # First encrypt as data, for data cipher verification at startup
-            open(pjoin(self.path,"vi.dat"), "wb").write(
+            open(pjoin(self.path,"vi.dat"+ext), "wb").write(
                 b''.join(self.archive.datacrypto.encrypt(buf)))
             # encrypt as metadata
             etag, buf = self.archive.mcrypto.encrypt(buf)
@@ -2103,8 +2102,8 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only):
             or vol.last not in s1tags:
 
                 # Handle inadvertant mapfile snapshot mis-match
-                vol.init_deltamap(mapfile, vol.mapsize())
-                lvols[snap1].delete()    ; print("  Removed mis-matched delta", snap1)
+                vol.init_deltamap(mapfile, vol.mapsize())    ; lvols[snap1].delete()
+                if debug:   print("  Removed mis-matched delta for", datavol)
 
             if not lvols[snap1].exists() and lvols[snap2].exists() \
             and vol.last in lvols[snap2].tags.split(",") and exists(mapfile)  \
@@ -2716,6 +2715,7 @@ def send_volume(storage, vol, localtime, ses_tags, send_all):
         for f in ("manifest.z","manifest","info"):
             os.replace(ses.path+"/"+f+".tmp", ses.path+"/"+f)
         os.replace(vol.path+"/volinfo.tmp", vol.path+"/volinfo")
+        os.replace(vol.path+"/vi.dat.tmp", vol.path+"/vi.dat")
         os.replace(aset.path+"/archive.ini.tmp", aset.path+"/archive.ini")
         ses.path = ses.path.rsplit("-tmp",maxsplit=1)[0]   ; os.replace(ses.path+"-tmp", ses.path)
         fssync(vol.path)
@@ -3126,22 +3126,6 @@ def merge_manifests(volume, msessions=None, mtarget=None, addcol=False):
 # target. Caution: clear_sources is destructive.
 
 def merge_sessions(volume, sources, target, clear_sources=False):
-    raise NotImplementedError() ####
-##$ diff
-##1a2
-##>     raise NotImplementedError() ####
-##5c6
-##<     m_tmp      = tmpdir if volume.volsize() < 128000000000 else big_tmpdir
-##---
-##>     m_tmp      = tmpdir if volume.volsize() < 128000000000 else aset.big_tmpdir
-##13c14
-##<     os.chdir(volume.path)         ; destvol = aset.bkdir+"/"+volume.vid
-##---
-##>     os.chdir(volume.path)         ; destvol = volume.vid
-##99c100
-##<         aset = ArchiveSet(aset.name, aset.path, aset.dest, prior_auth=aset)
-##---
-##>         aset = ArchiveSet(aset.path, aset.dest, prior_auth=aset)
 
     aset       = volume.archive    ; dest = aset.dest    ; resume = bool(aset.in_process)
     chdigits   = max_address.bit_length() // 4 # 4bits per digit
@@ -3154,7 +3138,7 @@ def merge_sessions(volume, sources, target, clear_sources=False):
     # processing the full range of volume chunks in the likely case that
     # the oldest (full) session is being pruned.
     merge_target  = sources[0]    ; merge_sources = ([target] + list(reversed(sources)))[:-1]
-    os.chdir(volume.path)         ; destvol = volume.vid
+    os.chdir(volume.path)         ; destvol       = "/"+volume.vid
 
     if not resume:
         volsize    = volume.sessions[target].volsize
@@ -3240,9 +3224,9 @@ def merge_sessions(volume, sources, target, clear_sources=False):
     catch_signals()
     if retcode == 50:
         # Initialization didn't complete, so reload aset and abort
-        aset = ArchiveSet(aset.path, aset.dest, prior_auth=aset)
+        aset = ArchiveSet(metadir, aset.dest, prior_auth=aset)
         aset.set_in_process(None)
-        for f in ("merge.lst.gz","volinfo.tmp",target+"/info.tmp"):
+        for f in ("merge.lst.gz","volinfo.tmp","vi.dat.tmp",target+"/info.tmp"):
             if exists(f):  os.remove(f)
         dest.run([dest.cd + destvol + " && rm -rf merge merge.lst.gz"], check=False)
         err_out("Error: Merge could not initialize!")
@@ -3260,7 +3244,7 @@ def merge_sessions(volume, sources, target, clear_sources=False):
 
     # Local finalize
     for f in (target+"/info", target+"/manifest.z", target+"/manifest",
-              "volinfo", "../archive.ini"):
+              "vi.dat", "volinfo", "../archive.ini"):
         if exists(f+".tmp"):  os.replace(f+".tmp", f)
 
     aset.set_in_process(None, todest=True)    ; os.remove("merge.lst.gz")
@@ -3610,7 +3594,7 @@ def rename_volume(storage, aset, oldname, newname):
 
     catch_signals()
     update_dest(aset, pathlist=[aset.confname], volumes=[volume], ext=".tmp")
-    for fl in (aset.confpath, volume.path+"/volinfo"):
+    for fl in (aset.confpath, volume.path+"/volinfo", volume.path+"/vi.dat"):
         os.replace(fl+".tmp", fl)
     catch_signals(None)
 
@@ -3631,8 +3615,8 @@ def add_volume(aset, datavol, desc):
 
     catch_signals()
     update_dest(aset, pathlist=[aset.confname], volumes=[vol], ext=".tmp")
-    os.replace(pjoin(vol.path, "volinfo.tmp"), pjoin(vol.path, "volinfo"))
-    os.replace(aset.confpath+".tmp", aset.confpath)
+    for fl in (aset.confpath, vol.path+"/volinfo", vol.path+"/vi.dat"):
+        os.replace(fl+".tmp", fl)
     catch_signals(None)
 
     #if lv_exists(aset.vgname, datavol+".tick") \
@@ -3729,11 +3713,11 @@ def show_list(aset, selected_vols):
     elif not selected_vols and not len(options.volumes):
         print("\nVolumes:")
         maxwidth = max(len(x.name) for x in aset.vols.values())
-        fmt    = "%7.2f GB  (%5d)  %s  %-" + str(maxwidth+5) + "s  %s"
+        fmt    = "%7.2f GB  %s  %-" + str(maxwidth+2) + "s  %s (%3d)"
         for vname in sorted(x.name for x in aset.vols.values()):
             vol = aset.vols[vname]   ; sname = vol.sesnames[-1][2:] if len(vol.sesnames) else " "
             if options.verbose:
-                print(fmt % ((vol.volsize() / 1024**3), len(vol.sessions), vol.vid, vname, sname))
+                print(fmt % ((vol.volsize() / 1024**3), vol.vid, vname, sname, len(vol.sessions)))
                 if vol.desc:   print("  desc:", vol.desc)
             else:
                 print("",vname)
@@ -3860,7 +3844,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4wip013"     ; prog_date = "20230320"
+prog_version          = "0.4wip014"     ; prog_date = "20230321"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 aset = dest = None
