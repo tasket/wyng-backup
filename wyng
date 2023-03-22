@@ -130,10 +130,12 @@ class ArchiveSet:
             ci_types = DataCryptography.crypto_codes[self.ci_mode]
             if debug:   print("metadata cipher =", ci_types[1])
 
-            # Access a key agent, if available for this UID and archive URL
+            # access a key agent, if available for this UID and archive URL
             agent_name = "wyng-agent-" + str(os.getuid()) + hashlib.blake2b(
                            bytes(self.dest.spec, encoding="UTF-8"), digest_size=16).hexdigest()
             agentkeys  = agent_get(agent_name, pass_agent)
+
+            # get passphrase if we got no agentkeys
             if not passphrase and not agentkeys:   passphrase = ask_passphrase()
             if passphrase:
                 assert passphrase != bytes(len(passphrase))
@@ -141,7 +143,10 @@ class ArchiveSet:
                 raise ValueError("No authentication input.")
             passphrase_s1 = passphrase[:] if passphrase else None
 
-            self.mcrypto = mcrypto = DataCryptography(ci_types[1], self.confpath+".salt", slot=1,
+            # create both crypto instances and load metadata key
+            self.datacrypto = datacrypto = DataCryptography()
+            self.mcrypto    = mcrypto    = DataCryptography()
+            mcrypto.load(ci_types[1], self.confpath+".salt", slot=1,
                                     passphrase=passphrase_s1, agentkeys=agentkeys)
 
         # initial decryption + auth
@@ -170,11 +175,10 @@ class ArchiveSet:
         self.gethash     = hash_funcs[self.hashtype]
 
         # init data crypto
-        if mcrypto and not self.datacrypto:
+        if mcrypto and datacrypto.key is None:
             if not float(self.updated_at) < time.time():
                 raise ValueError("Current time is less than archive timestamp!")
-            self.datacrypto = datacrypto \
-                = DataCryptography(self.data_cipher, mcrypto.keyfile, slot=0, cadence=20,
+            datacrypto.load(self.data_cipher, mcrypto.keyfile, slot=0, cadence=20,
                                    passphrase=passphrase, agentkeys=agentkeys)
 
             # persist keys to allow future invocations w/o passphrase input
@@ -396,8 +400,9 @@ class ArchiveVolume:
 
         if self.archive.mcrypto:
             # First encrypt as data, for data cipher verification at startup
-            open(pjoin(self.path,"vi.dat"+ext), "wb").write(
-                b''.join(self.archive.datacrypto.encrypt(buf)))
+            with open(pjoin(self.path,"vi.dat"+ext), "wb") as df:
+                df.write(b''.join(self.archive.datacrypto.encrypt(buf)))
+                self.archive.datacrypto.save_counter()
             # encrypt as metadata
             etag, buf = self.archive.mcrypto.encrypt(buf)
         with open(pjoin(self.path,fname+ext), "wb") as f:
@@ -710,7 +715,10 @@ class DataCryptography:
                        b"40":  ("xchacha20-poly1305", "xchacha20-poly1305")}
 
 
-    def __init__(self, ci_type, keyfile, slot, passphrase, agentkeys=None, cadence=1, init=False):
+    def __init__(self):
+        self.key = None
+
+    def load(self, ci_type, keyfile, slot, passphrase, agentkeys=None, cadence=1, init=False):
 
         if tuple(time.gmtime(0))[:6] != (1970, 1, 1, 0, 0, 0):
             x_it(1, "System time epoch is not 1970-01-01.")
@@ -801,6 +809,7 @@ class DataCryptography:
         clear_array(passphrase)
         return key
 
+    # Update key counter on disk; call directly at end of transaction if cadence > 1
     def save_counter(self):
         self.keyfile.seek(self.slot_offset)
         self.keyfile.write(self.counter.to_bytes(self.countsz, "big"))
@@ -909,7 +918,7 @@ class LocalStorage:
         assert len(auuid) > 8
         self.gc_procs  = []          ; self.locked  = False      ; self.auuid      = auuid
         self.clean     = clean       ; self.sync    = sync
-        self.lvols     = {}          ; self.vgs_all = {}
+        self.lvols     = {}          ; self.vgs_all = {}         ; self.arch_vols  = arch_vols
         self.path  = self.pooltype = self.fstype = self.lvpool  = None
 
         if localpath_t[0]:
@@ -1195,6 +1204,8 @@ class ReflinkVolume(LocalVolume):
     def is_arch_member(self):
         if not self.name.endswith(self.snap_ext) or not self.exists():
             return "na"
+        elif self.storage.arch_vols and self.name not in self.storage.arch_vols:
+            return "false"
         else:
             return "true"
 
@@ -1343,15 +1354,16 @@ def arch_init(aset, opts):
                                  if y[0] == aset.data_cipher][0]
 
         if aset.data_cipher != "off":
-            ##if opts.unattended:   x_it(1, "Enter passphrase interactively.")
             # Security Enh: Possibly use mmap+mlock to store passphrase/key values,
             #               and wipe them from RAM after use.
             passphrase      = ask_passphrase(prompt="Enter new encryption passphrase: ",
                                              verify=True)
-            aset.mcrypto    = DataCryptography(ci[1], aset.confpath+".salt", slot=1,
-                                            passphrase=passphrase[:], init=True)
-            aset.datacrypto = DataCryptography(aset.data_cipher, aset.mcrypto.keyfile, slot=0,
-                                            passphrase=passphrase, init=True)
+            aset.datacrypto = DataCryptography()
+            aset.mcrypto    = DataCryptography()
+            aset.mcrypto.load(ci[1], aset.confpath+".salt", slot=1,
+                                     passphrase=passphrase[:], init=True)
+            aset.datacrypto.load(aset.data_cipher, aset.mcrypto.keyfile, slot=0,
+                                     passphrase=passphrase, init=True)
     else:
         x_it(1,"Error: Invalid cipher option.")
 
@@ -1414,7 +1426,6 @@ def arch_check(storage, aset, vol_list=None, startup=False):
         if options.clean:
             lv.delete()
             print("Removed orphan snapshot:", lv.name)
-    # Fix... Extend to scan of reflink storage
 
     # Check volume contents at various levels (dirs, metadata, content)
     for volname in vol_list if dest.online else []:
@@ -3630,7 +3641,7 @@ def add_volume(aset, datavol, desc):
 def delete_volume(storage, aset, dv):
 
     if not options.unattended and not aset.in_process:
-        print("Warning! Delete will remove ALL metadata AND archived data",
+        print("\nWarning! Delete will remove ALL metadata AND archived data",
               "for volume", dv)
 
         ans = ask_input("Are you sure? [y/N]: ")
@@ -3655,27 +3666,36 @@ def delete_volume(storage, aset, dv):
 
 
 # Remove Wyng snapshots and metadata from local system
+#   archive == None: purge all wyng snapshots
+#   archive != None and purge_other: purge snapshots except those linked to archive
+#   archive != None and not purge other: purge only snapshots linked to archive
 
-def remove_local_metadata(storage, archive):
+def remove_local_metadata(storage, archive, purge_other=False):
+    assert not purge_other or (archive and purge_other)
 
     # Remove LVM snapshots
     for lv in (x for vg in storage.vgs_all.values() for x in vg.values()):
-        if lv.is_arch_member() == "true" or (not archive and "wyng" in lv.tags.split(",") and
-                                             lv.name.endswith(lv.snap_ext)):
-            lv.delete()
+        if lv.name.endswith(lv.snap_ext) and "wyng" in lv.tags.split(","):
+
+            if not archive or (lv.is_arch_member() == "false" and purge_other) \
+            or (archive and lv.is_arch_member() == "true" and not purge_other):
+                lv.delete()
+                if verbose:   print("Removed", fpath)
 
     # Remove reflink snapshots by scanning local dir
     if storage.pooltype == "rlnk":
         exts = ReflinkVolume.snap_ext    ; lvols = storage.lvols
         if archive:
-            archpaths = [lvols[getattr(lvols[x], y)] for x in archive.vols.keys()
-                                                      for y in ("snap1","snap2")]
+            archpaths = [lvols[getattr(lvols[x], y)].path for x in archive.vols.keys()
+                                                          for y in ("snap1","snap2")]
         for ldir, _, files in os.walk(storage.path):
             for fpath in (ldir+"/"+x for x in files if x.endswith(exts)):
-                if not archive or fpath not in archpaths:   os.remove(fpath)
+                if not archive or fpath not in archpaths:
+                    os.remove(fpath)
+                    if verbose:   print("Removed", fpath)
 
     # Remove metadata dir(s)
-    shutil.rmtree(metadir+"/"+prog_name, ignore_errors=True)
+    if not archive:   shutil.rmtree(metadir+"/"+prog_name, ignore_errors=True)
     shutil.rmtree(archive.path if archive else metadir+"/"+ArchiveSet.bkdir, ignore_errors=True)
     shutil.rmtree(archive.path if archive else metadir+"/"+ArchiveSet.bkdir+".old",
                   ignore_errors=True)
@@ -3844,7 +3864,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4wip014"     ; prog_date = "20230321"
+prog_version          = "0.4wip015"     ; prog_date = "20230322"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 aset = dest = None
@@ -4049,7 +4069,7 @@ selected_vols = options.volumes[:]
 for vol in selected_vols[:]:
     if selected_vols.count(vol) > 1:
         selected_vols.remove(vol)
-    if vol not in aset.vols and options.action not in {"add","delete","rename","send"}:
+    if vol not in aset.vols and options.action not in {"add","rename","send"}:
         print("Volume "+vol+" not configured; Skipping.")
         selected_vols.remove(vol)
 
@@ -4141,6 +4161,9 @@ elif options.action == "delete":
         elif not options.force:
             x_it(1, "Ignoring --clean without --force.")
         remove_local_metadata(storage, None if options.all else aset)
+
+    elif len(selected_vols) != 1:
+        x_it(1, "Specify one volume to delete.")
 
     else:
         delete_volume(storage, aset, selected_vols[0])
