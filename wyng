@@ -336,7 +336,7 @@ class ArchiveSet:
                             vname = vname.strip()    ; value = value.strip()
                             if value == "none":   value = "None"
                             if vname == "tag":
-                                self.tag_add(self.tag_parse(value))
+                                self.tag_add(volume.Ses.tag_parse(value))
                                 continue
 
                             setattr(self, vname, 
@@ -349,7 +349,7 @@ class ArchiveSet:
                 for tag in addtags:   self.tag_add(tag)
 
 
-            def tag_parse(self, tag, delim=" "):
+            def tag_parse(tag, delim=" "):
                 parts = "".join(filter(str.isprintable, tag.strip())).split(delim, maxsplit=1)
                 tag_id = parts[0].strip().lower()    ; result = tuple()
                 if len(tag_id) > tag_len:
@@ -2789,7 +2789,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.3.11"        ; prog_date = "20230206"
+prog_version          = "0.3.12"        ; prog_date = "20230323"
 format_version        = 2               ; debug     = False       ; tmpdir = None
 
 
