@@ -2098,7 +2098,7 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only):
         snap1, snap2 = l_vol.snap1, l_vol.snap2
         if lvols[snap1].is_arch_member() == "false":
             if options.remap:
-                l_vol.delete    ; print("  Removed mis-matched snapshot", snap1)
+                l_vol.delete    ; print("  Removed mis-matched snapshot", datavol)
             else:
                 print("  Skipping %s; snapshot is from a different archive." % datavol)
                 continue
@@ -2120,7 +2120,7 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only):
             and vol.last in lvols[snap2].tags.split(",") and exists(mapfile)  \
             and os.path.getmtime(mapfile) == lvols[snap2].gettime():
                 lvols[snap2].rename(snap1)
-                if debug:  print("Recovered interrupted snapshot rotation:", snap2)
+                if debug:  print("  Recovered interrupted snapshot rotation:", datavol)
  
             #if lvols[snap1].exists() and "delta" in lvols[snap1].tags \
             #and (     vol.map_used() == 0 
@@ -2190,11 +2190,12 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only):
 
                 # Handle inadvertant mapfile snapshot mis-match
                 vol.init_deltamap(mapfile, vol.mapsize())
-                lvols[snap1].delete()    ; print("  Removed mis-matched delta", snap1)
+                lvols[snap1].delete()
+                if debug:   print("  Removed mis-matched delta", datavol)
 
             if not lvols[snap1].exists() and lvols[snap2].exists() \
             and os.path.getmtime(mapfile) != lvols[snap2].gettime():
-                if debug:  print("Recovered interrupted snapshot rotation:", snap2)
+                if debug:  print("  Recovered interrupted snapshot rotation:", datavol)
                 lvols[snap2].rename(snap1)
 
         elif monitor_only:
@@ -4162,8 +4163,11 @@ elif options.action == "delete":
             x_it(1, "Ignoring --clean without --force.")
         remove_local_metadata(storage, None if options.all else aset)
 
-    elif len(selected_vols) != 1:
+    elif len(options.volumes) != 1:
         x_it(1, "Specify one volume to delete.")
+
+    elif options.volumes[0] not in aset.vols:
+        x_it(1, "Volume not found.")
 
     else:
         delete_volume(storage, aset, selected_vols[0])
