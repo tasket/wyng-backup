@@ -130,7 +130,7 @@ class ArchiveSet:
             ci_types = DataCryptography.crypto_codes[self.ci_mode]
             if debug:   print("metadata cipher =", ci_types[1])
 
-            # access a key agent, if available for this UID and archive URL
+            # access a key agent, if available for this UUID and archive URL
             agent_name = "wyng-agent-" + str(os.getuid()) + hashlib.blake2b(
                            bytes(self.dest.spec, encoding="UTF-8"), digest_size=16).hexdigest()
             agentkeys  = agent_get(agent_name, pass_agent)
@@ -146,8 +146,9 @@ class ArchiveSet:
             # create both crypto instances and load metadata key
             self.datacrypto = datacrypto = DataCryptography()
             self.mcrypto    = mcrypto    = DataCryptography()
-            mcrypto.load(ci_types[1], self.confpath+".salt", slot=1,
-                                    passphrase=passphrase_s1, agentkeys=agentkeys)
+            self.mci_count  = mcrypto.load(ci_types[1], self.confpath+".salt", slot=1,
+                                           arch_counter=self.mci_count,
+                                           passphrase=passphrase_s1, agentkeys=agentkeys)
 
         # initial decryption + auth
         try:
@@ -167,8 +168,6 @@ class ArchiveSet:
         if self.format_ver > format_version or not self.format_ver:
             x_it(1,"Archive format ver = "+str(self.format_ver)+
                                 ". Expected = "+str(format_version))
-        #if self.compression == "zstd" and not zstd.version().startswith("1.4."):
-        #    x_it(1,"python3-zstd version 1.4.x is required.")
 
         self.compress    = compressors[self.compression][2]
         self.decompress  = compressors[self.compression][0].decompress
@@ -178,22 +177,24 @@ class ArchiveSet:
         if mcrypto and datacrypto.key is None:
             if not float(self.updated_at) < time.time():
                 raise ValueError("Current time is less than archive timestamp!")
-            datacrypto.load(self.data_cipher, mcrypto.keyfile, slot=0, cadence=20,
-                                   passphrase=passphrase, agentkeys=agentkeys)
+
+            self.dataci_count = datacrypto.load(self.data_cipher, mcrypto.keyfile, slot=0,
+                                                cadence=20,  arch_counter=self.dataci_count,
+                                                passphrase=passphrase, agentkeys=agentkeys)
+
+            # datacrypto may not have AE, so test data chunk against a volinfo hash
+            for vol, vf in ((x, x.path+"/vi.dat") for x in self.vols.values()):
+                if exists(vf):
+                    if not hmac.compare_digest(vol.hashval, self.b64hash(
+                        datacrypto.decrypt(open(vf,"rb").read()))):
+                        x_it(3, "Error: Data hash check failed.")
+                    break
 
             # persist keys to allow future invocations w/o passphrase input
             if pass_agent > 0 and not agentkeys:
                 agent_make(agent_name, pass_agent, [datacrypto.key, mcrypto.key])
 
-        if mcrypto:
-        # use higest known counter values:
-        # Enh: Examine imported .salt counters to ensure they are not wildly increased
-        # above values in archive.ini (anti-DoS). Possibly warn or prompt user.
-            mcrypto.counter    = self.mci_count    = max(mcrypto.counter, self.mci_count)
-            datacrypto.counter = self.dataci_count = max(datacrypto.counter, self.dataci_count)
-
         # load volume metadata objects
-        convlist = []
         for key, value in cp["volumes"].items() if children else []:
             # conditions when a volume must be loaded:
             # - allvols flag is set
@@ -211,14 +212,6 @@ class ArchiveSet:
                                     self.vgname, name=vname, children=children)
             self.vols[volume.name] = volume
 
-        # datacrypto may not have AE, so test data chunk against a volinfo hash
-        for vol, vf in ((x, x.path+"/vi.dat") for x in self.vols.values() if datacrypto):
-            if exists(vf):
-                if not hmac.compare_digest(vol.hashval,
-                                           self.b64hash(datacrypto.decrypt(open(vf,"rb").read()))):
-                    x_it(3, "Error: Data hash check failed.")
-                break
-
 
     def save_conf(self, ext=""):
         c = self.conf['var']    ; c.clear()    ; mcrypto = self.mcrypto
@@ -229,8 +222,8 @@ class ArchiveSet:
         c['compression'] = self.compression
         c['compr_level'] = self.compr_level
         c['hashtype']    = self.hashtype
-        c['vgname']      = self.vgname      # move to volname
-        c['poolname']    = self.poolname    # move to ses info
+        c['vgname']      = self.vgname
+        c['poolname']    = self.poolname
         c['data_cipher'] = self.data_cipher
         if mcrypto:
             if self.datacrypto.counter > self.datacrypto.ctstart:
@@ -560,7 +553,6 @@ class ArchiveSession:
     def manifest_max(self):
         return self.volsize // self.archive.chunksize * ((256//4) + 20)
 
-
     def tag_parse(tag, delim=" "):
         result = tuple()    ; errs = []      ; parts = tag.strip().split(delim, maxsplit=1)
         tag_id = parts[0].strip().lower()    ; comment = parts[1].strip()
@@ -718,7 +710,8 @@ class DataCryptography:
     def __init__(self):
         self.key = None
 
-    def load(self, ci_type, keyfile, slot, passphrase, agentkeys=None, cadence=1, init=False):
+    def load(self, ci_type, keyfile, slot, passphrase, agentkeys=None, arch_counter=None,
+             cadence=1, init=False):
 
         if tuple(time.gmtime(0))[:6] != (1970, 1, 1, 0, 0, 0):
             x_it(1, "System time epoch is not 1970-01-01.")
@@ -790,6 +783,10 @@ class DataCryptography:
             else:
                 self.key = self.derive_key(salt, passphrase)
             assert len(self.key) == self.key_sz and type(self.key) is bytearray
+
+        if arch_counter and arch_counter > self.counter:
+            self.counter = arch_counter    ; self.save_counter()
+        return self.counter
 
 
     def __del__(self):
@@ -1109,6 +1106,8 @@ class LocalVolume:
     __slots__ = ("storage","lockfile","pdir","path","name","snap1","snap2")
 
     def _my_init(self, storage, name):
+        assert storage.online
+
         self.storage   = storage                        ; self.lockfile = None
         self.pdir      = storage.path.rstrip("/")+"/"   ; self.path     = self.pdir+name
         self.name      = name
@@ -1175,12 +1174,12 @@ class ReflinkVolume(LocalVolume):
 
         del(self.storage.lvols[self.name])
 
-    def delete(self, sync=True, check=False):
-        assert self.name.endswith(self.snap_ext)
+    def delete(self, sync=True, check=False, force=False):
+        assert force or self.name.endswith(self.snap_ext)
         self.unlock()
         if self.exists():   os.remove(self.path)
 
-    def create(self, size=None, snapshotfrom=None, ro=True):
+    def create(self, size=None, snapshotfrom=None, ro=True, addtags=[]):
         if self.exists():   raise ValueError(f"Volume {self.name} already exists.")
         os.makedirs(self.pdir, exist_ok=True)
         if snapshotfrom:
@@ -1208,6 +1207,11 @@ class ReflinkVolume(LocalVolume):
             return "false"
         else:
             return "true"
+
+    def is_paired(self, mapfile, sestag):
+        if not self.name.endswith(self.snap_ext):   raise ValueError("Not a snapshot.")
+        return self.exists() and exists(mapfile) and self.gettime() == os.path.getmtime(mapfile)
+        #Enh: also evaluate sestag
 
     def convert_pathname(self, path):
         raise NotImplementedError()
@@ -1246,11 +1250,11 @@ class LvmVolume(LocalVolume):
         if self.exists() and self.unlock():
             do_exec([[CP.lvm, "lvrename", self.path, new_name]])
 
-    def delete(self, sync=True, check=False):
+    def delete(self, sync=True, check=False, force=False):
         # Enh: re-write with asyncio
         sync = (optsync := options.maxsync) or sync    ; clean = options.clean
         assert not (sync == False and check)
-        assert self.name.endswith(self.snap_ext)
+        assert force or self.name.endswith(self.snap_ext)
 
         if self.exists():
             self.unlock()    ; procs = self.storage.gc_procs    ; maxprocs = 16
@@ -1291,6 +1295,7 @@ class LvmVolume(LocalVolume):
         return float(time.mktime(time.strptime(self.lv_time, r"%Y-%m-%d %H:%M:%S %z")))
 
     def resize(self, size):
+        if not self.exists():   raise FileNotFoundError(self.path)
         do_exec([[CP.lvm, "lvresize", "-L", str(size)+"b", "-f", self.path]])
 
     def getsize(self):
@@ -1303,6 +1308,12 @@ class LvmVolume(LocalVolume):
             return "false"
         else:
             return "true"
+
+    def is_paired(self, mapfile, sestag):
+        if not self.name.endswith(self.snap_ext):   raise ValueError("Not a snapshot.")
+
+        return self.exists() and exists(mapfile) and self.gettime() == os.path.getmtime(mapfile) \
+               and sestag in self.tags.split(",")
 
     def check_pathname(path):
         if res := super.check_pathname(path):
@@ -1468,21 +1479,25 @@ def arch_check(storage, aset, vol_list=None, startup=False):
             #if attended:   print(bcount, "bytes OK")
 
 
-def check_manifest_sequence(vol, sesnames):
+def check_manifest_sequence(vol, sesnames, addcol=False):
     volsize = vol.sessions[sesnames[-1]].volsize    ; aset = vol.archive
-    with open(merge_manifests(vol, msessions=sesnames, addcol=False), "r") as mrgf:
+    manifest = merge_manifests(vol, msessions=sesnames, addcol=addcol)
+    with open(manifest, "r") as mrgf:
         for addr in range(0, volsize, aset.chunksize):
             ln = mrgf.readline().strip()
             if not ln:   break
-            ln1, ln2 = ln.split()
+            ln1, ln2 = ln.split(maxsplit=1)
+            if addcol:   ln2, ses = ln2.split()
             if ln1 != "0":
                 assert len(ln1) == aset.mhash_sz    ; h1 = base64.urlsafe_b64decode(ln1)
             assert len(ln2) == aset.sesname_sz      ; a1 = int("0"+ln2, 16)
             if addr != a1:
-                print(ln); raise("Manifest seq error. Expected %d got %d." % (addr, a1))
+                print(ln); raise ValueError("Manifest seq error. Expected %d got %d." % (addr, a1))
 
     if addr+aset.chunksize != volsize:
         raise ValueError("Manifest range stopped short at", addr)
+
+    return manifest
 
 
 # Get configuration settings:
@@ -2243,8 +2258,9 @@ def get_lvm_deltas(storage, aset, datavols):
             for datavol in datavols:
                 lv = lvols[datavol]
                 if lv.pool_lv != apool:   continue
-                cmds = [[CP.thin_delta, "-m",   "--thin1=" + lvols[lv.snap1].thin_id,
-                                                "--thin2=" + lvols[lv.snap2].thin_id,
+                cmds = [[CP.thin_delta, "--metadata-snap",
+                                        "--thin1=" + lvols[lv.snap1].thin_id,
+                                        "--thin2=" + lvols[lv.snap2].thin_id,
                                         "/dev/mapper/"+vgname+"-"+poolname+"_tmeta"],
                         [CP.grep, "-v", r"^\s*<same .*\/>$"]
                         ]
@@ -2382,7 +2398,7 @@ def get_reflink_deltas(storage, aset, datavols):
 
         # Pipe output from second volume to 'sort' and include first file
         do_exec(cmds[1] +
-                [ [CP.sort, "-m", "-k2n,2", deltapath+"11", "-"],
+                [ [CP.sort, "-ms", "-k2n,2", deltapath+"11", "-"],
                   [CP.uniq, "-u", "-f1"],
                   [CP.gzip, "-2"]
                  ],
@@ -3097,13 +3113,13 @@ def autoprune(vol, needed_space=0, apmode="off", include=set()):
 # Accepts a list of session names in ascending order (or else uses all sessions in the volume)
 # and merges the manifests. Setting 'addcol' will add a colunm showing the session dir name.
 
-def merge_manifests(volume, msessions=None, mtarget=None, addcol=False):
+def merge_manifests(volume, msessions=None, mtarget=None, addcol=False, rdiff=[]):
     # Enh: implement mtarget to support merge_sessions()
     aset      = volume.archive
-    msessions = volume.sesnames if not msessions else msessions
+    msessions = msessions or volume.sesnames
     sespaths  = [ os.path.basename(volume.sessions[x].path) for x in msessions ]
     tmp       = aset.big_tmpdir if volume.volsize() > 128000000000 else tmpdir
-    outfile   = tmp+"/manifest.mrg"     ; slist  = []
+    outfile   = tempfile.NamedTemporaryFile(dir=tmp, delete=False)    ; slist  = []
 
     if not aset.dedupsessions:   volume.decode_manifests(msessions)
     for suffix in ("/manifest\x00", "\x00"):
@@ -3124,11 +3140,18 @@ def merge_manifests(volume, msessions=None, mtarget=None, addcol=False):
     else:
         cdir  = volume.path     ; slsort  = slist[0]
 
-    do_exec([[CP.sort, "-umd", "-k2,2", "--batch-size=16", "--files0-from="+slsort]],
-            out=outfile, cwd=cdir)
-    if addcol:  shutil.rmtree(tmp+"/m")
+    cmds = [[CP.sort, "-umsd", "-k2,2", "--batch-size=16", "--files0-from="+slsort]]
 
-    return outfile
+    if rdiff:
+        # merge a different set of manifests, use their address column to filter the main merge:
+        mfilter = merge_manifests(volume, msessions=list(reversed(rdiff)))
+        cmds.append([CP.sort, "-msd", "-k2,2", mfilter, "-"])
+        cmds.append([CP.awk, r'{if (PREV==$2) print $0} {PREV=$2}'])
+
+    do_exec(cmds, out=outfile.file, cwd=cdir)
+
+    if addcol:  shutil.rmtree(tmp+"/m")
+    return outfile.name
 
 
 # Merge sessions together. Starting from first session results in a target
@@ -3174,9 +3197,9 @@ def merge_sessions(volume, sources, target, clear_sources=False):
             print("###", file=lstf)
 
         # Unique-merge filenames: one for rename, one for new full manifest.
-        do_exec([[CP.sort, "-umd", "-k2,2", "--batch-size=16"] + manifests],
+        do_exec([[CP.sort, "-umsd", "-k2,2", "--batch-size=16"] + manifests],
                 out="manifest.one", cwd=m_tmp)
-        do_exec([[CP.sort, "-umd", "-k2,2", "manifest.one",
+        do_exec([[CP.sort, "-umsd", "-k2,2", "manifest.one",
                 pjoin(volume.path, merge_target, "manifest")]],
                 out="manifest.two", cwd=m_tmp)
         # Make final manifest without extra column.
@@ -3288,11 +3311,11 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
             return 0
 
     dest        = (aset := vol.archive).dest
-    verbose     = not options.quiet and verify_only != 2    ; debug = options.debug
-    attended    = not options.unattended          ; remap     = options.remap
+    verbose     = not options.quiet and verify_only != 2 ; debug = options.debug
+    attended    = not options.unattended          ; remap        = options.remap
     sparse      = options.sparse                  ; sparse_write = options.sparse_write or sparse
-    chunksize   = aset.chunksize                  ; zeros     = bytes(chunksize)
-    sessions    = vol.sesnames
+    chunksize   = aset.chunksize                  ; use_snapshot = False
+    sessions    = vol.sesnames                    ; zeros        = bytes(chunksize)
     # functions
     compress    = compressors[aset.compression][2]; compresslevel = int(aset.compr_level)
     decompress  = compressors[aset.compression][0].decompress
@@ -3333,81 +3356,55 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
         err_out("Cannot use prior session for remap.")
         return None
 
-    ##if save_path and exists(save_path) and attended:
-        ##print("\n!! This will", "overwrite" if sparse_write else "erase all",
-              ##"existing data in",save_path,"!!")
-        ##ans = ask_input("   Are you sure? [y/N]: ")
-        ##if ans.lower() not in {"y","yes"}:
-            ##return None
-
     volsize     = vol.sessions[select_ses].volsize   ; magic       = dest.magic
     chdigits    = max_address.bit_length() // 4      ; chformat    = "x%0"+str(chdigits)+"x"
     lchunk_addr = vol.last_chunk_addr(volsize)       ; last_chunkx = chformat % lchunk_addr
     addrsplit   = -address_split[1]                  ; rc = volf = None
-
-    # Collect session manifests
-    incl_ses = []
-    for ses in sessions if verify_only != 2 else [select_ses]:
-        incl_ses.append(ses)
-        if ses == select_ses:  break
-
-    # verify metadata
-    if not aset.just_fetched \
-    and compare_files(aset, volumes=[vol], sessions=[vol.sessions[x] for x in incl_ses],
-                      manifest=True):
-        err_out("Error: Local and archive metadata differ.")
-        return None
-    vol.decode_manifests(incl_ses, force=True)
-
-    # Merge manifests and send to archive system:
-    # sed is used to expand chunk info into a path and filter out any entries
-    # beyond the current last chunk, then piped to cat on destination.
-    # Note address_split is used to bisect filename to construct the subdir.
-    manifest = merge_manifests(vol, msessions=incl_ses, addcol=True)
-
-    if not sparse:
-        cmds = [[CP.sed, "-E", r"/" +last_chunkx+ r"/q", manifest],  ## Enh: detect vol_shrank
-                [CP.sed, "-E", r"/^0\s/ d; "
-                r"s|^\S+\s+x(\S{" +str(address_split[0])+ r"})(\S+)\s+(S_\S+)|\3/\1/x\1\2|;"],
-                [CP.gzip, "-c", "-4"
-                ],
-                dest.run_args(["cat >"+dest.dtmp+"/dest.lst.gz"]),
-            ]   # Enh: replace list with range
-        do_exec(cmds)
 
     # Prepare save volume
     if not (diff or verify_only):
 
         # Decode save path semantics
         if save_path:
+            save_storage = None       ; returned_home = False
             save_type, lvpool, lpath = LocalStorage.parse_local_path(os.path.dirname(save_path))
             if save_type not in (None,"block device"):
                 save_storage = LocalStorage((lvpool, lpath), auuid=aset.uuid)
+                l_vol = save_storage.new_vol_entry(vol.name)
         else:
-            save_storage = storage
+            save_storage = storage    ; returned_home = storage.online
             save_type = "logical volume" if storage.pooltype=="tlvm" else "file"
-            #, path1, path2 = LocalStorage.parse_local_path(l_vol.pdir)
-
-        # Does save path == original path?
-        returned_home = False ## save_path == storage.lvols[vol.name].path
-
-        punch_hole = save_storage.block_discard_chunk
-
-        if save_type == "logical volume":
             l_vol = save_storage.new_vol_entry(vol.name)    ; save_path = l_vol.path
+
+        if exists(save_path) and attended:
+            print("\n!! This will", "overwrite" if sparse_write else "erase all",
+                "existing data in",save_path,"!!")
+            ans = ask_input("   Are you sure? [y/N]: ")
+            if ans.lower() not in {"y","yes"}:
+                return None
+
+        # possibly use snapshot as baseline for receive
+        if returned_home and options.use_snapshot \
+        and (snap_lv := save_storage.lvols[l_vol.snap1]).is_paired(vol.mapfile, vol.last):
+            print("Using snapshot as baseline.")   ; assert l_vol.path == save_path
+            sparse_write = use_snapshot = True    ; sparse = False
+            l_vol.delete(force=True)
+            l_vol.create(snapshotfrom=snap_lv.name, ro=False)
+
+        elif save_type == "logical volume":
+            ##l_vol = save_storage.new_vol_entry(vol.name)    ; save_path = l_vol.path
             if not l_vol.exists():
                 print("Creating '%s' in thin pool %s[%s]." %
                       (l_vol.name, save_storage.path, save_storage.lvpool))
                 # Fix:  translate to safe lvm name
-                l_vol.create(volsize, ro=False)
+                l_vol.create(volsize, ro=False)    ; sparse_write = sparse = False
 
             elif l_vol.getsize() != volsize:
                 if debug:   print("Re-sizing LV to %d bytes." % volsize)
                 l_vol.resize(volsize)
 
-            volf = open(save_path, "r+b")
-
-        elif save_type == "block device" and exists(save_path):
+        if save_type in("logical volume","block device") and exists(save_path):
+            punch_hole = save_storage.block_discard_chunk
             if not sparse_write:   do_exec([[CP.blkdiscard, save_path]])
             volf = open(save_path, "r+b")
 
@@ -3415,15 +3412,12 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
             x_it(1, "Cannot create new volume from ambiguous /dev path.\n"
                     " Please create the volume before using 'receive', or specify"
                     " --save-to=volgroup/pool/volname in case of a thin LVM volume.")
-        else: # file
-            if not save_path:
-                l_vol = save_storage.new_vol_entry(vol.name)    ; save_path = l_vol.path
+        else:
             save_type = "file"   ; punch_hole = save_storage.file_punch_hole
-            if not exists(save_path):
-                d = os.path.dirname(save_path)
-                if d:   os.makedirs(d, exist_ok=True)
-                open(save_path, "wb").close()
-            volf = open(save_path, "r+b")   ; volf.truncate(volsize)
+            if not exists(save_path) or not sparse_write:
+                open(save_path, "wb").close()    ; sparse_write = sparse = False
+
+            volf = open(save_path, "r+b")    ; volf.truncate(volsize)
 
     elif diff:
         l_vol = storage.lvols[vol.name]     ; snap1vol = l_vol.snap1
@@ -3455,7 +3449,6 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
 
         volf  = open(l_vol.path, "r+b")
 
-
     if volf:
         volf_read = volf.read     ; volf_write = volf.write    ; volf_seek = volf.seek
         volfno    = volf.fileno() ; fcntl.lockf(volf, fcntl.LOCK_EX|fcntl.LOCK_NB)
@@ -3463,6 +3456,39 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
     if verbose:
         print("\nReceiving" if save_path else "\nVerifying", "volume:", vol.name, select_ses[2:])
         if save_path:    print("Saving to %s '%s'" % (save_type, save_path))
+
+    # Collect session manifests
+    diff_ses = []
+    if use_snapshot:
+        # sessions after selected, except if last ses (then we're already done)
+        if select_ses == vol.last:
+            print("Snapshot retrieved...Done.")
+            return volsize
+        incl_ses = sessions[:sessions.index(select_ses)+1]
+        diff_ses = sessions[sessions.index(select_ses)+1:]
+    elif verify_only == 2:
+        # only selected session
+        incl_ses = [select_ses]
+    else:
+        # everything upto & including selected
+        incl_ses = sessions[:sessions.index(select_ses)+1]
+
+    # Merge manifests and send to archive system:
+    # sed is used to expand chunk info into a path and filter out any entries
+    # beyond the current last chunk, then piped to cat on destination.
+    # Note address_split is used to bisect filename to construct the subdir.
+    vol.decode_manifests(incl_ses, force=True)
+    manifest = merge_manifests(vol, msessions=incl_ses, addcol=True, rdiff=diff_ses)
+
+    if not sparse:
+        cmds = [[CP.sed, "-E", r"/" +last_chunkx+ r"/q", manifest],  ## Enh: detect vol_shrank
+                [CP.sed, "-E", r"/^0\s/ d; "
+                r"s|^\S+\s+x(\S{" +str(address_split[0])+ r"})(\S+)\s+(S_\S+)|\3/\1/x\1\2|;"],
+                [CP.gzip, "-c", "-4"
+                ],
+                dest.run_args(["cat >"+dest.dtmp+"/dest.lst.gz"]),
+            ]   # Enh: replace list with range
+        do_exec(cmds)
 
     # Create retriever process using py program
     cmd = dest.run_args(
@@ -3554,13 +3580,14 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
             raise BufferError("Decompressed to %d bytes." % len(decomp))
         buf = decomp
 
+        # Write data to volume (receive)
         if save_path:
             volf_seek(addr)
             # Don't re-check buffer for sparse mode, check for sparse_write:
             if sparse:
                 volf_write(buf)    ; diff_count += len(buf)
             elif sparse_write:
-                if volf_read(chunksize) != buf:
+                if use_snapshot or volf_read(chunksize) != buf:
                     volf_seek(addr)    ; volf_write(buf)    ; diff_count += len(buf)
             else:
                 volf_write(buf)
@@ -3571,21 +3598,23 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
     if rc is not None and rc != 0:
         raise RuntimeError("Error code from getvol process: "+str(rc))
 
-    if not sparse and verify_only != 2 and addr+len(decompress(untrusted_buf)) != volsize:
+    if not sparse and verify_only != 2 and not use_snapshot \
+    and addr+len(decompress(untrusted_buf)) != volsize:
         raise ValueError("Received range %d does not match volume size %d."
                             % (addr+len(decompress(untrusted_buf)), volsize))
 
-    print(f"Data bytes: {bcount} / {addr+len(buf)}", end="")
-    print("  OK" if not diff_count else "  Diff bytes: " + str(diff_count))
+    print("OK" if not diff_count else f"Diff bytes: {diff_count}", end="")
+    print(f" Data bytes: {bcount}", f"/ {addr+len(buf)}" if verify_only != 2 else "")
 
-    if volf:  volf.close()
     if save_path:
-        os.sync()
+        volf.flush()    ; os.fsync(volf.fileno())    ; volf.close()
         if returned_home and select_ses == sessions[-1]:
-            tags = ["--addtag=wyng", "--addtag=arch-"+aset.uuid]
-            save_storage.lvols[l_vol.snap1].create(snapshotfrom=vol.name, addtags=tags)
-            if verbose:   print("  Snapshot created for", vol.name)
             vol.init_deltamap(vol.mapfile, vol.mapsize())
+            tags = ["--addtag=wyng", "--addtag=arch-"+aset.uuid]
+            save_storage.lvols[l_vol.snap2].delete()
+            save_storage.lvols[l_vol.snap2].create(snapshotfrom=vol.name, addtags=tags)
+            l_vol.rotate_snapshots(timestamp_path=vol.mapfile)
+            print("  Snapshot paired for", vol.name)
     if remap:
         bmapf.close()
         if diff_count > 0 and options.action != "send":
@@ -3865,7 +3894,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4wip015"     ; prog_date = "20230322"
+prog_version          = "0.4wip016"     ; prog_date = "20230324"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 aset = dest = None
@@ -3920,6 +3949,8 @@ parser.add_argument("--autoprune", default="off", help="Automatic pruning")
 parser.add_argument("--save-to", dest="saveto", default="",help="Path to store volume for receive")
 parser.add_argument("--sparse", action="store_true", default=False, help="Retrieve differences only")
 parser.add_argument("--sparse-write", action="store_true", default=False, help="Save differences only")
+parser.add_argument("--use-snapshot", action="store_true", default=False,
+                    help="Use local snapshot as baseline for receive")
 parser.add_argument("--remap", action="store_true", default=False, help="Remap snapshots")
 parser.add_argument("--dest", default="",     help="URL to archive")
 parser.add_argument("--dest-name", "-n", default="", help="Nickname for dest location")
@@ -4178,7 +4209,7 @@ elif options.action == "arch-init":
 
 
 elif options.action == "arch-check":
-    arch_check(storage, aset, datavols)
+    arch_check(storage, aset, selected_vols or datavols)
 
 
 elif options.action == "arch-delete":
