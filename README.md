@@ -391,22 +391,21 @@ It accepts one of the following forms, always ending in a mountpoint path:
 
 Note: --local and --dest are required.
 
-`--compression=zstd:3` accepts the form `type` or `type:level`. The three types available are
-the default `zstd` (zstandard), plus `zlib` and `bz2` (bzip2). Note that Wyng will only default
+`--compression` accepts the forms `type` or `type:level`. The three types available are `zstd` (zstandard), plus `zlib` and `bz2` (bzip2). Note that Wyng will only default
 to `zstd` when the 'python3-zstd' package is installed; otherwise it will fall back to the less
-capable `zlib`.
+capable `zlib`. (default=zstd:3)
 
-`--hashtype=blake2b` accepts a value of either _'sha256'_ or _'blake2b'_ (the default).
-The digest size used for blake2b is 256 bits.
+`--hashtype` accepts a value of either _'sha256'_ or _'blake2b'_ (the default).
+The digest size used for blake2b is 256 bits. (default=blake2b)
 
-`--chunk-factor=1` sets the pre-compression data chunk size used within the destination archive.
+`--chunk-factor` sets the pre-compression data chunk size used within the destination archive.
 Accepted range is an integer exponent from '1' to '6', resulting in a chunk size of 64kB for
 factor '1', 128kB for factor '2', 256kB for factor '3' and so on. To maintain a good
 space efficiency and performance balance, a factor of '2' or greater is suggested for archives
-that will store volumes larger than about 100GB.
+that will store volumes larger than about 100GB. (default=2)
 
-`--encrypt=xchacha20` selects the encryption cipher/mode. Choices are _'xchacha20',
-'xchacha20-poly1305', 'aes-siv'_ and _'off'_.
+`--encrypt` selects the encryption cipher/mode. Choices are _'xchacha20', 'aes-siv'_ and _'off'_.  _'xchacha20'_ is currently the only _recommended_ choice as _'aes-siv'_ is slow and
+may not be appropriate on some CPU hardware. (default=xchacha20)
 
 Note that _encrypt, compression, hashtype_ and _chunk-factor_ cannot be changed for an archive once it is initialized.
 
@@ -464,6 +463,12 @@ local volume so that only the differences between local and archived volumes wil
 from the archive and written to the local volume. This results in reduced network
 usage at the expense of some extra CPU usage on the local machine, and also uses
 less local disk space when snapshots are a factor (implies '--sparse-write`).
+
+`--use-snapshot` _(experimental)_
+
+A faster-than-sparse option that uses a snapshot as the baseline for the
+`receive`, if one is available.  Use with `--sparse` if you want Wyng to fall back to
+sparse mode when snapshots are not already present.
 
 `--dedup`, `-d`
 

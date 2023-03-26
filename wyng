@@ -1221,7 +1221,7 @@ class LvmVolume(LocalVolume):
 
     snap_ext  = (".tick",".tock")
     maxname   = 112    ; maxpath = maxname    ; alphanumsym = r"^[a-zA-Z0-9\+\._-]+$"
-    colnames  = ("vg_name","lv_name","lv_path","lv_attr","lv_size",
+    colnames  = ("vg_name","lv_name","lv_attr","lv_size",
                  "lv_time","pool_lv","thin_id","tags")
     __slots__ = LocalVolume.__slots__ + colnames
 
@@ -3111,7 +3111,7 @@ def autoprune(vol, needed_space=0, apmode="off", include=set()):
 
 
 # Accepts a list of session names in ascending order (or else uses all sessions in the volume)
-# and merges the manifests. Setting 'addcol' will add a colunm showing the session dir name.
+# and merges the manifests. Setting 'addcol' will add a colunm showing the session name.
 
 def merge_manifests(volume, msessions=None, mtarget=None, addcol=False, rdiff=[]):
     # Enh: implement mtarget to support merge_sessions()
@@ -3130,13 +3130,14 @@ def merge_manifests(volume, msessions=None, mtarget=None, addcol=False, rdiff=[]
 
     if addcol:
         # add a column containing the source session
-        cdir  = tmp+"/m"     ; slsort  = slist[1]
+        cdir_obj = tempfile.TemporaryDirectory(dir=tmp, prefix="m_")
+        cdir     = cdir_obj.name    ; slsort  = slist[1]
         shutil.rmtree(cdir, ignore_errors=True);   os.makedirs(cdir)
 
         # fix: extrapolate path with filename
         do_exec([[CP.xargs, "-0", "-a", slist[0],
                   CP.awk, r'{sub("/manifest","",FILENAME); print $0, FILENAME > "'
-                            +tmp+'/m/"FILENAME}']], cwd=volume.path)
+                            +cdir+r'/"FILENAME}']], cwd=volume.path)
     else:
         cdir  = volume.path     ; slsort  = slist[0]
 
@@ -3144,13 +3145,13 @@ def merge_manifests(volume, msessions=None, mtarget=None, addcol=False, rdiff=[]
 
     if rdiff:
         # merge a different set of manifests, use their address column to filter the main merge:
-        mfilter = merge_manifests(volume, msessions=list(reversed(rdiff)))
+        mfilter = merge_manifests(volume, msessions=list(reversed(rdiff)), addcol=False)
         cmds.append([CP.sort, "-msd", "-k2,2", mfilter, "-"])
         cmds.append([CP.awk, r'{if (PREV==$2) print $0} {PREV=$2}'])
 
     do_exec(cmds, out=outfile.file, cwd=cdir)
 
-    if addcol:  shutil.rmtree(tmp+"/m")
+    if addcol:  cdir_obj.cleanup()
     return outfile.name
 
 
