@@ -56,12 +56,10 @@ class ArchiveSet:
 
     attr_ints   = {"format_ver","chunksize","mci_count","dataci_count"}
 
-    bkdir       = "/wyng.backup040/default" ####
-
     def __init__(self, top, dest, ext="", allvols=False, children=2,
                  pass_agent=0, passphrase=None, prior_auth=None):
         self.dest        = dest
-        self.path        = top + self.bkdir
+        self.path        = top
         self.confpath    = pjoin(self.path, self.confname)
         self.confprefix  = b"[WYNG%02d]\n" % format_version
         self.modeprefix  = b"ci = "
@@ -73,7 +71,9 @@ class ArchiveSet:
         self.raw_hashval = None
         self.just_fetched= False
         self.Volume      = ArchiveVolume
+
         self.big_tmpdir  = self.path+"/.tmp"
+        self.subdir      = None
 
         # persisted:
         self.format_ver  = 0
@@ -132,7 +132,7 @@ class ArchiveSet:
 
             # access a key agent, if available for this UUID and archive URL
             agent_name = "wyng-agent-" + str(os.getuid()) + hashlib.blake2b(
-                           bytes(self.dest.spec, encoding="UTF-8"), digest_size=16).hexdigest()
+                           bytes(self.dest.spec, encoding="UTF-8"), digest_size=20).hexdigest()
             agentkeys  = agent_get(agent_name, pass_agent)
 
             # get passphrase if we got no agentkeys
@@ -172,6 +172,9 @@ class ArchiveSet:
         self.compress    = compressors[self.compression][2]
         self.decompress  = compressors[self.compression][0].decompress
         self.gethash     = hash_funcs[self.hashtype]
+        self.subdir      = "/a_"+hashlib.blake2b(
+                           bytes(str(os.getuid())+self.uuid+self.dest.spec, encoding="UTF-8"),
+                           digest_size=20).hexdigest()
 
         # init data crypto
         if mcrypto and datacrypto.key is None:
@@ -195,7 +198,29 @@ class ArchiveSet:
                 agent_make(agent_name, pass_agent, [datacrypto.key, mcrypto.key])
 
         # load volume metadata objects
-        for key, value in cp["volumes"].items() if children else []:
+        if children:
+            self.load_volumes(1)
+
+            if children > 1:
+                ses_list =[(x.volume.vid+"/"+x.name, x.name, x.volume.name) for sub in
+                        (vol.sessions.values() for vol in self.vols.values()) for x in sub]
+                fetch_file_blobs([(x+"/info", self.max_infosz) for x,_,_ in ses_list],
+                                self.path, self.dest, skip_exists=True)
+
+                self.load_volumes(children) # Enh: don't re-load vols
+                fetched = fetch_file_blobs([(sp+"/manifest.z", self.vols[dv].sessions[s].manifest_max())
+                                            for sp,s,dv in ses_list],
+                                self.path, self.dest, verifier=self.mcrypto, skip_exists=True)
+                self.just_fetched = bool(fetched)
+
+    def load_volumes(self, children):
+        recv_list = [(x+"/volinfo", self.max_volinfosz)
+                       for x in self.conf["volumes"].keys()]
+        fetch_file_blobs(recv_list, self.path, self.dest, skip_exists=True)
+        do_exec([[CP.chattr, "+c"] + list(self.conf["volumes"].keys())],
+                cwd=self.path, check=False)
+
+        for key, value in self.conf["volumes"].items():
             # conditions when a volume must be loaded:
             # - allvols flag is set
             # - in_process flag from an unfinished action
@@ -208,9 +233,9 @@ class ArchiveSet:
             vid = key; hashval = value; vname = None
 
             #loadses = allvols or self.in_process or options.from_arch or options.dedup or
-            volume  = self.Volume(self, vid, hashval, pjoin(self.path,vid),
+            vol  = self.Volume(self, vid, hashval, pjoin(self.path,vid),
                                     self.vgname, name=vname, children=children)
-            self.vols[volume.name] = volume
+            self.vols[vol.name] = vol
 
 
     def save_conf(self, ext=""):
@@ -377,6 +402,8 @@ class ArchiveVolume:
 
         if exists(pjoin(path,"volchanged")):
             self.changed_bytes = int(open(pjoin(path,"volchanged"),"r").readlines()[0].strip())
+
+
 
 
     def save_volinfo(self, ext=""):
@@ -551,7 +578,7 @@ class ArchiveSession:
 
 
     def manifest_max(self):
-        return self.volsize // self.archive.chunksize * ((256//4) + 20)
+        return self.volsize // self.archive.chunksize * ((hash_bits//4) + 20)
 
     def tag_parse(tag, delim=" "):
         result = tuple()    ; errs = []      ; parts = tag.strip().split(delim, maxsplit=1)
@@ -938,7 +965,7 @@ class LocalStorage:
             self.prep_snapshots = prepare_snapshots_reflink
             if self.online:
                 if (fs := LocalStorage.get_fs_type(self.path)) in self.rltypes:   self.fstype = fs
-                self.snappath   = self.path + ("wyng_snapshot/" if self.fstype == "btrfs" else "")
+                self.snappath = self.path+("wyng_snapshot_tmp/" if self.fstype == "btrfs" else "")
 
         elif require_online:
             raise ValueError("Indeterminate local path.")
@@ -989,14 +1016,29 @@ class LocalStorage:
         return mark, spath
 
     def metadata_unlock(self, lvpool=None):
-        mark = 0
+        mark_t = (0, self.path)
         if self.pooltype == "tlvm":
             self._lvm_meta_snapshot("release")
         elif self.pooltype == "rlnk":
             if self.fstype == "btrfs":
-                mark = self._btrfs_subvol_snapshot(delete=True)
+                mark_t = self._btrfs_subvol_snapshot(delete=True)
         self.locked = False
-        return mark
+        return mark_t
+
+    def check_support(self):
+        if self.pooltype == "tlvm":
+            for prg in (CP.lvm, CP.dmsetup, CP.thin_delta ):
+                if not shutil.which(prg):  raise RuntimeError("Required command not found: "+prg)
+            try:
+                p = SPr.check_output([CP.thin_delta, "-V"])
+            except:
+                p = b""
+            ver = p[:5].decode("UTF-8").strip()    ; target_ver = "0.7.4"
+            if p and ver < target_ver:
+                raise RuntimeError("Thin provisioning tools version >= "+target_ver+" required.")
+        elif self.pooltype == "rlnk" and self.fstype == "btrfs":
+            if not shutil.which(CP.btrfs):  raise RuntimeError("Required command not found: btrfs")
+            # maybe also check kernel version and xfs reflink support...
 
     def _btrfs_subvol_snapshot(self, delete=False):
         svpath = self.path    ; dest = self.snappath    ; gen = 0
@@ -1187,7 +1229,10 @@ class ReflinkVolume(LocalVolume):
             do_exec([[CP.cp, "-p", "--reflink=always", snap_path, self.path]])
         else:
             assert size is not None
-            open(self.path, "wb").truncate(size)
+            with open(self.path, "wb") as vf:  vf.truncate(size); vf.flush()
+
+        rel_chmod(self.path, "-", 0o222)
+
         self.storage.lvols[self.name] = self
 
     def gettime(self):
@@ -1195,7 +1240,7 @@ class ReflinkVolume(LocalVolume):
 
     def resize(self, size):
         if not self.exists():   raise FileNotFoundError(self.path)
-        open(self.path, "r+b").truncate(size)
+        with open(self.path, "r+b") as vf:   vf.truncate(size); vf.flush()
 
     def getsize(self):
         return os.path.getsize(self.path)
@@ -1329,6 +1374,12 @@ class LvmVolume(LocalVolume):
 # Try to sync only selected filesystem
 def fssync(path):
     if options.maxsync:   SPr.Popen([CP.sync,"-f",path])
+
+
+def rel_chmod(fpath, op, mask):
+    assert op in ("-","+")
+    current = stat.S_IMODE(os.stat(fpath).st_mode)
+    os.chmod(fpath, (current & ~mask) if op=="-" else (current | mask))
 
 
 def ask_passphrase(prompt="Enter passphrase: ", verify=False):
@@ -1505,9 +1556,11 @@ def check_manifest_sequence(vol, sesnames, addcol=False):
 def get_configs(opts):
     load_children = 1 if opts.action in ("arch-delete","delete","add") else 2
 
-    dest = Destination(opts.dest, opts.dest_name, ArchiveSet.bkdir)
-    if (opts.action not in local_actions and dest.sys is not None) \
-    or opts.remap:
+    dest = Destination(opts.dest, opts.dest_name)
+
+    # FIX: allow monitor to function offline
+    # FIX: check dest names for meta path if 'local_actions'
+    if True: ####(opts.action not in local_actions and dest.sys is not None) or opts.remap:
         dest.detect_state(opts.dedup)
 
     # Check online status for certain commands.
@@ -1520,65 +1573,63 @@ def get_configs(opts):
     if dest.archive_ini_hash == "none" and opts.action not in local_actions+("arch-init",):
         x_it(6,"Archive not found at '%s'" % dest.spec)
 
-    #### Test dest.archive_ini_hash here:
+    if opts.action in ("arch-init",):
+        if dest.archive_ini_hash != "none":
+            x_it(1, "Archive already exists: "+dest.spec)
+        arch_init(ArchiveSet(tmpdir, dest), opts)
+        x_it(0, "Done.")
 
-    aset = ArchiveSet(metadir, dest, children=load_children, pass_agent=opts.pass_agent)
- 
-    if opts.action == "arch-init" and aset.updated_at is None:
-        arch_init(aset, opts)
-    elif opts.action == "arch-init":
-        x_it(1, "Archive already initialized for "+dest.spec)
-    elif aset.updated_at is None:
-        if exists(metadir+ArchiveSet.bkdir+".old"):
-            shutil.rmtree(metadir+ArchiveSet.bkdir+".old")
-        if exists(metadir+ArchiveSet.bkdir):
-            os.replace(metadir+ArchiveSet.bkdir, metadir+ArchiveSet.bkdir+".old")
-        aset = get_configs_remote(dest, metadir)
+    aset = get_configs_remote(dest, cachedir)
 
     if aset.updated_at is None:
         x_it(6, "Archive not found.")
     elif opts.local:
         aset.set_local(opts.local)
 
+    os.utime(aset.path)
     return aset
 
 
 # Fetch copy of archive metadata from remote/dest
 
-def get_configs_remote(dest, arch_dir):
-
-    recv_dir = arch_dir+ArchiveSet.bkdir
+def get_configs_remote(dest, base_dir):
 
     recv_list = [(ArchiveSet.confname,  ArchiveSet.max_conf_sz),
                  (ArchiveSet.confname+".salt", DataCryptography.max_keyfile_sz)]
-    fetch_file_blobs(recv_list, recv_dir, dest, ext=".auth_req", skip0=True)
+    fetch_file_blobs(recv_list, tmpdir, dest, skip0=True)
 
     # Instantiate ArchiveSet to authenticate archive.ini
-    # Fix: rename after auth, not before ###
-    for fname, fsz in recv_list:   os.replace(recv_dir+"/"+fname+".auth_req", recv_dir+"/"+fname)
-    new_aset = ArchiveSet(arch_dir, dest, children=0, pass_agent=options.pass_agent)
+    aset = ArchiveSet(tmpdir, dest, children=0, pass_agent=options.pass_agent)
+
+    assert aset.updated_at is not None
+    arch_dir = base_dir + aset.subdir;   ini = pjoin(arch_dir, ArchiveSet.confname)
+
+    if exists(ini) and not hmac.compare_digest(aset.raw_hashval,
+                                        hashlib.sha256(open(ini,"rb").read()).hexdigest()):
+        try:
+            cache_aset = ArchiveSet(arch_dir, dest, children=0, pass_agent=opts.pass_agent)
+        except e:
+            err_out(repr(e)+"\nCached archive.ini didn't load.")
+            shutil.rmtree(arch_dir)
+        else:
+            if cache_aset.updated_at > aset.updated_at:
+                raise ValueError(f"Cached metadata is newer: "
+                                 f"{cache_aset.updated_at} vs. {aset.updated_at}")
+            elif cache_aset.updated_at == aset.updated_at:
+                err_out("Cached archive.ini differs with dest but timestamp matches.")
+            else:
+                if verbose:   err_out("Updating metadata cache.")
+                shutil.rmtree(arch_dir+"-old", ignore_errors=True)
+                os.replace(arch_dir, arch_dir+"-old")
+
+    if not exists(ini):
+        os.makedirs(arch_dir, exist_ok=True)
+        for f, _ in recv_list:
+            if exists(pjoin(tmpdir,f)):
+                shutil.copyfile(pjoin(tmpdir,f), pjoin(arch_dir,f))
 
     # Initial auth successful! Fetch + auth volume metadata...
-    recv_list= [(x+"/volinfo", ArchiveSet.max_volinfosz)
-                 for x in new_aset.conf["volumes"].keys()]
-    fetch_file_blobs(recv_list, recv_dir, dest)
-    do_exec([[CP.chattr, "+c"] + list(new_aset.conf["volumes"].keys())], cwd=arch_dir, check=False)
-    new_aset = ArchiveSet(arch_dir, dest, children=1, allvols=True, prior_auth=new_aset)
-
-    # Fetch + auth session metadata... use list flattener
-    ses_list =[(x.name, x.volume.name) for sub in
-               (vol.sessions.values() for vol in new_aset.vols.values()) for x in sub]
-    fetch_file_blobs([(new_aset.vols[y].vid+"/"+x+"/info", ArchiveSet.max_infosz)
-                                    for x,y in ses_list], recv_dir, dest)
-    new_aset = ArchiveSet(arch_dir, dest, children=2, allvols=True, prior_auth=new_aset)
-
-    fetch_file_blobs([(new_aset.vols[y].vid+"/"+x+"/manifest.z",
-                       new_aset.vols[y].sessions[x].manifest_max()) for x,y in ses_list],
-                        recv_dir, dest)
-    for vol in new_aset.vols.values():   vol.decode_manifests(vol.sesnames, force=True)
-
-    new_aset.just_fetched = True
-    return new_aset
+    return ArchiveSet(arch_dir, dest, children=2, allvols=True, prior_auth=aset)
 
 
 class Destination:
@@ -1592,7 +1643,7 @@ class Destination:
 
     magic       = b"\xff\x11\x15"
 
-    def __init__(self, dspec, dname, subdir):
+    def __init__(self, dspec, dname):
 
         # fetch locations list, dest spec
         dest_url = dspec    ; locs = self.load_locations()
@@ -1618,7 +1669,7 @@ class Destination:
 
         self.spec   = dest_url
         self.sys    = dparts.netloc
-        self.path   = os.path.normpath(dparts.path+"/"+subdir)
+        self.path   = os.path.normpath(dparts.path)
         self.cd     = " cd '"+self.path+"'"      ; self.archive_ini_hash = "none"
         self.free   = self.dtmp     =  None      ; self.dname  = dname
         self.online = self.writable =  False
@@ -2052,7 +2103,12 @@ def update_dest(arch, pathlist=[], volumes=[], sessions=[], ext="", delete=False
             ], inlines=[x+ext for x in update_list], cwd=lcd)
 
 
-def fetch_file_blobs(recv_list, recv_dir, dest, ext="", skip0=False, verifier=None):
+def fetch_file_blobs(recv_list, recv_dir, dest, ext="", skip0=False, skip_exists=False,
+                     verifier=None):
+
+    magic = dest.magic    ; exists = os.path.exists
+    recv_list = [(x,y) for x,y in recv_list if not skip_exists or not exists(recv_dir+"/"+x)]
+    if not recv_list:   return []
 
     cmd = dest.run_args(
             [dest.cd
@@ -2062,7 +2118,6 @@ def fetch_file_blobs(recv_list, recv_dir, dest, ext="", skip0=False, verifier=No
     recvp = SPr.Popen(cmd, stdout=SPr.PIPE, stdin=SPr.PIPE)
     recvp.stdin.write(("".join((x+"\n" for x,y in recv_list))).encode("UTF-8"))
     recvp.stdin.flush()    ; rc = recvp.poll()
-    magic = dest.magic
 
     for fname, fsz in list(recv_list):
         if rc is not None:   raise RuntimeError("Process terminated early.")
@@ -2086,6 +2141,8 @@ def fetch_file_blobs(recv_list, recv_dir, dest, ext="", skip0=False, verifier=No
 
         os.makedirs(os.path.dirname(fpath), exist_ok=True)
         with open(fpath, "wb") as outf:   outf.write(untrusted_buf)
+
+    return recv_list
 
 
 # Prepare snapshots and check consistency with metadata:
@@ -2513,7 +2570,7 @@ def manifest_to_deltamap(volume, manifest, mapsize):
 
 def send_volume(storage, vol, localtime, ses_tags, send_all):
 
-    aset        = vol.archive                   ; bkdir       = aset.bkdir
+    aset        = vol.archive
     datavol     = vol.name                      ; dedup       = options.dedup
     snap2vol    = storage.lvols[storage.lvols[vol.name].snap2]
     snap2size   = snap2vol.getsize()
@@ -2535,7 +2592,7 @@ def send_volume(storage, vol, localtime, ses_tags, send_all):
     fman_hash     = fman_fname = ""
 
     ses = vol.new_session(bksession, addtags=ses_tags)
-    ses.localtime = localtime
+    ses.localtime = localtime #### fix: change to nanoseconds
     ses.volsize   = snap2size
     ses.path      = vol.path+"/"+bksession+"-tmp"
 
@@ -2549,7 +2606,7 @@ def send_volume(storage, vol, localtime, ses_tags, send_all):
         ddsessions = aset.dedupsessions                ; ses_index = ddsessions.index(ses)
 
     # Set current dir and make new session folder
-    os.chdir(metadir+bkdir)    ; os.makedirs(sdir+"-tmp")
+    os.chdir(aset.path)    ; os.makedirs(sdir+"-tmp")
     do_exec([[CP.chattr, "+c", sdir+"-tmp"]], check=False)
 
 
@@ -2854,18 +2911,10 @@ def dedup_existing(aset):
 
 def monitor_send(storage, aset, datavols, monitor_only):
 
+    storage.check_support()
+
     if options.autoprune.lower() == "full":
         for vol in aset.vols:   autoprune(vol, apmode="full")
-
-    #for prg in (CP.lvm, CP.dmsetup, CP.thin_delta ):
-        #if not shutil.which(prg):  raise RuntimeError("Required command not found: "+prg)
-    #try:
-        #p = SPr.check_output([CP.thin_delta, "-V"])
-    #except:
-        #p = b""
-    #ver = p[:5].decode("UTF-8").strip()    ; target_ver = "0.7.4"
-    #if p and ver < target_ver:
-        #raise RuntimeError("Thin provisioning tools version >= "+target_ver+" required.")
 
     dest = aset.dest    ; localtime = time.strftime("%Y%m%d-%H%M%S")
 
@@ -3260,7 +3309,7 @@ def merge_sessions(volume, sources, target, clear_sources=False):
     catch_signals()
     if retcode == 50:
         # Initialization didn't complete, so reload aset and abort
-        aset = ArchiveSet(metadir, aset.dest, prior_auth=aset)
+        aset = ArchiveSet(aset.path, aset.dest, prior_auth=aset)
         aset.set_in_process(None)
         for f in ("merge.lst.gz","volinfo.tmp","vi.dat.tmp",target+"/info.tmp"):
             if exists(f):  os.remove(f)
@@ -3326,8 +3375,6 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
 
     if diff or verify_only:
         save_path = ""
-    #elif not save_path:
-        #save_path = (storage.path, vol.name)
 
     # Set the session to retrieve
     if select_ses:
@@ -3478,7 +3525,7 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
     # sed is used to expand chunk info into a path and filter out any entries
     # beyond the current last chunk, then piped to cat on destination.
     # Note address_split is used to bisect filename to construct the subdir.
-    vol.decode_manifests(incl_ses, force=True)
+    vol.decode_manifests(incl_ses+diff_ses, force=not aset.just_fetched)
     manifest = merge_manifests(vol, msessions=incl_ses, addcol=True, rdiff=diff_ses)
 
     if not sparse:
@@ -3726,10 +3773,11 @@ def remove_local_metadata(storage, archive, purge_other=False):
                     if verbose:   print("Removed", fpath)
 
     # Remove metadata dir(s)
-    if not archive:   shutil.rmtree(metadir+"/"+prog_name, ignore_errors=True)
-    shutil.rmtree(archive.path if archive else metadir+"/"+ArchiveSet.bkdir, ignore_errors=True)
-    shutil.rmtree(archive.path if archive else metadir+"/"+ArchiveSet.bkdir+".old",
-                  ignore_errors=True)
+    #if not archive:   shutil.rmtree(metadir+"/"+prog_name, ignore_errors=True)
+    #### FIX
+    #shutil.rmtree(archive.path if archive else metadir+"/"+ArchiveSet.bkdir, ignore_errors=True)
+    #shutil.rmtree(archive.path if archive else metadir+"/"+ArchiveSet.bkdir+".old",
+                  #ignore_errors=True)
 
 
 def show_list(aset, selected_vols):
@@ -3760,7 +3808,7 @@ def show_list(aset, selected_vols):
 
     # Print list of volumes if no volume is selected.
     if not aset.vols:
-        print("No volumes.")    ; return
+        print("\nNo volumes.")    ; return
     elif not selected_vols and not len(options.volumes):
         print("\nVolumes:")
         maxwidth = max(len(x.name) for x in aset.vols.values())
@@ -3895,7 +3943,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4wip016"     ; prog_date = "20230324"
+prog_version          = "0.4alpha3"     ; prog_date = "20230326"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 aset = dest = None
@@ -3925,11 +3973,13 @@ os.environ["LC_ALL"]  = "C"    ; shell_prefix   = "set -e && export LC_ALL=C\n"
 
 pjoin       = os.path.join    ; exists = os.path.exists
 
+
+## Parse Arguments ##
+
 local_actions         = ("monitor","version")
 write_actions         = ("add","send","prune","delete","rename","arch-delete","arch-deduplicate")
 dest_actions          = ("list","receive","verify","diff","arch-check","arch-init") + write_actions
 
-# Parse Arguments:
 parser = argparse.ArgumentParser(description="")
 parser.add_argument("action", choices=local_actions+dest_actions, help="Action to take")
 parser.add_argument("-u", "--unattended", action="store_true", default=False,
@@ -3992,12 +4042,12 @@ if options.action not in ("send", "arch-deduplicate"):   options.dedup = False
 if options.action == "arch-deduplicate":   options.dedup = True
 
 
-# vardir:  holds data not directly related to an archive, such as nicknames for commonly accessed
-# archive URLs.
-# metadir: holds cached archive metadata.
-# bigtmpdir is used for metadir when an archive's metadata cache may be too big for /tmp.
+## General Configuration ##
+
+# vardir  : holds data not directly related to an archive, such as nicknames for archive URLs.
+# cachedir: holds cached archive metadata.
 vardir      = "/var/lib/"+prog_name
-metadir     = options.metadir if options.metadir else "/var/lib"
+cachedir    = options.metadir if options.metadir else "/var/cache/"+prog_name
 tmpdir_obj  = tempfile.TemporaryDirectory(prefix=prog_name)   ; tmpdir = tmpdir_obj.name
 
 os.makedirs(vardir, exist_ok=True)
@@ -4005,9 +4055,6 @@ shutil.rmtree("/tmp/"+prog_name+"-debug", ignore_errors=True)
 os.makedirs(tmpdir+"/rpc")
 Destination.write_helper_program(tmpdir+"/rpc")
 agent_helper_write(tmpdir)
-
-
-## General Configuration ##
 
 signal_handlers  = {}    ; signals_caught = []    ; error_cache = []
 
@@ -4027,31 +4074,6 @@ storage = LocalStorage((None, options.local) if options.local else (aset.vgname,
                        require_online= options.action in ("monitor","send","receive","diff"),
                        arch_vols=aset.vols.keys(),
                        auuid=aset.uuid)
-
-##if options.local:   aset.set_local(opts.local)
-
-
-
-# Check if local matches dest
-if dest.online and options.action not in ("arch-init","arch-check","arch-delete") + local_actions:
-    if not hmac.compare_digest(aset.raw_hashval, dest.archive_ini_hash) and dest.online:
-        #if not exists(aset.confpath+".tmp"):
-            #fetch_file_blobs([(aset.confname, aset.max_conf_sz)], aset.path, ext=".tmp")
-            #test_aset = ArchiveSet(metadir+topdir, ext=".tmp", children=0)
-            #if float(aset.updated_at) > float(test_aset.updated_at):
-                #update_dest(aset, [aset.confname])
-            #else:
-        #else:
-            #raise NotImplementedError(".tmp recovery")
-
-        # local copy is consistent, so update destination:
-        #update_dest(aset, pathlist=[aset.confname]) # Fix: expand checks from here....
-        raise RuntimeError("archive.ini mis-match")
-
-    arch_check(storage, aset, [], startup=True)
-
-
-
 
 
 # Handle unfinished in_process:
@@ -4083,7 +4105,7 @@ if aset.in_process and dest.online  \
     else:
         raise ValueError("Bad in_process descriptor: "+repr(aset.in_process[0]))
 
-        aset = ArchiveSet(metadir, aset.dest, allvols=True, prior_auth=aset)
+        aset = ArchiveSet(aset.path, aset.dest, allvols=True, prior_auth=aset)
         if compare_files(aset, pathlist=[aset.confname], volumes=[aset.vols[vname]]):
             x_it(1, "Error: Local and archive metadata differ.")
 
@@ -4107,7 +4129,7 @@ for vol in selected_vols[:]:
         selected_vols.remove(vol)
 
 
-# Process Commands:
+## Process Commands ##
 
 if options.action   == "monitor":
     monitor_send(storage, aset, selected_vols or datavols, monitor_only=True)
@@ -4214,6 +4236,8 @@ elif options.action == "arch-check":
 
 
 elif options.action == "arch-delete":
+    raise NotImplementedError()
+
     desthost = "//"+dest.sys+" " if dest.sys else ""
     print("\nDeleting ALL archived data from '%s' !" % dest.spec)
 
@@ -4246,4 +4270,5 @@ elif options.action == "arch-deduplicate":
 
 
 cleanup()
-# END
+
+## END ##

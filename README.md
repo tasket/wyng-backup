@@ -44,15 +44,27 @@ Public release v0.3 with a range of features including:
 
  - Marking and selecting snapshots with user-defined tags
 
-Alpha pre-release v0.4 which adds:
+Alpha pre-release v0.4 major enhancements:
 
- - Authenticated encryption
+ - Btrfs and XFS source volumes
+
+ - Authenticated encryption with auth caching & timeout
  
- - Btrfs and XFS local volumes
+ - Simpler authentication of non-encrypted archives
+ 
+ - Overall faster detection of changed/unchanged volumes
 
  - Metadata compression
 
-Wyng is released under a GPL license and comes with no warranties expressed or implied.
+ - Simple switching between multiple archives: Choose any (dest) archive location each time you run Wyng
+
+ - --local may also be specified & changed with most commands
+
+ - Mountpoints no longer required at destination
+
+ - Multiple volumes can now be specified for most Wyng commands
+
+ Wyng is released under a GPL license and comes with no warranties expressed or implied.
 
 
 v0.4 Requirements & Setup
@@ -66,7 +78,7 @@ Before starting:
 should be installed, respectively.
 
 * Volumes to be backed-up must reside locally in one of the following snapshot-capable
-storage types:  LVM thin-provisioned pool, Btrfs subvolume, or XFS filesystem.
+storage types:  LVM thin-provisioned pool, Btrfs subvolume, or XFS/reflink capable filesystem.
 
 * For backing up from LVM, _thin-provisioning-tools & lvm2_ must be present on the source system.
 
@@ -83,11 +95,11 @@ Archives can be created with `wyng arch-init`:
 
 ```
 
-wyng arch-init --local=vg/pool --dest=ssh://me@exmaple.com:/mnt/bkdrive -n default
+wyng arch-init --local=/mnt/btrfspool/subvol1 --dest=ssh://me@exmaple.com:/home/me/mybackup -n default
 
 ...or...
 
-wyng arch-init --local=vg/pool --dest=file:/home/user -n default
+wyng arch-init --local=vg/pool --dest=file:/mnt/drive1/myarchive -n default
 
 wyng send my_big_volume
 
@@ -144,6 +156,7 @@ Run Wyng using the following commands and arguments in the form of:
 --save-to=_path_       | Save volume to _path_ (receive).
 --sparse               | Receive volume data sparsely (implies --sparse-write)
 --sparse-write         | Overwrite local data only where it differs (receive)
+--use-snapshot         | Use snapshots when available for faster `receive`.
 --remap                | Remap volume during `send` or `diff`.
 --encrypt=_cipher_     | Set encryption type or 'off' (default: chacha20)
 --compression          | (arch-init) Set compression type:level.
@@ -178,8 +191,9 @@ will cause Wyng to remove older backup sessions from the archive when space is n
 
 Retrieves a volume instance (using the latest session ID
 if `--session` isn't specified) from the archive and saves it to either the volume's
-original path or the path specified
-with `--save-to`. If `--session` is used, only one date-time is accepted. The volume
+original path or the path specified with `--save-to`.  The `--local` option may also be
+specified when not using `--save-to`.
+If `--session` is used, only one date-time is accepted. The volume
 name is required.
 
 ```
@@ -190,10 +204,10 @@ wyng receive vm-work-private
 ```
 
 ...restores a volume called 'vm-work-private' to 'myfile.img' in
-the current folder.
+the default _local_ pool.
 
 Its possible to receive to any valid file path or block device using the `--save-to` option.
-However, note that '/dev/_vgname_/_lvname_' is a special form
+However, note that '/dev/_vgname_/_poolname_/_lvname_' is a special form
 that indicates you are saving to an LVM volume; Wyng will only auto-create LVs for you
 if the save-to path is specified this way.
 For any save path, Wyng will try to discard old data before receiving unless `--sparse` or
@@ -331,7 +345,7 @@ wyng arch-deduplicate
 Initialize a new backup archive configuration...
 ```
 
-wyng arch-init --local=/mnt/btrfspool/volumes --dest=file:/mnt/backups -n default
+wyng arch-init --local=/mnt/btrfspool/volumes --dest=file:/mnt/backups/archive1 -n default
 
 
 ```
@@ -339,7 +353,7 @@ wyng arch-init --local=/mnt/btrfspool/volumes --dest=file:/mnt/backups -n defaul
 Initialize a new backup archive with storage parameters...
 ```
 
-wyng arch-init --local=myvg/mypool --dest=file:/mnt/backups --chunk-factor=3 --hashtype=blake2b
+wyng arch-init --local=myvg/mypool --dest=file:/mnt/backups/mybackup --compression=zstd:7
 
 
 ```
@@ -375,11 +389,11 @@ wyng --force arch-delete
 
 #### Options/Parameters for arch-init
 
-`--local` takes the source volume group and pool as 'vgname/poolname' for the `arch-init` command.
-These LVM objects don't have to exist before using `arch-init` but they will
-have to be there before using `send`.
+`--local` takes one of two forms: Either the source volume group and pool as 'vgname/poolname'
+or a file path on a reflink-capable filesystem such as Btrfs or XFS (for Btrfs the path should
+end at a subvolume).
 
-`--dest` when using `arch-init`, describes the location where backups will be sent.
+`--dest` is a URL pointing to the location where the archive will be stored.
 It accepts one of the following forms, always ending in a mountpoint path:
 
 | _URL Form_ | _Destination Type_
@@ -414,15 +428,17 @@ Note that _encrypt, compression, hashtype_ and _chunk-factor_ cannot be changed 
 `--dest=URL`
 
 The option tells Wyng where to access the archive and is required for all commands unless
-`--dest-name` is used.  See the URL Form table in the above `arch-init` section.
+`--dest-name` or `-n` is used.  See the URL Form table in the above `arch-init` section.
 
 `--dest-name=name`, `-n name`
 
 Use a shorthand name for the destination.  Together with `--dest` the dest URL spec is stored
-under _name_; without `--dest` the URL associated with _name_ is retrieved.  If the special name
+under _name_; without `--dest` the URL associated with _name_ is retrieved and used.
+If the special name
 _default_ is set, it will automatically be used for the destination URL when neither `--dest` nor
-`--dest-name` are specified on the command line.  There is no particular Wyng command required
-for `--dest-name` and it will store or retrieve dest URLs any time its used on the command line.
+`--dest-name` nor `-n` are specified on the command line.  There is no particular Wyng command
+required for `--dest-name` and it will store or retrieve dest URLs any time its used on the
+command line.
 
 Note that dest names are stored only in local system settings, separate from the archive itself.
 
@@ -450,7 +466,8 @@ specify multiple volumes.
 `--sparse-write`
 
 Used with `receive`, the sparse-write mode tells Wyng not to create a brand-new local volume and
-results in the data being sparsely written into the volume instead. This is useful if the existing
+results in the data being sparsely written into the existing volume instead. This is useful if
+the existing
 local volume is a clone/snapshot of another volume and you wish to save local disk space. It is also
 best used when the backup/archive storage is local (i.e. fast USB drive or similar) and you don't
 want the added CPU usage of full `--sparse` mode.
@@ -462,7 +479,9 @@ an existing
 local volume so that only the differences between local and archived volumes will be fetched
 from the archive and written to the local volume. This results in reduced network
 usage at the expense of some extra CPU usage on the local machine, and also uses
-less local disk space when snapshots are a factor (implies '--sparse-write`).
+less local disk space when snapshots are a factor.  The best situation for sparse mode is when
+you want to restore/revert a large volume with a containing a limited number of changes
+over a low-bandwidth connection.
 
 `--use-snapshot` _(experimental)_
 
@@ -481,7 +500,7 @@ memory and CPU resources during backups. Using `--dedup` works best if you are b
 multiple volumes that have a lot of the same content and/or you are backing-up over a slow
 Internet link.
 
-`--autoprune=(off | on | min | full)` (_experimental_)
+`--autoprune=(off | on | min | full)`
 
 Autoprune may be used with either the `prune` or `send` commands and will cause Wyng to
 automatically remove older backup sessions according to date criteria. When used with `send`
@@ -539,23 +558,32 @@ to nail down the precisely desired range by observing the output of
 `list volumename` and using exact date-times from the listing.
 
 
-### Beta testers
+### Testers
+
+* Wyng v0.4alpha3 has one major departure from previous alphas:  The `wyng.backup040/default`
+directory structure is no longer automatically used.  This means whatever you specify
+in `--dest` is all there is to the archive path.  It also means accessing an alpha1 or
+alpha2 archive will require you to either include those dirs explicitly in your --dest path
+or rename '../wyng.backup040/default' to something else you prefer to use.
 
 * Testing goals are basically stability, usability, security and efficiency. Compatibility
 is also a valued topic, where source systems are generally expected to be a fairly recent
 Linux distro or Qubes OS. Destination systems can vary a lot, they just need to have Python and
-support Unix conventions.
+Unix commands or support a compatible FUSE protocol such as sshfs(sftp) or s3.
 
 * If you wish to run Wyng operations that may want to roll back later,
 its possible to "backup the backup" in a relatively quick manner using a hardlink copy:
 ```
-sudo cp -a /var/lib/wyng.backup /var/lib/wyng.backup-02
 sudo cp -rl /dest/path/wyng.backup /dest/path/wyng.backup-02
+
+...or...
+
+rsync -a --hard-links --delete source dest
 ```
 
-Rolling back would involve deleting the wyng.backup dirs and then `cp` in the reverse
-direction. Note that Wyng may require using --remap afterward. Also note this is _not_
-recommended for regular use.
+The `rsync` command is also suitable for efficiently updating an archive copy, since it can
+delete files that are no longer present in the origin archive (`cp` is not suitable for
+this purpose).
 
 
 
