@@ -347,9 +347,11 @@ class ArchiveSet:
             open(destname,"wb").write(self.decompress(mbuf))
 
     def set_local(self, localpath):
-        res = LocalStorage.parse_local_path(localpath)
-        if not res:   x_it(7, "Ambiguous --local spec.")
-        _, self.vgname, self.poolname = res
+        parts = localpath.split("/")
+        if len(parts) == 2 and all(parts) and not localpath.startswith("/"):
+            self.vgname, self.poolname = parts
+        else:
+            self.vgname, self.poolname = "", localpath
 
 
 class ArchiveVolume:
@@ -3420,11 +3422,11 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
             if save_type not in (None,"block device"):
                 save_storage = LocalStorage((lvpool, lpath), auuid=aset.uuid,
                                             arch_vols=storage.arch_vols)
-                l_vol = save_storage.new_vol_entry(vol.name)
+                l_vol = save_storage.new_vol_entry(vol.name, vol.vid)
         else:
             save_storage = storage    ; returned_home = storage.online
             save_type = "logical volume" if storage.pooltype=="tlvm" else "file"
-            l_vol = save_storage.new_vol_entry(vol.name)    ; save_path = l_vol.path
+            l_vol = save_storage.new_vol_entry(vol.name, vol.vid)    ; save_path = l_vol.path
 
         if exists(save_path) and attended:
             print("\n!! This will", "overwrite" if sparse_write else "erase all",
@@ -3442,7 +3444,6 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
             l_vol.create(snapshotfrom=snap_lv.name, ro=False)
 
         elif save_type == "logical volume":
-            ##l_vol = save_storage.new_vol_entry(vol.name)    ; save_path = l_vol.path
             if not l_vol.exists():
                 print("Creating '%s' in thin pool %s[%s]." %
                       (l_vol.name, save_storage.path, save_storage.lvpool))
@@ -3690,7 +3691,7 @@ def rename_volume(storage, aset, oldname, newname):
     catch_signals(None)
 
     # move snapshots to new pathname
-    new_lvol = storage.new_vol_entry(newname)    ; old_lvol = storage.lvols[oldname]
+    new_lvol = storage.new_vol_entry(newname, volume.vid)    ; old_lvol = storage.lvols[oldname]
     for atr in ("snap1","snap2"):
         if new_lvol.exists():
             storage.lvols[getattr(old_lvol,atr)].rename(getattr(new_lvol,atr))
@@ -3943,7 +3944,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4alpha3"     ; prog_date = "20230329"
+prog_version          = "0.4alpha3"     ; prog_date = "20230330"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 aset = dest = None
