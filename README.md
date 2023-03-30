@@ -6,8 +6,8 @@ Fast incremental backups for logical volumes.
 ### Introduction
 
 Wyng is able to deliver faster, more efficient incremental backups for logical
-volumes. It accesses logical volume *metadata* (instead of re-scanning data over
-and over) to instantly find which *data* has changed since the last backup.
+volumes and disk images. It accesses volume *metadata* (instead of re-scanning data
+for each backup) to instantly find which *data* has changed since the last backup.
 Combined with a Time Machine style storage format, it can also prune older
 backups from the archive very quickly, meaning you only ever have to do a full
 backup once and can send incremental backups to the same archive indefinitely
@@ -21,8 +21,8 @@ Wyng sends data as *streams* whenever possible, which avoids writing temporary
 caches of data to disk. And Wyng's ingenious snapshot rotation avoids common
 _aging snapshot_ space consumption pitfalls.
 
-Wyng also doesn't require the
-source admin system to ever mount processed volumes, so it safely handles
+Wyng also doesn't require the source admin system to ever mount processed volumes or
+to handle them as anything other than blocks, so it safely handles
 untrusted data in guest filesystems to bolster container-based security.
 
 
