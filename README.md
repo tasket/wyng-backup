@@ -54,6 +54,8 @@ Alpha pre-release v0.4 major enhancements:
  
  - Overall faster detection of changed/unchanged volumes
 
+ - Fast differential receive based on available snapshots
+
  - Metadata compression
 
  - Simple switching between multiple archives: Choose any (dest) archive location each time you run Wyng
@@ -207,11 +209,10 @@ wyng receive vm-work-private
 the default _local_ pool.
 
 Its possible to receive to any valid file path or block device using the `--save-to` option.
-However, note that '/dev/_vgname_/_poolname_/_lvname_' is a special form
-that indicates you are saving to an LVM volume; Wyng will only auto-create LVs for you
-if the save-to path is specified this way.
+(LVM users note that '/dev/_vgname_/_poolname_/_lvname_' is a special form
+that indicates you are saving to a thin LVM pool via --save-to.)
 For any save path, Wyng will try to discard old data before receiving unless `--sparse` or
-`--sparse-write` options are used.
+`--sparse-write` or `--use-snapshot` options are used.
 
 
 #### verify
@@ -231,10 +232,7 @@ To use, supply a single exact date-time in _YYYYMMDD-HHMMSS_ format to remove a
 specific session, or two date-times representing a range:
 
 ```
-
 wyng prune --session=20180605-000000,20180701-140000
-
-
 ```
 
 ...removes backup sessions from midnight on June 5 through 2pm on July 1 for all
@@ -250,9 +248,9 @@ Matching sessions will be excluded from pruning and autopruning.
 
 #### monitor
 
-Frees disk space that is cumulatively occupied by aging LVM
-snapshots, thereby addressing a common resource usage issue with snapshot-based
-backups. After harvesting their change metadata, the older snapshots are replaced with
+Frees disk space that is cumulatively occupied by aging snapshots, thereby addressing a
+common resource usage issue with snapshot-based backups.
+After harvesting their change metadata, the older snapshots are replaced with
 new ones. Running `monitor` isn't strictly necessary, but it only takes a few seconds
 and is good to run on a frequent, regular basis if you have some volumes that are
 very active. Volume names may also be
@@ -269,7 +267,6 @@ This rule in /etc/cron.d runs `monitor` every 20 minutes:
 
 wyng diff vm-work-private
 
-
 ```
 
 Compare a local volume snapshot with the archive and report any differences.
@@ -284,7 +281,6 @@ the next `send`.
 
 wyng add vm-untrusted-private
 
-
 ```
 Adds a new entry to the list of volumes configured for backup.
 
@@ -293,7 +289,6 @@ Adds a new entry to the list of volumes configured for backup.
 ```
 
 wyng delete vm-untrusted-private
-
 
 ```
 
@@ -336,7 +331,6 @@ De-duplication can also be performed incrementally by using `--dedup` with `send
 
 wyng arch-deduplicate
 
-
 ```
 
 
@@ -347,14 +341,12 @@ Initialize a new backup archive configuration...
 
 wyng arch-init --local=/mnt/btrfspool/volumes --dest=file:/mnt/backups/archive1 -n default
 
-
 ```
 
 Initialize a new backup archive with storage parameters...
 ```
 
 wyng arch-init --local=myvg/mypool --dest=file:/mnt/backups/mybackup --compression=zstd:7
-
 
 ```
 
