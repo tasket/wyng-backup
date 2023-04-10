@@ -97,19 +97,21 @@ Archives can be created with `wyng arch-init`:
 
 ```
 
-wyng arch-init --local=/mnt/btrfspool/subvol1 --dest=ssh://me@exmaple.com:/home/me/mybackup -n default
+wyng arch-init --local=/mnt/btrfspool/subvol1 --dest=ssh://me@exmaple.com:/home/me/mylaptop.backup -n default
 
 ...or...
 
-wyng arch-init --local=vg/pool --dest=file:/mnt/drive1/myarchive -n default
+wyng arch-init --local=vg/pool --dest=file:/mnt/drive1/mylaptop.backup -n default
 
 wyng send my_big_volume
 
 
 ```
 
+The examples above create a 'mylaptop.backup' directory on the destination.
 The `--dest` argument includes the destination type, remote system (where applicable)
-and file path.  The `-n` or `--dest-name` argument tells Wyng to associate the dest location
+and directory path.
+The optional `-n` or `--dest-name` argument tells Wyng to associate the dest location
 with the name "default" which will be automatically used for future Wyng commands.
 
 
@@ -541,6 +543,12 @@ your volumes for normal use.
 
 
 ### Troubleshooting notes
+
+* Since 04alpha3, Wyng may appear at first to not recognize older alpha archives.
+This is because Wyng no longer adds '/wyng.backup040/default' to the `--dest` path. To access the
+archives simply add those two dirs to the end of your `--dest` URLs.  Alternately, you can rename
+those subdirs to a single dir of your choosing.
+
 
 * Backup sessions shown in `list` output may be seemingly (but not actually) out of
 order if the system's local time shifts

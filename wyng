@@ -2,9 +2,11 @@
 # editor width: 100   -----------------------------------------------------------------------------
 
 
-###  Wyng – Logical volume backup tool
+###  Wyng – The Logical Volume Backup Tool
 ###  Copyright Christopher Laprise 2018-2023 / tasket@protonmail.com
 ###  Licensed under GNU General Public License v3. See file 'LICENSE'.
+###  Permission to redistribute under similar naming "Wyng", "wyng backup", etc.
+###  is granted only for un-modified code (GPLv3 S.7-c).
 
 
 # Return codes:
@@ -529,7 +531,7 @@ class ArchiveVolume:
 
 class ArchiveSession:
 
-    attr_str  = ("localtime","previous","uuid","permissions","manifesthash")
+    attr_str  = ("localtime","previous","permissions","manifesthash")
     attr_int  = ("volsize","sequence")
     attr_misc = ("tags","volume","archive","name","path","saved","loaded","toggle",
                  "hashval","meta_checked")
@@ -544,7 +546,6 @@ class ArchiveSession:
         self.hashval  = hashval
         self.meta_checked = False
         # persisted:
-        self.uuid     = None
         self.localtime= None
         self.volsize  = None
         self.sequence = None
@@ -565,7 +566,7 @@ class ArchiveSession:
                                  % (name, arch.b64hash(buf), hashval))
             with io.StringIO(arch.decompress(buf).decode("UTF-8")) as sf:
                 for ln in sf:
-                    if ln.strip() == "uuid =":  continue
+                    if ln.startswith("uuid ="):  continue
                     vname, value = ln.split("=", maxsplit=1)
                     vname = vname.strip()    ; value = value.strip()
                     if value == "none":   value = "None"
@@ -1462,7 +1463,8 @@ def arch_init(aset, opts):
 
     aset.data_cipher = opts.encrypt.lower()
     # Fix: duplicates code in aset... move to aset class.
-    if aset.data_cipher in (x[0] for x in DataCryptography.crypto_codes.values()): 
+    if aset.data_cipher in ("off","xchacha20"):
+    #if aset.data_cipher in (x[0] for x in DataCryptography.crypto_codes.values()): 
         aset.ci_mode, ci= [(x,y) for x,y in DataCryptography.crypto_codes.items()
                                  if y[0] == aset.data_cipher][0]
 
@@ -1862,8 +1864,9 @@ class Destination:
                 raise ValueError("Missing or malformed tmp dir: "+repr(self.dtmp))
         else:
             for log in ("/dest-state.log", "/err.log"):
-                if exists(tmpdir+log) and verbose:
-                    do_exec([ [CP.cat,"-v",tmpdir+log],  [CP.tail,"--bytes=2000"],
+                if exists(tmpdir+log):
+                    do_exec([ [CP.cat, "-v", tmpdir+log],  [CP.tail, "--bytes=2000"],
+                              [CP.grep, "-v", "^--+--"],
                               [CP.tee, "--append", tmpdir+log+"-out" ] ])
                     err_out(open(tmpdir+log+"-out", "r").read())
 
@@ -2227,7 +2230,7 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only):
                 continue
 
         # Make deltamap or initial snapshot if necessary. Try to recover paired state
-        # by comparing snapshot UUIDs; a match means remap is unnecessary.
+        # by comparing timestamps; a match means remap is unnecessary.
         if len(vol.sessions):
             s1tags = lvols[snap1].tags.split(",")
 
@@ -3983,7 +3986,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4alpha3"     ; prog_date = "20230404"
+prog_version          = "0.4alpha3"     ; prog_date = "20230409"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 aset = dest = None
