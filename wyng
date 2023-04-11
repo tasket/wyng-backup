@@ -271,6 +271,9 @@ class ArchiveSet:
             f.write(b''.join((self.confprefix, self.modeprefix, self.ci_mode, b"\n")))
             f.write(etag)    ; f.write(buf)
 
+    def rename_saved(self, ext=".tmp"):
+        os.replace(self.confpath+ext, self.confpath)
+
     # Set or clear state for the archive as 'in_process' in case of interruption during write.
     # Format is list containing strings or list of strings. For latter, ':|' is the delimiter.
     def set_in_process(self, outer_list, tmp=False, todest=True):
@@ -409,8 +412,6 @@ class ArchiveVolume:
             self.changed_bytes = int(open(pjoin(path,"volchanged"),"r").readlines()[0].strip())
 
 
-
-
     def save_volinfo(self, ext=""):
         os.makedirs(self.path, exist_ok=True)   ; fname = "volinfo"   ; etag = b''
         with io.StringIO() as f:
@@ -434,6 +435,12 @@ class ArchiveVolume:
             f.write(etag)  ; f.write(buf)
             f.flush()      ; os.fsync(f.fileno())
         self.archive.save_conf(ext)
+
+    def rename_saved(self, ext=".tmp"):
+        assert ext and exists(pjoin(self.path,"volinfo")+ext)
+        for rpath in (pjoin(self.path,"volinfo"), pjoin(self.path,"vi.dat")):
+            if exists(rpath+ext):   os.replace(rpath+ext, rpath)
+        self.archive.rename_saved(ext)
 
     def volname_check(vname): # Fix: move to LocalStorage class
         if not 0 < len(vname) <= ArchiveSet.volname_len:
@@ -643,6 +650,12 @@ class ArchiveSession:
         self.saved = self.loaded = True
         self.volume.save_volinfo(ext)
 
+    def rename_saved(self, ext=".tmp"):
+        assert ext and exists(pjoin(self.path,"info")+ext)
+        for rpath in (pjoin(self.path,x) for x in ("info", "manifest", "manifest.z")):
+            if exists(rpath+ext):   os.replace(rpath+ext, rpath)
+        self.volume.rename_saved(ext)
+
 # END class ArchiveSet, ArchiveVolume, ArchiveSession
 
 
@@ -738,6 +751,10 @@ class DataCryptography:
                        b"30":  ("xchacha20",          "xchacha20-poly1305"),
                        b"40":  ("xchacha20-poly1305", "xchacha20-poly1305")}
 
+    __slots__ = ("key","keyfile","ci_type","counter","ctstart","ctcadence","countsz","max_count",
+                 "slot","slot_offset","key_sz","nonce_sz","tag_sz","randomsz","buf_start","mode",
+                 "encrypt","decrypt","auth","AES_new","ChaCha20_new","ChaCha20_Poly1305_new",
+                 "timer","get_rnd")
 
     def __init__(self):
         self.key = self.keyfile = self.counter = self.ctstart = self.countsz \
@@ -1304,7 +1321,7 @@ class LvmVolume(LocalVolume):
     maxname   = 112    ; maxpath = maxname    ; alphanumsym = r"^[a-zA-Z0-9\+\._-]+$"
     colnames  = ("vg_name","lv_name","lv_attr","lv_size",
                  "lv_time","pool_lv","thin_id","tags")
-    __slots__ = LocalVolume.__slots__ + colnames
+    __slots__ = colnames
 
     def __init__(self, storage, name=None, vid=None, members=[]):
 
@@ -1660,8 +1677,8 @@ def get_configs_remote(dest, base_dir):
     if exists(ini) and not hmac.compare_digest(aset.raw_hashval,
                                         hashlib.sha256(open(ini,"rb").read()).hexdigest()):
         try:
-            cache_aset = ArchiveSet(arch_dir, dest, children=0, pass_agent=opts.pass_agent)
-        except e:
+            cache_aset = ArchiveSet(arch_dir, dest, children=0, prior_auth=aset)
+        except Exception as e:
             err_out(repr(e)+"\nCached archive.ini didn't load.")
             shutil.rmtree(arch_dir)
         else:
@@ -2840,12 +2857,8 @@ def send_volume(storage, vol, curtime, ses_tags, send_all):
                  ], trap=True)
 
         # Local finalize
-        for f in ("manifest.z","manifest","info"):
-            os.replace(ses.path+"/"+f+".tmp", ses.path+"/"+f)
-        os.replace(vol.path+"/volinfo.tmp", vol.path+"/volinfo")
-        os.replace(vol.path+"/vi.dat.tmp", vol.path+"/vi.dat")
-        os.replace(aset.path+"/archive.ini.tmp", aset.path+"/archive.ini")
         ses.path = ses.path.rsplit("-tmp",maxsplit=1)[0]   ; os.replace(ses.path+"-tmp", ses.path)
+        ses.rename_saved(ext=".tmp")
         fssync(vol.path)
 
     else:
@@ -3355,7 +3368,7 @@ def merge_sessions(volume, sources, target, clear_sources=False):
         # Initialization didn't complete, so reload aset and abort
         aset = ArchiveSet(aset.path, aset.dest, prior_auth=aset)
         aset.set_in_process(None)
-        for f in ("merge.lst.gz","volinfo.tmp","vi.dat.tmp",target+"/info.tmp"):
+        for f in ("merge.lst.gz", "volinfo.tmp", "vi.dat.tmp", target+"/info.tmp"):
             if exists(f):  os.remove(f)
         dest.run([dest.cd + destvol + " && rm -rf merge merge.lst.gz"], check=False)
         err_out("Error: Merge could not initialize!")
@@ -3372,9 +3385,7 @@ def merge_sessions(volume, sources, target, clear_sources=False):
             )
 
     # Local finalize
-    for f in (target+"/info", target+"/manifest.z", target+"/manifest",
-              "vi.dat", "volinfo", "../archive.ini"):
-        if exists(f+".tmp"):  os.replace(f+".tmp", f)
+    volume.sessions[target].rename_saved(ext=".tmp")
 
     aset.set_in_process(None, todest=True)    ; os.remove("merge.lst.gz")
     catch_signals(None)
@@ -3722,18 +3733,17 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
 
 def rename_volume(storage, aset, oldname, newname):
 
-    os.chdir(aset.path)    ; volume   = aset.vols[oldname]
+    os.chdir(aset.path)    ; vol = aset.vols[oldname]
     if not aset.rename_volume_meta(oldname, newname, ext=".tmp"):
         x_it(1, "Error: Cannot rename '%s' to '%s'." % (oldname,newname))
 
     catch_signals()
-    update_dest(aset, pathlist=[aset.confname], volumes=[volume], ext=".tmp")
-    for fl in (aset.confpath, volume.path+"/volinfo", volume.path+"/vi.dat"):
-        os.replace(fl+".tmp", fl)
+    update_dest(aset, pathlist=[aset.confname], volumes=[vol], ext=".tmp")
+    vol.rename_saved(ext=".tmp")
     catch_signals(None)
 
     # move snapshots to new pathname
-    new_lvol = storage.new_vol_entry(newname, volume.vid)    ; old_lvol = storage.lvols[oldname]
+    new_lvol = storage.new_vol_entry(newname, vol.vid)    ; old_lvol = storage.lvols[oldname]
     for atr in ("snap1","snap2"):
         if new_lvol.exists():
             storage.lvols[getattr(old_lvol,atr)].rename(getattr(new_lvol,atr))
@@ -3749,8 +3759,7 @@ def add_volume(aset, datavol, desc):
 
     catch_signals()
     update_dest(aset, pathlist=[aset.confname], volumes=[vol], ext=".tmp")
-    for fl in (aset.confpath, vol.path+"/volinfo", vol.path+"/vi.dat"):
-        os.replace(fl+".tmp", fl)
+    vol.rename_saved(ext=".tmp")
     catch_signals(None)
 
     #if lv_exists(aset.vgname, datavol+".tick") \
@@ -3986,7 +3995,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4alpha3"     ; prog_date = "20230409"
+prog_version          = "0.4alpha3"     ; prog_date = "20230411"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 aset = dest = None
