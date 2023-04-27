@@ -244,7 +244,7 @@ class ArchiveSet:
     def save_conf(self, ext=""):
         c = self.conf['var']    ; c.clear()    ; mcrypto = self.mcrypto
         c['uuid']        = self.uuid or str(uuid.uuid4())
-        c['updated_at']  = self.updated_at = str(time.time())
+        c['updated_at']  = self.updated_at = str(max(time.time(), float(self.updated_at)))
         c['format_ver']  = str(format_version)
         c['chunksize']   = str(self.chunksize)
         c['compression'] = self.compression
@@ -777,7 +777,7 @@ class DataCryptography:
 
         if not issubclass(type(keyfile), io.IOBase):
             if not exists(keyfile) and init:   open(keyfile, "wb").close()
-            keyfile =  open(keyfile, "r+b")
+            keyfile =  open(keyfile, "r+b", buffering=0)
 
         self.keyfile = keyfile          ; self.ci_type = ci_type
         self.key     = None             ; kbits = self.crypto_key_bits
@@ -867,15 +867,17 @@ class DataCryptography:
     def save_counter(self):
         self.keyfile.seek(self.slot_offset)
         self.keyfile.write(self.counter.to_bytes(self.countsz, "big"))
+        self.keyfile.flush()
 
     # Encrypt aes-256-siv:
     def _enc_aes_256_siv(self, buf):
         self.counter += 1
+        if self.counter % self.ctcadence == 0:   self.save_counter()
         if self.counter > self.max_count:   raise ValueError("Key exhaustion.")
+
         nonce  = self.get_rnd(self.randomsz) + self.counter.to_bytes(self.countsz, "big")
         cipher = self.AES_new(self.key, self.mode, nonce=nonce)
         buf, ci_tag = cipher.encrypt_and_digest(buf)
-        if self.counter % self.ctcadence == 0:   self.save_counter()
         return  nonce + ci_tag + buf
 
     # Decrypt aes-256-siv:
@@ -888,7 +890,9 @@ class DataCryptography:
     # Encrypt [X]ChaCha20:
     def _enc_chacha20(self, buf):
         self.counter += 1
+        if self.counter % self.ctcadence == 0:   self.save_counter()
         if self.counter > self.max_count:   raise ValueError("Key exhaustion.")
+
         # Nonce composed from: 32bit current time offset + 80bit rnd + 80bit counter
         nonce  = b''.join(( (int(self.timer()) - self.time_headroom).to_bytes(self.timesz, "big"),
                             self.get_rnd(self.randomsz),
@@ -896,7 +900,6 @@ class DataCryptography:
                  ))
         cipher = self.ChaCha20_new(key=self.key, nonce=nonce)
         buf    = cipher.encrypt(buf)
-        if self.counter % self.ctcadence == 0:   self.save_counter()
         return  nonce, buf
 
     # Decrypt [X]ChaCha20:
@@ -909,7 +912,9 @@ class DataCryptography:
     # Encrypt [X]ChaCha20-Poly1305:
     def _enc_chacha20_poly1305(self, buf):
         self.counter += 1
+        if self.counter % self.ctcadence == 0:   self.save_counter()
         if self.counter > self.max_count:   raise ValueError("Key exhaustion.")
+
         # Nonce composed from: 32bit current time offset + 80bit rnd + 80bit counter
         nonce  = b''.join(( (int(self.timer()) - self.time_headroom).to_bytes(self.timesz, "big"),
                             self.get_rnd(self.randomsz),
@@ -917,7 +922,6 @@ class DataCryptography:
                  ))
         cipher = self.ChaCha20_Poly1305_new(key=self.key, nonce=nonce)
         buf, ci_tag = cipher.encrypt_and_digest(buf)
-        if self.counter % self.ctcadence == 0:   self.save_counter()
         return  b''.join((nonce, ci_tag)), buf
 
     # Decrypt [X]ChaCha20-Poly1305:
@@ -1514,6 +1518,7 @@ def arch_init(aset, opts):
                                      passphrase=passphrase[:], init=True)
             aset.datacrypto.load(aset.data_cipher, aset.mcrypto.keyfile, slot=0,
                                      passphrase=passphrase, init=True)
+            shutil.copyfile(aset.path+"/"+aset.confname+".salt", aset.path+"/salt.bak")
     else:
         x_it(1,"Error: Invalid cipher option.")
 
@@ -1545,13 +1550,15 @@ def arch_init(aset, opts):
 
     if opts.chfactor:
         # accepts an exponent from 1 to 6
-        if not ( 0 < opts.chfactor < 7 ):
+        chfactor = int(opts.chfactor)
+        if not ( 0 < chfactor < 7 ):
             x_it(1, "Requested chunk size not supported.")
-        aset.chunksize = (aset.min_chunksize//2) * (2** opts.chfactor)
+        aset.chunksize = (aset.min_chunksize//2) * (2** chfactor)
         if aset.chunksize > 256 * 1024:
             print("Large chunk size set:", aset.chunksize)
 
-    aset.save_conf()    ; update_dest(aset, pathlist=[aset.confname, aset.confname+".salt"])
+    aset.save_conf()
+    update_dest(aset, pathlist=[aset.confname, aset.confname+".salt", "salt.bak"])
 
 
 # Check/verify an entire archive
@@ -4032,7 +4039,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4alpha3"     ; prog_date = "20230414"
+prog_version          = "0.4alpha3"     ; prog_date = "20230425"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 aset = dest = None
