@@ -60,6 +60,8 @@ class ArchiveSet:
 
     def __init__(self, top, dest, ext="", allvols=False, children=2,
                  pass_agent=0, passphrase=None, prior_auth=None):
+        self.time_start      = time_start
+        self.monotonic_start = monotonic_start
         self.dest        = dest
         self.path        = top
         self.confpath    = pjoin(self.path, self.confname)
@@ -180,7 +182,7 @@ class ArchiveSet:
 
         # init data crypto
         if mcrypto and datacrypto.key is None:
-            if not float(self.updated_at) < time.time():
+            if not float(self.updated_at) < self.time_start:
                 raise ValueError("Current time is less than archive timestamp!")
 
             self.dataci_count = datacrypto.load(self.data_cipher, mcrypto.keyfile, slot=0,
@@ -244,7 +246,8 @@ class ArchiveSet:
     def save_conf(self, ext=""):
         c = self.conf['var']    ; c.clear()    ; mcrypto = self.mcrypto
         c['uuid']        = self.uuid or str(uuid.uuid4())
-        c['updated_at']  = self.updated_at = str(max(time.time(), float(self.updated_at)))
+        c['updated_at']  = self.updated_at = \
+                            str(self.time_start - self.monotonic_start + time.monotonic())
         c['format_ver']  = str(format_version)
         c['chunksize']   = str(self.chunksize)
         c['compression'] = self.compression
@@ -761,7 +764,7 @@ class DataCryptography:
     __slots__ = ("key","keyfile","ci_type","counter","ctstart","ctcadence","countsz","max_count",
                  "slot","slot_offset","key_sz","nonce_sz","tag_sz","randomsz","buf_start","mode",
                  "encrypt","decrypt","auth","AES_new","ChaCha20_new","ChaCha20_Poly1305_new",
-                 "timer","get_rnd")
+                 "time_start","monotonic_start","get_rnd")
 
     def __init__(self):
         self.key = self.keyfile = self.counter = self.ctstart = self.countsz \
@@ -779,11 +782,12 @@ class DataCryptography:
             if not exists(keyfile) and init:   open(keyfile, "wb").close()
             keyfile =  open(keyfile, "r+b", buffering=0)
 
-        self.keyfile = keyfile          ; self.ci_type = ci_type
-        self.key     = None             ; kbits = self.crypto_key_bits
-        self.slot    = slot             ; self.counter  = self.ctstart = None
-        self.ctcadence = cadence        ; self.auth     = False
-        self.timer   = time.time        ; self.get_rnd  = get_random_bytes
+        self.keyfile    = keyfile          ; self.ci_type  = ci_type
+        self.key        = None             ; kbits = self.crypto_key_bits
+        self.slot       = slot             ; self.counter  = self.ctstart = None
+        self.ctcadence  = cadence          ; self.auth     = False
+        self.time_start = time_start       ; self.monotonic_start = monotonic_start
+        self.get_rnd    = get_random_bytes
 
         if ci_type == "aes-256-cbc":
             raise NotImplementedError()
@@ -832,7 +836,7 @@ class DataCryptography:
             self.key     = self.new_key(passphrase)
         else:
             keyfile.seek(self.slot_offset)    ; ctbytes = keyfile.read(self.countsz)
-            self.counter = self.ctstart = cadence - 1 + int.from_bytes(ctbytes, "big")
+            self.counter = self.ctstart = (cadence * 2) + int.from_bytes(ctbytes, "big")
             salt         = keyfile.read(self.key_sz)   ; assert len(salt) == self.key_sz
 
             if agentkeys:
@@ -894,7 +898,8 @@ class DataCryptography:
         if self.counter > self.max_count:   raise ValueError("Key exhaustion.")
 
         # Nonce composed from: 32bit current time offset + 80bit rnd + 80bit counter
-        nonce  = b''.join(( (int(self.timer()) - self.time_headroom).to_bytes(self.timesz, "big"),
+        nonce  = b''.join(( (int(self.time_start - self.monotonic_start + time.monotonic())
+                               - self.time_headroom).to_bytes(self.timesz, "big"),
                             self.get_rnd(self.randomsz),
                             self.counter.to_bytes(self.countsz, "big")
                  ))
@@ -916,7 +921,8 @@ class DataCryptography:
         if self.counter > self.max_count:   raise ValueError("Key exhaustion.")
 
         # Nonce composed from: 32bit current time offset + 80bit rnd + 80bit counter
-        nonce  = b''.join(( (int(self.timer()) - self.time_headroom).to_bytes(self.timesz, "big"),
+        nonce  = b''.join(( (int(self.time_start - self.monotonic_start + time.monotonic())
+                               - self.time_headroom).to_bytes(self.timesz, "big"),
                             self.get_rnd(self.randomsz),
                             self.counter.to_bytes(self.countsz, "big")
                  ))
@@ -1711,6 +1717,8 @@ def get_configs_remote(dest, base_dir):
                 raise ValueError(f"Cached metadata is newer: "
                                  f"{cache_aset.updated_at} vs. {aset.updated_at}")
                 # Enh: Test-load the cache fully and/or fetch remote, but use largest counter#s
+                # Fix: Check for .tmp versions and use local copy if all other fields match;
+                # this allows recovery from interruption during send (archive.ini cadence).
             elif cache_aset.updated_at == aset.updated_at:
                 err_out("Cached archive.ini differs with dest but timestamp matches.")
             else:
@@ -2102,7 +2110,7 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", inlines=[], text=
     commands = [x for x in commands if x is not None]
 
     # Start each command, linking them via pipes
-    procs = []    ; start_t = time.time()
+    procs = []    ; start_t = time.monotonic()
     for i, clist in enumerate(commands):
         p = SPr.Popen(clist, cwd=cwd, stdin=inf if i==0 else procs[i-1].stdout,
                              stdout=outf if i==len(commands)-1 else SPr.PIPE,
@@ -2135,7 +2143,7 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", inlines=[], text=
                 p1.terminate()
                 continue
 
-        if err or not to_flag or (timeout and time.time() - start_t > timeout):
+        if err or not to_flag or (timeout and time.monotonic() - start_t > timeout):
             break
 
     for f in [inf, outf, errf]:
@@ -3004,12 +3012,12 @@ def dedup_existing(aset):
 
 def monitor_send(storage, aset, datavols, monitor_only):
 
-    storage.check_support()
+    dest = aset.dest    ; storage.check_support()
 
     if options.autoprune.lower() == "full":
         for vol in aset.vols:   autoprune(vol, apmode="full")
 
-    dest = aset.dest    ; curtime = time.strftime("%Y%m%d-%H%M%S")
+    curtime = time.strftime("%Y%m%d-%H%M%S", time.localtime(time_start))
 
     print("\nPreparing snapshots...")
     incrementals, send_alls \
@@ -4039,9 +4047,11 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4alpha3"     ; prog_date = "20230425"
+prog_version          = "0.4alpha3"     ; prog_date = "20230427"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
+time_start            = time.time()
+monotonic_start       = time.monotonic()
 aset = dest = None
 
 
