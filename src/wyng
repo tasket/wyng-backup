@@ -759,6 +759,7 @@ class DataCryptography:
                        b"10":  ("aes-256-siv",        "aes-256-siv"),
                        b"20":  ("aes-256-cbc",        "aes-256-siv"),
                        b"30":  ("xchacha20",          "xchacha20-poly1305"),
+                       b"33":  ("xchacha20-t1",       "xchacha20-poly1305-t1"),
                        b"40":  ("xchacha20-poly1305", "xchacha20-poly1305")}
 
     __slots__ = ("key","keyfile","ci_type","counter","ctstart","ctcadence","countsz","max_count",
@@ -777,6 +778,9 @@ class DataCryptography:
             x_it(1, "System time epoch is not 1970-01-01.")
         assert passphrase is None or type(passphrase) == bytearray
         assert type(cadence) is int and cadence > 0
+
+        if ci_type.startswith("xchacha20") and Cryptodome.version_info[0:2] < (3,9):
+            raise RuntimeError("Cryptodome version >= 3.9 required for xchacha20 cipher.")
 
         if not issubclass(type(keyfile), io.IOBase):
             if not exists(keyfile) and init:   open(keyfile, "wb").close()
@@ -805,8 +809,6 @@ class DataCryptography:
             self.decrypt = self.auth = self._dec_aes_256_siv
 
         elif ci_type == "xchacha20":
-            if Cryptodome.version_info[0:2] < (3,9):
-                raise RuntimeError("Cryptodome version >= 3.9 required for xchacha20 cipher.")
             self.key_sz  = kbits//8                ; self.max_count = 2**80-64
             self.nonce_sz= 24                      ; self.buf_start = self.nonce_sz
             self.countsz = self.max_count.bit_length() // 8
@@ -816,14 +818,28 @@ class DataCryptography:
             self.decrypt = self._dec_chacha20
 
         elif ci_type == "xchacha20-poly1305":
-            if Cryptodome.version_info[0:2] < (3,9):
-                raise RuntimeError("Cryptodome version >= 3.9 required for xchacha20 cipher.")
             self.key_sz  = kbits//8         ; self.max_count = 2**80-64    ; self.tag_sz = 16
             self.nonce_sz= 24               ; self.buf_start = self.nonce_sz + self.tag_sz
             self.countsz = self.max_count.bit_length() // 8
             self.randomsz=self.nonce_sz - self.countsz - self.timesz
             self.ChaCha20_Poly1305_new = Cipher_ChaCha20_Poly1305.new
             self.encrypt = self._enc_chacha20_poly1305
+            self.decrypt = self.auth = self._dec_chacha20_poly1305
+
+        elif ci_type == "xchacha20-t1":
+            self.key_sz  = kbits//8                ; self.max_count = 2**80-64
+            self.nonce_sz= 24                      ; self.buf_start = self.nonce_sz
+            self.countsz = self.max_count.bit_length() // 8
+            self.ChaCha20_new = Cipher_ChaCha20.new
+            self.encrypt = self._enc_chacha20_t1
+            self.decrypt = self._dec_chacha20
+
+        elif ci_type == "xchacha20-poly1305-t1":
+            self.key_sz  = kbits//8         ; self.max_count = 2**80-64    ; self.tag_sz = 16
+            self.nonce_sz= 24               ; self.buf_start = self.nonce_sz + self.tag_sz
+            self.countsz = self.max_count.bit_length() // 8
+            self.ChaCha20_Poly1305_new = Cipher_ChaCha20_Poly1305.new
+            self.encrypt = self._enc_chacha20_poly1305_t1
             self.decrypt = self.auth = self._dec_chacha20_poly1305
 
         else:
@@ -937,6 +953,33 @@ class DataCryptography:
         ci_tag = untrusted_buf[self.nonce_sz:self.buf_start]
         cipher = self.ChaCha20_Poly1305_new(key=self.key, nonce=nonce)
         return cipher.decrypt_and_verify(untrusted_buf[self.buf_start:], ci_tag)
+
+    # Encrypt [X]ChaCha20 (hash nonce)
+    def _enc_chacha20_t1(self, buf):
+        self.counter += 1
+        if self.counter % self.ctcadence == 0:   self.save_counter()
+        if self.counter > self.max_count:   raise ValueError("Key exhaustion.")
+
+        # Nonce from keyed hash of rnd || buf
+        nonce_h = hashlib.blake2b(self.get_rnd(24), key=self.key, digest_size=self.nonce_sz)
+        nonce_h.update(buf)
+        nonce   = nonce_h.digest()
+        cipher  = self.ChaCha20_new(key=self.key, nonce=nonce)
+        return  nonce, cipher.encrypt(buf)
+
+    # Encrypt [X]ChaCha20-Poly1305 (hash nonce)
+    def _enc_chacha20_poly1305_t1(self, buf):
+        self.counter += 1
+        if self.counter % self.ctcadence == 0:   self.save_counter()
+        if self.counter > self.max_count:   raise ValueError("Key exhaustion.")
+
+        # Nonce composed from: 32bit current time offset + 80bit rnd + 80bit counter
+        nonce_h = hashlib.blake2b(self.get_rnd(24), key=self.key, digest_size=self.nonce_sz)
+        nonce_h.update(buf)
+        nonce   = nonce_h.digest()
+        cipher = self.ChaCha20_Poly1305_new(key=self.key, nonce=nonce)
+        buf, ci_tag = cipher.encrypt_and_digest(buf)
+        return  b''.join((nonce, ci_tag)), buf
 
 
 # Define absolute paths of commands
@@ -1508,7 +1551,7 @@ def arch_init(aset, opts):
 
     aset.data_cipher = opts.encrypt.lower()
     # Fix: duplicates code in aset... move to aset class.
-    if aset.data_cipher in ("off","xchacha20"):
+    if aset.data_cipher in ("off","xchacha20","xchacha20-t1"):
     #if aset.data_cipher in (x[0] for x in DataCryptography.crypto_codes.values()): 
         aset.ci_mode, ci= [(x,y) for x,y in DataCryptography.crypto_codes.items()
                                  if y[0] == aset.data_cipher][0]
@@ -4047,7 +4090,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4alpha3"     ; prog_date = "20230427"
+prog_version          = "0.4alpha3"     ; prog_date = "20230429"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 time_start            = time.time()
