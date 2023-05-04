@@ -973,7 +973,7 @@ class DataCryptography:
         if self.counter % self.ctcadence == 0:   self.save_counter()
         if self.counter > self.max_count:   raise ValueError("Key exhaustion.")
 
-        # Nonce composed from: 32bit current time offset + 80bit rnd + 80bit counter
+        # Nonce from keyed hash of rnd || buf
         nonce_h = hashlib.blake2b(self.get_rnd(24), key=self.key, digest_size=self.nonce_sz)
         nonce_h.update(buf)
         nonce   = nonce_h.digest()
@@ -2839,7 +2839,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all):
                 else:
                     # Compress chunk and hash it
                     buf    = compress(buf, compresslevel)
-                    bhash  = gethash(buf)   ; b64hash = b64enc(bhash.digest()).decode("ascii")
+                    bhashb = gethash(buf).digest()   ; b64hash = b64enc(bhashb).decode("ascii")
 
                     # Skip when current and prior chunks are the same
                     if compare_digest(fman_hash, b64hash):  continue
@@ -2864,7 +2864,6 @@ def send_volume(storage, vol, curtime, ses_tags, send_all):
 
                 # If chunk already in archive, link to it
                 if dedup:
-                    bhashb = bhash.digest()
                     i      = b2int(bhashb[:ht_ksize], "big")
                     pos    = hashtree[i].find(bhashb)     ; ddses = None
                     if pos % hash_w == 0:
@@ -4090,7 +4089,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4alpha3"     ; prog_date = "20230429"
+prog_version          = "0.4alpha3"     ; prog_date = "20230503"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 time_start            = time.time()
@@ -4189,6 +4188,7 @@ if options.action in write_actions+("arch-init","monitor") and not admin_permiss
 if options.action == "version":   x_it(0,"")
 if options.action not in ("send", "arch-deduplicate"):   options.dedup = False
 if options.action == "arch-deduplicate":   options.dedup = True
+options.unattended = options.unattended or not sys.stdin.isatty()
 
 
 ## General Configuration ##
