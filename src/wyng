@@ -1093,6 +1093,34 @@ class LocalStorage:
         except Exception as e:
             return None
 
+    def setperms(self, path, perms):
+        if not perms:   return
+        p_t = perms.split(":")    ; user = group = None
+
+        if len(p_t) == 1:
+            # set lvm type perm
+            assert p_t[0] in ("r","w")
+            pbits = 0o600 if p_t[0]=="w" else 0o400
+        else:
+            pbits, user, group = p_t    ; pbits = int(pbits)
+
+        if os.path.isfile(path):
+            os.chmod(path, stat.S_IMODE(pbits))
+            if admin_permission and user and user in self.users:
+                shutil.chown(path, user, group if group in self.groups else None)
+        elif self.pooltype == "tlvm" and path.startswith(self.path):
+            p  = "w" if pbits & stat.S_IWUSR else ""
+            old= SPr.check_output([CP.lvm, "lvs", "--noheadings", "-o","lv_attr", path], text=True)
+            if p != old.strip()[1]:
+                do_exec([[CP.lvm, "lvchange", path, "-p", "r"+p]])
+
+    def settime(self, path, t):
+        if t > 0 and os.path.isfile(path):
+            os.utime(path, ns=(t,t))
+            return True
+        else:
+            return False
+
     def metadata_lock(self, lvpool=None):
         mark = 0    ; spath = self.path
         if self.pooltype == "tlvm":
@@ -1270,6 +1298,12 @@ class LocalVolume:
             lvols[self.snap2].delete(sync=False)
         return None
 
+    def setperms(self, perms):
+        self.storage.setperms(self.path, perms)
+
+    def settime(self, t):
+        self.storage.settime(self.path, t)
+
     def exists(self):
         return exists(self.path)
 
@@ -1328,13 +1362,6 @@ class ReflinkVolume(LocalVolume):
     def gettime(self):
         return os.stat(self.path).st_mtime_ns
 
-    def settime(self, t):
-        if t > 0:
-            os.utime(self.path, ns=(t,t))
-            return True
-        else:
-            return False
-
     def resize(self, size):
         if not self.exists():   raise FileNotFoundError(self.path)
         with open(self.path, "r+b") as vf:   vf.truncate(size); vf.flush()
@@ -1348,20 +1375,6 @@ class ReflinkVolume(LocalVolume):
         user  = [x for x, num in self.storage.users.items()  if num == uid][0]
         group = [x for x, num in self.storage.groups.items() if num == gid][0]
         return f"{stat.S_IMODE(vstat.st_mode)}:{user}:{group}"
-
-    def setperms(self, perms):
-        if not perms:   return
-        p_t = perms.split(":")
-        if len(p_t) == 1:
-            # set lvm type perm
-            assert p_t[0] in ("r","w")
-            pbits = "0o600" if p_t[0]=="w" else "0o400"
-        else:
-            pbits, user, group = p_t
-            if admin_permission and user in self.storage.users:
-                shutil.chown(self.path, user, group if group in self.storage.groups else None)
-
-        os.chmod(self.path, stat.S_IMODE(int(pbits)))
 
     def is_arch_member(self):
         if not self.name.endswith(self.snap_ext) or not self.exists():
@@ -1474,17 +1487,6 @@ class LvmVolume(LocalVolume):
 
     def getperms(self):
         return self.lv_attr[1]
-
-    def setperms(self, perms):
-        if not perms:   return
-        p_t = perms.split(":")
-        if len(p_t) == 1:
-            # set lvm type perm
-            assert p_t[0] in ("r","w")    ; ro = p_t[0] == "r"
-        else:
-            pbits, user, group = p_t      ; ro = not int(pbits) & stat.S_IWUSR
-
-        do_exec([[CP.lvm, "lvchange", self.path, "-p", "r" if ro else "rw"]])
 
     def is_arch_member(self):
         if not self.name.endswith(self.snap_ext) or "wyng" not in self.tags or not self.exists():
@@ -3549,7 +3551,7 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
     ses_obj     = vol.sessions[select_ses]           ; volsize     = ses_obj.volsize
     chdigits    = max_address.bit_length() // 4      ; chformat    = "x%0"+str(chdigits)+"x"
     lchunk_addr = vol.last_chunk_addr(volsize)       ; last_chunkx = chformat % lchunk_addr
-    addrsplit   = -address_split[1]                  ; rc = volf = None
+    addrsplit   = -address_split[1]                  ; rc = l_vol  = volf = None
 
     # Prepare save volume
     if not (diff or verify_only):
@@ -3561,7 +3563,6 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
             if save_type not in (None,"block device"):
                 save_storage = LocalStorage((lvpool, lpath), auuid=aset.uuid,
                                             arch_vols=storage.arch_vols)
-                l_vol = save_storage.new_vol_entry(vol.name, vol.vid)
         else:
             save_storage = storage    ; returned_home = storage.online
             save_type = "logical volume" if storage.pooltype=="tlvm" else "file"
@@ -3801,9 +3802,9 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
 
     if save_path:
         volf.flush()    ; os.fsync(volf.fileno())    ; volf.close()
-        l_vol.setperms(ses_obj.permissions)
-        if is_num(ses_obj.localtime):   l_vol.settime(int(ses_obj.localtime))
-        if returned_home and select_ses == sessions[-1]:
+        storage.setperms(save_path, ses_obj.permissions)
+        if is_num(ses_obj.localtime):   storage.settime(save_path, int(ses_obj.localtime))
+        if returned_home and select_ses == sessions[-1] and storage.pooltype == "rlnk":
             vol.init_deltamap(vol.mapfile, vol.mapsize())
             tags = ["--addtag=wyng", "--addtag=arch-"+aset.uuid, "--addtag="+sessions[-1]]
             save_storage.lvols[l_vol.snap2].delete()
@@ -4089,7 +4090,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4alpha3"     ; prog_date = "20230503"
+prog_version          = "0.4alpha3"     ; prog_date = "20230507"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 time_start            = time.time()
@@ -4219,8 +4220,9 @@ hash_funcs       = {"sha256" : hashlib.sha256,
 # Create ArchiveSet and Destination objects with get_configs().
 # Passphrase input happens here; no stdin before this point!
 aset    = get_configs(options)    ; dest = aset.dest
+require_online = options.action in ("monitor","send","receive","diff") and not options.saveto
 storage = LocalStorage((None, options.local) if options.local else (aset.vgname, aset.poolname),
-                       require_online= options.action in ("monitor","send","receive","diff"),
+                       require_online=require_online,
                        arch_vols=[(x.name, x.vid) for x in aset.vols.values()],
                        auuid=aset.uuid)
 
@@ -4386,31 +4388,6 @@ elif options.action == "arch-check":
 
 elif options.action == "arch-delete":
     raise NotImplementedError()
-
-    desthost = "//"+dest.sys+" " if dest.sys else ""
-    print("\nDeleting ALL archived data from '%s' !" % dest.spec)
-
-    if not options.unattended and not options.force:
-        ans = ask_input("Are you sure? [y/N]: ")
-        if ans.lower() not in {"y","yes"}:
-            x_it(0,"")
-    elif options.unattended and not options.force:
-        x_it(1,"Error: --force required to delete entire archive.")
-
-    # Remove metadata and snapshots
-    for dv in list(aset.vols):   aset.delete_volume_meta(dv)
-
-    # Remove local metadata and stray snapshots associated with archive
-    remove_local_metadata(storage, aset)
-
-    # Remove from destination
-    print("\nDeleting entire archive...")
-    cmd = [dest.cd
-          +" && cd .."
-          +" && rm -rf default" ####
-          +" && { sync -f . || sync; }"
-          ]
-    dest.run(cmd)
 
 
 elif options.action == "arch-deduplicate":
