@@ -759,17 +759,33 @@ class DataCryptography:
                        b"10":  ("aes-256-siv",        "aes-256-siv"),
                        b"20":  ("aes-256-cbc",        "aes-256-siv"),
                        b"30":  ("xchacha20",          "xchacha20-poly1305"),
+                       b"31":  ("xchacha20-t2",       "xchacha20-poly1305-t2"),
                        b"33":  ("xchacha20-t1",       "xchacha20-poly1305-t1"),
+                       b"34":  ("xchacha20-t3",       "xchacha20-poly1305-t3"),
                        b"40":  ("xchacha20-poly1305", "xchacha20-poly1305")}
 
     __slots__ = ("key","keyfile","ci_type","counter","ctstart","ctcadence","countsz","max_count",
                  "slot","slot_offset","key_sz","nonce_sz","tag_sz","randomsz","buf_start","mode",
                  "encrypt","decrypt","auth","AES_new","ChaCha20_new","ChaCha20_Poly1305_new",
-                 "time_start","monotonic_start","get_rnd")
+                 "time_start","monotonic_start","get_rnd","b2bhash")
 
     def __init__(self):
         self.key = self.keyfile = self.counter = self.ctstart = self.countsz \
                  = self.slot_offset = None
+
+    def common_xchacha20(self):
+        self.key_sz  = self.crypto_key_bits//8 ; self.max_count = 2**80-64
+        self.nonce_sz= 24                      ; self.buf_start = self.nonce_sz
+        self.countsz = self.max_count.bit_length() // 8
+        self.randomsz=self.nonce_sz - self.countsz - self.timesz
+        self.ChaCha20_new = Cipher_ChaCha20.new
+        self.decrypt = self._dec_chacha20
+
+    def common_xchacha20_poly1305(self):
+        self.common_xchacha20()
+        self.tag_sz = 16                       ; self.buf_start = self.nonce_sz + self.tag_sz
+        self.ChaCha20_Poly1305_new = Cipher_ChaCha20_Poly1305.new
+        self.decrypt = self.auth = self._dec_chacha20_poly1305
 
     def load(self, ci_type, keyfile, slot, passphrase, agentkeys=None, arch_counter=None,
              cadence=1, init=False):
@@ -791,9 +807,33 @@ class DataCryptography:
         self.slot       = slot             ; self.counter  = self.ctstart = None
         self.ctcadence  = cadence          ; self.auth     = False
         self.time_start = time_start       ; self.monotonic_start = monotonic_start
-        self.get_rnd    = get_random_bytes
+        self.get_rnd    = get_random_bytes ; self.b2bhash  = hashlib.blake2b
 
-        if ci_type == "aes-256-cbc":
+        if ci_type == "xchacha20":
+            self.common_xchacha20()
+            self.encrypt = self._enc_chacha20
+
+        elif ci_type == "xchacha20-poly1305":
+            self.common_xchacha20_poly1305()
+            self.encrypt = self._enc_chacha20_poly1305
+
+        elif ci_type == "xchacha20-t1":
+            self.common_xchacha20()
+            self.encrypt = self._enc_chacha20_t1
+
+        elif ci_type == "xchacha20-poly1305-t1":
+            self.common_xchacha20_poly1305()
+            self.encrypt = self._enc_chacha20_poly1305_t1
+
+        elif ci_type == "xchacha20-t2":
+            self.common_xchacha20()
+            self.encrypt = self._enc_chacha20_t2
+
+        elif ci_type == "xchacha20-poly1305-t2":
+            self.common_xchacha20_poly1305()
+            self.encrypt = self._enc_chacha20_poly1305_t2
+
+        elif ci_type == "aes-256-cbc":
             raise NotImplementedError()
 
         elif ci_type == "aes-256-siv":
@@ -807,40 +847,6 @@ class DataCryptography:
             self.randomsz=self.nonce_sz - self.countsz
             self.encrypt = self._enc_aes_256_siv
             self.decrypt = self.auth = self._dec_aes_256_siv
-
-        elif ci_type == "xchacha20":
-            self.key_sz  = kbits//8                ; self.max_count = 2**80-64
-            self.nonce_sz= 24                      ; self.buf_start = self.nonce_sz
-            self.countsz = self.max_count.bit_length() // 8
-            self.randomsz=self.nonce_sz - self.countsz - self.timesz
-            self.ChaCha20_new = Cipher_ChaCha20.new
-            self.encrypt = self._enc_chacha20
-            self.decrypt = self._dec_chacha20
-
-        elif ci_type == "xchacha20-poly1305":
-            self.key_sz  = kbits//8         ; self.max_count = 2**80-64    ; self.tag_sz = 16
-            self.nonce_sz= 24               ; self.buf_start = self.nonce_sz + self.tag_sz
-            self.countsz = self.max_count.bit_length() // 8
-            self.randomsz=self.nonce_sz - self.countsz - self.timesz
-            self.ChaCha20_Poly1305_new = Cipher_ChaCha20_Poly1305.new
-            self.encrypt = self._enc_chacha20_poly1305
-            self.decrypt = self.auth = self._dec_chacha20_poly1305
-
-        elif ci_type == "xchacha20-t1":
-            self.key_sz  = kbits//8                ; self.max_count = 2**80-64
-            self.nonce_sz= 24                      ; self.buf_start = self.nonce_sz
-            self.countsz = self.max_count.bit_length() // 8
-            self.ChaCha20_new = Cipher_ChaCha20.new
-            self.encrypt = self._enc_chacha20_t1
-            self.decrypt = self._dec_chacha20
-
-        elif ci_type == "xchacha20-poly1305-t1":
-            self.key_sz  = kbits//8         ; self.max_count = 2**80-64    ; self.tag_sz = 16
-            self.nonce_sz= 24               ; self.buf_start = self.nonce_sz + self.tag_sz
-            self.countsz = self.max_count.bit_length() // 8
-            self.ChaCha20_Poly1305_new = Cipher_ChaCha20_Poly1305.new
-            self.encrypt = self._enc_chacha20_poly1305_t1
-            self.decrypt = self.auth = self._dec_chacha20_poly1305
 
         else:
             raise ValueError("Invalid cipher spec "+ci_type)
@@ -898,7 +904,7 @@ class DataCryptography:
         nonce  = self.get_rnd(self.randomsz) + self.counter.to_bytes(self.countsz, "big")
         cipher = self.AES_new(self.key, self.mode, nonce=nonce)
         buf, ci_tag = cipher.encrypt_and_digest(buf)
-        return  nonce + ci_tag + buf
+        return  b''.join((nonce, ci_tag)), buf
 
     # Decrypt aes-256-siv:
     def _dec_aes_256_siv(self, untrusted_buf):
@@ -954,30 +960,53 @@ class DataCryptography:
         cipher = self.ChaCha20_Poly1305_new(key=self.key, nonce=nonce)
         return cipher.decrypt_and_verify(untrusted_buf[self.buf_start:], ci_tag)
 
-    # Encrypt [X]ChaCha20 (hash nonce)
+    # Encrypt [X]ChaCha20 (blake2 hash nonce)
     def _enc_chacha20_t1(self, buf):
         self.counter += 1
         if self.counter % self.ctcadence == 0:   self.save_counter()
         if self.counter > self.max_count:   raise ValueError("Key exhaustion.")
 
         # Nonce from keyed hash of rnd || buf
-        nonce_h = hashlib.blake2b(self.get_rnd(24), key=self.key, digest_size=self.nonce_sz)
+        nonce_h = self.b2bhash(self.get_rnd(24), key=self.key, digest_size=self.nonce_sz)
         nonce_h.update(buf)
         nonce   = nonce_h.digest()
         cipher  = self.ChaCha20_new(key=self.key, nonce=nonce)
         return  nonce, cipher.encrypt(buf)
 
-    # Encrypt [X]ChaCha20-Poly1305 (hash nonce)
+    # Encrypt [X]ChaCha20-Poly1305 (blake2 hash nonce)
     def _enc_chacha20_poly1305_t1(self, buf):
         self.counter += 1
         if self.counter % self.ctcadence == 0:   self.save_counter()
         if self.counter > self.max_count:   raise ValueError("Key exhaustion.")
 
         # Nonce from keyed hash of rnd || buf
-        nonce_h = hashlib.blake2b(self.get_rnd(24), key=self.key, digest_size=self.nonce_sz)
+        nonce_h = self.b2bhash(self.get_rnd(24), key=self.key, digest_size=self.nonce_sz)
         nonce_h.update(buf)
         nonce   = nonce_h.digest()
-        cipher = self.ChaCha20_Poly1305_new(key=self.key, nonce=nonce)
+        cipher  = self.ChaCha20_Poly1305_new(key=self.key, nonce=nonce)
+        buf, ci_tag = cipher.encrypt_and_digest(buf)
+        return  b''.join((nonce, ci_tag)), buf
+
+    # Encrypt [X]ChaCha20 (random nonce)
+    def _enc_chacha20_t2(self, buf):
+        self.counter += 1
+        if self.counter % self.ctcadence == 0:   self.save_counter()
+        if self.counter > self.max_count:   raise ValueError("Key exhaustion.")
+
+        # Nonce from rnd
+        nonce   = self.get_rnd(self.nonce_sz)
+        cipher  = self.ChaCha20_new(key=self.key, nonce=nonce)
+        return  nonce, cipher.encrypt(buf)
+
+    # Encrypt [X]ChaCha20-Poly1305 (random nonce)
+    def _enc_chacha20_poly1305_t2(self, buf):
+        self.counter += 1
+        if self.counter % self.ctcadence == 0:   self.save_counter()
+        if self.counter > self.max_count:   raise ValueError("Key exhaustion.")
+
+        # Nonce from rnd
+        nonce   = self.get_rnd(self.nonce_sz)
+        cipher  = self.ChaCha20_Poly1305_new(key=self.key, nonce=nonce)
         buf, ci_tag = cipher.encrypt_and_digest(buf)
         return  b''.join((nonce, ci_tag)), buf
 
@@ -1553,8 +1582,8 @@ def arch_init(aset, opts):
 
     aset.data_cipher = opts.encrypt.lower()
     # Fix: duplicates code in aset... move to aset class.
-    if aset.data_cipher in ("off","xchacha20","xchacha20-t1"):
-    #if aset.data_cipher in (x[0] for x in DataCryptography.crypto_codes.values()): 
+    #if aset.data_cipher in ("off","xchacha20","xchacha20-t1","xchacha20-t3","xchacha20-t2"):
+    if aset.data_cipher in (x[0] for x in DataCryptography.crypto_codes.values()):  ####
         aset.ci_mode, ci= [(x,y) for x,y in DataCryptography.crypto_codes.items()
                                  if y[0] == aset.data_cipher][0]
 
@@ -2716,7 +2745,7 @@ def manifest_to_deltamap(volume, manifest, mapsize):
 # Bytes sent will always be >0 if nonzero chunks were added to the manifest.
 # A result of (0, 0) means no change was detected or sent.
 
-def send_volume(storage, vol, curtime, ses_tags, send_all):
+def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
 
     aset        = vol.archive
     datavol     = vol.name                      ; dedup       = options.dedup
@@ -2729,6 +2758,9 @@ def send_volume(storage, vol, curtime, ses_tags, send_all):
     verbose     = not options.quiet             ; zeros       = bytes(chunksize)
     addrsplit   = -address_split[1]             ; lchunk_addr = vol.last_chunk_addr(snap2size)
     compress = compressors[aset.compression][2] ; compresslevel = int(aset.compr_level)
+
+    if benchmark:   testtime = time.monotonic()
+    def tar_add_pass(**kwargs):   pass
 
     if len(vol.sessions):
         # Our chunks are usually smaller than LVM's, so generate a full manifest to detect
@@ -2852,10 +2884,10 @@ def send_volume(storage, vol, curtime, ses_tags, send_all):
                             stdin =SPr.PIPE,    stdout=SPr.DEVNULL,
                             stderr=SPr.DEVNULL)
                     tarf = tarfile.open(mode="w|", fileobj=untar.stdin)
-                    tarf_addfile = tarf.addfile        ; TarInfo = tarfile.TarInfo
-                    stream_started = True              ; LNKTYPE = tarfile.LNKTYPE
-                    tar_info = TarInfo(sdir+"-tmp")    ; tar_info.type = tarfile.DIRTYPE
-                    tarf_addfile(tarinfo=tar_info)
+                    tarf_addfile = tar_add_pass if benchmark else tarf.addfile
+                    TarInfo  = tarfile.TarInfo         ; LNKTYPE = tarfile.LNKTYPE
+                    tar_info = TarInfo(sdir+"-tmp")    ; tar_info.type  = tarfile.DIRTYPE
+                    tarf_addfile(tarinfo=tar_info)     ; stream_started = True
 
                 # Add entry to new manifest
                 print(b64hash, destfile, file=hashf)
@@ -2908,6 +2940,8 @@ def send_volume(storage, vol, curtime, ses_tags, send_all):
           ("\n  (reduced %0.1fM)" % (ddbytes/1000000)) if ddbytes and options.verbose else "",
           end="")
 
+    if benchmark:   print("\nTime:", time.monotonic() - timetest)
+
     # Send session info, end stream and cleanup
     if fullmanifest:   fullmanifest.close()
     if stream_started:
@@ -2930,6 +2964,8 @@ def send_volume(storage, vol, curtime, ses_tags, send_all):
 
         if retcode != 0:
             raise RuntimeError("tar transport failure code %d" % retcode)
+
+        if benchmark:   return 1
 
         if ses.volsize != prior_size and len(vol.sessions) > 1:
             os.link(ses.path+"/manifest.tmp", ses.path+"/manifest")
@@ -4090,7 +4126,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4alpha3"     ; prog_date = "20230507"
+prog_version          = "0.4alpha3"     ; prog_date = "20230513"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 time_start            = time.time()

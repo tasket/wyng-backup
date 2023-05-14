@@ -5,19 +5,19 @@ Fast incremental backups for logical volumes.
 
 ### Introduction
 
-Wyng is able to deliver faster, more efficient incremental backups for logical
+Wyng is able to deliver faster incremental backups for logical
 volumes and disk images. It accesses volume *metadata* (instead of re-scanning data
 for each backup) to instantly find which *data* has changed since the last backup.
-Combined with a Time Machine style storage format, it can also prune older
-backups from the archive very quickly, meaning you only ever have to do a full
-backup once and can send incremental backups to the same archive indefinitely
+Combined with the efficient maintenance functions of its archive format, it can also prune older
+backups from the archive very quickly.  This means you only ever have to do a full
+backup once and can send quick incremental backups to the same archive indefinitely
 and frequently.
 
 Having nearly instantaneous access to volume changes and a nimble archival format
 enables backing up even terabyte-sized volumes multiple times per hour with little
 impact on system resources.
 
-Wyng sends data as *streams* whenever possible, which avoids writing temporary
+Wyng pushes data to archives in a stream-like fashion, which avoids writing temporary
 caches of data to disk. And Wyng's ingenious snapshot rotation avoids common
 _aging snapshot_ space consumption pitfalls.
 
@@ -50,11 +50,11 @@ Alpha pre-release v0.4 major enhancements:
 
  - Authenticated encryption with auth caching & timeout
  
+ - Fast differential receive based on available snapshots
+
  - Simpler authentication of non-encrypted archives
  
  - Overall faster detection of changed/unchanged volumes
-
- - Fast differential receive based on available snapshots
 
  - Metadata compression
 
@@ -88,6 +88,8 @@ storage types:  LVM thin-provisioned pool, Btrfs subvolume, or XFS/reflink capab
 also have python3, plus a basic Unix command set and filesystem (i.e. a typical Linux or BSD
 system). Otherwise, FUSE may be used to access remote storage using sftp or s3 protocols
 without concern for python or Unix commands.
+
+* See the 'Testing' section below for tips and caveats about using the alpha and beta versions.
 
 Wyng is distributed as a single Python executable with no complex
 supporting modules or other program files; it can be placed in '/usr/local/bin'
@@ -544,7 +546,7 @@ your volumes for normal use.
 
 ### Troubleshooting notes
 
-* Since 04alpha3, Wyng may appear at first to not recognize older alpha archives.
+* Since v0.4alpha3, Wyng may appear at first to not recognize older alpha archives.
 This is because Wyng no longer adds '/wyng.backup040/default' to the `--dest` path. To access the
 archives simply add those two dirs to the end of your `--dest` URLs.  Alternately, you can rename
 those subdirs to a single dir of your choosing.
@@ -558,13 +560,33 @@ to nail down the precisely desired range by observing the output of
 `list volumename` and using exact date-times from the listing.
 
 
-### Testers
+### Testing
 
 * Wyng v0.4alpha3 has one major departure from previous alphas:  The `wyng.backup040/default`
 directory structure is no longer automatically used.  This means whatever you specify
 in `--dest` is all there is to the archive path.  It also means accessing an alpha1 or
 alpha2 archive will require you to either include those dirs explicitly in your --dest path
 or rename '../wyng.backup040/default' to something else you prefer to use.
+
+* Encryption is still considered a new feature and various crypto modes are available for
+testing, with `--encrypt=xchacha20` currently being the default.  This default is an efficient counter-based
+mode that may have security issues under very specific conditions that must line up perfectly;
+nevertheless, you are encouraged to look at issue [158](https://github.com/tasket/wyng-backup/issues/158)
+which examines the risks.
+
+More encryption modes are being added which avoid those security issues, but using them
+may significantly impact performance.  Currently the testing designations of the new modes are:
+
+- `xchacha20-t1` — Using a keyed-hash msg function; somewhat slow
+- `xchacha20-t2` — Using a 192-bit random nonce; fast
+- `xchacha20-t3` — Using HMAC-SHA256 msg function
+
+Note that _all_ of the above modes use methods recommended by the _libsodium_
+project, the experts on encryption using the XChaCha20 cipher.  However, _even more_ modes may become
+available for testing in the near future, so stay tuned!
+
+Of course, Wyng still works with BYOE (bring your own encryption) and can turn off its own internal
+encryption.
 
 * Testing goals are basically stability, usability, security and efficiency. Compatibility
 is also a valued topic, where source systems are generally expected to be a fairly recent
