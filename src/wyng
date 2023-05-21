@@ -151,9 +151,8 @@ class ArchiveSet:
             # create both crypto instances and load metadata key
             self.datacrypto = datacrypto = DataCryptography()
             self.mcrypto    = mcrypto    = DataCryptography()
-            self.mci_count  = mcrypto.load(ci_types[1], self.confpath+".salt", slot=1,
-                                           arch_counter=self.mci_count,
-                                           passphrase=passphrase_s1, agentkeys=agentkeys)
+            mcrypto.load(ci_types[1], self.confpath+".salt", slot=1,
+                         passphrase=passphrase_s1, agentkeys=agentkeys)
 
         # initial decryption + auth of archive.ini (root body)
         try:
@@ -187,9 +186,11 @@ class ArchiveSet:
                 raise ValueError("Current time is less than archive timestamp!")
 
             cadence = 20 + (self.data_cipher.endswith(("-t1","-t2","-t3","-t4")) * 100)
-            self.dataci_count = datacrypto.load(self.data_cipher, mcrypto.keyfile, slot=0,
-                                                cadence=cadence,  arch_counter=self.dataci_count,
-                                                passphrase=passphrase, agentkeys=agentkeys)
+            datacrypto.load(self.data_cipher, mcrypto.keyfile, slot=0, cadence=cadence,
+                            passphrase=passphrase, agentkeys=agentkeys)
+
+            self.mci_count    = mcrypto.set_counter(self.mci_count)
+            self.dataci_count = datacrypto.set_counter(self.dataci_count)
 
             # datacrypto may not have AE, so test data chunk against a volinfo hash
             for vol, vf in ((x, x.path+"/vi.dat") for x in self.vols.values()):
@@ -790,8 +791,7 @@ class DataCryptography:
         self.ChaCha20_Poly1305_new = Cipher_ChaCha20_Poly1305.new
         self.decrypt = self.auth = self._dec_chacha20_poly1305
 
-    def load(self, ci_type, keyfile, slot, passphrase, agentkeys=None, arch_counter=None,
-             cadence=1, init=False):
+    def load(self, ci_type, keyfile, slot, passphrase, agentkeys=None, cadence=1, init=False):
 
         if tuple(time.gmtime(0))[:6] != (1970, 1, 1, 0, 0, 0):
             x_it(1, "System time epoch is not 1970-01-01.")
@@ -897,7 +897,6 @@ class DataCryptography:
             self.noncekey = self.derive_noncekey(self.key, self.key_sz)
             assert len(self.noncekey) == self.key_sz and type(self.noncekey) is bytearray
 
-        if arch_counter:   self.set_counter(arch_counter)
         return self.counter
 
 
@@ -933,6 +932,7 @@ class DataCryptography:
     def set_counter(self, ct):
         if ct > self.counter:
             self.counter = ct    ; self.save_counter()
+        return self.counter
 
     # Encrypt aes-256-siv:
     def _enc_aes_256_siv(self, buf):
@@ -4235,7 +4235,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4alpha3"     ; prog_date = "20230515"
+prog_version          = "0.4alpha3"     ; prog_date = "20230520"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 time_start            = time.time()
