@@ -83,7 +83,7 @@ class ArchiveSet:
         self.chunksize   = self.min_chunksize * 2
         self.compression = "zstd" if zstd else "zlib"
         self.compr_level = str(compressors[self.compression][1])
-        self.hashtype    = "blake2b"
+        self.hashtype    = "hmac-sha256"
         self.vgname      = None
         self.poolname    = None
         self.uuid        = None
@@ -172,9 +172,11 @@ class ArchiveSet:
             x_it(1,"Archive format ver = "+str(self.format_ver)+
                                 ". Expected = "+str(format_version))
 
+        # use blake2b for metadata if hmac-sha256 is used for data:
+        self.gethash     = hash_funcs["blake2b"] if self.hashtype == "hmac-sha256" \
+                           else hash_funcs[self.hashtype]
         self.compress    = compressors[self.compression][2]
         self.decompress  = compressors[self.compression][0].decompress
-        self.gethash     = hash_funcs[self.hashtype]
         self.subdir      = "/a_"+hashlib.blake2b(
                            bytes(str(os.getuid())+self.uuid+self.dest.spec, encoding="UTF-8"),
                            digest_size=20).hexdigest()
@@ -203,6 +205,7 @@ class ArchiveSet:
             if pass_agent > 0 and not agentkeys:
                 agent_make(agent_name, pass_agent, [datacrypto.key, mcrypto.key])
 
+        # Enh: use 'hashtype' value for non-test modes ###
         if datacrypto and datacrypto.mhashkey:
             self.getdatahash = datacrypto.gethash_hmac
         else:
@@ -1600,7 +1603,7 @@ def arch_init(aset, opts):
 
     aset.set_local(opts.local)
 
-    aset.data_cipher = opts.encrypt.lower()
+    aset.data_cipher = opts.encrypt or "xchacha20-t3"
     # Fix: duplicates code in aset... move to aset class.
     if aset.data_cipher in (x[0] for x in DataCryptography.crypto_codes.values() if x[2]):
         aset.ci_mode, ci= [(x,y) for x,y in DataCryptography.crypto_codes.items()
@@ -1623,14 +1626,15 @@ def arch_init(aset, opts):
 
     print(); print(f"Encryption    : {aset.data_cipher} ({ci[1]})")
 
-    if opts.hashtype:
-        if opts.hashtype not in hash_funcs or opts.hashtype == "sha256":
-            x_it(1, "Hash function '"+opts.hashtype+"' is not available on this system.")
+    ##if opts.hashtype:
+        ##if opts.hashtype not in hash_funcs or opts.hashtype == "sha256":
+            ##x_it(1, "Hash function '"+opts.hashtype+"' is not available on this system.")
 
-        aset.hashtype = opts.hashtype
-
-    aset.gethash = hash_funcs[aset.hashtype]
-    print("Hashing       :", aset.hashtype, "+ HMAC" if aset.datacrypto.mhashkey else "")
+    # Use hmac-sha256 as data hash if the mode supports it:
+    aset.hashtype = "hmac-sha256" if aset.datacrypto.mhashkey else "blake2b"
+    # Always use blake2b for metadata:
+    aset.gethash  = hash_funcs["blake2b"]
+    print("Data Hashing  :", aset.hashtype)
 
     if opts.compression:
         if ":" in opts.compression:
@@ -4173,7 +4177,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4alpha3"     ; prog_date = "20230524"
+prog_version          = "0.4alpha3"     ; prog_date = "20230525"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 time_start            = time.time()
@@ -4238,7 +4242,7 @@ parser.add_argument("--remap", action="store_true", default=False, help="Remap s
 parser.add_argument("--dest", default="",     help="URL to archive")
 parser.add_argument("--dest-name", "-n", default="", help="Nickname for dest location")
 parser.add_argument("--local", default="",    help="Init: LVM vg/pool containing source volumes")
-parser.add_argument("--encrypt", default="xchacha20-t3", help="Encryption mode")
+parser.add_argument("--encrypt", default=None, help="Encryption mode")
 parser.add_argument("--compression", default="", help="Init: compression type:level")
 parser.add_argument("--hashtype", default="", help="Init: hash function type")
 parser.add_argument("--chunk-factor", dest="chfactor", type=int,
@@ -4296,7 +4300,8 @@ compressors      =    {"zlib":   (zlib, 4, zlib.compress),
                        "bz2" :   (bz2,  9, bz2.compress)}
 if zstd:   compressors["zstd"] = (zstd, 3, lambda data, lvl: zstd.compress(data, lvl, 3))
 
-hash_funcs       = {"sha256"     : hashlib.sha256,
+hash_funcs       = {"hmac-sha256": None,
+                    "sha256"     : hashlib.sha256,
                     "blake2b"    : lambda x: hashlib.blake2b(x, digest_size=hash_bytes).digest()}
 
 
