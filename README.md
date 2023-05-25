@@ -164,9 +164,9 @@ Run Wyng using the following commands and arguments in the form of:
 --sparse-write         | Overwrite local data only where it differs (receive)
 --use-snapshot         | Use snapshots when available for faster `receive`.
 --remap                | Remap volume during `send` or `diff`.
---encrypt=_cipher_     | Set encryption type or 'off' (default: chacha20)
+--encrypt=_cipher_     | Set encryption mode or _'off'_ (default: _'xchacha20-t3'_)
 --compression          | (arch-init) Set compression type:level.
---hashtype             | (arch-init) Set hash algorithm: _sha256_ or _blake2b_.
+--hashtype             | (arch-init) Set data hash algorithm: _hmac-sha256_ or _blake2b_.
 --chunk-factor         | (arch-init) Set archive chunk size.
 --meta-dir=_path_      | Use a different metadata dir than the default.
 --unattended, -u       | Don't prompt for interactive input.
@@ -370,18 +370,6 @@ than using `verify` as the latter is always the size of a volume snapshot. The l
 complete form `arch-check` is to supply no parameters, which checks all sessions in all volumes.
 
 
-#### arch-delete
-
-Deletes the entire archive on the destination, and all data that was saved in it; also removes
-archive metadata from the source system. Use with caution!
-
-```
-
-wyng --force arch-delete
-
-
-```
-
 
 #### Options/Parameters for arch-init
 
@@ -405,8 +393,8 @@ Note: --local and --dest are required.
 to `zstd` when the 'python3-zstd' package is installed; otherwise it will fall back to the less
 capable `zlib`. (default=zstd:3)
 
-`--hashtype` accepts a value of either _'sha256'_ or _'blake2b'_ (the default).
-The digest size used for blake2b is 256 bits. (default=blake2b)
+`--hashtype` accepts a value of either _'blake2b'_ or _'hmac-sha256'_ (default).
+The digest size is 256 bits.
 
 `--chunk-factor` sets the pre-compression data chunk size used within the destination archive.
 Accepted range is an integer exponent from '1' to '6', resulting in a chunk size of 64kB for
@@ -414,8 +402,7 @@ factor '1', 128kB for factor '2', 256kB for factor '3' and so on. To maintain a 
 space efficiency and performance balance, a factor of '2' or greater is suggested for archives
 that will store volumes larger than about 100GB. (default=2)
 
-`--encrypt` selects the encryption cipher/mode. Choices are _'xchacha20', 'aes-siv'_ and _'off'_.  _'xchacha20'_ is currently the only _recommended_ choice as _'aes-siv'_ is slow and
-may not be appropriate on some CPU hardware. (default=xchacha20)
+`--encrypt` selects the encryption cipher/mode. See _Testing_ section for description of choices.
 
 Note that _encrypt, compression, hashtype_ and _chunk-factor_ cannot be changed for an archive once it is initialized.
 
@@ -569,21 +556,19 @@ alpha2 archive will require you to either include those dirs explicitly in your 
 or rename '../wyng.backup040/default' to something else you prefer to use.
 
 * Encryption is still considered a new feature and various crypto modes are available for
-testing, with `--encrypt=xchacha20` currently being the default.  This default is an efficient counter-based
-mode that may have security issues under very specific conditions that must line up perfectly;
-nevertheless, you are encouraged to look at issue [158](https://github.com/tasket/wyng-backup/issues/158)
-which examines the risks.
+testing, with `--encrypt=xchacha20-t3` currently being the default.
 
-More encryption modes are being added which avoid those security issues, but using them
-may significantly impact performance.  Currently the testing designations of the new modes are:
+Currently the testing designations of the new modes are:
 
-- `xchacha20-t1` — Using a keyed-hash msg function; somewhat slow
-- `xchacha20-t2` — Using a 192-bit random nonce; fast
-- `xchacha20-t3` — Using HMAC-SHA256 msg function
+- `xchacha20-t2` — Using a 192-bit random nonce; fast.
+- `xchacha20-t3` — Using HMAC-SHA256(rnd||msg) function; safe.
+- `xchacha20-t4` — Using HMAC-SHA256(rnd||hash) function; see below.
+- `xchacha20-tc` — Counter based; fast with certain risks.  See issue [158](https://github.com/tasket/wyng-backup/issues/158).
+- `off` — Turns off Wyng's authentication and encryption.
 
-Note that _all_ of the above modes use methods recommended by the _libsodium_
-project, the experts on encryption using the XChaCha20 cipher.  However, _even more_ modes may become
-available for testing in the near future, so stay tuned!
+Note that the _t2, t3 & tc_ modes use methods recommended by the _libsodium_
+project, the experts on encryption using the XChaCha20 cipher.  The _t4_ mode is an
+attempt to combine the best aspects of safety and speed (issue [161](https://github.com/tasket/wyng-backup/issues/161).
 
 Of course, Wyng still works with BYOE (bring your own encryption) and can turn off its own internal
 encryption.

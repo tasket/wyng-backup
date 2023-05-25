@@ -23,7 +23,7 @@ import sys, signal, os, stat, shutil, subprocess as SPr, time, datetime
 import re, mmap, bz2, zlib, gzip, tarfile, io, fcntl, tempfile
 import argparse, configparser, hashlib, hmac, functools, uuid
 import getpass, base64, platform, resource, itertools, string, struct
-import xml.etree.ElementTree, ctypes, ctypes.util
+import xml.etree.ElementTree, ctypes, ctypes.util, atexit
 from array import array         ; from urllib.parse import urlparse
 
 try:
@@ -34,13 +34,12 @@ except:
     zstd = None
 
 try:
-    from Cryptodome.Cipher import AES as Cipher_AES
     from Cryptodome.Cipher import ChaCha20 as Cipher_ChaCha20
     from Cryptodome.Cipher import ChaCha20_Poly1305 as Cipher_ChaCha20_Poly1305
     from Cryptodome.Random import get_random_bytes
-    import Cryptodome
+    import Cryptodome, Cryptodome.Protocol.KDF, Cryptodome.Hash
 except:
-    Cipher_AES = Cipher_ChaCha20 = Cipher_ChaCha20_Poly1305 = None
+    Cipher_ChaCha20 = Cipher_ChaCha20_Poly1305 = None
 
 
 # ArchiveSet manages archive metadata incl. volumes and sessions
@@ -196,13 +195,18 @@ class ArchiveSet:
             for vol, vf in ((x, x.path+"/vi.dat") for x in self.vols.values()):
                 if exists(vf):
                     if not hmac.compare_digest(vol.hashval, self.b64hash(
-                        datacrypto.decrypt(open(vf,"rb").read()))):
+                        datacrypto.decrypt(open(vf,"rb").read()))[0]):
                         x_it(3, "Error: Data hash check failed.")
                     break
 
             # persist keys to allow future invocations w/o passphrase input
             if pass_agent > 0 and not agentkeys:
                 agent_make(agent_name, pass_agent, [datacrypto.key, mcrypto.key])
+
+        if datacrypto and datacrypto.mhashkey:
+            self.getdatahash = datacrypto.gethash_hmac
+        else:
+            self.getdatahash = hash_funcs[self.hashtype]
 
         # load volume metadata objects
         if children:
@@ -331,7 +335,7 @@ class ArchiveSet:
         return True
 
     def b64hash(self, buf):
-        return base64.urlsafe_b64encode(self.gethash(buf).digest()).decode("ascii")
+        return base64.urlsafe_b64encode(self.gethash(buf)).decode("ascii")
 
     def encode_file(self, fname, fdest=None, get_digest=True, compress=True):
         # Enh: optimize memory use
@@ -433,7 +437,8 @@ class ArchiveVolume:
         if self.archive.mcrypto:
             # First encrypt as data, for data cipher verification at startup
             with open(pjoin(self.path,"vi.dat"+ext), "wb") as df:
-                df.write(b''.join(self.archive.datacrypto.encrypt(buf)))
+                df.write(b''.join(self.archive.datacrypto.encrypt(buf,
+                                    self.archive.gethash(buf))))
                 self.archive.datacrypto.save_counter()
             # encrypt as metadata
             etag, buf = self.archive.mcrypto.encrypt(buf)
@@ -758,38 +763,25 @@ class DataCryptography:
 
     # Matrix of recommended mode pairs = 'formatcode: (data, metadata)'
     # User selects a data cipher which is automatically paired w a metadata authentication cipher.
-    crypto_codes    = {b"00":  ("off",                "off"),
-                       b"10":  ("aes-256-siv",        "aes-256-siv"),
-                       b"20":  ("aes-256-cbc",        "aes-256-siv"),
-                       b"30":  ("xchacha20",          "xchacha20-poly1305"),
-                       b"31":  ("xchacha20-t2",       "xchacha20-poly1305-t2"),
-                       b"33":  ("xchacha20-t1",       "xchacha20-poly1305-t1"),
-                       b"34":  ("xchacha20-t3",       "xchacha20-poly1305-t3"),
-                       b"35":  ("xchacha20-t4",       "xchacha20-poly1305-t4"),
-                       b"40":  ("xchacha20-poly1305", "xchacha20-poly1305")}
+    crypto_codes    = {b"00":  ("off",                "off", 1),
+                       b"10":  ("n/a",                "n/a", 0),
+                       b"20":  ("n/a",                "n/a", 0),
+                       b"30":  ("xchacha20",          "xchacha20-poly1305",    0),
+                       b"31":  ("xchacha20-t2",       "xchacha20-poly1305-t2", 1),
+                       b"32":  ("xchacha20-tc",       "xchacha20-poly1305",    1),
+                       b"33":  ("n/a",                "n/a", 0),
+                       b"34":  ("xchacha20-t3",       "xchacha20-poly1305-t3", 1),
+                       b"35":  ("xchacha20-t4",       "xchacha20-poly1305-t3", 1),
+                       b"40":  ("n/a",                "n/a", 0)}
 
     __slots__ = ("key","keyfile","ci_type","counter","ctstart","ctcadence","countsz","max_count",
                  "slot","slot_offset","key_sz","nonce_sz","tag_sz","randomsz","buf_start","mode",
-                 "encrypt","decrypt","auth","AES_new","ChaCha20_new","ChaCha20_Poly1305_new",
-                 "time_start","monotonic_start","get_rnd","b2bhash","noncekey")
+                 "encrypt","decrypt","auth","ChaCha20_new","ChaCha20_Poly1305_new",
+                 "time_start","monotonic_start","get_rnd","noncekey","mhashkey")
 
     def __init__(self):
         self.key = self.noncekey = self.keyfile = self.counter = self.ctstart = self.countsz \
-                 = self.slot_offset = None
-
-    def common_xchacha20(self):
-        self.key_sz  = self.crypto_key_bits//8 ; self.max_count = 2**80-64
-        self.nonce_sz= 24                      ; self.buf_start = self.nonce_sz
-        self.countsz = self.max_count.bit_length() // 8
-        self.randomsz=self.nonce_sz - self.countsz - self.timesz
-        self.ChaCha20_new = Cipher_ChaCha20.new
-        self.decrypt = self._dec_chacha20
-
-    def common_xchacha20_poly1305(self):
-        self.common_xchacha20()
-        self.tag_sz = 16                       ; self.buf_start = self.nonce_sz + self.tag_sz
-        self.ChaCha20_Poly1305_new = Cipher_ChaCha20_Poly1305.new
-        self.decrypt = self.auth = self._dec_chacha20_poly1305
+                 = self.mhashkey = self.slot_offset = None
 
     def load(self, ci_type, keyfile, slot, passphrase, agentkeys=None, cadence=1, init=False):
 
@@ -805,72 +797,57 @@ class DataCryptography:
             if not exists(keyfile) and init:   open(keyfile, "wb").close()
             keyfile =  open(keyfile, "r+b", buffering=0)
 
-        mknoncekey      = False
+        mknoncekey      = mkmhashkey = False
         self.keyfile    = keyfile          ; self.ci_type  = ci_type
         self.key        = None             ; kbits = self.crypto_key_bits
         self.slot       = slot             ; self.counter  = self.ctstart = None
         self.ctcadence  = cadence          ; self.auth     = False
         self.time_start = time_start       ; self.monotonic_start = monotonic_start
-        self.get_rnd    = get_random_bytes ; self.b2bhash  = hashlib.blake2b
+        self.get_rnd    = get_random_bytes
+
+        # xchacha20 common
+        self.key_sz  = self.crypto_key_bits//8 ; self.max_count = 2**80-64
+        self.nonce_sz= 24                      ; self.buf_start = self.nonce_sz
+        self.countsz = self.max_count.bit_length() // 8
+        self.randomsz=self.nonce_sz - self.countsz - self.timesz
+        self.ChaCha20_new = Cipher_ChaCha20.new
+        self.ChaCha20_Poly1305_new = Cipher_ChaCha20_Poly1305.new
+        self.decrypt = self._dec_chacha20
 
         if ci_type == "xchacha20":
-            self.common_xchacha20()
             self.encrypt = self._enc_chacha20
 
         elif ci_type == "xchacha20-poly1305":
-            self.common_xchacha20_poly1305()
+            self.tag_sz  = 16                  ; self.buf_start = self.nonce_sz + self.tag_sz
+            self.decrypt = self.auth = self._dec_chacha20_poly1305
             self.encrypt = self._enc_chacha20_poly1305
 
-        elif ci_type == "xchacha20-t1":
-            self.common_xchacha20()
-            self.encrypt = self._enc_chacha20_t1
-
-        elif ci_type == "xchacha20-poly1305-t1":
-            self.common_xchacha20_poly1305()
-            self.encrypt = self._enc_chacha20_poly1305_t1
+        elif ci_type == "xchacha20-tc":
+            self.encrypt = self._enc_chacha20
+            mkmhashkey   = True
 
         elif ci_type == "xchacha20-t2":
-            self.common_xchacha20()
             self.encrypt = self._enc_chacha20_t2
+            mkmhashkey   = True
 
         elif ci_type == "xchacha20-poly1305-t2":
-            self.common_xchacha20_poly1305()
+            self.tag_sz  = 16                  ; self.buf_start = self.nonce_sz + self.tag_sz
+            self.decrypt = self.auth = self._dec_chacha20_poly1305
             self.encrypt = self._enc_chacha20_poly1305_t2
 
         elif ci_type == "xchacha20-t3":
-            self.common_xchacha20()
             self.encrypt = self._enc_chacha20_t3
-            mknoncekey   = True
+            mknoncekey   = mkmhashkey = True
 
         elif ci_type == "xchacha20-poly1305-t3":
-            self.common_xchacha20_poly1305()
+            self.tag_sz  = 16                  ; self.buf_start = self.nonce_sz + self.tag_sz
+            self.decrypt = self.auth = self._dec_chacha20_poly1305
             self.encrypt = self._enc_chacha20_poly1305_t3
             mknoncekey   = True
 
-        #elif ci_type == "xchacha20-t4":
-            #self.common_xchacha20()
-            #self.encrypt = self._enc_chacha20_t4
-            #mknoncekey   = True
-
-        #elif ci_type == "xchacha20-poly1305-t4":
-            #self.common_xchacha20_poly1305()
-            #self.encrypt = self._enc_chacha20_poly1305_t4
-            #mknoncekey   = True
-
-        elif ci_type == "aes-256-cbc":
-            raise NotImplementedError()
-
-        elif ci_type == "aes-256-siv":
-            if not (platform.machine() == "x86_64" and "aes" in cpu_flags):
-                print("Warning: x86_64 + AES crypto sidechannel resistance not detected.")
-            self.key_sz  = 2*kbits//8              ; self.max_count = 2**48-64
-            self.nonce_sz= 12                      ; self.tag_sz    = 16
-            self.buf_start = self.nonce_sz+self.tag_sz
-            self.mode    = Cipher_AES.MODE_SIV     ; self.AES_new = Cipher_AES.new
-            self.countsz = self.max_count.bit_length() // 8
-            self.randomsz=self.nonce_sz - self.countsz
-            self.encrypt = self._enc_aes_256_siv
-            self.decrypt = self.auth = self._dec_aes_256_siv
+        elif ci_type == "xchacha20-t4":
+            self.encrypt = self._enc_chacha20_t4
+            mknoncekey   = mkmhashkey = True
 
         else:
             raise ValueError("Invalid cipher spec "+ci_type)
@@ -893,9 +870,10 @@ class DataCryptography:
                 self.key = self.derive_key(salt, passphrase, self.key_sz)
             assert len(self.key) == self.key_sz and type(self.key) is bytearray
 
-        if mknoncekey:
-            self.noncekey = self.derive_noncekey(self.key, self.key_sz)
-            assert len(self.noncekey) == self.key_sz and type(self.noncekey) is bytearray
+        if mknoncekey or mkmhashkey:
+            subkeys = self.derive_subkeys(2, self.key, size=self.key_sz)
+            if mknoncekey:   self.noncekey = subkeys[0]
+            if mkmhashkey:   self.mhashkey = subkeys[1]
 
         return self.counter
 
@@ -904,6 +882,7 @@ class DataCryptography:
         if self.counter and self.counter > self.ctstart:   self.save_counter()
         if self.key:        clear_array(self.key)
         if self.noncekey:   clear_array(self.noncekey)
+        if self.mhashkey:   clear_array(self.mhashkey)
 
 
     # Key file binary format: counter=8B, key=key_sz
@@ -918,10 +897,14 @@ class DataCryptography:
         clear_array(passphrase)
         return key
 
-    def derive_noncekey(self, key, size):
-        noncekey = bytearray(hashlib.scrypt(key, salt=b'Wyng_Nonces', n=2**13, r=8, p=1,
-                                            maxmem=128*1024*1024, dklen=size))
-        return noncekey
+    def derive_subkeys(self, qty, key, salt=b'', size=None):
+        assert qty > 1
+        m = map(bytearray, Cryptodome.Protocol.KDF.HKDF(key, size, salt, Cryptodome.Hash.SHA256,
+                                                        qty, b'Wyng-Subkeys'))
+        return tuple(m)
+
+    def gethash_hmac(self, buf):
+        return hmac.digest(self.mhashkey, buf, "sha256")
 
     # Update key counter on disk; call directly at end of transaction if cadence > 1
     def save_counter(self):
@@ -934,26 +917,8 @@ class DataCryptography:
             self.counter = ct    ; self.save_counter()
         return self.counter
 
-    # Encrypt aes-256-siv:
-    def _enc_aes_256_siv(self, buf):
-        self.counter += 1
-        if self.counter % self.ctcadence == 0:   self.save_counter()
-        if self.counter > self.max_count:   raise ValueError("Key exhaustion.")
-
-        nonce  = self.get_rnd(self.randomsz) + self.counter.to_bytes(self.countsz, "big")
-        cipher = self.AES_new(self.key, self.mode, nonce=nonce)
-        buf, ci_tag = cipher.encrypt_and_digest(buf)
-        return  b''.join((nonce, ci_tag)), buf
-
-    # Decrypt aes-256-siv:
-    def _dec_aes_256_siv(self, untrusted_buf):
-        nonce  = untrusted_buf[:self.nonce_sz]
-        ci_tag = untrusted_buf[self.nonce_sz:self.buf_start]
-        cipher = self.AES_new(self.key, self.mode, nonce)
-        return cipher.decrypt_and_verify(untrusted_buf[self.buf_start:], ci_tag)
-
     # Encrypt [X]ChaCha20:
-    def _enc_chacha20(self, buf):
+    def _enc_chacha20(self, buf, _na):
         self.counter += 1
         if self.counter % self.ctcadence == 0:   self.save_counter()
         if self.counter > self.max_count:   raise ValueError("Key exhaustion.")
@@ -999,35 +964,8 @@ class DataCryptography:
         cipher = self.ChaCha20_Poly1305_new(key=self.key, nonce=nonce)
         return cipher.decrypt_and_verify(untrusted_buf[self.buf_start:], ci_tag)
 
-    # Encrypt [X]ChaCha20 (blake2 hash nonce)
-    def _enc_chacha20_t1(self, buf):
-        self.counter += 1
-        if self.counter % self.ctcadence == 0:   self.save_counter()
-        if self.counter > self.max_count:   raise ValueError("Key exhaustion.")
-
-        # Nonce from keyed hash of rnd || buf
-        nonce_h = self.b2bhash(self.get_rnd(24), key=self.key, digest_size=self.nonce_sz)
-        nonce_h.update(buf)
-        nonce   = nonce_h.digest()
-        cipher  = self.ChaCha20_new(key=self.key, nonce=nonce)
-        return  nonce, cipher.encrypt(buf)
-
-    # Encrypt [X]ChaCha20-Poly1305 (blake2 hash nonce)
-    def _enc_chacha20_poly1305_t1(self, buf):
-        self.counter += 1
-        if self.counter % self.ctcadence == 0:   self.save_counter()
-        if self.counter > self.max_count:   raise ValueError("Key exhaustion.")
-
-        # Nonce from keyed hash of rnd || buf
-        nonce_h = self.b2bhash(self.get_rnd(24), key=self.key, digest_size=self.nonce_sz)
-        nonce_h.update(buf)
-        nonce   = nonce_h.digest()
-        cipher  = self.ChaCha20_Poly1305_new(key=self.key, nonce=nonce)
-        buf, ci_tag = cipher.encrypt_and_digest(buf)
-        return  b''.join((nonce, ci_tag)), buf
-
     # Encrypt [X]ChaCha20 (random nonce)
-    def _enc_chacha20_t2(self, buf):
+    def _enc_chacha20_t2(self, buf, _na):
         self.counter += 1
         if self.counter % self.ctcadence == 0:   self.save_counter()
         if self.counter > self.max_count:   raise ValueError("Key exhaustion.")
@@ -1050,7 +988,7 @@ class DataCryptography:
         return  b''.join((nonce, ci_tag)), buf
 
     # Encrypt [X]ChaCha20 (HMAC nonce)
-    def _enc_chacha20_t3(self, buf):
+    def _enc_chacha20_t3(self, buf, _na):
         self.counter += 1
         if self.counter % self.ctcadence == 0:   self.save_counter()
         if self.counter > self.max_count:   raise ValueError("Key exhaustion.")
@@ -1084,28 +1022,13 @@ class DataCryptography:
         if self.counter % self.ctcadence == 0:   self.save_counter()
         if self.counter > self.max_count:   raise ValueError("Key exhaustion.")
 
-        # Nonce from HMAC of rnd || H(m)
+        # Nonce from HMAC of rnd || Hm (manifest hash)
         nonce_h = hmac.new(self.noncekey, msg=self.get_rnd(24), digestmod="sha256")
         nonce_h.update(mhash)
         nonce   = nonce_h.digest()[:24]
 
         cipher  = self.ChaCha20_new(key=self.key, nonce=nonce)
         return  nonce, cipher.encrypt(buf)
-
-    # Encrypt [X]ChaCha20-Poly1305 (HMAC nonce)
-    def _enc_chacha20_poly1305_t4(self, buf, mhash):
-        self.counter += 1
-        if self.counter % self.ctcadence == 0:   self.save_counter()
-        if self.counter > self.max_count:   raise ValueError("Key exhaustion.")
-
-        # Nonce from HMAC of rnd || H(m)
-        nonce_h = hmac.new(self.noncekey, msg=self.get_rnd(24), digestmod="sha256")
-        nonce_h.update(mhash)
-        nonce   = nonce_h.digest()[:24]
-
-        cipher = self.ChaCha20_Poly1305_new(key=self.key, nonce=nonce)
-        buf, ci_tag = cipher.encrypt_and_digest(buf)
-        return  b''.join((nonce, ci_tag)), buf
 
 
 # Define absolute paths of commands
@@ -1679,8 +1602,7 @@ def arch_init(aset, opts):
 
     aset.data_cipher = opts.encrypt.lower()
     # Fix: duplicates code in aset... move to aset class.
-    #if aset.data_cipher in ("off","xchacha20","xchacha20-t1","xchacha20-t3","xchacha20-t2"):
-    if aset.data_cipher in (x[0] for x in DataCryptography.crypto_codes.values()):  ####
+    if aset.data_cipher in (x[0] for x in DataCryptography.crypto_codes.values() if x[2]):
         aset.ci_mode, ci= [(x,y) for x,y in DataCryptography.crypto_codes.items()
                                  if y[0] == aset.data_cipher][0]
 
@@ -1702,11 +1624,13 @@ def arch_init(aset, opts):
     print(); print(f"Encryption    : {aset.data_cipher} ({ci[1]})")
 
     if opts.hashtype:
-        if opts.hashtype not in hash_funcs:
+        if opts.hashtype not in hash_funcs or opts.hashtype == "sha256":
             x_it(1, "Hash function '"+opts.hashtype+"' is not available on this system.")
+
         aset.hashtype = opts.hashtype
 
-    print("Hashing       :", aset.hashtype)
+    aset.gethash = hash_funcs[aset.hashtype]
+    print("Hashing       :", aset.hashtype, "+ HMAC" if aset.datacrypto.mhashkey else "")
 
     if opts.compression:
         if ":" in opts.compression:
@@ -1742,7 +1666,7 @@ def arch_init(aset, opts):
 
 def arch_check(storage, aset, vol_list=None, startup=False):
     dest     = aset.dest                   ; attended  = not options.unattended
-    gethash  = hash_funcs[aset.hashtype]   ; chunksize = aset.chunksize
+    chunksize= aset.chunksize
     compare_digest = hmac.compare_digest   ; b64enc    = base64.urlsafe_b64encode
 
     decrypt  = aset.datacrypto.decrypt if aset.datacrypto else None
@@ -1786,9 +1710,15 @@ def arch_check(storage, aset, vol_list=None, startup=False):
 
         if startup:   continue
 
+        # Remove stray volume dirs and other files
+        if options.clean:   dest.run([dest.cd + " && rm -r"] + vdir_strays)
+        deepclean = options.clean and options.force
+
         # Check all combined manifests are correct
         print("  Checking indexes,", end="", flush=True) ; mset = []
-        for ses in vol.sesnames:   mset.append(ses)    ; check_manifest_sequence(vol, mset)
+        for ses in vol.sesnames:
+            mset.append(ses)    ; check_manifest_sequence(vol, mset)
+            #### FIX: implement deepclean
 
         # Check hashes of each session individually
         print(" data:")
@@ -1820,7 +1750,7 @@ def check_manifest_sequence(vol, sesnames, addcol=False):
     if addr+aset.chunksize != volsize:
         raise ValueError("Manifest range stopped short at", addr)
 
-    return manifest
+    os.remove(manifest)
 
 
 # Get configuration settings:
@@ -1886,9 +1816,11 @@ def get_configs_remote(dest, base_dir):
         else:
             if cache_aset.updated_at > aset.updated_at:
                 # check if any non-crypto-counter vars differ
-                if cache_aset.header != aset.header \
-                or any((x != y for x, y in zip(dict(cache_aset.conf), dict(aset.conf))
-                                  if aset.mcrypto and x[0] not in ("mci_count","dataci_count"))):
+                if aset.mcrypto and cache_aset.header != aset.header \
+                or set(aset.conf) != set(cache_aset.conf) \
+                or any((x != y for s in aset.conf
+                  for x, y in zipln(dict(cache_aset.conf[s]).items(), dict(aset.conf[s]).items())
+                  if x[0] not in ("mci_count","dataci_count","updated_at"))):
                     raise ValueError(f"Cached metadata is newer, from {cache_aset.path}\n"
                                      f"{cache_aset.updated_at} vs. {aset.updated_at}\n")
                 elif aset.mcrypto:
@@ -2898,11 +2830,10 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
 
 
     if aset.datacrypto:
-        crypto  = True    ; crypto_cadence = aset.datacrypto.ctcadence
-        encrypt = aset.datacrypto.encrypt
+        crypto   = True    ; crypto_cadence = aset.datacrypto.ctcadence
+        encrypt  = aset.datacrypto.encrypt
     else:
-        crypto  = False
-        etag    = b''     ; crypto_cadence = 0
+        crypto   = False    ; etag     = b''     ; crypto_cadence = 0
 
 
     # Use tar to stream files to destination
@@ -2919,10 +2850,9 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
          open("/dev/zero" if send_all else vol.mapfile,"rb") as bmapf:
 
         vf_seek = vf.seek; vf_read = vf.read   ; BytesIO = io.BytesIO
-        gethash = hash_funcs[aset.hashtype]    ; b64enc  = base64.urlsafe_b64encode
+        gethash = aset.getdatahash             ; b64enc  = base64.urlsafe_b64encode
         b2int   = int.from_bytes               ; islice  = itertools.islice
         compare_digest = hmac.compare_digest
-
 
         # Feed delta bmap to inner loop in pieces segmented by large zero delimeter.
         # This allows skipping most areas when changes are few.
@@ -2950,6 +2880,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
                     try:
                         fman_hash, fman_fname = fullmanifest_readline().split()
                     except ValueError: # EOF
+                        fullmanifest.close()   ; os.remove(fullmanifest)
                         fullmanifest = None    ; fman_hash = ""
                     else:
                         if fman_fname != destfile:
@@ -2965,7 +2896,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
                 # Process checkpoint
                 if counter > checkpt:
                     # Keep updating aset counters if key has a low cadence
-                    if 0 < crypto_cadence < 101:
+                    if 0 < crypto_cadence < 101 and not benchmark:
                         aset.save_conf()    ; tarf_add(aset.confname)
                     # Show progress.
                     if verbose:
@@ -2981,8 +2912,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
                 else:
                     # Compress chunk and hash it
                     buf    = compress(buf, compresslevel)
-                    bhashb = gethash(buf).digest()   ; b64hash = b64enc(bhashb).decode("ascii")
-
+                    bhashb = gethash(buf)   ; b64hash = b64enc(bhashb).decode("ascii")
                     # Skip when current and prior chunks are the same
                     if compare_digest(fman_hash, b64hash):  continue
 
@@ -3034,7 +2964,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
                 else:
                     # Encrypt the data chunk
                     if crypto:
-                        etag, buf = encrypt(buf)
+                        etag, buf = encrypt(buf, bhashb)
 
                     # Send data chunk to the archive
                     fileobj = BytesIO()
@@ -3052,8 +2982,8 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
     if benchmark:   print("\nTime:", time.monotonic() - testtime)
 
     # Send session info, end stream and cleanup
-    if fullmanifest:   fullmanifest.close()
-    if stream_started:
+    if fullmanifest:   fullmanifest.close()   ; os.remove(fullmanifest.name)
+    if stream_started and not benchmark:
         # Save session info
         if crypto:   aset.datacrypto.save_counter()
         ses.save_info(ext=".tmp")
@@ -3074,8 +3004,6 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
         if retcode != 0:
             raise RuntimeError("tar transport failure code %d" % retcode)
 
-        if benchmark:   return 1
-
         if ses.volsize != prior_size and len(vol.sessions) > 1:
             os.link(ses.path+"/manifest.tmp", ses.path+"/manifest")
             check_manifest_sequence(vol, vol.sesnames)
@@ -3095,12 +3023,14 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
         fssync(vol.path)
 
     else:
+        if stream_started:   tarf.close(); untar.kill()
         catch_signals()
         vol.delete_session(bksession)    ; shutil.rmtree(aset.path+"/"+sdir+"-tmp")
 
-    vol.init_deltamap(vol.mapfile, vol.mapsize())
-    storage.lvols[vol.name].rotate_snapshots(rotate=True, timestamp_path=vol.mapfile,
-                                             addtags=["--addtag="+vol.last])
+    if not benchmark:
+        vol.init_deltamap(vol.mapfile, vol.mapsize())
+        storage.lvols[vol.name].rotate_snapshots(rotate=True, timestamp_path=vol.mapfile,
+                                                 addtags=["--addtag="+vol.last])
     catch_signals(None)
     if dedup and debug:   show_mem_stats()
 
@@ -3455,15 +3385,15 @@ def autoprune(vol, needed_space=0, apmode="off", include=set()):
 
 def merge_manifests(volume, msessions=None, mtarget=None, addcol=False, rdiff=[]):
     # Enh: implement mtarget to support merge_sessions()
-    aset      = volume.archive
+    aset      = volume.archive                    ; slist  = []
     msessions = msessions or volume.sesnames
     sespaths  = [ os.path.basename(volume.sessions[x].path) for x in msessions ]
     tmp       = aset.big_tmpdir if volume.volsize() > 128000000000 else tmpdir
-    outfile   = tempfile.NamedTemporaryFile(dir=tmp, delete=False)    ; slist  = []
+    outfile   = tempfile.NamedTemporaryFile(dir=tmp, prefix="mout_", delete=False)
 
     if not aset.dedupsessions:   volume.decode_manifests(msessions)
     for suffix in ("/manifest\x00", "\x00"):
-        with tempfile.NamedTemporaryFile(dir=tmp, delete=False) as tmpf:
+        with tempfile.NamedTemporaryFile(dir=tmp, prefix="sl_", delete=False) as tmpf:
             tmpf.write(bytes(suffix.join(reversed(sespaths)), encoding="UTF-8"))
             tmpf.write(bytes(suffix, encoding="UTF-8"))
             slist.append(tmpf.name)
@@ -3472,7 +3402,7 @@ def merge_manifests(volume, msessions=None, mtarget=None, addcol=False, rdiff=[]
         # add a column containing the source session
         cdir_obj = tempfile.TemporaryDirectory(dir=tmp, prefix="m_")
         cdir     = cdir_obj.name    ; slsort  = slist[1]
-        shutil.rmtree(cdir, ignore_errors=True);   os.makedirs(cdir)
+        ##shutil.rmtree(cdir, ignore_errors=True);   os.makedirs(cdir) ###
 
         # fix: extrapolate path with filename
         do_exec([[CP.xargs, "-0", "-a", slist[0],
@@ -3491,7 +3421,9 @@ def merge_manifests(volume, msessions=None, mtarget=None, addcol=False, rdiff=[]
 
     do_exec(cmds, out=outfile.file, cwd=cdir)
 
-    if addcol:  cdir_obj.cleanup()
+    for f in slist:  os.remove(f)
+    if rdiff:        os.remove(mfilter)
+    if addcol:       cdir_obj.cleanup()
     return outfile.name
 
 
@@ -3621,6 +3553,7 @@ def merge_sessions(volume, sources, target, clear_sources=False):
     # Local finalize
     volume.sessions[target].rename_saved(ext=".tmp")
 
+    # Enh:  This should be a part of Finalize dest ^
     aset.set_in_process(None, todest=True)    ; os.remove("merge.lst.gz")
     catch_signals(None)
 
@@ -3660,7 +3593,7 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
     decompress  = compressors[aset.compression][0].decompress
     decrypt     = aset.datacrypto.decrypt if aset.datacrypto else None
     compare_digest = hmac.compare_digest          ; b64enc    = base64.urlsafe_b64encode
-    gethash     = hash_funcs[aset.hashtype]
+    gethash     = aset.getdatahash
 
     if diff or verify_only:
         save_path = ""
@@ -3862,7 +3795,7 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
         if sparse and save_path:
             volf_seek(addr)
             if b64enc(gethash(compress(volf_read(chunksize),
-                                       compresslevel)).digest()).decode("ascii") == cksum:
+                                       compresslevel))).decode("ascii") == cksum:
                 continue
             else:
                 print("%s/%s/%s" % (ses, faddr[1:addrsplit], faddr), flush=True, file=gv_stdin)
@@ -3897,10 +3830,10 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
             untrusted_buf = decrypt(untrusted_buf)
 
         # Validate data chunk
-        if not compare_digest(cksum, b64enc(gethash(untrusted_buf).digest()).decode("ascii")):
+        if not compare_digest(cksum, b64enc(gethash(untrusted_buf)).decode("ascii")):
             with open(tmpdir+"/bufdump", "wb") as dump:   dump.write(untrusted_buf)
             print(size, mfline)
-            raise ValueError("Bad hash "+faddr+" :: "+str(b64enc(gethash(untrusted_buf).digest())))
+            raise ValueError("Bad hash "+faddr+" :: "+str(b64enc(gethash(untrusted_buf))))
 
         ##  Buffer is OK  ##
         buf = untrusted_buf   ; bcount += len(buf)
@@ -3963,6 +3896,7 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
     elif diff and diff_count:
         return None
 
+    os.remove(manifest)
     return bcount
 
 
@@ -4216,14 +4150,18 @@ def err_out(text):
     sys.stdout.write(text+"\n")
 
 
+@atexit.register
 def cleanup():
     if debug:
         shutil.rmtree("/tmp/"+prog_name+"-debug", ignore_errors=True)
         shutil.move(tmpdir, "/tmp/"+prog_name+"-debug")
-    if not debug:
-        if dest:   dest.remove_dtmp()
-        if aset:   shutil.rmtree(aset.big_tmpdir, ignore_errors=True)
-        shutil.rmtree(tmpdir, ignore_errors=True)
+    try:
+        if not debug:
+            if dest:   dest.remove_dtmp()
+            if aset:   shutil.rmtree(aset.big_tmpdir, ignore_errors=True)
+            if tmpdir and exists(tmpdir):   shutil.rmtree(tmpdir, ignore_errors=True)
+    except:
+        pass
     if error_cache:
         err_out("Error on volume(s): " + ", ".join(error_cache))
         sys.exit(2)
@@ -4235,7 +4173,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4alpha3"     ; prog_date = "20230520"
+prog_version          = "0.4alpha3"     ; prog_date = "20230524"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 time_start            = time.time()
@@ -4261,11 +4199,11 @@ cpu_flags = [x for x in open("/proc/cpuinfo") if x.startswith("flags")] [0].spli
 max_address           = 0xffffffffffffffff # 64bits
 # for 64bits, a subdir split of 9+7 allows =< 4096 files per dir:
 address_split         = [len(hex(max_address))-2-7, 7]
-hash_bits             = 256
+hash_bits             = 256    ; hash_bytes   = hash_bits // 8
 
-os.environ["LC_ALL"]  = "C"    ; shell_prefix   = "set -e && export LC_ALL=C\n"
+os.environ["LC_ALL"]  = "C"    ; shell_prefix = "set -e && export LC_ALL=C\n"
 
-pjoin       = os.path.join    ; exists = os.path.exists
+pjoin       = os.path.join     ; exists = os.path.exists   ; zipln = itertools.zip_longest
 
 
 ## Parse Arguments ##
@@ -4300,7 +4238,7 @@ parser.add_argument("--remap", action="store_true", default=False, help="Remap s
 parser.add_argument("--dest", default="",     help="URL to archive")
 parser.add_argument("--dest-name", "-n", default="", help="Nickname for dest location")
 parser.add_argument("--local", default="",    help="Init: LVM vg/pool containing source volumes")
-parser.add_argument("--encrypt", default="xchacha20", help="Init: compression type:level")
+parser.add_argument("--encrypt", default="xchacha20-t3", help="Encryption mode")
 parser.add_argument("--compression", default="", help="Init: compression type:level")
 parser.add_argument("--hashtype", default="", help="Init: hash function type")
 parser.add_argument("--chunk-factor", dest="chfactor", type=int,
@@ -4339,11 +4277,13 @@ options.unattended = options.unattended or not sys.stdin.isatty()
 
 ## General Configuration ##
 
+signal_handlers  = {}    ; signals_caught = []    ; error_cache = []
+
 # vardir  : holds data not directly related to an archive, such as nicknames for archive URLs.
 # cachedir: holds cached archive metadata.
 vardir      = "/var/lib/"+prog_name
 cachedir    = options.metadir if options.metadir else "/var/cache/"+prog_name
-tmpdir_obj  = tempfile.TemporaryDirectory(prefix=prog_name)   ; tmpdir = tmpdir_obj.name
+tmpdir      = tempfile.mkdtemp(prefix=prog_name, dir="/tmp")
 
 os.makedirs(vardir, exist_ok=True)
 shutil.rmtree("/tmp/"+prog_name+"-debug", ignore_errors=True)
@@ -4351,15 +4291,13 @@ os.makedirs(tmpdir+"/rpc")
 Destination.write_helper_program(tmpdir+"/rpc")
 agent_helper_write(tmpdir)
 
-signal_handlers  = {}    ; signals_caught = []    ; error_cache = []
-
 # Dict of compressors in the form: (library, default_compress_level, compress_func)
 compressors      =    {"zlib":   (zlib, 4, zlib.compress),
                        "bz2" :   (bz2,  9, bz2.compress)}
 if zstd:   compressors["zstd"] = (zstd, 3, lambda data, lvl: zstd.compress(data, lvl, 3))
 
-hash_funcs       = {"sha256" : hashlib.sha256,
-                    "blake2b": functools.partial(hashlib.blake2b, digest_size=hash_bits//8)}
+hash_funcs       = {"sha256"     : hashlib.sha256,
+                    "blake2b"    : lambda x: hashlib.blake2b(x, digest_size=hash_bytes).digest()}
 
 
 # Create ArchiveSet and Destination objects with get_configs().
