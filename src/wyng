@@ -289,9 +289,10 @@ class ArchiveSet:
 
     # Set or clear state for the archive as 'in_process' in case of interruption during write.
     # Format is list containing strings or list of strings. For latter, ':|' is the delimiter.
-    def set_in_process(self, outer_list, tmp=False, todest=True):
+    def set_in_process(self, outer_list, tmp=False, save=True, todest=True):
         fssync(aset.path)
         self.in_process = [] if outer_list is None else outer_list
+        if not save:   return
         self.save_conf(".tmp" if tmp else "")
 
         #if not tmp:   os.replace(self.confpath+".tmp", self.confpath)
@@ -875,8 +876,9 @@ class DataCryptography:
 
         if mknoncekey or mkmhashkey:
             subkeys = self.derive_subkeys(2, self.key, size=self.key_sz)
-            if mknoncekey:   self.noncekey = subkeys[0]
-            if mkmhashkey:   self.mhashkey = subkeys[1]
+            if mknoncekey:   self.noncekey = bytearray(subkeys[0])
+            if mkmhashkey:   self.mhashkey = bytearray(subkeys[1])
+            del(subkeys)
 
         return self.counter
 
@@ -902,9 +904,8 @@ class DataCryptography:
 
     def derive_subkeys(self, qty, key, salt=b'', size=None):
         assert qty > 1
-        m = map(bytearray, Cryptodome.Protocol.KDF.HKDF(key, size, salt, Cryptodome.Hash.SHA256,
-                                                        qty, b'Wyng-Subkeys'))
-        return tuple(m)
+        return Cryptodome.Protocol.KDF.HKDF(key, size, salt, Cryptodome.Hash.SHA256,
+                                            qty, b'Wyng-Subkeys')
 
     def gethash_hmac(self, buf):
         return hmac.digest(self.mhashkey, buf, "sha256")
@@ -2123,16 +2124,16 @@ def helper_merge():
                 elif ln[0] == "-rm" and exists(ln[1]):
                     remove(ln[1])
             open("CHECK-mv-rm","w").close()
+        os.chdir("..")     #  CD
     except Exception as err:
         print(err)    ; sys.exit(60)
 
 def helper_merge_finalize():
     try:
         print("Merge: Finalize target")
-        os.chdir("merge")  #  CD                 ; open("CHECK-start-finalize","w").close()
+        m = "merge/"    ; open("CHECK-start-finalize","w").close()
         for f in ("/info", "/manifest.z"):
-            if not resume or exists(target+f+".tmp"):  replace(target+f+".tmp", merge_target+f)
-        os.chdir("..")     #  CD
+            if not resume or exists(m+target+f+".tmp"): replace(m+target+f+".tmp", m+merge_target+f)
         if not resume or not exists(target):         replace("merge/"+merge_target, target)
         if not resume or exists("volinfo.tmp"):      replace("volinfo.tmp", "volinfo")
         if not resume or exists("archive.ini.tmp"):  replace("archive.ini.tmp", "../archive.ini")
@@ -2147,7 +2148,6 @@ def helper_merge_finalize():
 cmd = sys.argv[1]   ; msync = "--sync" in sys.argv   ; magic  = b"\xff\x11\x15"
 tmpdir = os.path.dirname(os.path.abspath(sys.argv[0]))  
 exists = os.path.exists    ; replace = os.replace    ; remove = os.remove
-if "--finalize" in sys.argv:   catch_signals()
 if cmd in ("receive","dedup") and exists(tmpdir+"/dest.lst.gz"):
     lstf = gzip.open(tmpdir+"/dest.lst.gz", "rt")
 else:
@@ -2166,7 +2166,10 @@ if cmd == "merge":
         ln = lstf.readline().strip()
         if ln == "###":  break
         src_list.append(ln)
-    na = helper_merge_finalize() if "--finalize" in sys.argv else helper_merge()
+    if "--finalize" not in sys.argv:
+        helper_merge()
+    catch_signals()
+    helper_merge_finalize()
 elif cmd == "receive":
     helper_receive(lstf if lstf else sys.stdin)
 elif cmd == "send":
@@ -3406,7 +3409,6 @@ def merge_manifests(volume, msessions=None, mtarget=None, addcol=False, rdiff=[]
         # add a column containing the source session
         cdir_obj = tempfile.TemporaryDirectory(dir=tmp, prefix="m_")
         cdir     = cdir_obj.name    ; slsort  = slist[1]
-        ##shutil.rmtree(cdir, ignore_errors=True);   os.makedirs(cdir) ###
 
         # fix: extrapolate path with filename
         do_exec([[CP.xargs, "-0", "-a", slist[0],
@@ -3517,20 +3519,20 @@ def merge_sessions(volume, sources, target, clear_sources=False):
         for ses in sources:
             if ses in volume.sessions:   volume.delete_session(ses, remove=False)
 
+    cmds = []    ; dest_cmds = dest.cd + destvol
     if not resume:
         aset.set_in_process(None, tmp=True, todest=False)
         volume.sessions[target].save_info(".tmp")
-        do_exec([[CP.tar, "-cf", "-", "../archive.ini", "../archive.ini.tmp", "merge.lst.gz",
-                            target+"/manifest.z.tmp", target+"/info.tmp", "volinfo.tmp"],
-                 dest.run_args([dest.cd + destvol + " && tar --no-same-owner -xmf -"])
-                ], cwd=volume.path)
+        cmds += [CP.tar, "-cf", "-", "../archive.ini", "../archive.ini.tmp", "merge.lst.gz",
+                            target+"/manifest.z.tmp", target+"/info.tmp", "volinfo.tmp"]
+        dest_cmds += " && tar --no-same-owner -xmf -"
 
     # Start merge operation on dest
-    retcode = dest.run([dest.cd + destvol + " && python3 "
+    retcode = do_exec([cmds, dest.run_args([dest_cmds + " && python3 "
                         + dest.dtmp+"/dest_helper.py merge "+merge_target
                         + (" --resume" if resume else "") + (" --sync" if options.maxsync else "")
-                        ],
-                        check=False, out=">>"+tmpdir+"/merge.log"
+                         ])
+                        ], cwd=volume.path, check=False, out=tmpdir+"/merge.log"
                       )
 
     catch_signals()
@@ -3541,24 +3543,13 @@ def merge_sessions(volume, sources, target, clear_sources=False):
         for f in ("merge.lst.gz", "volinfo.tmp", "vi.dat.tmp", target+"/info.tmp"):
             if exists(f):  os.remove(f)
         dest.run([dest.cd + destvol + " && rm -rf merge merge.lst.gz"], check=False)
-        err_out("Error: Merge could not initialize!")
-        if not resume:   sys.exit(1)
+        x_it(1, "Error: Merge could not initialize!")
     elif retcode != 0:
         x_it(retcode, "Error: Remote exited!")
 
-    # Finalize merge operation on dest
-    dest.run([dest.cd + destvol + " && python3 "
-                +dest.dtmp+"/dest_helper.py merge --finalize"+(" --resume" if resume else "")
-                +" && rm -rf merge merge.lst.gz"
-                ],
-                trap=True, out=">>"+tmpdir+"/merge.log"
-            )
-
     # Local finalize
     volume.sessions[target].rename_saved(ext=".tmp")
-
-    # Enh:  This should be a part of Finalize dest ^
-    aset.set_in_process(None, todest=True)    ; os.remove("merge.lst.gz")
+    aset.set_in_process(None, save=False)
     catch_signals(None)
 
     # Check consistency after resuming merge
@@ -3566,6 +3557,7 @@ def merge_sessions(volume, sources, target, clear_sources=False):
                                 manifest=True):
         x_it(1, "Error: Local and dest metadata differ.")
 
+    os.remove("merge.lst.gz")
     for ses in sources:  shutil.rmtree(volume.path+"/"+ses, ignore_errors=True)
 
 
@@ -4177,12 +4169,11 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4alpha3"     ; prog_date = "20230525"
+prog_version          = "0.4alpha3"     ; prog_date = "20230526"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
-time_start            = time.time()
-monotonic_start       = time.monotonic()
-aset = dest = None
+aset = dest = storage = None
+time_start, monotonic_start = time.time(), time.monotonic()
 
 
 if sys.hexversion < 0x3080000:
