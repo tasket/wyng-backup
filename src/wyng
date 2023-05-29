@@ -37,7 +37,7 @@ try:
     from Cryptodome.Cipher import ChaCha20 as Cipher_ChaCha20
     from Cryptodome.Cipher import ChaCha20_Poly1305 as Cipher_ChaCha20_Poly1305
     from Cryptodome.Random import get_random_bytes
-    import Cryptodome, Cryptodome.Protocol.KDF, Cryptodome.Hash
+    import Cryptodome, Cryptodome.Protocol.KDF, Cryptodome.Hash.SHA512
 except:
     Cipher_ChaCha20 = Cipher_ChaCha20_Poly1305 = None
 
@@ -207,7 +207,7 @@ class ArchiveSet:
 
         # Enh: use 'hashtype' value for non-test modes ###
         if datacrypto and datacrypto.mhashkey:
-            self.getdatahash = datacrypto.gethash_hmac
+            self.getdatahash = datacrypto.getmhash_hmac
         else:
             self.getdatahash = hash_funcs[self.hashtype]
 
@@ -761,8 +761,8 @@ def agent_make(agname, duration, keys):
 
 class DataCryptography:
 
-    crypto_key_bits = 256        ; max_ct_bits = 128
-    max_keyfile_sz  = ((crypto_key_bits*2) + max_ct_bits) * 2 // 8
+    crypto_key_bits = 256      ; max_ct_bits = 128        ; salt_sz = 64
+    max_keyfile_sz  = (salt_sz + (max_ct_bits // 8)) * 4  # max 4 slots
     time_headroom   = int(60*60*24*365.25*50)             ; timesz  = 32 // 8
 
     # Matrix of recommended mode pairs = 'formatcode: (data, metadata)'
@@ -797,22 +797,16 @@ class DataCryptography:
         if ci_type.startswith("xchacha20") and Cryptodome.version_info[0:2] < (3,9):
             raise RuntimeError("Cryptodome version >= 3.9 required for xchacha20 cipher.")
 
-        if not issubclass(type(keyfile), io.IOBase):
-            if not exists(keyfile) and init:   open(keyfile, "wb").close()
-            keyfile =  open(keyfile, "r+b", buffering=0)
-
-        mknoncekey      = mkmhashkey = False
         self.keyfile    = keyfile          ; self.ci_type  = ci_type
-        self.key        = None             ; kbits = self.crypto_key_bits
-        self.slot       = slot             ; self.counter  = self.ctstart = None
-        self.ctcadence  = cadence          ; self.auth     = False
+        self.slot       = slot             ; self.slot_offset = self.get_slot_offset(slot)
+        self.ctcadence  = cadence          ; mknoncekey    = mkmhashkey = False
         self.time_start = time_start       ; self.monotonic_start = monotonic_start
-        self.get_rnd    = get_random_bytes
+        self.get_rnd    = get_random_bytes ; self.auth     = False
 
         # xchacha20 common
         self.key_sz  = self.crypto_key_bits//8 ; self.max_count = 2**80-64
         self.nonce_sz= 24                      ; self.buf_start = self.nonce_sz
-        self.countsz = self.max_count.bit_length() // 8
+        self.countsz = 10
         self.randomsz=self.nonce_sz - self.countsz - self.timesz
         self.ChaCha20_new = Cipher_ChaCha20.new
         self.ChaCha20_Poly1305_new = Cipher_ChaCha20_Poly1305.new
@@ -856,29 +850,41 @@ class DataCryptography:
         else:
             raise ValueError("Invalid cipher spec "+ci_type)
 
-        self.slot_offset = (kbits*2//8 + self.max_ct_bits//8) * self.slot
 
         # Load counter and key
-        if init:
-            self.key     = self.new_key(passphrase)
-        else:
-            keyfile.seek(self.slot_offset)    ; ctbytes = keyfile.read(self.countsz)
-            # Advance counter with a safe margin 'cadence X2' if cadence is quick (<101)
-            self.counter = self.ctstart = (cadence * 2 * int(cadence < 101)) \
-                         + int.from_bytes(ctbytes, "big")
-            salt         = keyfile.read(self.key_sz)   ; assert len(salt) == self.key_sz
-
-            if agentkeys:
-                self.key = agentkeys[slot]
+        if not issubclass(type(keyfile), io.IOBase):
+            if not exists(keyfile) and init:
+                open(keyfile, "wb").close()    ; self.keyfile = open(keyfile, "r+b", buffering=0)
+                for ii in range(4):
+                    self.keyfile.seek(self.get_slot_offset(ii))
+                    self.keyfile.write(bytes(self.countsz) + self.get_rnd(self.salt_sz))
             else:
-                self.key = self.derive_key(salt, passphrase, self.key_sz)
-            assert len(self.key) == self.key_sz and type(self.key) is bytearray
+                self.keyfile = open(keyfile, "r+b", buffering=0)
 
-        if mknoncekey or mkmhashkey:
-            subkeys = self.derive_subkeys(2, self.key, size=self.key_sz)
-            if mknoncekey:   self.noncekey = bytearray(subkeys[0])
-            if mkmhashkey:   self.mhashkey = bytearray(subkeys[1])
-            del(subkeys)
+        if os.fstat(self.keyfile.fileno()).st_size != self.max_keyfile_sz:
+            self.keyfile.truncate(self.max_keyfile_sz)
+
+        ct, salt     = self.load_slot(self.slot)
+        # Kludge for original counter mode salt
+        if ci_type in ("xchacha20","xchacha20-poly1305"):   salt = salt[:32]
+        # Advance counter with a safe margin 'cadence X2' if cadence is quick (<101)
+        self.counter = self.ctstart = ct + (cadence * 2 * int(cadence < 101))
+
+        if agentkeys:
+            self.key = agentkeys[slot]
+        else:
+            self.key = self.derive_key(salt, passphrase, self.key_sz)
+        assert len(self.key) == self.key_sz and type(self.key) is bytearray
+
+        if mknoncekey:
+            _na, nk_salt  = self.load_slot(2)
+            self.noncekey = self.derive_subkey(self.key, 64, 0, nk_salt,
+                                               b"Wyng_Nonces" + str(self.slot).encode())
+
+        if mkmhashkey:
+            _na, mhk_salt = self.load_slot(3)
+            self.mhashkey = self.derive_subkey(self.key, 64, 1, mhk_salt,
+                                               b"Wyng-Manifest-Hash" + str(self.slot).encode())
 
         return self.counter
 
@@ -890,11 +896,15 @@ class DataCryptography:
         if self.mhashkey:   clear_array(self.mhashkey)
 
 
-    # Key file binary format: counter=8B, key=key_sz
-    def new_key(self, passphrase):
-        salt = self.get_rnd(self.key_sz)      ; self.counter = self.ctstart = 0
-        self.keyfile.seek(self.slot_offset)   ; self.keyfile.write(bytes(self.countsz) + salt)
-        return self.derive_key(salt, passphrase, self.key_sz)
+    def get_slot_offset(self, slot):
+        return (self.salt_sz + (self.max_ct_bits//8)) * slot
+
+    def load_slot(self, slot):
+        self.keyfile.seek(self.get_slot_offset(slot))
+        counter = int.from_bytes(self.keyfile.read(self.countsz), "big")
+        salt    = self.keyfile.read(self.salt_sz)
+        assert len(salt) == self.salt_sz and salt != bytes(len(salt))
+        return counter, salt
 
     def derive_key(self, salt, passphrase, size):
         key = bytearray(hashlib.scrypt(passphrase, salt=salt, n=2**19, r=8, p=1,
@@ -902,12 +912,13 @@ class DataCryptography:
         clear_array(passphrase)
         return key
 
-    def derive_subkeys(self, qty, key, salt=b'', size=None):
-        assert qty > 1
-        return Cryptodome.Protocol.KDF.HKDF(key, size, salt, Cryptodome.Hash.SHA256,
-                                            qty, b'Wyng-Subkeys')
+    def derive_subkey(self, key, size, subslot, salt, context):
+        skeys = Cryptodome.Protocol.KDF.HKDF(key, size, salt, Cryptodome.Hash.SHA512,
+                                             max(subslot+1, 2), context)
+        return bytearray(skeys[subslot])
 
-    def gethash_hmac(self, buf):
+    # Provide keyed hash func for manifests (send/receive)
+    def getmhash_hmac(self, buf):
         return hmac.digest(self.mhashkey, buf, "sha256")
 
     # Update key counter on disk; call directly at end of transaction if cadence > 1
@@ -916,10 +927,26 @@ class DataCryptography:
         self.keyfile.write(self.counter.to_bytes(self.countsz, "big"))
         self.keyfile.flush()
 
+    # Update counter with a new value, if greater
     def set_counter(self, ct):
         if ct > self.counter:
             self.counter = ct    ; self.save_counter()
         return self.counter
+
+    # Decrypt [X]ChaCha20:
+    def _dec_chacha20(self, buf):
+        untrusted_buf = memoryview(buf)
+        nonce  = untrusted_buf[:self.nonce_sz]
+        cipher = self.ChaCha20_new(key=self.key, nonce=nonce)
+        return cipher.decrypt(untrusted_buf[self.nonce_sz:])
+
+    # Decrypt [X]ChaCha20-Poly1305:
+    def _dec_chacha20_poly1305(self, buf):
+        untrusted_buf = memoryview(buf)
+        nonce  = untrusted_buf[:self.nonce_sz]
+        ci_tag = untrusted_buf[self.nonce_sz:self.buf_start]
+        cipher = self.ChaCha20_Poly1305_new(key=self.key, nonce=nonce)
+        return cipher.decrypt_and_verify(untrusted_buf[self.buf_start:], ci_tag)
 
     # Encrypt [X]ChaCha20:
     def _enc_chacha20(self, buf, _na):
@@ -937,13 +964,6 @@ class DataCryptography:
         buf    = cipher.encrypt(buf)
         return  nonce, buf
 
-    # Decrypt [X]ChaCha20:
-    def _dec_chacha20(self, buf):
-        untrusted_buf = memoryview(buf)
-        nonce  = untrusted_buf[:self.nonce_sz]
-        cipher = self.ChaCha20_new(key=self.key, nonce=nonce)
-        return cipher.decrypt(untrusted_buf[self.nonce_sz:])
-
     # Encrypt [X]ChaCha20-Poly1305:
     def _enc_chacha20_poly1305(self, buf):
         self.counter += 1
@@ -959,14 +979,6 @@ class DataCryptography:
         cipher = self.ChaCha20_Poly1305_new(key=self.key, nonce=nonce)
         buf, ci_tag = cipher.encrypt_and_digest(buf)
         return  b''.join((nonce, ci_tag)), buf
-
-    # Decrypt [X]ChaCha20-Poly1305:
-    def _dec_chacha20_poly1305(self, buf):
-        untrusted_buf = memoryview(buf)
-        nonce  = untrusted_buf[:self.nonce_sz]
-        ci_tag = untrusted_buf[self.nonce_sz:self.buf_start]
-        cipher = self.ChaCha20_Poly1305_new(key=self.key, nonce=nonce)
-        return cipher.decrypt_and_verify(untrusted_buf[self.buf_start:], ci_tag)
 
     # Encrypt [X]ChaCha20 (random nonce)
     def _enc_chacha20_t2(self, buf, _na):
@@ -4169,7 +4181,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4alpha3"     ; prog_date = "20230526"
+prog_version          = "0.4alpha3"     ; prog_date = "20230528"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 aset = dest = storage = None
