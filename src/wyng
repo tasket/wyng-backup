@@ -4417,10 +4417,10 @@ elif options.action == "receive":
 
 
 elif options.action == "verify":
-    if options.session and len(options.session.split(",")) > 1:
-        x_it(1, "Specify one session for verify.")
+    if not (loopvols := datavols if options.all else selected_vols):
+        x_it(1, "Volume name(s) required for verify.")
 
-    for dv in datavols if options.all else selected_vols:
+    for dv in loopvols:
         count = receive_volume(storage, aset.vols[dv],
                     select_ses="" if not options.session else options.session.split(",")[0],
                     verify_only=1, save_path="")
@@ -4428,8 +4428,10 @@ elif options.action == "verify":
 
 
 elif options.action == "diff":
+    if not (loopvols := datavols if options.all else selected_vols):
+        x_it(1, "Volume name(s) required for diff.")
 
-    for dv in datavols if options.all else selected_vols:
+    for dv in loopvols:
         count = receive_volume(storage, aset.vols[dv], save_path="", diff=True)
         if count is None:   error_cache.append(dv)
 
@@ -4440,7 +4442,7 @@ elif options.action == "list":
 
 elif options.action == "add":
     if len(options.volumes) < 1:
-        x_it(1, "Volume name(s) required for 'add'.")
+        x_it(1, "Volume name(s) required for add.")
 
     for dv in options.volumes:
         if dv not in aset.vols:   add_volume(aset, dv, options.voldesc)
