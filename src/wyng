@@ -1137,6 +1137,7 @@ class LocalStorage:
             self.LVolClass    = self.stypes[self.pooltype]
             self.path = self.path.rstrip("/")+"/"
             self.update_vol_list(arch_vols)
+            self.metadata_unlock()
 
         if debug:
             print("**fstype is", self.fstype)
@@ -1189,7 +1190,7 @@ class LocalStorage:
     def metadata_lock(self, lvpool=None):
         mark = 0    ; spath = self.path
         if self.pooltype == "tlvm":
-            self._lvm_meta_snapshot("reserve")
+            self._lvm_meta_snapshot("reserve", pool=lvpool)
         elif self.pooltype == "rlnk":
             if not self.fstype or self.fstype not in ("btrfs","xfs"):
                 raise ValueError("Bad fstype "+repr(self.fstype))
@@ -1203,10 +1204,14 @@ class LocalStorage:
     def metadata_unlock(self, lvpool=None):
         mark_t = (0, self.path)
         if self.pooltype == "tlvm":
-            self._lvm_meta_snapshot("release")
+            for pl in {lvpool} if lvpool else {getattr(x, "pool_lv", self.lvpool)
+                                               for x in self.lvols.values()}:
+                if pl:   self._lvm_meta_snapshot("release", pool=pl)
+
         elif self.pooltype == "rlnk":
             if self.fstype == "btrfs":
                 mark_t = self._btrfs_subvol_snapshot(delete=True)
+
         self.locked = False
         return mark_t
 
@@ -2238,10 +2243,10 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", inlines=[], text=
         inf     = infunc(infile, "r"+ftype) if infile else SPr.DEVNULL
 
     errf = open(tmpdir+"/err.log", "a")  ; print("--+--", file=errf)
-    commands = [x for x in commands if x is not None]
+    if debug:   print(commands, file=errf, flush=True)
 
     # Start each command, linking them via pipes
-    procs = []    ; start_t = time.monotonic()
+    commands = list(filter(None, commands))    ; procs = []    ; start_t = time.monotonic()
     for i, clist in enumerate(commands):
         p = SPr.Popen(clist, cwd=cwd, stdin=inf if i==0 else procs[i-1].stdout,
                              stdout=outf if i==len(commands)-1 else SPr.PIPE,
@@ -4150,7 +4155,6 @@ def show_dest_free(dest):
 # Exit with simple message
 def x_it(code, text):
     err_out(text)
-    if tmpdir:   cleanup()
     sys.exit(code)
 
 
@@ -4181,7 +4185,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4alpha3"     ; prog_date = "20230528"
+prog_version          = "0.4alpha3"     ; prog_date = "20230531"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 aset = dest = storage = None
@@ -4485,7 +4489,5 @@ elif options.action == "arch-deduplicate":
     show_dest_free(aset.dest)
     dedup_existing(aset)
 
-
-cleanup()
 
 ## END ##
