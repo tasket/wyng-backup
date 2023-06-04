@@ -376,15 +376,14 @@ class ArchiveSet:
 
 class ArchiveVolume:
 
-    __slots__ = ("vid","name","hashval","archive","path","vgname","mapfile","sessions","sesnames",
+    __slots__ = ("vid","name","hashval","archive","path","vgname","sessions","sesnames",
                  "_seslist","last","meta_checked","tags","desc","changed_bytes")
 
     def __init__(self, archive, vid, hashval, path, vgname, name=None, children=2):
         self.vid       = vid                       ; self.tags    = {}
         self.archive   = archive                   ; self.path    = path
-        self.vgname    = vgname                    ; self.mapfile = path+"/deltamap"
+        self.vgname    = vgname                    ; self.hashval = hashval
         self.last      = "None"                    ; self.meta_checked = False
-        self.hashval   = hashval
         # persisted here:
         self.name      = name                      ; self.desc      = ""
         self.sessions  = {}                        ; self.sesnames= []
@@ -473,14 +472,17 @@ class ArchiveVolume:
         if vsize is None:  vsize = self.volsize()
         return (vsize-1) - ((vsize-1) % self.archive.chunksize)
 
+    def mapfile(self, pos=None):
+        s = self.sessions[self.sesnames[pos] if pos else self.last]
+        return f"{self.path}/{s.name}_{s.sequence}.deltamap"
+
     # Based on last session size unless volume_size is specified.
     def mapsize(self, volume_size=None):
-        if not volume_size:
-            volume_size = self.volsize()
-        return (volume_size // self.archive.chunksize // 8) + 1
+        vs = volume_size or self.volsize()
+        return (vs // self.archive.chunksize // 8) + 1
 
     def map_used(self, ext=""):
-        return os.stat(self.mapfile+ext).st_blocks if exists(self.mapfile+ext) else 0
+        return os.stat(self.mapfile()+ext).st_blocks if exists(self.mapfile()+ext) else 0
 
     def changed_bytes_add(self, amount, reset=False, save=False):
         if reset:
@@ -493,12 +495,12 @@ class ArchiveVolume:
                 print(self.changed_bytes, file=f)
                 f.flush()    ; os.fsync(f.fileno())
 
-    def init_deltamap(self, bmfile, bmsize, timestamp=None):
-        self.changed_bytes_add(0, reset=True)
+    def init_deltamap(self, timestamp=None):
+        self.changed_bytes_add(0, reset=True)    ; bmfile = self.mapfile()
         if exists(bmfile):
             os.remove(bmfile)
         with open(bmfile, "wb") as bmapf:
-            bmapf.truncate(bmsize)    ; bmapf.flush()
+            bmapf.truncate(self.mapsize())    ; bmapf.flush()
         if timestamp:   os.utime(bmfile, ns=(timestamp,)*2)
 
     def new_session(self, sname, addtags={}):
@@ -765,7 +767,7 @@ class DataCryptography:
     max_keyfile_sz  = (salt_sz + (max_ct_bits // 8)) * 4  # max 4 slots
     time_headroom   = int(60*60*24*365.25*50)             ; timesz  = 32 // 8
 
-    # Matrix of recommended mode pairs = 'formatcode: (data, metadata)'
+    # Matrix of recommended mode pairs = 'formatcode: (data, metadata, selectable)'
     # User selects a data cipher which is automatically paired w a metadata authentication cipher.
     crypto_codes    = {b"00":  ("off",                "off", 1),
                        b"10":  ("n/a",                "n/a", 0),
@@ -1730,11 +1732,20 @@ def arch_check(storage, aset, vol_list=None, startup=False):
                 raise ValueError(f"Duplicate sequence {ses.sequence} in {ses.name}")
         vol._seslist = None
 
+        if len(vol.sessions) > 1 and exists(vol.mapfile(-2)):   os.remove(vol.mapfile(-2))
+        if exists(vol.path+"/deltamap"):
+            if not exists(vol.mapfile()):
+                os.replace(vol.path+"/deltamap", vol.mapfile())
+            else:
+                os.remove(vol.path+"/deltamap")
+
         if startup:   continue
 
         # Remove stray volume dirs and other files
         if options.clean:   dest.run([dest.cd + " && rm -r"] + vdir_strays)
         deepclean = options.clean and options.force
+        for pos in list(range(len(vol.sessions)))[:-1]:
+            if exists(vol.mapfile(pos)):   os.remove(vol.mapfile(pos))
 
         # Check all combined manifests are correct
         print("  Checking indexes,", end="", flush=True) ; mset = []
@@ -2401,7 +2412,7 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only):
             add_volume(aset, datavol, options.voldesc)
 
         # 'mapfile' is the deltamap file, snap1 holds vol state between send/monitor ops
-        vol   = aset.vols[datavol]                        ; mapfile = vol.mapfile
+        vol   = aset.vols[datavol]                        ; mapfile = vol.mapfile()
         l_vol = storage.new_vol_entry(datavol, vol.vid)   ; snap1, snap2 = l_vol.snap1, l_vol.snap2
 
         if not l_vol.exists():
@@ -2441,7 +2452,7 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only):
                       #)
                  #):
                 ## Handle inadvertant mapfile snapshot mis-match
-                #vol.init_deltamap(mapfile, vol.mapsize())
+                #vol.init_deltamap()
                 #lvols[snap1].delete()    ; print("  Removed mis-matched delta", snap1vol)
 
             if not exists(mapfile) and lvols[snap1].exists() \
@@ -2449,7 +2460,7 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only):
             and "delta" not in lvols[snap1].tags \
             and os.stat(mapfile).st_mtime_ns == lvols[snap1].gettime():
                 # Latest session matches current snapshot; OK to make blank map.
-                vol.init_deltamap(mapfile, vol.mapsize())
+                vol.init_deltamap()
 
         elif monitor_only:
             print("  Skipping %s; No data." % datavol)    ; continue
@@ -2484,7 +2495,7 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only):
             add_volume(aset, datavol, options.voldesc)
 
         # 'mapfile' is the deltamap file, snap1 holds vol state between send/monitor ops
-        vol   = aset.vols[datavol]                        ; mapfile = vol.mapfile
+        vol   = aset.vols[datavol]                        ; mapfile = vol.mapfile()
         l_vol = storage.new_vol_entry(datavol, vol.vid)   ; snap1, snap2 = l_vol.snap1, l_vol.snap2
 
         if not l_vol.exists():
@@ -2499,7 +2510,7 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only):
             if not exists(mapfile) and lastses.gettime() == l_vol.gettime():
                 # Create deltamap if its missing but datavol and lastses timestamps align
                 if debug:   print("init_deltamap", vol.name)
-                vol.init_deltamap(mapfile, vol.mapsize(), timestamp=l_vol.gettime())
+                vol.init_deltamap(timestamp=l_vol.gettime())
 
             if exists(mapfile) and not lvols[snap1].exists() \
             and os.stat(mapfile).st_mtime_ns == l_vol.gettime() == lastses.gettime():
@@ -2582,7 +2593,7 @@ def update_delta_digest_lvm(storage, aset, datavol, monitor_only):
     vol         = aset.vols[datavol]         ; chunksize  = aset.chunksize
     snap1vol    = lvols[vol.name].snap1      ; snap2vol   = lvols[vol.name].snap2
     snap1size   = lvols[snap1vol].getsize()  ; snap2size  = lvols[snap2vol].getsize()
-    assert len(vol.sessions) and exists(vol.mapfile)
+    assert len(vol.sessions) and exists(vol.mapfile())
     assert storage.block_size == 512
 
     # Get xml parser and initialize vars
@@ -2596,7 +2607,7 @@ def update_delta_digest_lvm(storage, aset, datavol, monitor_only):
     markall_pos = (next_chunk_addr//chunksize//8) if snap2size-1 >= next_chunk_addr else None
 
     # Setup access to deltamap as an mmap object.
-    with open(vol.mapfile, "r+b") as bmapf:
+    with open(vol.mapfile(), "r+b") as bmapf:
         snap_ceiling = max(snap1size, snap2size) // storage.block_size
         chunkblocks  = chunksize // storage.block_size
         bmap_size    = vol.mapsize(max(snap1size, snap2size))
@@ -2644,7 +2655,7 @@ def update_delta_digest_lvm(storage, aset, datavol, monitor_only):
     if monitor_only:
         t1   = lvols[snap2vol].gettime()
         tags = ["--addtag="+vol.last, "--addtag=delta-"+str(t1)]
-        t2   = lvols[datavol].rotate_snapshots(rotate=map_updated, timestamp_path=vol.mapfile,
+        t2   = lvols[datavol].rotate_snapshots(rotate=map_updated, timestamp_path=vol.mapfile(),
                                                addtags=tags)
         assert t1 == t2
         print(("\r  %d ch, %d dis" % (dnewchunks, dfreedblocks//chunksize))
@@ -2716,7 +2727,7 @@ def update_delta_digest_reflink(storage, aset, datavol, monitor_only):
     vol         = aset.vols[datavol]         ; chunksize  = aset.chunksize
     snap1vol    = l_vol.snap1                ; snap2vol   = l_vol.snap2
     snap1size   = lvols[snap1vol].getsize()  ; snap2size  = lvols[snap2vol].getsize()
-    assert len(vol.sessions) and exists(vol.mapfile)
+    assert len(vol.sessions) and exists(vol.mapfile())
 
     # Check for volume size increase;
     # Chunks from 'markall_pos' onward will be marked for backup.
@@ -2724,7 +2735,7 @@ def update_delta_digest_reflink(storage, aset, datavol, monitor_only):
     markall_pos = (next_chunk_addr//chunksize//8) if snap2size-1 >= next_chunk_addr else None
 
     # Setup access to deltamap as an mmap object.
-    with open(vol.mapfile, "r+b") as bmapf, gzip.open(tmpdir+"/delta."+vol.vid, "r") as deltaf:
+    with open(vol.mapfile(), "r+b") as bmapf, gzip.open(tmpdir+"/delta."+vol.vid, "r") as deltaf:
         snap_ceiling = max(snap1size, snap2size) // storage.block_size
         chunkblocks  = chunksize // storage.block_size
         bmap_size    = vol.mapsize(max(snap1size, snap2size))
@@ -2774,7 +2785,7 @@ def update_delta_digest_reflink(storage, aset, datavol, monitor_only):
     catch_signals()
     map_updated = dnewchunks+dfreedblocks+anynew+vol.map_used() > 0
     if monitor_only:
-        t = lvols[datavol].rotate_snapshots(rotate=map_updated, timestamp_path=vol.mapfile)
+        t = lvols[datavol].rotate_snapshots(rotate=map_updated, timestamp_path=vol.mapfile())
         print(("\r  %d ch, %d dis" % (dnewchunks, dfreedblocks//chunksize))
                 if map_updated else "\r  No changes   ")
 
@@ -2788,7 +2799,7 @@ def update_delta_digest_reflink(storage, aset, datavol, monitor_only):
 def manifest_to_deltamap(volume, manifest, mapsize):
     aset = volume.archive
     with open(manifest, "r") as mf, \
-         open(volume.mapfile, "r+b") as bmapf:
+         open(volume.mapfile(), "r+b") as bmapf:
 
         bmapf.truncate(mapsize)    ; bmapf.flush()
         bmap_mm = mmap.mmap(bmapf.fileno(), 0)       ; chunksize  = aset.chunksize
@@ -2833,6 +2844,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
         fullmanifest = None
     fman_hash     = fman_fname = ""
 
+    old_mapfile     = vol.mapfile()
     ses = vol.new_session(bksession, addtags=ses_tags)
     ses.localtime   = str(snap2vol.gettime())
     ses.volsize     = snap2size
@@ -2871,7 +2883,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
     # Open source volume and its delta bitmap as r, session manifest as w.
     with open(snap2vol.path,"rb", buffering=chunksize) as vf,    \
          open(sdir+"-tmp/manifest.tmp", "wt") as hashf,            \
-         open("/dev/zero" if send_all else vol.mapfile,"rb") as bmapf:
+         open("/dev/zero" if send_all else old_mapfile,"rb") as bmapf:
 
         vf_seek = vf.seek; vf_read = vf.read   ; BytesIO = io.BytesIO
         gethash = aset.getdatahash             ; b64enc  = base64.urlsafe_b64encode
@@ -3044,6 +3056,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
         # Local finalize
         ses.path = ses.path.rsplit("-tmp",maxsplit=1)[0]   ; os.replace(ses.path+"-tmp", ses.path)
         ses.rename_saved(ext=".tmp")
+        os.remove(old_mapfile)
         fssync(vol.path)
 
     else:
@@ -3052,8 +3065,8 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
         vol.delete_session(bksession)    ; shutil.rmtree(aset.path+"/"+sdir+"-tmp")
 
     if not benchmark:
-        vol.init_deltamap(vol.mapfile, vol.mapsize())
-        storage.lvols[vol.name].rotate_snapshots(rotate=True, timestamp_path=vol.mapfile,
+        vol.init_deltamap()
+        storage.lvols[vol.name].rotate_snapshots(rotate=True, timestamp_path=vol.mapfile(),
                                                  addtags=["--addtag="+vol.last])
     catch_signals(None)
     if dedup and debug:   show_mem_stats()
@@ -3668,7 +3681,7 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
 
         # possibly use snapshot as baseline for receive
         if returned_home and options.use_snapshot \
-        and (snap_lv := save_storage.lvols[l_vol.snap1]).is_paired(vol.mapfile, vol.last):
+        and (snap_lv := save_storage.lvols[l_vol.snap1]).is_paired(vol.mapfile(), vol.last):
             print("Using snapshot as baseline.")   ; assert l_vol.path == save_path
             sparse_write = use_snapshot = True    ; sparse = False
             l_vol.delete(force=True)
@@ -3714,9 +3727,9 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
                     #"--addtag=arch-"+aset.uuid, "-s", vgname+"/"+datavol, "-n", snap1vol]])
             #print("  Initial snapshot created for", datavol)
             #get_lvm_vgs(aset.vgname)
-            #if not exists(vol.mapfile):
-                #vol.init_deltamap(vol.mapfile, vol.mapsize())
-            #bmapf = open(vol.mapfile, "r+b")
+            #if not exists(vol.mapfile()):
+                #vol.init_deltamap()
+            #bmapf = open(vol.mapfile(), "r+b")
             #bmapf.truncate(vol.mapsize())    ; bmapf.flush()
             #bmap_mm = mmap.mmap(bmapf.fileno(), 0)
         else:
@@ -3896,11 +3909,11 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
         storage.setperms(save_path, ses_obj.permissions)
         if is_num(ses_obj.localtime):   storage.settime(save_path, int(ses_obj.localtime))
         if returned_home and select_ses == sessions[-1] and storage.pooltype == "rlnk":
-            vol.init_deltamap(vol.mapfile, vol.mapsize())
+            vol.init_deltamap()
             tags = ["--addtag=wyng", "--addtag=arch-"+aset.uuid, "--addtag="+sessions[-1]]
             save_storage.lvols[l_vol.snap2].delete()
             save_storage.lvols[l_vol.snap2].create(snapshotfrom=vol.name, addtags=tags)
-            l_vol.rotate_snapshots(timestamp_path=vol.mapfile)
+            l_vol.rotate_snapshots(timestamp_path=vol.mapfile())
             print("  Snapshot paired for", vol.name)
     if remap:
         bmapf.close()
@@ -4185,7 +4198,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4alpha3"     ; prog_date = "20230531"
+prog_version          = "0.4alpha3"     ; prog_date = "20230603"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 aset = dest = storage = None
