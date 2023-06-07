@@ -2236,7 +2236,7 @@ elif cmd == "dedup":
 # List of commands may include 'None' instead of a child list; these will be ignored.
 
 def do_exec(commands, cwd=None, check=True, out="", infile="", inlines=[], text=False,
-            pipefail=False, timeout=None):
+            pipefail=False, timeout=None, getctl=False):
     ftype   = "t" if text else "b"
     if issubclass(type(out), io.IOBase):
         outf = out
@@ -2253,7 +2253,7 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", inlines=[], text=
         infunc  = gzip.open if infile.endswith(".gz") else open
         inf     = infunc(infile, "r"+ftype) if infile else SPr.DEVNULL
 
-    errf = open(tmpdir+"/err.log", "a")  ; print("--+--", file=errf)
+    errf = open(tmpdir+"/err.log", "a")  ; print("--+--", file=errf)   ; err = None
     if debug:   print(commands, file=errf, flush=True)
 
     # Start each command, linking them via pipes
@@ -2272,26 +2272,33 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", inlines=[], text=
         pass
 
     # Monitor and control processes
-
-    while True:
-        err = None    ; finish = to_flag = False
-        for p1 in reversed(procs):
-            retcode = p1.poll()
-            if not finish and retcode is None:
-                try:
-                    p1.communicate(timeout=2)
-                except SPr.TimeoutExpired:
-                    to_flag = True
+    def control_execs():
+        while True:
+            err = None    ; finish = to_flag = False
+            for p1 in reversed(procs):
+                retcode = p1.poll()
+                if not finish and retcode is None:
+                    try:
+                        p1.communicate(timeout=2)
+                    except SPr.TimeoutExpired:
+                        to_flag = True
+                        continue
+                    retcode = p1.returncode   ; finish = True
+                    if check and (retcode != 0):
+                        err = p1              ; finish = True
+                elif finish and retcode is None:
+                    p1.terminate()
                     continue
-                retcode = p1.returncode   ; finish = True
-                if check and (retcode != 0):
-                    err = p1              ; finish = True
-            elif finish and retcode is None:
-                p1.terminate()
-                continue
 
-        if err or not to_flag or (timeout and time.monotonic() - start_t > timeout):
-            break
+            if err or not to_flag or (timeout and time.monotonic() - start_t > timeout):
+                break
+            else:
+                yield err
+
+    if getctl:
+        return control_execs(), inf, outf, errf
+    else:
+        for ii in control_execs():   err = ii
 
     for f in [inf, outf, errf]:
         if type(f) is not int: f.close()
@@ -2507,16 +2514,19 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only):
         if len(vol.sessions):
             lastses = vol.sessions[vol.last]
 
-            if not exists(mapfile) and lastses.gettime() == l_vol.gettime():
+            if not exists(mapfile) and lvols[snap1].exists() \
+            and lastses.gettime() == lvols[snap1].gettime()  \
+            and lastses.volsize == lvols[snap1].getsize():
                 # Create deltamap if its missing but datavol and lastses timestamps align
-                if debug:   print("init_deltamap", vol.name)
-                vol.init_deltamap(timestamp=l_vol.gettime())
+                vol.init_deltamap(timestamp=lvols[snap1].gettime())
 
             if exists(mapfile) and not lvols[snap1].exists() \
-            and os.stat(mapfile).st_mtime_ns == l_vol.gettime() == lastses.gettime():
+            and os.stat(mapfile).st_mtime_ns == l_vol.gettime() == lastses.gettime() \
+            and lastses.volsize == l_vol.getsize():
                 # Create snap1 from datavol if its missing but other timestamps align
-                if debug:   print("make snap1", vol.name)
                 lvols[snap1].create(snapshotfrom=datavol, ro=True)
+                # Avoid race condition
+                if lvols[snap1].gettime() != lastses.gettime():   lvols[snap1].delete()
 
             if not lvols[snap1].exists() or not exists(mapfile) \
             or os.stat(mapfile).st_mtime_ns != lvols[snap1].gettime():
@@ -2691,27 +2701,29 @@ def get_reflink_deltas(storage, aset, datavols):
               [CP.awk, r'BEGIN {PAT="^\\s*ext:\\s+logical_offset:\\s+physical_offset:\\s+length:"}'
                        r' NR==1, $0 ~ PAT {HEADER=$0; next}'
                        r' END {if (!(HEADER ~ PAT && $0 ~ /extents? found$/)) exit 2}'
-                       r' /delalloc/ {next}'
                        r' /^\s*[0-9]+:/ {gsub(/\.|:/, " ", $0);'
-                                        r' print '+side+', $2, $6, $3, $4, $5}'
+                                        r' print '+side+', $2, $6, $3, $4, $5, $NF'
+                      +(r'}' if side=='22' else r' > "'+deltapath+r'-p"}')
                ]
             ])
         if debug:   print(devs, "\n", cmds)
         assert len(devs) == 1
 
-        # Save output from first volume to a file
-        do_exec(cmds[0], out=deltapath+"11")
+        # Save output from first volume to a named pipe
+        os.mkfifo(deltapath+"-p")
+        procs11ctl = do_exec(cmds[0], timeout=60, getctl=True)
         #Enh: maybe use dev+inode as fname
 
-        # Pipe output from second volume to 'sort' and include first file
-        do_exec(cmds[1] +
-                [ [CP.sort, "-ms", "-k2n,2", deltapath+"11", "-"],
-                  [CP.uniq, "-u", "-f1"],
-                  [CP.gzip, "-2"]
-                 ],
-                    out=deltapath
-                )
-        if not debug:   os.remove(deltapath+"11")
+        # Pipe output from second volume to 'sort' and include pipe from first
+        procs22ctl = do_exec(cmds[1] +
+                             [ [CP.sort, "-ms", "-k2n,2", deltapath+"-p", "-"],
+                               [CP.uniq, "-u", "-f1"],
+                               [CP.gzip, "-2"]
+                              ],
+                                 out=deltapath, timeout=60, getctl=True
+                            )
+        for ii in zipln(procs11ctl[0], procs22ctl[0]):   errs = ii
+        os.remove(deltapath+"-p")
 
     # Check here that Btrfs snapshot gen#s did not change.
     # If changed: retry, x_it(7), use remap mode or pause/cancel the Btrfs op.
@@ -4198,7 +4210,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4alpha3"     ; prog_date = "20230603"
+prog_version          = "0.4alpha3"     ; prog_date = "20230606"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 aset = dest = storage = None
