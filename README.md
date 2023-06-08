@@ -44,7 +44,7 @@ Public release v0.3 with a range of features including:
 
  - Marking and selecting snapshots with user-defined tags
 
-Alpha pre-release v0.4 major enhancements:
+Beta release v0.8 major enhancements:
 
  - Btrfs and XFS source volumes
 
@@ -69,7 +69,7 @@ Alpha pre-release v0.4 major enhancements:
  Wyng is released under a GPL license and comes with no warranties expressed or implied.
 
 
-v0.4 Requirements & Setup
+v0.8beta Requirements & Setup
 ---
 
 Before starting:
@@ -113,7 +113,7 @@ wyng send my_big_volume
 The examples above create a 'mylaptop.backup' directory on the destination.
 The `--dest` argument includes the destination type, remote system (where applicable)
 and directory path.
-The optional `-n` or `--dest-name` argument tells Wyng to associate the dest location
+The optional `-n` or `--nickname` argument tells Wyng to associate the local and dest locations
 with the name "default" which will be automatically used for future Wyng commands.
 
 
@@ -148,11 +148,12 @@ Run Wyng using the following commands and arguments in the form of:
 
 | _Option_                      | _Description_
 |-------------------------------|--------------
---local=_vg/pool_  _...or..._    | (arch-init) Storage pool containing local volumes.
+--local=_vg/pool_  _...or..._    | Storage pool containing local volumes.
 --local=_/absolute/path_    | 
 --dest=_type:location_   | (arch-init) Destination of backup archive.
---dest-name=, -n _name_  | Retrieve a dest location, or with --dest store location under _name_
+--nickname=, -n _name_  | Retrieve local, dest locations. Or with --local/--dest opts, store locations under _name_
 --session=_date-time[,date-time]_ | Select a session or session range by date-time or tag (receive, verify, prune).
+--authmin=_N_          | Remember authentication for N minutes.
 --volex=_volname_      | Exclude volumes (send, monitor, list, prune).
 --dedup, -d            | Use deduplication for send (see notes).
 --all-before           | Select all sessions before the specified _--session date-time_ (prune).
@@ -373,10 +374,6 @@ complete form `arch-check` is to supply no parameters, which checks all sessions
 
 #### Options/Parameters for arch-init
 
-`--local` takes one of two forms: Either the source volume group and pool as 'vgname/poolname'
-or a file path on a reflink-capable filesystem such as Btrfs or XFS (for Btrfs the path should
-end at a subvolume).
-
 `--dest` is a URL pointing to the location where the archive will be stored.
 It accepts one of the following forms, always ending in a mountpoint path:
 
@@ -387,7 +384,6 @@ It accepts one of the following forms, always ending in a mountpoint path:
 |__qubes:__//vm-name[/path]                     | Qubes virtual machine
 |__qubes-ssh:__//vm-name:me@example.com[:port][/path]  | SSH server via a Qubes VM
 
-Note: --local and --dest are required.
 
 `--compression` accepts the forms `type` or `type:level`. The three types available are `zstd` (zstandard), plus `zlib` and `bz2` (bzip2). Note that Wyng will only default
 to `zstd` when the 'python3-zstd' package is installed; otherwise it will fall back to the less
@@ -408,22 +404,27 @@ Note that _encrypt, compression, hashtype_ and _chunk-factor_ cannot be changed 
 
 ### General Options
 
+`--local`
+
+Takes one of two forms: Either the source volume group and pool as 'vgname/poolname'
+or a file path on a reflink-capable filesystem such as Btrfs or XFS (for Btrfs the path should
+end at a subvolume).  Required for commands `send`, `monitor` and `diff` (and `receive` when
+not using `--saveto`).
+
 `--dest=URL`
 
-The option tells Wyng where to access the archive and is required for all commands unless
-`--dest-name` or `-n` is used.  See the URL Form table in the above `arch-init` section.
+This option tells Wyng where to access the archive and is required for most commands unless
+`--nickname` or `-n` is used to fetch a stored URL.  See the URL Form table in the above `arch-init` section.
 
-`--dest-name=name`, `-n name`
+`--nickname=name`, `-n name`
 
-Use a shorthand name for the destination.  Together with `--dest` the dest URL spec is stored
-under _name_; without `--dest` the URL associated with _name_ is retrieved and used.
+Use a nickname for the local & destination URLs.  Together with `--dest` or `--local` the
+URL spec is stored under _name_; otherwise the URL associated with _name_ is retrieved and used.
 If the special name
-_default_ is set, it will automatically be used for the destination URL when neither `--dest` nor
-`--dest-name` nor `-n` are specified on the command line.  There is no particular Wyng command
-required for `--dest-name` and it will store or retrieve dest URLs any time its used on the
-command line.
+_default_ is set, its local/dest values will automatically be used when `--dest` or `--local`
+are absent and there is no explicit nickname on the command line.
 
-Note that dest names are stored only in local system settings, separate from the archive itself.
+Note that nicknames are stored only in local system settings, separate from the archive itself.
 
 `--session=<date-time>[,<date-time>]` OR
 `--session=^<tag>[,^<tag>]`
@@ -549,8 +550,8 @@ to nail down the precisely desired range by observing the output of
 
 ### Testing
 
-* Wyng v0.4alpha3 has one major departure from previous alphas:  The `wyng.backup040/default`
-directory structure is no longer automatically used.  This means whatever you specify
+* Wyng v0.4alpha3 and later no longer create or require the `wyng.backup040/default`
+directory structure.  This means whatever you specify
 in `--dest` is all there is to the archive path.  It also means accessing an alpha1 or
 alpha2 archive will require you to either include those dirs explicitly in your --dest path
 or rename '../wyng.backup040/default' to something else you prefer to use.

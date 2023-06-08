@@ -21,7 +21,7 @@
 
 import sys, signal, os, stat, shutil, subprocess as SPr, time, datetime
 import re, mmap, bz2, zlib, gzip, tarfile, io, fcntl, tempfile
-import argparse, configparser, hashlib, hmac, functools, uuid
+import argparse, configparser, json, hashlib, hmac, functools, uuid
 import getpass, base64, platform, resource, itertools, string, struct
 import xml.etree.ElementTree, ctypes, ctypes.util, atexit
 from array import array         ; from urllib.parse import urlparse
@@ -84,8 +84,8 @@ class ArchiveSet:
         self.compression = "zstd" if zstd else "zlib"
         self.compr_level = str(compressors[self.compression][1])
         self.hashtype    = "hmac-sha256"
-        self.vgname      = None
-        self.poolname    = None
+        self.vgname      = ""
+        self.poolname    = ""
         self.uuid        = None
         self.updated_at  = None
         self.data_cipher = self.ci_mode = None
@@ -1733,6 +1733,8 @@ def arch_check(storage, aset, vol_list=None, startup=False):
         vol._seslist = None
 
         if len(vol.sessions) > 1 and exists(vol.mapfile(-2)):   os.remove(vol.mapfile(-2))
+
+        # temporary: migrate to new deltamap naming ###
         if exists(vol.path+"/deltamap"):
             if not exists(vol.mapfile()):
                 os.replace(vol.path+"/deltamap", vol.mapfile())
@@ -1791,7 +1793,29 @@ def check_manifest_sequence(vol, sesnames, addcol=False):
 def get_configs(opts):
     load_children = 1 if opts.action in ("arch-delete","delete","add") else 2
 
-    dest = Destination(opts.dest, opts.dest_name)
+    locs = {}    ; lname, dest_url, local_url = opts.nickname, opts.dest, opts.local
+    try:
+        with open(locfile := vardir+"/locations.json", "r") as lf:   locs = json.load(lf)
+    except:
+        pass
+
+    if lname:
+        if re.match(".*[,=\^]", lname) or any(map(str.isspace, lname)) \
+        or not lname.isprintable():
+            x_it(1,"Error: [^control], [space], and ',^=' not allowed in dest-name.")
+        if lname in locs:
+            if not local_url:  local_url = locs[lname][1]
+            if not dest_url:   dest_url  = locs[lname][2]
+    elif "default" in locs:
+        if not local_url:  local_url = locs["default"][1]
+        if not dest_url:   dest_url  = locs["default"][2]
+
+    if lname and (opts.local or opts.dest):
+        print(f"Naming local + dest '{lname}'.")
+        locs[lname] = (time.time(), local_url, dest_url)
+        with open(locfile, "w") as lf:   json.dump(locs, lf)   ; del(locs)
+
+    dest = Destination(dest_url)
 
     # FIX: allow monitor to function offline
     # FIX: check dest names for meta path if 'local_actions'
@@ -1814,27 +1838,34 @@ def get_configs(opts):
         arch_init(ArchiveSet(tmpdir, dest), opts)
         x_it(0, "Done.")
 
-    aset = get_configs_remote(dest, cachedir)
+    aset = get_configs_remote(dest, cachedir, opts.authmin)    ; os.utime(aset.path)
 
     if aset.updated_at is None:
         x_it(6, "Archive not found.")
-    elif opts.local:
-        aset.set_local(opts.local)
+    elif local_url:
+        aset.set_local(local_url) ####
 
-    os.utime(aset.path)
-    return aset
+    require_online = opts.action in ("monitor","send","receive","diff") and not opts.saveto
+    if require_online and not local_url:
+        x_it(7, f"Please specify local storage for {opts.action}.")
+    storage = LocalStorage((None, local_url) if local_url else (aset.vgname, aset.poolname),
+                        require_online=require_online,
+                        arch_vols=[(x.name, x.vid) for x in aset.vols.values()],
+                        auuid=aset.uuid)
+
+    return aset, storage
 
 
 # Fetch copy of archive metadata from remote/dest
 
-def get_configs_remote(dest, base_dir):
+def get_configs_remote(dest, base_dir, authmin):
 
     recv_list = [(ArchiveSet.confname,  ArchiveSet.max_conf_sz),
                  (ArchiveSet.confname+".salt", DataCryptography.max_keyfile_sz)]
     fetch_file_blobs(recv_list, tmpdir, dest, skip0=True)
 
     # Instantiate ArchiveSet to authenticate archive.ini
-    aset = ArchiveSet(tmpdir, dest, children=0, pass_agent=options.pass_agent)
+    aset = ArchiveSet(tmpdir, dest, children=0, pass_agent=authmin)
 
     assert aset.updated_at is not None
     arch_dir = base_dir + aset.subdir;   ini = pjoin(arch_dir, ArchiveSet.confname)
@@ -1892,19 +1923,9 @@ class Destination:
 
     magic       = b"\xff\x11\x15"
 
-    def __init__(self, dspec, dname):
+    def __init__(self, dspec):
 
-        # fetch locations list, dest spec
-        dest_url = dspec    ; locs = self.load_locations()
-        if dname:
-            if re.match(".*[,=\^]", dname) or any(map(str.isspace, dname)) \
-            or not dname.isprintable():
-                x_it(1,"Error: [^control], [space], and ',^=' not allowed in dest-name.")
-            if not dest_url and dname in locs:
-                dest_url = locs[dname]
-        elif not dspec and "default" in locs and not options.metadir:  #### options
-            dest_url = locs["default"]
-
+        dest_url = dspec
         # parse and validate dest spec
         if not dest_url:                 x_it(1,"Error: Missing dest specification.")
         if not dest_url.isprintable():   x_it(1,"Error: [^control] not allowed in dest.")
@@ -1920,7 +1941,7 @@ class Destination:
         self.sys    = dparts.netloc
         self.path   = os.path.normpath(dparts.path)
         self.cd     = " cd '"+self.path+"'"      ; self.archive_ini_hash = "none"
-        self.free   = self.dtmp     =  None      ; self.dname  = dname
+        self.free   = self.dtmp     =  None
         self.online = self.writable =  False
 
         self.run_map = {"file":       [CP.sh],
@@ -1930,12 +1951,6 @@ class Destination:
                         "qubes-ssh":  [CP.qvm_run, "--no-color-stderr", "--no-color-output",
                                       "-p", self.sys.split(":")[0]]
                         }
-
-        # save locations change
-        if dspec and dname:
-            print(f"Naming this URL '{dname}'.")
-            locs[dname] = dspec
-            self.save_locations(locs)    ; del(locs)
 
 
     def remove_dtmp(self):
@@ -1947,19 +1962,7 @@ class Destination:
         for ln in open(fpath,"r"):
             if ln.startswith("wyng_check_free"):  self.free = int(ln.split()[1])
 
-    def save_locations(self, locs):
-        with open(vardir+"/dests", "w") as fl:
-            for x, y in locs.items():   print(x, y, file=fl)
-
-    def load_locations(self):
-        if not exists(vardir+"/dests"):   return {}
-        with open(vardir+"/dests", "r") as fl:
-            loc = { x: y for x, y in (w.strip().split(" ",maxsplit=1) for w in fl) }
-
-        return loc
-
     # Run system commands on destination
-
     def run(self, commands, direct=False, timeout=None,
             infile="", inlines=None, out="", check=True, trap=False):
 
@@ -2590,6 +2593,7 @@ def get_lvm_deltas(storage, aset, datavols):
             storage.metadata_unlock(apool)
 
     catch_signals(None)
+    return datavols
 
 
 # update_delta_digest: Translates raw lvm delta information
@@ -2680,15 +2684,17 @@ def get_reflink_deltas(storage, aset, datavols):
 
     assert aset.chunksize % storage.block_size == 0
     blksz = str(storage.block_size)
-    generation, stpath = storage.metadata_lock()    ; lvols = storage.lvols    ; procs=[]
+    generation, stpath = storage.metadata_lock()    ; lvols = storage.lvols
 
-    for vol in (aset.vols[x] for x in datavols):
+    for vol in (aset.vols[x] for x in datavols[:]):
         locvol = lvols[vol.name]
         deltapath = tmpdir+"/delta."+vol.vid    ; cmds, devs = [], set()
 
         for side, snapname in (("11", locvol.snap1), ("22", locvol.snap2)):
             if not exists(stpath+snapname):
-                raise RuntimeError("Volume path '%s' does not exist." % fpath)
+                err_out("'%s' snapshot not found (different subvolume?); Skipping..." % fpath)
+                datavols.remove(vol.name);   break
+
             # filefrag output: file extent ranges, their 'physical' block ranges, extent length
             # sort -m will merge this output from two vols (file extent #s are pre-sorted)
             # uniq -u will filter-out exact extent/phys/len matches between the two vols
@@ -2706,6 +2712,7 @@ def get_reflink_deltas(storage, aset, datavols):
                       +(r'}' if side=='22' else r' > "'+deltapath+r'-p"}')
                ]
             ])
+        if vol.name not in datavols:   continue
         if debug:   print(devs, "\n", cmds)
         assert len(devs) == 1
 
@@ -2731,6 +2738,8 @@ def get_reflink_deltas(storage, aset, datavols):
     # while doing one snap pair at a time to increase chances of success.
     if storage.metadata_unlock()[0] != generation:
         x_it(7, "fs gen ids differ.")
+
+    return datavols
 
 
 def update_delta_digest_reflink(storage, aset, datavol, monitor_only):
@@ -3215,7 +3224,7 @@ def monitor_send(storage, aset, datavols, monitor_only):
 
     if len(incrementals) > 0:
         if verbose:   print("Acquiring deltas.")
-        storage.acquire_deltas(storage, aset, incrementals)
+        incrementals = storage.acquire_deltas(storage, aset, incrementals)
 
     if not monitor_only:
         cmpvols = [x for x in aset.vols.values()
@@ -4210,11 +4219,13 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4alpha3"     ; prog_date = "20230606"
+prog_version          = "0.8wip"        ; prog_date = "20230607"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
+
 aset = dest = storage = None
 time_start, monotonic_start = time.time(), time.monotonic()
+signal_handlers  = {}    ; signals_caught = []    ; error_cache = []
 
 
 if sys.hexversion < 0x3080000:
@@ -4252,8 +4263,8 @@ parser = argparse.ArgumentParser(description="")
 parser.add_argument("action", choices=local_actions+dest_actions, help="Action to take")
 parser.add_argument("-u", "--unattended", action="store_true", default=False,
                     help="Non-interactive, supress prompts")
-parser.add_argument("--pass-agent", type=int, default=0,
-                    help="Minutes to remember passphrase")
+parser.add_argument("--authmin", type=int, default=0,
+                    help="Minutes to remember authentication")
 parser.add_argument("--all-before", dest="allbefore", action="store_true", default=False,
                     help="Select all sessions before --session date-time.")
 parser.add_argument("--all", action="store_true", default=False)
@@ -4272,7 +4283,7 @@ parser.add_argument("--use-snapshot", action="store_true", default=False,
                     help="Use local snapshot as baseline for receive")
 parser.add_argument("--remap", action="store_true", default=False, help="Remap snapshots")
 parser.add_argument("--dest", default="",     help="URL to archive")
-parser.add_argument("--dest-name", "-n", default="", help="Nickname for dest location")
+parser.add_argument("--nickname", "-n", default="", help="Nickname for dest location")
 parser.add_argument("--local", default="",    help="Init: LVM vg/pool containing source volumes")
 parser.add_argument("--encrypt", default=None, help="Encryption mode")
 parser.add_argument("--compression", default="", help="Init: compression type:level")
@@ -4313,19 +4324,24 @@ options.unattended = options.unattended or not sys.stdin.isatty()
 
 ## General Configuration ##
 
-signal_handlers  = {}    ; signals_caught = []    ; error_cache = []
-
 # vardir  : holds data not directly related to an archive, such as nicknames for archive URLs.
 # cachedir: holds cached archive metadata.
 vardir      = "/var/lib/"+prog_name
-cachedir    = options.metadir if options.metadir else "/var/cache/"+prog_name
+cachedir    = options.metadir or vardir
 tmpdir      = tempfile.mkdtemp(prefix=prog_name, dir="/tmp")
 
 os.makedirs(vardir, exist_ok=True)
 shutil.rmtree("/tmp/"+prog_name+"-debug", ignore_errors=True)
 os.makedirs(tmpdir+"/rpc")
+
 Destination.write_helper_program(tmpdir+"/rpc")
 agent_helper_write(tmpdir)
+
+# temporary: migrate cache to vardir ###
+if exists(_oldcache:="/var/cache/wyng") and not options.metadir:
+    for fn in [x.name for x in os.scandir(_oldcache) if x.name.startswith("a_")]:
+        if not exists(cachedir+"/"+fn):   os.rename(_oldcache+"/"+fn, cachedir+"/"+fn)
+    shutil.rmtree(_oldcache, ignore_errors=True)
 
 # Dict of compressors in the form: (library, default_compress_level, compress_func)
 compressors      =    {"zlib":   (zlib, 4, zlib.compress),
@@ -4337,14 +4353,9 @@ hash_funcs       = {"hmac-sha256": None,
                     "blake2b"    : lambda x: hashlib.blake2b(x, digest_size=hash_bytes).digest()}
 
 
-# Create ArchiveSet and Destination objects with get_configs().
+# Create ArchiveSet, LocalStorage and Destination objects with get_configs().
 # Passphrase input happens here; no stdin before this point!
-aset    = get_configs(options)    ; dest = aset.dest
-require_online = options.action in ("monitor","send","receive","diff") and not options.saveto
-storage = LocalStorage((None, options.local) if options.local else (aset.vgname, aset.poolname),
-                       require_online=require_online,
-                       arch_vols=[(x.name, x.vid) for x in aset.vols.values()],
-                       auuid=aset.uuid)
+aset, storage    = get_configs(options)    ; dest = aset.dest
 
 
 # Handle unfinished in_process:
