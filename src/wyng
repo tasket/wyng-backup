@@ -21,7 +21,7 @@
 
 import sys, signal, os, stat, shutil, subprocess as SPr, time, datetime
 import re, mmap, bz2, zlib, gzip, tarfile, io, fcntl, tempfile
-import argparse, configparser, json, hashlib, hmac, functools, uuid
+import argparse, configparser, hashlib, hmac, functools, uuid
 import getpass, base64, platform, resource, itertools, string, struct
 import xml.etree.ElementTree, ctypes, ctypes.util, atexit
 from array import array         ; from urllib.parse import urlparse
@@ -1793,28 +1793,7 @@ def check_manifest_sequence(vol, sesnames, addcol=False):
 def get_configs(opts):
     load_children = 1 if opts.action in ("arch-delete","delete","add") else 2
 
-    locs = {}    ; lname, dest_url, local_url = opts.nickname, opts.dest, opts.local
-    try:
-        with open(locfile := vardir+"/locations.json", "r") as lf:   locs = json.load(lf)
-    except:
-        pass
-
-    if lname:
-        if re.match(".*[,=\^]", lname) or any(map(str.isspace, lname)) \
-        or not lname.isprintable():
-            x_it(1,"Error: [^control], [space], and ',^=' not allowed in dest-name.")
-        if lname in locs:
-            if not local_url:  local_url = locs[lname][1]
-            if not dest_url:   dest_url  = locs[lname][2]
-    elif "default" in locs:
-        if not local_url:  local_url = locs["default"][1]
-        if not dest_url:   dest_url  = locs["default"][2]
-
-    if lname and (opts.local or opts.dest):
-        print(f"Naming local + dest '{lname}'.")
-        locs[lname] = (time.time(), local_url, dest_url)
-        with open(locfile, "w") as lf:   json.dump(locs, lf)   ; del(locs)
-
+    dest_url, local_url = opts.dest, opts.local
     dest = Destination(dest_url)
 
     # FIX: allow monitor to function offline
@@ -1838,7 +1817,7 @@ def get_configs(opts):
         arch_init(ArchiveSet(tmpdir, dest), opts)
         x_it(0, "Done.")
 
-    aset = get_configs_remote(dest, cachedir, opts.authmin)    ; os.utime(aset.path)
+    aset = get_configs_remote(dest, cachedir, int(opts.authmin))    ; os.utime(aset.path)
 
     if aset.updated_at is None:
         x_it(6, "Archive not found.")
@@ -1923,9 +1902,8 @@ class Destination:
 
     magic       = b"\xff\x11\x15"
 
-    def __init__(self, dspec):
+    def __init__(self, dest_url):
 
-        dest_url = dspec
         # parse and validate dest spec
         if not dest_url:                 x_it(1,"Error: Missing dest specification.")
         if not dest_url.isprintable():   x_it(1,"Error: [^control] not allowed in dest.")
@@ -3196,7 +3174,7 @@ def monitor_send(storage, aset, datavols, monitor_only):
 
     curtime = time.strftime("%Y%m%d-%H%M%S", time.localtime(time_start))
 
-    print("\nPreparing snapshots...")
+    print(f"\nPreparing snapshots in '{storage.path}'...")
     incrementals, send_alls \
         = storage.prep_snapshots(storage, aset, datavols, monitor_only)
     storage.update_vol_list([(x.name, x.vid) for x in aset.vols.values()])
@@ -3233,7 +3211,7 @@ def monitor_send(storage, aset, datavols, monitor_only):
         if compare_files(aset, volumes=cmpvols, sessions=cmpses):
             x_it(1, "Error: Local and archive metadata differ.")
 
-        print("\nSending backup session %s to '%s'." % (curtime, dest.spec))
+        print("\nSending backup session %s:" % curtime)
 
     for datavol in incrementals + send_alls:
         vol = aset.vols[datavol]    ; updated = False
@@ -4219,7 +4197,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8wip"        ; prog_date = "20230607"
+prog_version          = "0.8wip"        ; prog_date = "20230608"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
@@ -4253,56 +4231,73 @@ os.environ["LC_ALL"]  = "C"    ; shell_prefix = "set -e && export LC_ALL=C\n"
 pjoin       = os.path.join     ; exists = os.path.exists   ; zipln = itertools.zip_longest
 
 
-## Parse Arguments ##
+## Parse Arguments & Etc Config ##
 
-local_actions         = ("monitor","version")
-write_actions         = ("add","send","prune","delete","rename","arch-delete","arch-deduplicate")
-dest_actions          = ("list","receive","verify","diff","arch-check","arch-init") + write_actions
+local_actions       = ("monitor","version")
+write_actions       = ("add","send","prune","delete","rename","arch-delete","arch-deduplicate")
+dest_actions        = ("list","receive","verify","diff","arch-check","arch-init") + write_actions
 
-parser = argparse.ArgumentParser(description="")
-parser.add_argument("action", choices=local_actions+dest_actions, help="Action to take")
-parser.add_argument("-u", "--unattended", action="store_true", default=False,
-                    help="Non-interactive, supress prompts")
-parser.add_argument("--authmin", type=int, default=0,
-                    help="Minutes to remember authentication")
-parser.add_argument("--all-before", dest="allbefore", action="store_true", default=False,
-                    help="Select all sessions before --session date-time.")
-parser.add_argument("--all", action="store_true", default=False)
-parser.add_argument("--session", help="YYYYMMDD-HHMMSS[,YYYYMMDD-HHMMSS] or ^tag_id"
-                                 " select session date|tag, singular or range.")
-parser.add_argument("--tag", action="append",
-                    help="tag_id[,description] Add tags when sending")
-parser.add_argument("--keep", action="append", default=[],
-                    help="YYYYMMDD-HHMMSS or ^tag_id exclude session by date|tag (prune)") 
-parser.add_argument("--volex", action="append", help="Exclude volume")
-parser.add_argument("--autoprune", default="off", help="Automatic pruning")
-parser.add_argument("--save-to", dest="saveto", default="",help="Path to store volume for receive")
-parser.add_argument("--sparse", action="store_true", default=False, help="Retrieve differences only")
-parser.add_argument("--sparse-write", action="store_true", default=False, help="Save differences only")
-parser.add_argument("--use-snapshot", action="store_true", default=False,
-                    help="Use local snapshot as baseline for receive")
-parser.add_argument("--remap", action="store_true", default=False, help="Remap snapshots")
-parser.add_argument("--dest", default="",     help="URL to archive")
-parser.add_argument("--nickname", "-n", default="", help="Nickname for dest location")
-parser.add_argument("--local", default="",    help="Init: LVM vg/pool containing source volumes")
-parser.add_argument("--encrypt", default=None, help="Encryption mode")
-parser.add_argument("--compression", default="", help="Init: compression type:level")
-parser.add_argument("--hashtype", default="", help="Init: hash function type")
-parser.add_argument("--chunk-factor", dest="chfactor", type=int,
-                    help="Init: set chunk size to N*64kB")
-parser.add_argument("--meta-dir", dest="metadir", default="", help="Use alternate metadata path")
-parser.add_argument("--force", action="store_true", default=False, help="For arch-delete")
-parser.add_argument("--clean", action="store_true", default=False, help="Clean snapshots, metadata")
-parser.add_argument("--maxsync", action="store_true", default=False, help="Use more fs sync")
-parser.add_argument("--debug", action="store_true", default=False, help="Debug mode")
-parser.add_argument("--quiet", action="store_true", default=False)
-parser.add_argument("--verbose", action="store_true", default=False)
-parser.add_argument("--dedup", "-d", action="store_true", default=False,
-                    help="Data deduplication (send)")
-parser.add_argument("--volume-desc", dest="voldesc", default="",
-                    help="Set volume description (add, rename, send)")
-parser.add_argument("volumes", nargs="*")
-options = parser.parse_args()    ; options.action = options.action.lower()
+parser_defs = [
+ [["--unattended", "-u"], {"action": "store_true", "help": "Non-interactive, supress prompts"}],
+ [["--authmin"],      {"default": "0", "help": "Minutes to remember authentication"}],
+ [["--all-before"],   {"dest": "allbefore", "action": "store_true",
+                       "help": "Select all sessions before --session date-time."}],
+ [["--all"],          {"action": "store_true"}],
+ [["--session"],      {"help": "YYYYMMDD-HHMMSS[,YYYYMMDD-HHMMSS] or ^tag_id"
+                             " select session date|tag, singular or range."}],
+ [["--tag"],          {"action": "append", "default": [],
+                       "help": "tag_id[,description] Add tags when sending"}],
+ [["--keep"],         {"action": "append", "default": [],
+                       "help": "YYYYMMDD-HHMMSS or ^tag_id exclude session by date|tag (prune)"}],
+ [["--volex"],        {"action": "append", "default": [],
+                       "help": "Exclude volume"}],
+ [["--autoprune"],    {"default": "off",   "help": "Automatic pruning"}],
+ [["--save-to"],      {"dest": "saveto", "default": "", "help": "Path to store volume for receive"}],
+ [["--sparse"],       {"action": "store_true", "help": "Retrieve differences only"}],
+ [["--sparse-write"], {"action": "store_true", "help": "Save differences only"}],
+ [["--use-snapshot"], {"action": "store_true",
+                       "help": "Use local snapshot as baseline for receive"}],
+ [["--remap"],        {"action": "store_true", "help": "Remap snapshots"}],
+ [["--dest"],         {"default": "", "help": "URL to archive"}],
+ [["--local"],        {"default": "", "help": "Init: LVM vg/pool containing source volumes"}],
+ [["--encrypt"],      {"help": "Encryption mode"}],
+ [["--compression"],  {"default": "", "help": "Init: compression type:level"}],
+ [["--hashtype"],     {"default": "", "help": "Init: hash function type"}],
+ [["--chunk-factor"], {"dest": "chfactor",
+                       "help": "Init: set chunk size to N*64kB"}],
+ [["--meta-dir"],     {"dest": "metadir", "default": "", "help": "Use alternate metadata path"}],
+ [["--force"],        {"action": "store_true", "help": "For arch-delete"}],
+ [["--clean"],        {"action": "store_true", "help": "Clean snapshots, metadata"}],
+ [["--maxsync"],      {"action": "store_true", "help": "Use more fs sync"}],
+ [["--debug"],        {"action": "store_true", "help": "Debug mode"}],
+ [["--quiet"],        {"action": "store_true"}],
+ [["--verbose"],      {"action": "store_true"}],
+ [["--dedup", "-d"],  {"action": "store_true", "help": "Data deduplication (send)"}],
+ [["--volume-desc"],  {"dest": "voldesc", "default": "",
+                       "help": "Set volume description (add, rename, send)"}]
+]
+
+def parse_options(args, etcconf):
+    parser_defs_d = {x[0]: y for x, y in parser_defs}
+
+    if exists(etcconf):
+        confp = configparser.ConfigParser()    ; confp.optionxform = lambda option: option
+        confp["var-global-default"] = {}       ; confp.read_file(open(etcconf, "r"))
+        conf_block = ("debug","force","remap","save-to","session","unattended")
+        for k, v in confp["var-global-default"].items():
+            if (kopt := "--"+k) in parser_defs_d and k not in conf_block:
+                if parser_defs_d[kopt].get("action") != "append":
+                    parser_defs_d[kopt]["default"] = v
+                else:
+                    parser_defs_d[kopt]["default"] = list(filter(None, v.splitlines()))
+
+    parser = argparse.ArgumentParser(description="")
+    parser.add_argument("action", choices=local_actions+dest_actions, help="Wyng Commands")
+    for x, y in parser_defs:  parser.add_argument(*x, **y)
+    parser.add_argument("volumes", nargs="*")
+    return parser.parse_args(args)
+
+options = parse_options(sys.argv[1:], "/etc/wyng/wyng.ini"); options.action = options.action.lower()
 
 # Set stdout to devnull if --quiet is specified
 debug = options.debug    #; assert not (options.quiet and (options.verbose or debug))
@@ -4396,7 +4391,7 @@ arch_dt_raw = datetime.datetime.fromtimestamp(float(aset.updated_at), datetime.t
 arch_dt     = arch_dt_raw.astimezone().isoformat(sep=u" ")
 
 print("Encrypted" if (aset.mcrypto and aset.datacrypto) else "Un-encrypted",
-      "archive:", dest.spec,
+      f"archive '{dest.spec}'",
       "\nLast updated %s (%s)" % (arch_dt[:-6], arch_dt[-6:]), flush=True)
 
 # Check volume args against config
