@@ -1187,12 +1187,13 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", text=False, pipef
         if err or not timeout:
             break
 
+    rclist = [0] + list(filter(bool if pipefail else str, ( x.returncode for x in procs )))
+    if check and any(rclist):
+        raise subprocess.SubprocessError("Chain exited "+repr(rclist))
+
     for f in [inf, outf, errf]:
         if type(f) is not int: f.close()
-    if err and check:
-        raise subprocess.CalledProcessError(err.returncode, err.args)
 
-    rclist = [0] + list(filter(bool if pipefail else str, ( x.returncode for x in procs )))
     return rclist[-1]
 
 
@@ -2789,7 +2790,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.3.12"        ; prog_date = "20230323"
+prog_version          = "0.3.13"        ; prog_date = "20230608"
 format_version        = 2               ; debug     = False       ; tmpdir = None
 
 
