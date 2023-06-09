@@ -1788,6 +1788,31 @@ def check_manifest_sequence(vol, sesnames, addcol=False):
     os.remove(manifest)
 
 
+# Parse args and global conf file
+
+def parse_options(args, etcconf):
+    parser_defs_d = {x[0]: y for x, y in parser_defs}
+
+    if exists(etcconf):
+        confp = configparser.ConfigParser()    ; confp.optionxform = lambda option: option
+        confp["var-global-default"] = {}       ; confp.read_file(open(etcconf, "r"))
+        conf_block = ("debug","force","remap","save-to","session","unattended")
+        for k, v in confp["var-global-default"].items():
+            if (kopt := "--"+k) in parser_defs_d and k not in conf_block:
+                if parser_defs_d[kopt].get("action") == "append":
+                    parser_defs_d[kopt]["default"] = list(filter(None, v.splitlines()))
+                elif parser_defs_d[kopt].get("action") in ("store_true","store_false"):
+                    parser_defs_d[kopt]["default"] = bool(int(v))
+                else:
+                    parser_defs_d[kopt]["default"] = v
+
+    parser = argparse.ArgumentParser(description="")
+    parser.add_argument("action", choices=local_actions+dest_actions, help="Wyng Commands")
+    for x, y in parser_defs:  parser.add_argument(*x, **y)
+    parser.add_argument("volumes", nargs="*")
+    return parser.parse_args(args)
+
+
 # Get configuration settings:
 
 def get_configs(opts):
@@ -2215,9 +2240,13 @@ elif cmd == "dedup":
 # selected by beginning 'out' path with '>>'. 'inlines' can be a list-like collection of strings
 # to be used as input instead of 'infile'.
 # List of commands may include 'None' instead of a child list; these will be ignored.
+# 'getctl' returns a tuple(control_execs <generator>, close <func>, (inf, outf, errf))
+# without waiting. The generator allows communicate() and checks to occur in tandem with other
+# commands. The context may be fed into another do_exec invocation via 'otherctl', which will
+# automatically process the separate pipe chains in tandem.
 
 def do_exec(commands, cwd=None, check=True, out="", infile="", inlines=[], text=False,
-            pipefail=False, timeout=None, getctl=False):
+            pipefail=False, timeout=None, getctl=False, otherctl=None):
     ftype   = "t" if text else "b"
     if issubclass(type(out), io.IOBase):
         outf = out
@@ -2253,7 +2282,7 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", inlines=[], text=
         pass
 
     # Monitor and control processes
-    def control_execs():
+    def _iterate_execs():
         while True:
             err = None    ; finish = to_flag = False
             for p1 in reversed(procs):
@@ -2276,18 +2305,28 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", inlines=[], text=
             else:
                 yield err
 
+    def control_execs():
+        for ii in zipln(_iterate_execs(), otherctl[0]() if otherctl else []):
+            yield ii
+
+    def close():
+        other_rcs = otherctl[1]() if otherctl else [] # close other
+        rclist = [0] + list(filter(bool if pipefail else str, ( x.returncode for x in procs )))
+
+        if check and any(rclist):
+            print(repr(rclist), file=errf, flush=True)
+            raise SPr.SubprocessError(repr(commands)+" ### rc="+repr(rclist))
+
+        for f in [inf, outf, errf]:
+            if type(f) is not int: f.close()
+
+        return other_rcs + rclist
+
     if getctl:
-        return control_execs(), inf, outf, errf
-    else:
-        for ii in control_execs():   err = ii
+        return control_execs, close, (inf, outf, errf)
 
-    for f in [inf, outf, errf]:
-        if type(f) is not int: f.close()
-    if err and check:
-        raise SPr.CalledProcessError(err.returncode, err.args)
-
-    rclist = [0] + list(filter(bool if pipefail else str, ( x.returncode for x in procs )))
-    return rclist[-1]
+    for ii in control_execs() if otherctl else _iterate_execs():   pass
+    return close()[-1]
 
 
 # Compare files between local and dest archive, using hashes.
@@ -2696,18 +2735,17 @@ def get_reflink_deltas(storage, aset, datavols):
 
         # Save output from first volume to a named pipe
         os.mkfifo(deltapath+"-p")
-        procs11ctl = do_exec(cmds[0], timeout=60, getctl=True)
+        p11context = do_exec(cmds[0], timeout=60, getctl=True)
         #Enh: maybe use dev+inode as fname
 
         # Pipe output from second volume to 'sort' and include pipe from first
-        procs22ctl = do_exec(cmds[1] +
-                             [ [CP.sort, "-ms", "-k2n,2", deltapath+"-p", "-"],
+        retcode = do_exec(cmds[1] +
+                             [ [CP.sort, "-s", "-k2n,2", deltapath+"-p", "-"],
                                [CP.uniq, "-u", "-f1"],
                                [CP.gzip, "-2"]
                               ],
-                                 out=deltapath, timeout=60, getctl=True
+                                 out=deltapath, timeout=60, otherctl=p11context
                             )
-        for ii in zipln(procs11ctl[0], procs22ctl[0]):   errs = ii
         os.remove(deltapath+"-p")
 
     # Check here that Btrfs snapshot gen#s did not change.
@@ -4257,7 +4295,7 @@ parser_defs = [
  [["--sparse-write"], {"action": "store_true", "help": "Save differences only"}],
  [["--use-snapshot"], {"action": "store_true",
                        "help": "Use local snapshot as baseline for receive"}],
- [["--remap"],        {"action": "store_true", "help": "Remap snapshots"}],
+ [["--remap"],        {"action": "store_true", "help": "Remap volumes from other archive"}],
  [["--dest"],         {"default": "", "help": "URL to archive"}],
  [["--local"],        {"default": "", "help": "Init: LVM vg/pool containing source volumes"}],
  [["--encrypt"],      {"help": "Encryption mode"}],
@@ -4277,27 +4315,7 @@ parser_defs = [
                        "help": "Set volume description (add, rename, send)"}]
 ]
 
-def parse_options(args, etcconf):
-    parser_defs_d = {x[0]: y for x, y in parser_defs}
-
-    if exists(etcconf):
-        confp = configparser.ConfigParser()    ; confp.optionxform = lambda option: option
-        confp["var-global-default"] = {}       ; confp.read_file(open(etcconf, "r"))
-        conf_block = ("debug","force","remap","save-to","session","unattended")
-        for k, v in confp["var-global-default"].items():
-            if (kopt := "--"+k) in parser_defs_d and k not in conf_block:
-                if parser_defs_d[kopt].get("action") != "append":
-                    parser_defs_d[kopt]["default"] = v
-                else:
-                    parser_defs_d[kopt]["default"] = list(filter(None, v.splitlines()))
-
-    parser = argparse.ArgumentParser(description="")
-    parser.add_argument("action", choices=local_actions+dest_actions, help="Wyng Commands")
-    for x, y in parser_defs:  parser.add_argument(*x, **y)
-    parser.add_argument("volumes", nargs="*")
-    return parser.parse_args(args)
-
-options = parse_options(sys.argv[1:], "/etc/wyng/wyng.ini"); options.action = options.action.lower()
+options = parse_options(sys.argv[1:], "/etc/wyng/wyng.ini"); options.action= options.action.lower()
 
 # Set stdout to devnull if --quiet is specified
 debug = options.debug    #; assert not (options.quiet and (options.verbose or debug))
