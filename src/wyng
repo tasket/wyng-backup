@@ -2295,18 +2295,22 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", inlines=[], text=
             else:
                 yield err
 
+    def close():
+        rclist = [0] + list(filter(bool if pipefail else str, ( x.returncode for x in procs )))
+        if check and any(rclist):
+            raise SPr.SubprocessError("Chain exited "+repr(rclist))
+
+        for f in [inf, outf, errf]:
+            if type(f) is not int: f.close()
+
+        return rclist
+
     if getctl:
-        return control_execs(), inf, outf, errf
+        return control_execs, close, (inf, outf, errf)
     else:
         for ii in control_execs():   err = ii
 
-    for f in [inf, outf, errf]:
-        if type(f) is not int: f.close()
-    if err and check:
-        raise SPr.CalledProcessError(err.returncode, err.args)
-
-    rclist = [0] + list(filter(bool if pipefail else str, ( x.returncode for x in procs )))
-    return rclist[-1]
+    return close()[-1]
 
 
 # Compare files between local and dest archive, using hashes.
@@ -2711,18 +2715,19 @@ def get_reflink_deltas(storage, aset, datavols):
 
         # Save output from first volume to a named pipe
         os.mkfifo(deltapath+"-p")
-        procs11ctl = do_exec(cmds[0], timeout=60, getctl=True)
+        p11ctl, p11close, _na = do_exec(cmds[0], timeout=60, getctl=True)
         #Enh: maybe use dev+inode as fname
 
         # Pipe output from second volume to 'sort' and include pipe from first
-        procs22ctl = do_exec(cmds[1] +
-                             [ [CP.sort, "-ms", "-k2n,2", deltapath+"-p", "-"],
+        p22ctl, p22close, _na = do_exec(cmds[1] +
+                             [ [CP.sort, "-s", "-k2n,2", deltapath+"-p", "-"],
                                [CP.uniq, "-u", "-f1"],
                                [CP.gzip, "-2"]
                               ],
                                  out=deltapath, timeout=60, getctl=True
                             )
-        for ii in zipln(procs11ctl[0], procs22ctl[0]):   errs = ii
+        for ii in zipln(p11ctl(), p22ctl()):   errs = ii
+        retcode = p22close() + p11close()
         os.remove(deltapath+"-p")
 
     # Check here that Btrfs snapshot gen#s did not change.
@@ -4210,7 +4215,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4alpha3"     ; prog_date = "20230606"
+prog_version          = "0.4alpha3"     ; prog_date = "20230608"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 aset = dest = storage = None

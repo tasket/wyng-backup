@@ -139,7 +139,6 @@ Run Wyng using the following commands and arguments in the form of:
 | **rename** _vol_name_ _new_name_  | Renames a volume in the archive.
 | **arch-init**               | Initialize archive configuration.
 | **arch-check** _[volume_name] [*]_    | Thorough check of archive data & metadata
-| **arch-delete**             | Remove data and metadata for all volumes.
 | **arch-deduplicate**        | Deduplicate existing data in archive.
 | **version**                 | Print the Wyng version and exit.
 
@@ -378,7 +377,7 @@ or a file path on a reflink-capable filesystem such as Btrfs or XFS (for Btrfs t
 end at a subvolume).
 
 `--dest` is a URL pointing to the location where the archive will be stored.
-It accepts one of the following forms, always ending in a mountpoint path:
+It accepts one of the following forms:
 
 | _URL Form_ | _Destination Type_
 |----------|-----------------
