@@ -473,6 +473,7 @@ class ArchiveVolume:
         return (vsize-1) - ((vsize-1) % self.archive.chunksize)
 
     def mapfile(self, pos=None):
+        if not self.sessions:   return None
         s = self.sessions[self.sesnames[pos] if pos else self.last]
         return f"{self.path}/{s.name}_{s.sequence}.deltamap"
 
@@ -1618,8 +1619,8 @@ def clear_array(ar):
 # Initialize a new ArchiveSet:
 
 def arch_init(aset, opts):
-    if not opts.local:
-        x_it(1,"--local is required.")
+    #if not opts.local:
+        #x_it(1,"--local is required.")
 
     aset.set_local(opts.local)
 
@@ -2315,7 +2316,7 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", inlines=[], text=
 
         if check and any(rclist):
             print(repr(rclist), file=errf, flush=True)
-            raise SPr.SubprocessError(repr(commands)+" ### rc="+repr(rclist))
+            raise SPr.SubprocessError("Chain exited "+repr(rclist))
 
         for f in [inf, outf, errf]:
             if type(f) is not int: f.close()
@@ -2439,7 +2440,7 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only):
             add_volume(aset, datavol, options.voldesc)
 
         # 'mapfile' is the deltamap file, snap1 holds vol state between send/monitor ops
-        vol   = aset.vols[datavol]                        ; mapfile = vol.mapfile()
+        vol   = aset.vols[datavol]
         l_vol = storage.new_vol_entry(datavol, vol.vid)   ; snap1, snap2 = l_vol.snap1, l_vol.snap2
 
         if not l_vol.exists():
@@ -2456,7 +2457,7 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only):
         # Make deltamap or initial snapshot if necessary. Try to recover paired state
         # by comparing timestamps; a match means remap is unnecessary.
         if len(vol.sessions):
-            s1tags = lvols[snap1].tags.split(",")
+            mapfile = vol.mapfile()    ; s1tags = lvols[snap1].tags.split(",")
 
             if not lvols[snap1].exists() or not exists(mapfile)    \
             or os.stat(mapfile).st_mtime_ns != lvols[snap1].gettime() \
@@ -2522,7 +2523,7 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only):
             add_volume(aset, datavol, options.voldesc)
 
         # 'mapfile' is the deltamap file, snap1 holds vol state between send/monitor ops
-        vol   = aset.vols[datavol]                        ; mapfile = vol.mapfile()
+        vol   = aset.vols[datavol]
         l_vol = storage.new_vol_entry(datavol, vol.vid)   ; snap1, snap2 = l_vol.snap1, l_vol.snap2
 
         if not l_vol.exists():
@@ -2532,7 +2533,7 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only):
         # Make deltamap or initial snapshot if necessary. Try to recover paired state
         # by comparing timestamps; a match means remap is unnecessary.
         if len(vol.sessions):
-            lastses = vol.sessions[vol.last]
+            mapfile = vol.mapfile()    ; lastses = vol.sessions[vol.last]
 
             if not exists(mapfile) and lvols[snap1].exists() \
             and lastses.gettime() == lvols[snap1].gettime()  \
@@ -3093,7 +3094,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
         # Local finalize
         ses.path = ses.path.rsplit("-tmp",maxsplit=1)[0]   ; os.replace(ses.path+"-tmp", ses.path)
         ses.rename_saved(ext=".tmp")
-        os.remove(old_mapfile)
+        if old_mapfile and exists(old_mapfile):   os.remove(old_mapfile)
         fssync(vol.path)
 
     else:
@@ -4235,7 +4236,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8wip"        ; prog_date = "20230608"
+prog_version          = "0.8wip"        ; prog_date = "20230609"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
