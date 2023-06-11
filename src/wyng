@@ -1062,7 +1062,7 @@ class CP:
     chattr = "/usr/bin/chattr"  ; xargs = "/usr/bin/xargs"  ; sha256sum= "/usr/bin/sha256sum"
     cmp    = "/usr/bin/cmp"     ; gzip  = "/bin/gzip"       ; env      = "/usr/bin/env"
     ps     = "/usr/bin/ps"      ; uniq  = "/usr/bin/uniq"   ; filefrag = "/usr/sbin/filefrag"
-    thin_delta = "/usr/sbin/thin_delta"    ; cp     = "/bin/cp"      ; echo = "/bin/echo"
+    thin_delta = "/usr/sbin/thin_delta"    ; cp     = "/bin/cp"
     blkdiscard = "/sbin/blkdiscard"        ; ionice = "/usr/bin/ionice"
     btrfs      = "/usr/sbin/btrfs" if os.path.exists("/usr/sbin/btrfs") else "/bin/btrfs"
 
@@ -1783,7 +1783,7 @@ def check_manifest_sequence(vol, sesnames, addcol=False):
             if addr != a1:
                 print(ln); raise ValueError("Manifest seq error. Expected %d got %d." % (addr, a1))
 
-    if addr+aset.chunksize != volsize:
+    if addr != vol.last_chunk_addr(volsize):
         raise ValueError("Manifest range stopped short at", addr)
 
     os.remove(manifest)
@@ -2311,6 +2311,7 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", inlines=[], text=
             yield ii
 
     def close():
+        other_rcs = otherctl[1]() if otherctl else [] # close other
         rclist = [0] + list(filter(bool if pipefail else str, ( x.returncode for x in procs )))
 
         if check and any(rclist):
@@ -2320,7 +2321,6 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", inlines=[], text=
         for f in [inf, outf, errf]:
             if type(f) is not int: f.close()
 
-        other_rcs = otherctl[1]() if otherctl else [] # close other
         return other_rcs + rclist
 
     if getctl:
@@ -2550,8 +2550,8 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only):
                 if lvols[snap1].gettime() != lastses.gettime():   lvols[snap1].delete()
 
             if not lvols[snap1].exists() or not exists(mapfile) \
-            or os.stat(mapfile).st_mtime_ns != lvols[snap1].gettime():
-
+            or (os.stat(mapfile).st_mtime_ns != lvols[snap1].gettime()
+                and os.stat(mapfile).st_blocks == 0):
                 # Handle inadvertant mapfile snapshot mis-match
                 lvols[snap1].delete()
                 print("  Removed mis-matched snapshot for", datavol)
@@ -2705,10 +2705,10 @@ def get_reflink_deltas(storage, aset, datavols):
     generation, stpath = storage.metadata_lock()    ; lvols = storage.lvols
 
     for vol in (aset.vols[x] for x in datavols[:]):
-        locvol = lvols[vol.name]
-        deltapath = tmpdir+"/delta."+vol.vid    ; cmds, devs = [], set()
+        lv = lvols[vol.name]                ; cmds, devs = [], set()
+        dpath = tmpdir+"/delta."+vol.vid
 
-        for side, snapname in (("11", locvol.snap1), ("22", locvol.snap2)):
+        for side, snapname, outp in (("11", lv.snap1, ' > "'+dpath+'-p"'), ("22", lv.snap2, "")):
             if not exists(stpath+snapname):
                 err_out("'%s' snapshot not found (different subvolume?); Skipping..." % fpath)
                 datavols.remove(vol.name);   break
@@ -2721,36 +2721,34 @@ def get_reflink_deltas(storage, aset, datavols):
             devs.add(os.stat(stpath+snapname).st_dev)
             cmds.append([
               [CP.env, "LC_ALL=''", CP.filefrag, "-vs", "-b"+blksz, stpath+snapname],
-              # awk checks the expected filefrag format and removes extra cols & punctuation.
+              # awk checks the expected filefrag layout and removes punctuation;
+              # fields are arranged to complement sort & uniq field requirements.
               [CP.awk, r'BEGIN {PAT="^\\s*ext:\\s+logical_offset:\\s+physical_offset:\\s+length:"}'
-                       r' NR==1, $0 ~ PAT {HEADER=$0; next}'
-                       r' END {if (!(HEADER ~ PAT && $0 ~ /extents? found$/)) exit 2}'
+                       r' NR==1, $0 ~ PAT {if ($0 ~ /\s0 extents found$/) {ZXT="Y";'
+                       r' print "00 0 1 0 0 0 wyng_input"' +outp+ r'} HEADER=$0; next}'
+                       r' END {if (!(ZXT=="Y" || HEADER ~ PAT && $0 ~ /extents? found$/)) exit 2}'
                        r' /^\s*[0-9]+:/ {gsub(/\.|:/, " ", $0);'
-                                        r' print '+side+', $2, $6, $3, $4, $5, $NF'
-                      +(r'}' if side == "22" else r' > "'+deltapath+r'-p"}')
-               ]
-              ] if os.stat(stpath+snapname).st_blocks > 0
-                else [[CP.echo, side, "00 1 0 0 0 wyng_input"],
-                      [CP.tee, deltapath+"-p"]i f]
+                                        r' print '+side+r', $2, $6, $3, $4, $5, $NF'+outp+r'}']
+             ]
             )
 
         if vol.name not in datavols:   continue
         assert len(devs) == 1
 
         # Save output from first volume to a named pipe
-        os.mkfifo(deltapath+"-p")
+        os.mkfifo(dpath+"-p")
         p11context = do_exec(cmds[0], timeout=60, getctl=True)
         #Enh: maybe use dev+inode as fname
 
         # Pipe output from second volume to 'sort' and include pipe from first
         retcode = do_exec(cmds[1] +
-                             [ [CP.sort, "-s", "-k2n,2", deltapath+"-p", "-"],
+                             [ [CP.sort, "-s", "-k2n,2", dpath+"-p", "-"],
                                [CP.uniq, "-u", "-f1"],
                                [CP.gzip, "-2"]
                               ],
-                                 out=deltapath, timeout=60, otherctl=p11context
+                                 out=dpath, timeout=60, otherctl=p11context
                             )
-        os.remove(deltapath+"-p")
+        os.remove(dpath+"-p")
 
     # Check here that Btrfs snapshot gen#s did not change.
     # If changed: retry, x_it(7), use remap mode or pause/cancel the Btrfs op.
@@ -2864,7 +2862,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
     aset        = vol.archive
     datavol     = vol.name                      ; dedup       = options.dedup
     snap2vol    = storage.lvols[storage.lvols[vol.name].snap2]
-    snap2size   = snap2vol.getsize()
+    snap2size   = snap2vol.getsize()            ; verbose     = options.verbose
     bmap_size   = vol.mapsize(snap2size)        ; chunksize   = aset.chunksize
     chdigits    = max_address.bit_length()//4   ; chformat    = "x%0"+str(chdigits)+"x"
     bksession   = "S_"+curtime                  ; sdir        = pjoin(vol.vid, bksession)
@@ -2979,10 +2977,14 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
                         percent = int(addr/snap2size*1000)
                         #print("\x0d  %4.1f%% %7dM" % (percent/10, bcount//1000000),
                             #end="", flush=True)
-                        print(("\r%0d-->%0d MB" % (snap2size/MB, bcount/MB)).ljust(22),
-                                "|  %0d%%" % percent//10,
-                                 #bcount/(time.monotonic() - testtime)/1048576),
-                              end="")
+                        print(("\r%0d-->%0d MB" % (snap2size/MB, bcount/MB)).ljust(18)
+                                + "|  %0d%% " % (percent//10),
+                        #print(("\r%0d-->%0d MB" % (snap2size/MB,
+                                                   #(bcount + snap2size-addr)/MB)).ljust(18),
+
+
+                                 bcount/(time.monotonic() - testtime)/1048576,
+                              end="", flush=True)
                     counter = 0
 
                 # Compress & write only non-empty chunks
@@ -3058,7 +3060,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
     #print("\r  100% ", ("%8.1fM  |  %s" % (bcount/1000000, datavol)),
           #("\n  (reduced %0.1fM)" % (ddbytes/1000000)) if ddbytes and options.verbose else "",
           #end="")
-    print("")
+    #print("")
 
     runtime = time.monotonic() - testtime
     if benchmark:   print("\nTime:", runtime)
@@ -3265,7 +3267,7 @@ def monitor_send(storage, aset, datavols, monitor_only):
     totalvsize = totalbcount = 0
     for datavol in incrementals + send_alls:
         vol = aset.vols[datavol]    ; updated = False    ; svsize = sbcount = stime = 0
-        print(" ", "Scan" if monitor_only else "Send", "volume         |       | ", datavol,
+        print("Scan" if monitor_only else "Send", "volume      |       | ", datavol,
               flush=True, end="")
 
         if datavol in incrementals:
@@ -4257,7 +4259,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8wip"        ; prog_date = "20230609"
+prog_version          = "0.8wip"        ; prog_date = "20230610"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
