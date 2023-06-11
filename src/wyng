@@ -1781,7 +1781,7 @@ def check_manifest_sequence(vol, sesnames, addcol=False):
             if addr != a1:
                 print(ln); raise ValueError("Manifest seq error. Expected %d got %d." % (addr, a1))
 
-    if addr+aset.chunksize != volsize:
+    if addr != vol.last_chunk_addr(volsize):
         raise ValueError("Manifest range stopped short at", addr)
 
     os.remove(manifest)
@@ -2534,8 +2534,8 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only):
                 if lvols[snap1].gettime() != lastses.gettime():   lvols[snap1].delete()
 
             if not lvols[snap1].exists() or not exists(mapfile) \
-            or os.stat(mapfile).st_mtime_ns != lvols[snap1].gettime():
-
+            or (os.stat(mapfile).st_mtime_ns != lvols[snap1].gettime()
+                and os.stat(mapfile).st_blocks == 0):
                 # Handle inadvertant mapfile snapshot mis-match
                 lvols[snap1].delete()
                 print("  Removed mis-matched snapshot for", datavol)
@@ -2688,10 +2688,10 @@ def get_reflink_deltas(storage, aset, datavols):
     generation, stpath = storage.metadata_lock()    ; lvols = storage.lvols    ; procs=[]
 
     for vol in (aset.vols[x] for x in datavols):
-        locvol = lvols[vol.name]
-        deltapath = tmpdir+"/delta."+vol.vid    ; cmds, devs = [], set()
+        lv    = lvols[vol.name]
+        dpath = tmpdir+"/delta."+vol.vid    ; cmds, devs = [], set()
 
-        for side, snapname in (("11", locvol.snap1), ("22", locvol.snap2)):
+        for side, snapname, outp in (("11", lv.snap1, ' > "'+dpath+'-p"'), ("22", lv.snap2, "")):
             if not exists(stpath+snapname):
                 raise RuntimeError("Volume path '%s' does not exist." % fpath)
             # filefrag output: file extent ranges, their 'physical' block ranges, extent length
@@ -2702,34 +2702,35 @@ def get_reflink_deltas(storage, aset, datavols):
             devs.add(os.stat(stpath+snapname).st_dev)
             cmds.append([
               [CP.env, "LC_ALL=''", CP.filefrag, "-vs", "-b"+blksz, stpath+snapname],
-              # awk checks the expected filefrag format and removes extra cols & punctuation.
+              # awk checks the expected filefrag layout and removes punctuation;
+              # fields are arranged to complement sort & uniq field requirements.
               [CP.awk, r'BEGIN {PAT="^\\s*ext:\\s+logical_offset:\\s+physical_offset:\\s+length:"}'
-                       r' NR==1, $0 ~ PAT {HEADER=$0; next}'
-                       r' END {if (!(HEADER ~ PAT && $0 ~ /extents? found$/)) exit 2}'
+                       r' NR==1, $0 ~ PAT {if ($0 ~ /\s0 extents found$/) {ZXT="Y";'
+                       r' print "00 0 1 0 0 0 wyng_input"' +outp+ r'} HEADER=$0; next}'
+                       r' END {if (!(ZXT=="Y" || HEADER ~ PAT && $0 ~ /extents? found$/)) exit 2}'
                        r' /^\s*[0-9]+:/ {gsub(/\.|:/, " ", $0);'
-                                        r' print '+side+', $2, $6, $3, $4, $5, $NF'
-                      +(r'}' if side=='22' else r' > "'+deltapath+r'-p"}')
-               ]
-            ])
+                                        r' print '+side+r', $2, $6, $3, $4, $5, $NF'+outp+r'}']
+              ]
+            )
         if debug:   print(devs, "\n", cmds)
         assert len(devs) == 1
 
         # Save output from first volume to a named pipe
-        os.mkfifo(deltapath+"-p")
+        os.mkfifo(dpath+"-p")
         p11ctl, p11close, _na = do_exec(cmds[0], timeout=60, getctl=True)
         #Enh: maybe use dev+inode as fname
 
         # Pipe output from second volume to 'sort' and include pipe from first
         p22ctl, p22close, _na = do_exec(cmds[1] +
-                             [ [CP.sort, "-s", "-k2n,2", deltapath+"-p", "-"],
+                             [ [CP.sort, "-s", "-k2n,2", dpath+"-p", "-"],
                                [CP.uniq, "-u", "-f1"],
                                [CP.gzip, "-2"]
                               ],
-                                 out=deltapath, timeout=60, getctl=True
+                                 out=dpath, timeout=60, getctl=True
                             )
         for ii in zipln(p11ctl(), p22ctl()):   errs = ii
         retcode = p22close() + p11close()
-        os.remove(deltapath+"-p")
+        os.remove(dpath+"-p")
 
     # Check here that Btrfs snapshot gen#s did not change.
     # If changed: retry, x_it(7), use remap mode or pause/cancel the Btrfs op.
@@ -4216,7 +4217,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4alpha3"     ; prog_date = "20230609"
+prog_version          = "0.4alpha3"     ; prog_date = "20230610"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 aset = dest = storage = None
