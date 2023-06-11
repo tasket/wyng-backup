@@ -1062,7 +1062,7 @@ class CP:
     chattr = "/usr/bin/chattr"  ; xargs = "/usr/bin/xargs"  ; sha256sum= "/usr/bin/sha256sum"
     cmp    = "/usr/bin/cmp"     ; gzip  = "/bin/gzip"       ; env      = "/usr/bin/env"
     ps     = "/usr/bin/ps"      ; uniq  = "/usr/bin/uniq"   ; filefrag = "/usr/sbin/filefrag"
-    thin_delta = "/usr/sbin/thin_delta"    ; cp     = "/bin/cp"
+    thin_delta = "/usr/sbin/thin_delta"    ; cp     = "/bin/cp"      ; echo = "/bin/echo"
     blkdiscard = "/sbin/blkdiscard"        ; ionice = "/usr/bin/ionice"
     btrfs      = "/usr/sbin/btrfs" if os.path.exists("/usr/sbin/btrfs") else "/bin/btrfs"
 
@@ -2311,7 +2311,6 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", inlines=[], text=
             yield ii
 
     def close():
-        other_rcs = otherctl[1]() if otherctl else [] # close other
         rclist = [0] + list(filter(bool if pipefail else str, ( x.returncode for x in procs )))
 
         if check and any(rclist):
@@ -2321,6 +2320,7 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", inlines=[], text=
         for f in [inf, outf, errf]:
             if type(f) is not int: f.close()
 
+        other_rcs = otherctl[1]() if otherctl else [] # close other
         return other_rcs + rclist
 
     if getctl:
@@ -2695,7 +2695,7 @@ def update_delta_digest_lvm(storage, aset, datavol, monitor_only):
 
     if dnewchunks:   vol.changed_bytes_add(dnewchunks*chunksize, save=True)
     catch_signals(None)
-    return map_updated
+    return map_updated, snap2size
 
 
 def get_reflink_deltas(storage, aset, datavols):
@@ -2727,11 +2727,14 @@ def get_reflink_deltas(storage, aset, datavols):
                        r' END {if (!(HEADER ~ PAT && $0 ~ /extents? found$/)) exit 2}'
                        r' /^\s*[0-9]+:/ {gsub(/\.|:/, " ", $0);'
                                         r' print '+side+', $2, $6, $3, $4, $5, $NF'
-                      +(r'}' if side=='22' else r' > "'+deltapath+r'-p"}')
+                      +(r'}' if side == "22" else r' > "'+deltapath+r'-p"}')
                ]
-            ])
+              ] if os.stat(stpath+snapname).st_blocks > 0
+                else [[CP.echo, side, "00 1 0 0 0 wyng_input"],
+                      [CP.tee, deltapath+"-p"]i f]
+            )
+
         if vol.name not in datavols:   continue
-        if debug:   print(devs, "\n", cmds)
         assert len(devs) == 1
 
         # Save output from first volume to a named pipe
@@ -2829,7 +2832,7 @@ def update_delta_digest_reflink(storage, aset, datavol, monitor_only):
 
     if dnewchunks:   vol.changed_bytes_add(dnewchunks*chunksize, save=True)
     catch_signals(None)
-    return map_updated
+    return map_updated, snap2size
 
 
 # Reads addresses from manifest and marks corresponding chunks in a volume's deltamap.
@@ -2866,11 +2869,10 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
     chdigits    = max_address.bit_length()//4   ; chformat    = "x%0"+str(chdigits)+"x"
     bksession   = "S_"+curtime                  ; sdir        = pjoin(vol.vid, bksession)
     prior_size  = vol.volsize()                 ; prior_ses   = vol.last
-    verbose     = not options.quiet             ; zeros       = bytes(chunksize)
     addrsplit   = -address_split[1]             ; lchunk_addr = vol.last_chunk_addr(snap2size)
     compress = compressors[aset.compression][2] ; compresslevel = int(aset.compr_level)
 
-    if benchmark:   testtime = time.monotonic()
+    testtime = time.monotonic()
     def tar_add_pass(*args, **kwargs):   pass
 
     if len(vol.sessions):
@@ -2926,7 +2928,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
         vf_seek = vf.seek; vf_read = vf.read   ; BytesIO = io.BytesIO
         gethash = aset.getdatahash             ; b64enc  = base64.urlsafe_b64encode
         b2int   = int.from_bytes               ; islice  = itertools.islice
-        compare_digest = hmac.compare_digest
+        compare_digest = hmac.compare_digest   ; zeros   = bytes(chunksize)     ; MB = 2**20
 
         # Feed delta bmap to inner loop in pieces segmented by large zero delimeter.
         # This allows skipping most areas when changes are few.
@@ -2973,10 +2975,14 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
                     if 0 < crypto_cadence < 101 and not benchmark:
                         aset.save_conf()    ; tarf_add(aset.confname)
                     # Show progress.
-                    if verbose:
+                    if verbose or True: ####
                         percent = int(addr/snap2size*1000)
-                        print("\x0d  %4.1f%% %7dM" % (percent/10, bcount//1000000),
-                              end="", flush=True)
+                        #print("\x0d  %4.1f%% %7dM" % (percent/10, bcount//1000000),
+                            #end="", flush=True)
+                        print(("\r%0d-->%0d MB" % (snap2size/MB, bcount/MB)).ljust(22),
+                                "|  %0d%%" % percent//10,
+                                 #bcount/(time.monotonic() - testtime)/1048576),
+                              end="")
                     counter = 0
 
                 # Compress & write only non-empty chunks
@@ -3049,11 +3055,13 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
             # Advance addr, except when minibmap is zero len.
             if minibmap or send_all:  addr += chunksize
 
-    print("\r  100% ", ("%8.1fM  |  %s" % (bcount/1000000, datavol)),
-          ("\n  (reduced %0.1fM)" % (ddbytes/1000000)) if ddbytes and options.verbose else "",
-          end="")
+    #print("\r  100% ", ("%8.1fM  |  %s" % (bcount/1000000, datavol)),
+          #("\n  (reduced %0.1fM)" % (ddbytes/1000000)) if ddbytes and options.verbose else "",
+          #end="")
+    print("")
 
-    if benchmark:   print("\nTime:", time.monotonic() - testtime)
+    runtime = time.monotonic() - testtime
+    if benchmark:   print("\nTime:", runtime)
 
     # Send session info, end stream and cleanup
     if fullmanifest:   fullmanifest.close()   ; os.remove(fullmanifest.name)
@@ -3109,7 +3117,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
     catch_signals(None)
     if dedup and debug:   show_mem_stats()
 
-    return stream_started + bcount
+    return stream_started, ses.volsize, bcount, runtime
 
 
 # Build deduplication hash index and list
@@ -3212,6 +3220,7 @@ def monitor_send(storage, aset, datavols, monitor_only):
         for vol in aset.vols:   autoprune(vol, apmode="full")
 
     curtime = time.strftime("%Y%m%d-%H%M%S", time.localtime(time_start))
+    mstime_start = time.monotonic()
 
     print(f"\nPreparing snapshots in '{storage.path}'...")
     incrementals, send_alls \
@@ -3251,13 +3260,16 @@ def monitor_send(storage, aset, datavols, monitor_only):
             x_it(1, "Error: Local and archive metadata differ.")
 
         print("\nSending backup session %s:" % curtime)
+        print("-" * (os.get_terminal_size().columns - 1))
 
+    totalvsize = totalbcount = 0
     for datavol in incrementals + send_alls:
-        vol = aset.vols[datavol]    ; updated = False
-        print(" ", "Scan" if monitor_only else "Send", "volume      | ", datavol, flush=True,end="")
+        vol = aset.vols[datavol]    ; updated = False    ; svsize = sbcount = stime = 0
+        print(" ", "Scan" if monitor_only else "Send", "volume         |       | ", datavol,
+              flush=True, end="")
 
         if datavol in incrementals:
-            updated = storage.process_deltas(storage, aset, datavol, monitor_only)
+            updated, svsize = storage.process_deltas(storage, aset, datavol, monitor_only)
 
         if monitor_only:   continue
 
@@ -3274,13 +3286,22 @@ def monitor_send(storage, aset, datavols, monitor_only):
                     error_cache.append(datavol)
                     continue
 
-            dnew   = send_volume(storage, vol, curtime, ses_tags, send_all=datavol in send_alls)
-            dest.free -= int(dnew + (dnew * 0.05))
+            sent, svsize, sbcount, stime = \
+                send_volume(storage, vol, curtime, ses_tags, send_all=datavol in send_alls)
+            dest.free -= int(sbcount + (sbcount * 0.05))
 
         else:
-            storage.lvols[vol.name].rotate_snapshots(rotate=False)    ; dnew = 0
+            storage.lvols[vol.name].rotate_snapshots(rotate=False)
 
-        print("\r" if dnew else "\r  No changes   ", flush=True)
+        print("\r" if sbcount else "\rno changes     ", flush=True)
+        totalvsize += svsize    ; totalbcount += sbcount
+
+    if not monitor_only and (volct := len(incrementals + send_alls)):
+        print("-" * (os.get_terminal_size().columns - 1))
+        print(" %0d ===> %0d MB    %0d volumes in %.1f seconds"
+              % (totalvsize/(1024**2), totalbcount/(1024**2),
+                 volct, time.monotonic() - mstime_start)
+              )
 
 
 # Prune backup sessions from an archive. Basis is a non-overwriting dir tree
