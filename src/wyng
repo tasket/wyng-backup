@@ -46,14 +46,9 @@ except:
 
 class ArchiveSet:
 
-    confname      = "archive.ini"   ; max_volumes  = 4096
-    mhash_sz      = 44              ; max_sessions = 16384          ; comment_len = 100
-    sesname_sz    = 17              ; tag_len      = 25             ; max_tags = 5
-    min_chunksize = 0x10000         ; volname_len  = 4000           ; vid_len  = 10
-
-    max_conf_sz = (volname_len + comment_len + mhash_sz + 25) * max_volumes + 1000
-    max_infosz  = (tag_len+comment_len + 10) * max_tags + 1000
-    max_volinfosz= (mhash_sz + sesname_sz + 10) * max_sessions + 1000
+    confname      = "archive.ini"   ; max_volumes  = 1024          ; vid_len     = 10
+    min_chunksize = 0x10000         ; mhash_sz     = 44            ; comment_len = 100
+    max_conf_sz   = (vid_len + comment_len + mhash_sz + 25) * max_volumes + 1000
 
     attr_ints   = {"format_ver","chunksize","mci_count","dataci_count"}
 
@@ -84,8 +79,6 @@ class ArchiveSet:
         self.compression = "zstd" if zstd else "zlib"
         self.compr_level = str(compressors[self.compression][1])
         self.hashtype    = "hmac-sha256"
-        self.vgname      = ""
-        self.poolname    = ""
         self.uuid        = None
         self.updated_at  = None
         self.data_cipher = self.ci_mode = None
@@ -114,12 +107,7 @@ class ArchiveSet:
             buf = f.read(self.max_conf_sz)
         self.raw_hashval = hashlib.sha256(header0 + header1 + buf).hexdigest()
         if not (header0 == self.confprefix and header1.startswith(self.modeprefix)):
-            if not header0.startswith(b"[var]\n"):
-                raise ValueError("Not a Wyng format.")
-            else:
-                old_v2_format = True  ; raise NotImplementedError("Old format conversion")
-        else:
-            old_v2_format = False    #; untrusted_ver = 2
+            raise ValueError("Not a Wyng format.")
 
         # use existing auth if specified
         if isinstance(prior_auth, ArchiveSet):
@@ -186,7 +174,7 @@ class ArchiveSet:
             if not float(self.updated_at) < self.time_start:
                 raise ValueError("Current time is less than archive timestamp!")
 
-            cadence = 20 + (self.data_cipher.endswith(("-t1","-t2","-t3","-t4")) * 100)
+            cadence = 20 + (self.data_cipher.endswith(("-dgr","-msr")) * 100)
             datacrypto.load(self.data_cipher, mcrypto.keyfile, slot=0, cadence=cadence,
                             passphrase=passphrase, agentkeys=agentkeys)
 
@@ -218,18 +206,17 @@ class ArchiveSet:
             if children > 1:
                 ses_list =[(x.volume.vid+"/"+x.name, x.name, x.volume.name) for sub in
                         (vol.sessions.values() for vol in self.vols.values()) for x in sub]
-                fetch_file_blobs([(x+"/info", self.max_infosz) for x,_,_ in ses_list],
+                fetch_file_blobs([(x+"/info", ArchiveSession.max_infosz) for x,_,_ in ses_list],
                                 self.path, self.dest, skip_exists=True)
 
-                self.load_volumes(children) # Enh: don't re-load vols
-                fetched = fetch_file_blobs([(sp+"/manifest.z",
-                                             self.vols[dv].sessions[s].manifest_max())
-                                                for sp,s,dv in ses_list],
-                                self.path, self.dest, verifier=self.mcrypto, skip_exists=True)
-                self.just_fetched = bool(fetched)
+                self.load_volumes(children) # Enh: don't re-load vols ###
+                ff = fetch_file_blobs([(sp+"/manifest.z", self.vols[dv].sessions[s].manifest_max())
+                                        for sp,s,dv in ses_list],
+                                    self.path, self.dest, verifier=self.mcrypto, skip_exists=True)
+                self.just_fetched = bool(ff)
 
     def load_volumes(self, children):
-        recv_list = [(x+"/volinfo", self.max_volinfosz)
+        recv_list = [(x+"/volinfo", ArchiveVolume.max_volinfosz)
                        for x in self.conf["volumes"].keys()]
         fetch_file_blobs(recv_list, self.path, self.dest, skip_exists=True)
         do_exec([[CP.chattr, "+c"] + list(self.conf["volumes"].keys())],
@@ -249,7 +236,7 @@ class ArchiveSet:
 
             #loadses = allvols or self.in_process or options.from_arch or options.dedup or
             vol  = self.Volume(self, vid, hashval, pjoin(self.path,vid),
-                                    self.vgname, name=vname, children=children)
+                               name=vname, children=children)
             self.vols[vol.name] = vol
 
 
@@ -263,9 +250,9 @@ class ArchiveSet:
         c['compression'] = self.compression
         c['compr_level'] = self.compr_level
         c['hashtype']    = self.hashtype
-        c['vgname']      = self.vgname
-        c['poolname']    = self.poolname
+        #c['ci_mode']     = self.ci_mode
         c['data_cipher'] = self.data_cipher
+
         if mcrypto:
             if self.datacrypto.counter > self.datacrypto.ctstart:
                 self.dataci_count = self.datacrypto.counter
@@ -317,7 +304,7 @@ class ArchiveSet:
         while (vid := "Vol_"+os.urandom(3).hex()) in self.conf["volumes"]:   pass
 
         self.vols[datavol] = vol = self.Volume(self, vid, "0", pjoin(self.path,vid),
-                                               self.vgname, name=datavol, children=0)
+                                               name=datavol, children=0)
         vol.save_volinfo(ext)
         return vol
 
@@ -366,30 +353,24 @@ class ArchiveSet:
             assert hmac.compare_digest(digest, self.b64hash(mbuf))
             open(destname,"wb").write(self.decompress(mbuf))
 
-    def set_local(self, localpath):
-        parts = localpath.split("/")
-        if len(parts) == 2 and all(parts) and not localpath.startswith("/"):
-            self.vgname, self.poolname = parts
-        else:
-            self.vgname, self.poolname = "", localpath
-
 
 class ArchiveVolume:
 
-    __slots__ = ("vid","name","hashval","archive","path","vgname","sessions","sesnames",
+    max_sessions  = 16384    ; volname_len = 4000    ; sesname_sz = 17
+    max_volinfosz = (ArchiveSet.mhash_sz + sesname_sz + 10) * max_sessions \
+                  + volname_len + ArchiveSet.comment_len + 10
+
+    __slots__ = ("vid","name","hashval","archive","path","sessions","sesnames",
                  "_seslist","last","meta_checked","tags","desc","changed_bytes")
 
-    def __init__(self, archive, vid, hashval, path, vgname, name=None, children=2):
+    def __init__(self, archive, vid, hashval, path, name=None, children=2):
         self.vid       = vid                       ; self.tags    = {}
         self.archive   = archive                   ; self.path    = path
-        self.vgname    = vgname                    ; self.hashval = hashval
-        self.last      = "None"                    ; self.meta_checked = False
+        self.hashval   = hashval                   ; self.changed_bytes = 0
+        self.last      = "None"                    ; self.meta_checked  = False
         # persisted here:
         self.name      = name                      ; self.desc      = ""
         self.sessions  = {}                        ; self.sesnames= []
-        #self.fshint    = None
-        # other:
-        self.changed_bytes = 0
 
         Ses = ArchiveSession
         if debug:  print("\n", vid, "-", name)
@@ -397,7 +378,7 @@ class ArchiveVolume:
         if path and hashval != "0":
             with open(pjoin(path,"volinfo"), "rb") as f:
                 fsize = os.fstat(f.fileno()).st_size
-                if fsize > ArchiveSet.max_volinfosz:   raise ValueError("volinfo too large")
+                if fsize > self.max_volinfosz:   raise ValueError("volinfo too large")
                 buf = f.read(fsize)
             if archive.mcrypto:   buf = archive.mcrypto.decrypt(buf)
             if not hmac.compare_digest(hashval, archive.b64hash(buf)):
@@ -426,29 +407,28 @@ class ArchiveVolume:
 
 
     def save_volinfo(self, ext=""):
-        os.makedirs(self.path, exist_ok=True)   ; fname = "volinfo"   ; etag = b''
+        os.makedirs(self.path, exist_ok=True)
+        arch = self.archive    ; fname = "volinfo"   ; etag = b''
         with io.StringIO() as f:
             print("name =", self.name, file=f)
             print("desc =", self.desc, file=f)
             for ses in self.sessions.values():
                 if ses.saved:   print(ses.name, "=", ses.hashval, file=f)
 
-            buf = self.archive.compress(f.getvalue().encode("UTF-8"),
-                                        int(self.archive.compr_level))
-            self.archive.conf["volumes"][self.vid] = self.archive.b64hash(buf)
+            buf = arch.compress(f.getvalue().encode("UTF-8"), int(arch.compr_level))
+            assert len(buf) <= self.max_volinfosz
+            arch.conf["volumes"][self.vid] = arch.b64hash(buf)
 
-        if self.archive.mcrypto:
+        if arch.mcrypto:
             # First encrypt as data, for data cipher verification at startup
             with open(pjoin(self.path,"vi.dat"+ext), "wb") as df:
-                df.write(b''.join(self.archive.datacrypto.encrypt(buf,
-                                    self.archive.gethash(buf))))
-                self.archive.datacrypto.save_counter()
+                df.write(b''.join(arch.datacrypto.encrypt(buf, arch.gethash(buf))))
+                arch.datacrypto.save_counter()
             # encrypt as metadata
-            etag, buf = self.archive.mcrypto.encrypt(buf)
+            etag, buf = arch.mcrypto.encrypt(buf)
         with open(pjoin(self.path,fname+ext), "wb") as f:
             f.write(etag)  ; f.write(buf)
-            f.flush()      ; os.fsync(f.fileno())
-        self.archive.save_conf(ext)
+        arch.save_conf(ext)
 
     def rename_saved(self, ext=".tmp"):
         assert ext and exists(pjoin(self.path,"volinfo")+ext)
@@ -457,8 +437,8 @@ class ArchiveVolume:
         self.archive.rename_saved(ext)
 
     def volname_check(vname): # Fix: move to LocalStorage class
-        if not 0 < len(vname) <= ArchiveSet.volname_len:
-            return f"Volume path/name length must be 1 - {ArchiveSet.volname_len}."
+        if not 0 < len(vname) <= ArchiveVolume.volname_len:
+            return f"Volume path/name length must be 1 - {ArchiveVolume.volname_len}."
         if not vname.isprintable():
             return "Non-printable characters not allowed in volume names."
         if any([x in (".","..") for x in vname.strip().split("/")]):
@@ -561,6 +541,9 @@ class ArchiveSession:
     attr_int  = ("volsize","sequence")
     attr_misc = ("tags","volume","archive","name","path","saved","loaded","toggle",
                  "hashval","meta_checked")
+    sesname_sz= ArchiveVolume.sesname_sz    ; tag_len = 25    ; max_tags = 5    ; max_field = 64
+    max_infosz= (tag_len + ArchiveSet.comment_len + 10) * max_tags \
+              + sum(map(len, attr_str+attr_int)) + len(attr_str+attr_int)*(max_field+10)
     __slots__ = attr_str + attr_int + attr_misc
 
     def __init__(self, volume, name, hashval, path="", addtags={}):
@@ -584,7 +567,7 @@ class ArchiveSession:
             if debug:   print(name, ":", path)
             with open(pjoin(path,"info"), "rb") as sf:
                 fsize = os.fstat(sf.fileno()).st_size
-                if fsize > ArchiveSet.max_infosz:   raise ValueError("info too large")
+                if fsize > self.max_infosz:   raise ValueError("info too large")
                 buf = sf.read(fsize)
             if arch.mcrypto:   buf = arch.mcrypto.decrypt(buf)
             if not hmac.compare_digest(hashval, arch.b64hash(buf)):
@@ -609,14 +592,15 @@ class ArchiveSession:
 
 
     def manifest_max(self):
-        return self.volsize // self.archive.chunksize * ((hash_bits//4) + 20)
+        return self.volsize // self.archive.chunksize \
+               * (self.archive.mhash_sz + len(hex(max_address)) + 10)
 
     def tag_parse(tag, delim=" "):
         result = tuple()    ; errs = []      ; parts   = tag.strip().split(delim, maxsplit=1)
         tag_id = parts[0].strip().lower()    ; comment = parts[1].strip() if len(parts)>1 else ""
 
-        if len(tag_id.encode("UTF-8")) > ArchiveSet.tag_len:
-            errs.append("Error: Max "+ArchiveSet.tag_len+" size for tag ID.\n")
+        if len(tag_id.encode("UTF-8")) > ArchiveSession.tag_len:
+            errs.append("Error: Max "+ArchiveSession.tag_len+" size for tag ID.\n")
         if len(comment.encode("UTF-8")) > ArchiveSet.comment_len:
             errs.append("Error: Max "+ArchiveSet.comment_len+" size for comment.\n")
         if re.match(".*[,=\^]", tag_id) or any(map(str.isspace, tag_id)) \
@@ -633,8 +617,8 @@ class ArchiveSession:
         return result
 
     def tag_add(self, tag):
-        if len(self.tags) >= ArchiveSet.max_tags:
-            x_it(1, ArchiveSet.max_tags+" maximum tags.")
+        if len(self.tags) >= ArchiveSession.max_tags:
+            x_it(1, ArchiveSession.max_tags+" maximum tags.")
         self.saved = False    ; voltags = self.volume.tags    ; tid = tag[0]
         if tid not in self.tags:   self.tags[tid] = tag[1]
         if tid in voltags:
@@ -661,17 +645,18 @@ class ArchiveSession:
                                              fdest=self.path+"/manifest.z"+ext)
         with io.StringIO() as f:
             for attr in self.attr_str+self.attr_int:
-                print(attr, "=", getattr(self, attr), file=f)
+                print(attr, "=", field := getattr(self, attr), file=f)
+                assert len(str(field)) <= self.max_field
             for tkey, tdesc in self.tags.items():
                 print("tag =",   tkey, tdesc, file=f)
             buf = arch.compress(f.getvalue().encode("UTF-8"),
                                 int(arch.compr_level))
             self.hashval = arch.b64hash(buf)
+            assert len(buf) <= self.max_infosz
 
         if arch.mcrypto:   etag, buf = arch.mcrypto.encrypt(buf)
         with open(pjoin(self.path,fname+ext), "wb") as f:
             f.write(etag)  ; f.write(buf)
-            f.flush()      ; os.fsync(f.fileno())
         self.saved = self.loaded = True
         self.volume.save_volinfo(ext)
 
@@ -773,12 +758,12 @@ class DataCryptography:
     crypto_codes    = {b"00":  ("off",                "off", 1),
                        b"10":  ("n/a",                "n/a", 0),
                        b"20":  ("n/a",                "n/a", 0),
-                       b"30":  ("xchacha20",          "xchacha20-poly1305",    0),
-                       b"31":  ("xchacha20-t2",       "xchacha20-poly1305-t2", 1),
-                       b"32":  ("xchacha20-tc",       "xchacha20-poly1305",    1),
+                       b"30":  ("xchacha20",          "xchacha20-poly1305",     0),
+                       b"31":  ("n/a",                "n/a", 0),
+                       b"32":  ("xchacha20-ct",       "xchacha20-poly1305-ct",  1),
                        b"33":  ("n/a",                "n/a", 0),
-                       b"34":  ("xchacha20-t3",       "xchacha20-poly1305-t3", 1),
-                       b"35":  ("xchacha20-t4",       "xchacha20-poly1305-t3", 1),
+                       b"34":  ("xchacha20-msr",      "xchacha20-poly1305-msr", 1),
+                       b"35":  ("xchacha20-dgr",      "xchacha20-poly1305-msr", 1),
                        b"40":  ("n/a",                "n/a", 0)}
 
     __slots__ = ("key","keyfile","ci_type","counter","ctstart","ctcadence","countsz","max_count",
@@ -816,37 +801,30 @@ class DataCryptography:
         self.decrypt = self._dec_chacha20
 
         if ci_type == "xchacha20":
-            self.encrypt = self._enc_chacha20
+            self.encrypt = self._enc_chacha20_ct
 
-        elif ci_type == "xchacha20-poly1305":
+        elif ci_type in ("xchacha20-poly1305", "xchacha20-poly1305-ct"):
+            self.max_count = 2**60-64
             self.tag_sz  = 16                  ; self.buf_start = self.nonce_sz + self.tag_sz
             self.decrypt = self.auth = self._dec_chacha20_poly1305
-            self.encrypt = self._enc_chacha20_poly1305
+            self.encrypt = self._enc_chacha20_poly1305_ct
 
-        elif ci_type == "xchacha20-tc":
-            self.encrypt = self._enc_chacha20
+        elif ci_type == "xchacha20-ct":
+            self.encrypt = self._enc_chacha20_ct
             mkmhashkey   = True
 
-        elif ci_type == "xchacha20-t2":
-            self.encrypt = self._enc_chacha20_t2
-            mkmhashkey   = True
-
-        elif ci_type == "xchacha20-poly1305-t2":
-            self.tag_sz  = 16                  ; self.buf_start = self.nonce_sz + self.tag_sz
-            self.decrypt = self.auth = self._dec_chacha20_poly1305
-            self.encrypt = self._enc_chacha20_poly1305_t2
-
-        elif ci_type == "xchacha20-t3":
-            self.encrypt = self._enc_chacha20_t3
+        elif ci_type == "xchacha20-msr":
+            self.encrypt = self._enc_chacha20_msr
             mknoncekey   = mkmhashkey = True
 
-        elif ci_type == "xchacha20-poly1305-t3":
+        elif ci_type == "xchacha20-poly1305-msr":
+            self.max_count = 2**63-64
             self.tag_sz  = 16                  ; self.buf_start = self.nonce_sz + self.tag_sz
             self.decrypt = self.auth = self._dec_chacha20_poly1305
-            self.encrypt = self._enc_chacha20_poly1305_t3
+            self.encrypt = self._enc_chacha20_poly1305_msr
             mknoncekey   = True
 
-        elif ci_type == "xchacha20-t4":
+        elif ci_type == "xchacha20-dgr":
             self.encrypt = self._enc_chacha20_t4
             mknoncekey   = mkmhashkey = True
 
@@ -870,6 +848,7 @@ class DataCryptography:
         ct, salt     = self.load_slot(self.slot)
         # Kludge for original counter mode salt
         if ci_type in ("xchacha20","xchacha20-poly1305"):   salt = salt[:32]
+
         # Advance counter with a safe margin 'cadence X2' if cadence is quick (<101)
         self.counter = self.ctstart = ct + (cadence * 2 * int(cadence < 101))
 
@@ -952,7 +931,7 @@ class DataCryptography:
         return cipher.decrypt_and_verify(untrusted_buf[self.buf_start:], ci_tag)
 
     # Encrypt [X]ChaCha20:
-    def _enc_chacha20(self, buf, _na):
+    def _enc_chacha20_ct(self, buf, _na):
         self.counter += 1
         if self.counter % self.ctcadence == 0:   self.save_counter()
         if self.counter > self.max_count:   raise ValueError("Key exhaustion.")
@@ -968,7 +947,7 @@ class DataCryptography:
         return  nonce, buf
 
     # Encrypt [X]ChaCha20-Poly1305:
-    def _enc_chacha20_poly1305(self, buf):
+    def _enc_chacha20_poly1305_ct(self, buf):
         self.counter += 1
         if self.counter % self.ctcadence == 0:   self.save_counter()
         if self.counter > self.max_count:   raise ValueError("Key exhaustion.")
@@ -983,31 +962,8 @@ class DataCryptography:
         buf, ci_tag = cipher.encrypt_and_digest(buf)
         return  b''.join((nonce, ci_tag)), buf
 
-    # Encrypt [X]ChaCha20 (random nonce)
-    def _enc_chacha20_t2(self, buf, _na):
-        self.counter += 1
-        if self.counter % self.ctcadence == 0:   self.save_counter()
-        if self.counter > self.max_count:   raise ValueError("Key exhaustion.")
-
-        # Nonce from rnd
-        nonce   = self.get_rnd(self.nonce_sz)
-        cipher  = self.ChaCha20_new(key=self.key, nonce=nonce)
-        return  nonce, cipher.encrypt(buf)
-
-    # Encrypt [X]ChaCha20-Poly1305 (random nonce)
-    def _enc_chacha20_poly1305_t2(self, buf):
-        self.counter += 1
-        if self.counter % self.ctcadence == 0:   self.save_counter()
-        if self.counter > self.max_count:   raise ValueError("Key exhaustion.")
-
-        # Nonce from rnd
-        nonce   = self.get_rnd(self.nonce_sz)
-        cipher  = self.ChaCha20_Poly1305_new(key=self.key, nonce=nonce)
-        buf, ci_tag = cipher.encrypt_and_digest(buf)
-        return  b''.join((nonce, ci_tag)), buf
-
     # Encrypt [X]ChaCha20 (HMAC nonce)
-    def _enc_chacha20_t3(self, buf, _na):
+    def _enc_chacha20_msr(self, buf, _na):
         self.counter += 1
         if self.counter % self.ctcadence == 0:   self.save_counter()
         if self.counter > self.max_count:   raise ValueError("Key exhaustion.")
@@ -1021,8 +977,8 @@ class DataCryptography:
         return  nonce, cipher.encrypt(buf)
 
     # Encrypt [X]ChaCha20-Poly1305 (HMAC nonce)
-    def _enc_chacha20_poly1305_t3(self, buf):
-        self.counter += 1
+    def _enc_chacha20_poly1305_msr(self, buf):
+        self.counter += math.ceil(len(buf) // 16384)
         if self.counter % self.ctcadence == 0:   self.save_counter()
         if self.counter > self.max_count:   raise ValueError("Key exhaustion.")
 
@@ -1036,7 +992,7 @@ class DataCryptography:
         return  b''.join((nonce, ci_tag)), buf
 
     # Encrypt [X]ChaCha20 (HMAC nonce)
-    def _enc_chacha20_t4(self, buf, mhash):
+    def _enc_chacha20_dgr(self, buf, mhash):
         self.counter += 1
         if self.counter % self.ctcadence == 0:   self.save_counter()
         if self.counter > self.max_count:   raise ValueError("Key exhaustion.")
@@ -1587,8 +1543,9 @@ class LvmVolume(LocalVolume):
 
 
 # Try to sync only selected filesystem
-def fssync(path):
-    if options.maxsync:   SPr.Popen([CP.sync,"-f",path])
+def fssync(path, force=False, sync=False):
+    if options.maxsync or force:
+        rc = SPr.check_output([CP.sync,"-f",path]) if sync else SPr.Popen([CP.sync,"-f",path])
 
 
 def rel_chmod(fpath, op, mask):
@@ -1624,7 +1581,7 @@ def arch_init(aset, opts):
 
     aset.set_local(opts.local)
 
-    aset.data_cipher = opts.encrypt or "xchacha20-t3"
+    aset.data_cipher = opts.encrypt or "xchacha20-dgr"
     # Fix: duplicates code in aset... move to aset class.
     if aset.data_cipher in (x[0] for x in DataCryptography.crypto_codes.values() if x[2]):
         aset.ci_mode, ci= [(x,y) for x,y in DataCryptography.crypto_codes.items()
@@ -1641,18 +1598,19 @@ def arch_init(aset, opts):
                                      passphrase=passphrase[:], init=True)
             aset.datacrypto.load(aset.data_cipher, aset.mcrypto.keyfile, slot=0,
                                      passphrase=passphrase, init=True)
-            shutil.copyfile(aset.path+"/"+aset.confname+".salt", aset.path+"/salt.bak")
+            with open(aset.confpath+".salt","rb") as inf, open(aset.path+"/salt.bak","wb") as outf:
+                outf.write(bytes(x ^ 0xff for x in inf.read()))
     else:
         x_it(1,"Error: Invalid cipher option.")
 
     print(); print(f"Encryption    : {aset.data_cipher} ({ci[1]})")
 
-    ##if opts.hashtype:
-        ##if opts.hashtype not in hash_funcs or opts.hashtype == "sha256":
-            ##x_it(1, "Hash function '"+opts.hashtype+"' is not available on this system.")
+    if opts.hashtype:
+        if opts.hashtype not in hash_funcs or opts.hashtype == "sha256":
+            x_it(1, "Hash function '"+opts.hashtype+"' is not available on this system.")
 
     # Use hmac-sha256 as data hash if the mode supports it:
-    aset.hashtype = "hmac-sha256" if aset.datacrypto.mhashkey else "blake2b"
+    aset.hashtype = "hmac-sha256" if aset.datacrypto and aset.datacrypto.mhashkey else "blake2b"
     # Always use blake2b for metadata:
     aset.gethash  = hash_funcs["blake2b"]
     print("Data Hashing  :", aset.hashtype)
@@ -1666,9 +1624,7 @@ def arch_init(aset, opts):
         compression = compression.strip()   ; compr_level = compr_level.strip()
         if compression not in compressors.keys() or not is_num(compr_level):
             x_it(1, "Invalid compression spec.")
-        #if compression == "zstd":
-        #    print("Warning: zstd does not support reproducible output; future zstd updates may "
-        #          "prevent Wyng from deduplicating data.")
+
         aset.compression = compression      ; aset.compr_level = compr_level
         compressors[compression][2](b"test", int(compr_level))
 
@@ -1683,8 +1639,9 @@ def arch_init(aset, opts):
         if aset.chunksize > 256 * 1024:
             print("Large chunk size set:", aset.chunksize)
 
-    aset.save_conf()
-    update_dest(aset, pathlist=[aset.confname, aset.confname+".salt", "salt.bak"])
+    aset.save_conf()    ; fssync(aset.path, force=True, sync=True)
+    update_dest(aset, pathlist=[aset.confname] + ([aset.confname+".salt", "salt.bak.gz"]
+                                                  if aset.datacrypto else []))
 
 
 # Check/verify an entire archive
@@ -1770,6 +1727,7 @@ def arch_check(storage, aset, vol_list=None, startup=False):
 
 def check_manifest_sequence(vol, sesnames, addcol=False):
     volsize = vol.sessions[sesnames[-1]].volsize    ; aset = vol.archive
+    sesname_sz = aset.sesname_sz
     manifest = merge_manifests(vol, msessions=sesnames, addcol=addcol)
     with open(manifest, "r") as mrgf:
         for addr in range(0, volsize, aset.chunksize):
@@ -1779,7 +1737,7 @@ def check_manifest_sequence(vol, sesnames, addcol=False):
             if addcol:   ln2, ses = ln2.split()
             if ln1 != "0":
                 assert len(ln1) == aset.mhash_sz    ; h1 = base64.urlsafe_b64decode(ln1)
-            assert len(ln2) == aset.sesname_sz      ; a1 = int("0"+ln2, 16)
+            assert len(ln2) == sesname_sz      ; a1 = int("0"+ln2, 16)
             if addr != a1:
                 print(ln); raise ValueError("Manifest seq error. Expected %d got %d." % (addr, a1))
 
@@ -1848,13 +1806,13 @@ def get_configs(opts):
     if aset.updated_at is None:
         x_it(6, "Archive not found.")
     elif local_url:
-        aset.set_local(local_url) ####
+        pass # aset.set_local(local_url) ### ###
 
-    require_online = opts.action in ("monitor","send","receive","diff") and not opts.saveto
-    if require_online and not local_url:
+    require_local = opts.action in ("monitor","send","receive","diff") and not opts.saveto
+    if require_local and not local_url:
         x_it(7, f"Please specify local storage for {opts.action}.")
-    storage = LocalStorage((None, local_url) if local_url else (aset.vgname, aset.poolname),
-                        require_online=require_online,
+    storage = LocalStorage((None, local_url) if local_url else (None, ""), ####
+                        require_online=require_local,
                         arch_vols=[(x.name, x.vid) for x in aset.vols.values()],
                         auuid=aset.uuid)
 
@@ -2705,7 +2663,7 @@ def get_reflink_deltas(storage, aset, datavols):
     generation, stpath = storage.metadata_lock()    ; lvols = storage.lvols
 
     for vol in (aset.vols[x] for x in datavols[:]):
-        lv = lvols[vol.name]                ; cmds, devs = [], set()
+        lv = lvols[vol.name]                        ; cmds, devs = [], set()
         dpath = tmpdir+"/delta."+vol.vid
 
         for side, snapname, outp in (("11", lv.snap1, ' > "'+dpath+'-p"'), ("22", lv.snap2, "")):
@@ -3242,7 +3200,7 @@ def monitor_send(storage, aset, datavols, monitor_only):
             tag = ArchiveSession.tag_parse(ans, delim=",")
             if not tag:   continue
             ses_tags.append(tag)
-            if len(ses_tags) == ArchiveSet.max_tags:   break
+            if len(ses_tags) == ArchiveSession.max_tags:   break
         print(len(ses_tags), "tags total.")
     elif options.tag and not monitor_only:
         for tag_opt in options.tag:
@@ -4259,7 +4217,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8wip"        ; prog_date = "20230610"
+prog_version          = "0.8wip"        ; prog_date = "20230612"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
