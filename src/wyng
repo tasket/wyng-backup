@@ -804,7 +804,7 @@ class DataCryptography:
             self.encrypt = self._enc_chacha20_ct
 
         elif ci_type in ("xchacha20-poly1305", "xchacha20-poly1305-ct"):
-            self.max_count = 2**60-64
+            self.max_count = 2**61-64
             self.tag_sz  = 16                  ; self.buf_start = self.nonce_sz + self.tag_sz
             self.decrypt = self.auth = self._dec_chacha20_poly1305
             self.encrypt = self._enc_chacha20_poly1305_ct
@@ -930,7 +930,7 @@ class DataCryptography:
         cipher = self.ChaCha20_Poly1305_new(key=self.key, nonce=nonce)
         return cipher.decrypt_and_verify(untrusted_buf[self.buf_start:], ci_tag)
 
-    # Encrypt [X]ChaCha20:
+    # Encrypt [X]ChaCha20 (protected counter nonce):
     def _enc_chacha20_ct(self, buf, _na):
         self.counter += 1
         if self.counter % self.ctcadence == 0:   self.save_counter()
@@ -946,7 +946,7 @@ class DataCryptography:
         buf    = cipher.encrypt(buf)
         return  nonce, buf
 
-    # Encrypt [X]ChaCha20-Poly1305:
+    # Encrypt [X]ChaCha20-Poly1305 (protected counter nonce):
     def _enc_chacha20_poly1305_ct(self, buf):
         self.counter += 1
         if self.counter % self.ctcadence == 0:   self.save_counter()
@@ -962,7 +962,7 @@ class DataCryptography:
         buf, ci_tag = cipher.encrypt_and_digest(buf)
         return  b''.join((nonce, ci_tag)), buf
 
-    # Encrypt [X]ChaCha20 (HMAC nonce)
+    # Encrypt [X]ChaCha20 (HMAC nonce: message & random inputs)
     def _enc_chacha20_msr(self, buf, _na):
         self.counter += 1
         if self.counter % self.ctcadence == 0:   self.save_counter()
@@ -976,7 +976,7 @@ class DataCryptography:
         cipher  = self.ChaCha20_new(key=self.key, nonce=nonce)
         return  nonce, cipher.encrypt(buf)
 
-    # Encrypt [X]ChaCha20-Poly1305 (HMAC nonce)
+    # Encrypt [X]ChaCha20-Poly1305 (HMAC nonce: message & random inputs)
     def _enc_chacha20_poly1305_msr(self, buf):
         self.counter += math.ceil(len(buf) // 16384)
         if self.counter % self.ctcadence == 0:   self.save_counter()
@@ -991,7 +991,7 @@ class DataCryptography:
         buf, ci_tag = cipher.encrypt_and_digest(buf)
         return  b''.join((nonce, ci_tag)), buf
 
-    # Encrypt [X]ChaCha20 (HMAC nonce)
+    # Encrypt [X]ChaCha20 (HMAC nonce: digest & random inputs)
     def _enc_chacha20_dgr(self, buf, mhash):
         self.counter += 1
         if self.counter % self.ctcadence == 0:   self.save_counter()
@@ -1040,7 +1040,7 @@ class LocalStorage:
     fallocate.restype = ctypes.c_int
     fallocate.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int64, ctypes.c_int64]
 
-    def __init__(self, localpath_t, auuid=None, arch_vols=[], clean=False, sync=False,
+    def __init__(self, localpath, auuid=None, arch_vols=[], clean=False, sync=False,
                  require_online=False):
 
         self.stypes  = { "tlvm":  LvmVolume,   "rlnk": ReflinkVolume }
@@ -1048,28 +1048,29 @@ class LocalStorage:
 
         assert len(auuid) > 8
         self.gc_procs  = []          ; self.locked  = False      ; self.auuid     = auuid
-        self.clean     = clean       ; self.sync    = sync
-        self.arch_vols = arch_vols
+        self.clean     = clean       ; self.sync    = sync       ; self.arch_vols = arch_vols
         self.lvols, self.vgs_all = {}, {}
         self.users, self.groups  = {}, {}
-        self.path  = self.pooltype = self.fstype = self.lvpool  = None
+        self.path  = self.pooltype = self.fstype = self.lvpool = None    ; online = False
 
-        if localpath_t[0]:
-            self.pooltype       = "tlvm"
-            self.block_size     = 512
-            self.path           = "/dev/"+localpath_t[0]+"/"    ; self.vgname = localpath_t[0]
-            self.online         = LocalStorage.vg_exists(localpath_t[0]) and exists(self.path)
-            self.lvpool         = localpath_t[1]
+        loctype, locvol, locpool, pathxvg = LocalStorage.parse_local_path(localpath)
+
+        if loctype is None:
+            self.path           = None
+
+        elif loctype in ("lvm volgroup", "tlvm pool"):
+            self.pooltype       = "tlvm"          ; self.path    = "/dev/"+pathxvg+"/"
+            self.block_size     = 512             ; self.online  = exists(self.path)
+            self.vgname         = pathxvg         ; self.lvpool  = locpool
 
             self.acquire_deltas = get_lvm_deltas
             self.process_deltas = update_delta_digest_lvm
             self.prep_snapshots = prepare_snapshots_lvm
 
-        elif not localpath_t[0] and localpath_t[1].startswith("/"):
-            self.pooltype       = "rlnk"
-            self.block_size     = 4096   # Test this with XFS ###
-            self.path           = localpath_t[1]
-            self.online         = exists(self.path)
+        elif loctype == "file" and exists(pathxvg):
+            self.pooltype       = "rlnk"          ; self.path    = pathxvg
+            self.block_size     = 4096            ; self.online  = True
+
             if self.online:
                 if (fs := LocalStorage.get_fs_type(self.path)) in self.rltypes:   self.fstype = fs
                 self.snappath = self.path+("wyng_snapshot_tmp/" if self.fstype == "btrfs" else "")
@@ -1083,14 +1084,9 @@ class LocalStorage:
             self.process_deltas = update_delta_digest_reflink
             self.prep_snapshots = prepare_snapshots_reflink
 
-        elif require_online:
-            raise ValueError("Indeterminate local path.")
-
-        else:
-            self.online = False
-
+        print(loctype, self.path, pathxvg) ####
         if require_online and not self.online:
-            x_it(7, "Local storage is offline: "+repr(localpath_t))
+            x_it(7, "Local storage is offline: "+repr(localpath))
 
         if self.online:  #Fix: make conditional on send/monitor/receive
             self.LVolClass    = self.stypes[self.pooltype]
@@ -1264,20 +1260,29 @@ class LocalStorage:
         while path not in mtab and path != "/":   path = os.path.dirname(path)
         return mtab[path]
 
-    # accepts either a volgroup/pool or directory path and returns type, tpool, absolute path
+    # accepts either a volgroup/pool or directory path and returns:
+    # type, tvol, tpool, vg or abs path
     def parse_local_path(localpath):
-        lvname, lvpool, vg, lvattr = LocalStorage.get_lv_path_pool(localpath)
-        abspath = os.path.abspath(localpath)
+        if type(localpath) is not str or not localpath.isprintable():
+            return (None, None, None, None)
 
-        if lvname and not lvpool and lvattr.startswith("t") and exists("/dev/"+vg):
-            return ("logical volume", lvname, "/dev/"+vg)
+        abspath = os.path.abspath(localpath)
+        if LocalStorage.vg_exists(localpath):
+            return ("lvm volgroup", None, None, os.path.basename(localpath))
+
+        lvname, lvpool, vg, lvattr = LocalStorage.get_lv_path_pool(localpath)
+
+        if lvname and not lvpool and lvattr.startswith("t"):
+            return ("tlvm pool", None, lvname, vg)
+        elif lvname and lvpool and lvattr.startswith("V"):
+            return ("tlvm volume", lvpool, lvname, vg)
         elif abspath.startswith("/dev"):
         #and stat.S_ISBLK(os.stat(localpath).st_mode):
-            return ("block device", "", abspath)
+            return ("block device", None, None, abspath)
         elif abspath.startswith("/") and exists(abspath) and os.path.isdir(abspath):
-            return ("file", "", abspath)
+            return ("file", None, None, abspath)
         else:
-            return (None, None, None)
+            return (None, None, None, None)
 
     # Converts a non-cannonical LV path to LV name plus pool and vg names.
     def get_lv_path_pool(path):
@@ -1576,10 +1581,6 @@ def clear_array(ar):
 # Initialize a new ArchiveSet:
 
 def arch_init(aset, opts):
-    #if not opts.local:
-        #x_it(1,"--local is required.")
-
-    aset.set_local(opts.local)
 
     aset.data_cipher = opts.encrypt or "xchacha20-dgr"
     # Fix: duplicates code in aset... move to aset class.
@@ -1805,17 +1806,13 @@ def get_configs(opts):
 
     if aset.updated_at is None:
         x_it(6, "Archive not found.")
-    elif local_url:
-        pass # aset.set_local(local_url) ### ###
 
     require_local = opts.action in ("monitor","send","receive","diff") and not opts.saveto
     if require_local and not local_url:
         x_it(7, f"Please specify local storage for {opts.action}.")
-    storage = LocalStorage((None, local_url) if local_url else (None, ""), ####
-                        require_online=require_local,
+    storage = LocalStorage(local_url or None, require_online=require_local,
                         arch_vols=[(x.name, x.vid) for x in aset.vols.values()],
                         auuid=aset.uuid)
-
     return aset, storage
 
 
@@ -2274,7 +2271,7 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", inlines=[], text=
 
         if check and any(rclist):
             print(repr(rclist), file=errf, flush=True)
-            raise SPr.SubprocessError("Chain exited "+repr(rclist))
+            raise SPr.CalledProcessError("Chain exited "+repr(rclist), commands)
 
         for f in [inf, outf, errf]:
             if type(f) is not int: f.close()
@@ -3682,13 +3679,13 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
         # Decode save path semantics
         if save_path:
             save_storage = None       ; returned_home = False
-            save_type, lvpool, lpath = LocalStorage.parse_local_path(os.path.dirname(save_path))
+            save_type,_,_,_ = LocalStorage.parse_local_path(ldir := os.path.dirname(save_path))
             if save_type not in (None,"block device"):
-                save_storage = LocalStorage((lvpool, lpath), auuid=aset.uuid,
+                save_storage = LocalStorage(ldir, auuid=aset.uuid,
                                             arch_vols=storage.arch_vols)
         else:
             save_storage = storage    ; returned_home = storage.online
-            save_type = "logical volume" if storage.pooltype=="tlvm" else "file"
+            save_type = "tlvm pool" if storage.pooltype=="tlvm" else "file"
             l_vol = save_storage.new_vol_entry(vol.name, vol.vid)    ; save_path = l_vol.path
 
         if exists(save_path) and attended:
@@ -3706,7 +3703,7 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
             l_vol.delete(force=True)
             l_vol.create(snapshotfrom=snap_lv.name, ro=False)
 
-        elif save_type == "logical volume":
+        elif save_type == "tlvm pool":
             if not l_vol.exists():
                 print("Creating '%s' in thin pool %s[%s]." %
                       (l_vol.name, save_storage.path, save_storage.lvpool))
@@ -3717,7 +3714,7 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
                 if debug:   print("Re-sizing LV to %d bytes." % volsize)
                 l_vol.resize(volsize)
 
-        if save_type in("logical volume","block device") and exists(save_path):
+        if save_type in("tlvm pool","block device") and exists(save_path):
             punch_hole = save_storage.block_discard_chunk
             if not sparse_write:   do_exec([[CP.blkdiscard, save_path]])
             volf = open(save_path, "r+b")
