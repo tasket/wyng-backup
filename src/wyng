@@ -1647,12 +1647,12 @@ def arch_init(aset, opts):
 
     print(); print(f"Encryption    : {aset.data_cipher} ({ci[1]})")
 
-    ##if opts.hashtype:
-        ##if opts.hashtype not in hash_funcs or opts.hashtype == "sha256":
-            ##x_it(1, "Hash function '"+opts.hashtype+"' is not available on this system.")
+    if opts.hashtype:
+        if opts.hashtype not in hash_funcs or opts.hashtype == "sha256":
+            x_it(1, "Hash function '"+opts.hashtype+"' is not available on this system.")
 
     # Use hmac-sha256 as data hash if the mode supports it:
-    aset.hashtype = "hmac-sha256" if aset.datacrypto.mhashkey else "blake2b"
+    aset.hashtype = "hmac-sha256" if aset.datacrypto and aset.datacrypto.mhashkey else "blake2b"
     # Always use blake2b for metadata:
     aset.gethash  = hash_funcs["blake2b"]
     print("Data Hashing  :", aset.hashtype)
@@ -1684,7 +1684,8 @@ def arch_init(aset, opts):
             print("Large chunk size set:", aset.chunksize)
 
     aset.save_conf()
-    update_dest(aset, pathlist=[aset.confname, aset.confname+".salt", "salt.bak"])
+    update_dest(aset, pathlist=[aset.confname] + ([aset.confname+".salt", "salt.bak"]
+                                                  if aset.datacrypto else []))
 
 
 # Check/verify an entire archive
@@ -4217,7 +4218,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.4alpha3"     ; prog_date = "20230610"
+prog_version          = "0.4alpha3"     ; prog_date = "20230612"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 aset = dest = storage = None
