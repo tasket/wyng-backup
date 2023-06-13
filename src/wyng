@@ -2300,7 +2300,7 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", inlines=[], text=
     def close():
         rclist = [0] + list(filter(bool if pipefail else str, ( x.returncode for x in procs )))
         if check and any(rclist):
-            raise SPr.SubprocessError("Chain exited "+repr(rclist))
+            raise SPr.CalledProcessError("Chain exited "+repr(rclist), commands)
 
         for f in [inf, outf, errf]:
             if type(f) is not int: f.close()
