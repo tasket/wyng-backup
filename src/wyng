@@ -21,7 +21,7 @@
 
 import sys, signal, os, stat, shutil, subprocess as SPr, time, datetime
 import re, mmap, bz2, zlib, gzip, tarfile, io, fcntl, tempfile
-import argparse, configparser, hashlib, hmac, functools, uuid
+import argparse, configparser, hashlib, hmac, functools, uuid, math
 import getpass, base64, platform, resource, itertools, string, struct
 import xml.etree.ElementTree, ctypes, ctypes.util, atexit
 from array import array         ; from urllib.parse import urlparse
@@ -81,7 +81,7 @@ class ArchiveSet:
         self.hashtype    = "hmac-sha256"
         self.uuid        = None
         self.updated_at  = None
-        self.data_cipher = self.ci_mode = None
+        self.ci_mode     = None
         self.mci_count   = self.dataci_count  =  0
         self.in_process  = []
 
@@ -111,15 +111,15 @@ class ArchiveSet:
 
         # use existing auth if specified
         if isinstance(prior_auth, ArchiveSet):
-            self.mcrypto    = mcrypto = prior_auth.mcrypto    ; self.ci_mode = prior_auth.ci_mode
+            ci = prior_auth.ci_mode
+            self.mcrypto    = mcrypto = prior_auth.mcrypto
             self.datacrypto = datacrypto = prior_auth.datacrypto
-            self.data_cipher = prior_auth.data_cipher
         else:
-            self.ci_mode = header1[-3:-1]
+            ci = header1[-3:-1].decode("ASCII")
 
         # parse metadata crypto mode and instantiate it
-        if self.ci_mode != b"00" and not mcrypto:
-            ci_types = DataCryptography.crypto_codes[self.ci_mode]
+        if ci != "00" and not mcrypto:
+            ci_types = DataCryptography.crypto_codes[ci]
             if debug:   print("metadata cipher =", ci_types[1])
 
             # access a key agent, if available for this UUID and archive URL
@@ -156,6 +156,11 @@ class ArchiveSet:
             setattr(self, key, int(value) if key in self.attr_ints else value)
         self.in_process  = [ ln for ln in cp["in_process"].values() ]
 
+        if self.ci_mode and self.ci_mode != ci:
+            raise ValueError("Header ci_mode mismatch: %s != %s" % (ci, self.ci_mode))
+        else:
+            self.ci_mode = ci
+
         if self.format_ver > format_version or not self.format_ver:
             x_it(1,"Archive format ver = "+str(self.format_ver)+
                                 ". Expected = "+str(format_version))
@@ -174,8 +179,9 @@ class ArchiveSet:
             if not float(self.updated_at) < self.time_start:
                 raise ValueError("Current time is less than archive timestamp!")
 
-            cadence = 20 + (self.data_cipher.endswith(("-dgr","-msr")) * 100)
-            datacrypto.load(self.data_cipher, mcrypto.keyfile, slot=0, cadence=cadence,
+            data_ci = ci_types[0]
+            cadence = 20 + (data_ci.endswith(("-dgr","-msr")) * 100)
+            datacrypto.load(data_ci, mcrypto.keyfile, slot=0, cadence=cadence,
                             passphrase=passphrase, agentkeys=agentkeys)
 
             self.mci_count    = mcrypto.set_counter(self.mci_count)
@@ -250,8 +256,8 @@ class ArchiveSet:
         c['compression'] = self.compression
         c['compr_level'] = self.compr_level
         c['hashtype']    = self.hashtype
-        #c['ci_mode']     = self.ci_mode
-        c['data_cipher'] = self.data_cipher
+        assert bool(self.ci_mode)
+        c['ci_mode']     = self.ci_mode
 
         if mcrypto:
             if self.datacrypto.counter > self.datacrypto.ctstart:
@@ -268,7 +274,8 @@ class ArchiveSet:
             buf = gzip.compress(fs.getvalue().encode("UTF-8"), 4)
         if mcrypto:   etag, buf = mcrypto.encrypt(buf)
         with open(self.confpath+ext, "wb") as f:
-            f.write(b''.join((self.confprefix, self.modeprefix, self.ci_mode, b"\n")))
+            f.write(b''.join((self.confprefix, self.modeprefix,
+                              self.ci_mode.encode("ASCII"), b"\n")))
             f.write(etag)    ; f.write(buf)
 
     def rename_saved(self, ext=".tmp"):
@@ -755,16 +762,16 @@ class DataCryptography:
 
     # Matrix of recommended mode pairs = 'formatcode: (data, metadata, selectable)'
     # User selects a data cipher which is automatically paired w a metadata authentication cipher.
-    crypto_codes    = {b"00":  ("off",                "off", 1),
-                       b"10":  ("n/a",                "n/a", 0),
-                       b"20":  ("n/a",                "n/a", 0),
-                       b"30":  ("xchacha20",          "xchacha20-poly1305",     0),
-                       b"31":  ("n/a",                "n/a", 0),
-                       b"32":  ("xchacha20-ct",       "xchacha20-poly1305-ct",  1),
-                       b"33":  ("n/a",                "n/a", 0),
-                       b"34":  ("xchacha20-msr",      "xchacha20-poly1305-msr", 1),
-                       b"35":  ("xchacha20-dgr",      "xchacha20-poly1305-msr", 1),
-                       b"40":  ("n/a",                "n/a", 0)}
+    crypto_codes    = {"00":  ("off",                "off", 1),
+                       "10":  ("n/a",                "n/a", 0),
+                       "20":  ("n/a",                "n/a", 0),
+                       "30":  ("xchacha20",          "xchacha20-poly1305",     0),
+                       "31":  ("n/a",                "n/a", 0),
+                       "32":  ("xchacha20-ct",       "xchacha20-poly1305-ct",  1),
+                       "33":  ("n/a",                "n/a", 0),
+                       "34":  ("xchacha20-msr",      "xchacha20-poly1305-msr", 1),
+                       "35":  ("xchacha20-dgr",      "xchacha20-poly1305-msr", 1),
+                       "40":  ("n/a",                "n/a", 0)}
 
     __slots__ = ("key","keyfile","ci_type","counter","ctstart","ctcadence","countsz","max_count",
                  "slot","slot_offset","key_sz","nonce_sz","tag_sz","randomsz","buf_start","mode",
@@ -785,11 +792,11 @@ class DataCryptography:
         if ci_type.startswith("xchacha20") and Cryptodome.version_info[0:2] < (3,9):
             raise RuntimeError("Cryptodome version >= 3.9 required for xchacha20 cipher.")
 
-        self.keyfile    = keyfile          ; self.ci_type  = ci_type
-        self.slot       = slot             ; self.slot_offset = self.get_slot_offset(slot)
-        self.ctcadence  = cadence          ; mknoncekey    = mkmhashkey = False
         self.time_start = time_start       ; self.monotonic_start = monotonic_start
-        self.get_rnd    = get_random_bytes ; self.auth     = False
+        self.slot       = slot             ; self.slot_offset = self.get_slot_offset(slot)
+        self.keyfile    = keyfile          ; self.ci_type     = ci_type
+        self.ctcadence  = cadence          ; mknoncekey       = mkmhashkey = False
+        self.get_rnd    = get_random_bytes ; self.auth        = False
 
         # xchacha20 common
         self.key_sz  = self.crypto_key_bits//8 ; self.max_count = 2**80-64
@@ -825,7 +832,7 @@ class DataCryptography:
             mknoncekey   = True
 
         elif ci_type == "xchacha20-dgr":
-            self.encrypt = self._enc_chacha20_t4
+            self.encrypt = self._enc_chacha20_dgr
             mknoncekey   = mkmhashkey = True
 
         else:
@@ -1051,7 +1058,7 @@ class LocalStorage:
         self.clean     = clean       ; self.sync    = sync       ; self.arch_vols = arch_vols
         self.lvols, self.vgs_all = {}, {}
         self.users, self.groups  = {}, {}
-        self.path  = self.pooltype = self.fstype = self.lvpool = None    ; online = False
+        self.path = self.pooltype = self.fstype = self.lvpool = None; self.online = False
 
         loctype, locvol, locpool, pathxvg = LocalStorage.parse_local_path(localpath)
 
@@ -1582,29 +1589,29 @@ def clear_array(ar):
 
 def arch_init(aset, opts):
 
-    aset.data_cipher = opts.encrypt or "xchacha20-dgr"
+    data_ci = opts.encrypt or "xchacha20-dgr"
     # Fix: duplicates code in aset... move to aset class.
-    if aset.data_cipher in (x[0] for x in DataCryptography.crypto_codes.values() if x[2]):
-        aset.ci_mode, ci= [(x,y) for x,y in DataCryptography.crypto_codes.items()
-                                 if y[0] == aset.data_cipher][0]
+    if data_ci in (x[0] for x in DataCryptography.crypto_codes.values() if x[2]):
+        aset.ci_mode, ci_t = [(x,y) for x,y in DataCryptography.crypto_codes.items()
+                                    if y[0] == data_ci][0]
 
-        if aset.data_cipher != "off":
+        if data_ci != "off":
             # Security Enh: Possibly use mmap+mlock to store passphrase/key values,
             #               and wipe them from RAM after use.
             passphrase      = ask_passphrase(prompt="Enter new encryption passphrase: ",
                                              verify=True)
             aset.datacrypto = DataCryptography()
             aset.mcrypto    = DataCryptography()
-            aset.mcrypto.load(ci[1], aset.confpath+".salt", slot=1,
+            aset.mcrypto.load(ci_t[1], aset.confpath+".salt", slot=1,
                                      passphrase=passphrase[:], init=True)
-            aset.datacrypto.load(aset.data_cipher, aset.mcrypto.keyfile, slot=0,
+            aset.datacrypto.load(data_ci, aset.mcrypto.keyfile, slot=0,
                                      passphrase=passphrase, init=True)
             with open(aset.confpath+".salt","rb") as inf, open(aset.path+"/salt.bak","wb") as outf:
                 outf.write(bytes(x ^ 0xff for x in inf.read()))
     else:
         x_it(1,"Error: Invalid cipher option.")
 
-    print(); print(f"Encryption    : {aset.data_cipher} ({ci[1]})")
+    print(); print(f"Encryption    : {data_ci}", "" if data_ci=="off" else f"({ci_t[1]})")
 
     if opts.hashtype:
         if opts.hashtype not in hash_funcs or opts.hashtype == "sha256":
@@ -1641,8 +1648,8 @@ def arch_init(aset, opts):
             print("Large chunk size set:", aset.chunksize)
 
     aset.save_conf()    ; fssync(aset.path, force=True, sync=True)
-    update_dest(aset, pathlist=[aset.confname] + ([aset.confname+".salt", "salt.bak.gz"]
-                                                  if aset.datacrypto else []))
+    update_dest(aset, pathlist=([aset.confname+".salt", "salt.bak"] if aset.datacrypto else [])
+                              + [aset.confname])
 
 
 # Check/verify an entire archive
@@ -2271,7 +2278,7 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", inlines=[], text=
 
         if check and any(rclist):
             print(repr(rclist), file=errf, flush=True)
-            raise SPr.CalledProcessError("Chain exited "+repr(rclist), commands)
+            raise SPr.CalledProcessError([x for x in rclist if x][0], commands)
 
         for f in [inf, outf, errf]:
             if type(f) is not int: f.close()
@@ -2454,7 +2461,7 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only):
         if vol.sessions and exists(mapfile) and lvols[snap1].exists():
             incr_vols.append(datavol)
         elif not monitor_only:
-            print("  Re-mapping", datavol)
+            print("  Mapping snapshot to", datavol)
             complete_vols.append(datavol)
         else:
             print("  Skipping %s; No paired snapshot." % datavol)    ; continue
@@ -2520,7 +2527,7 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only):
         if vol.sessions and exists(mapfile) and lvols[snap1].exists():
             incr_vols.append(datavol)
         elif not monitor_only:
-            print("  Re-mapping", datavol)
+            print("  Mapping snapshot to", datavol)
             complete_vols.append(datavol)
         else:
             print("  Skipping %s; No paired snapshot." % datavol)    ; continue
@@ -2938,7 +2945,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
                                                    #(bcount + snap2size-addr)/MB)).ljust(18),
 
 
-                                 bcount/(time.monotonic() - testtime)/1048576,
+                                 #bcount/(time.monotonic() - testtime)/1048576,
                               end="", flush=True)
                     counter = 0
 
@@ -3012,6 +3019,8 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
             # Advance addr, except when minibmap is zero len.
             if minibmap or send_all:  addr += chunksize
 
+    print(("\r%0d-->%0d MB" % (snap2size/MB, bcount/MB)).ljust(18) + "|  100% ",
+          end="", flush=True)
     #print("\r  100% ", ("%8.1fM  |  %s" % (bcount/1000000, datavol)),
           #("\n  (reduced %0.1fM)" % (ddbytes/1000000)) if ddbytes and options.verbose else "",
           #end="")
@@ -4214,7 +4223,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8wip"        ; prog_date = "20230612"
+prog_version          = "0.8wip"        ; prog_date = "20230613"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
