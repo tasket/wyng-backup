@@ -141,13 +141,14 @@ Run Wyng using the following commands and arguments in the form of:
 |-------------------------------|--------------
 --local=_vg/pool_  _...or..._    | Storage pool containing local volumes.
 --local=_/absolute/path_    | 
---dest=_type:location_   | (arch-init) Destination of backup archive.
+--dest=_type:location_   | Destination of backup archive.
 --session=_date-time[,date-time]_ | Select a session or session range by date-time or tag (receive, verify, prune).
 --authmin=_N_          | Remember authentication for N minutes.
 --volex=_volname_      | Exclude volumes (send, monitor, list, prune).
 --dedup, -d            | Use deduplication for send (see notes).
 --all-before           | Select all sessions before the specified _--session date-time_ (prune).
 --autoprune=off        | Automatic pruning by calendar date.
+--apdays=_A:B:C:D_     | Number of days to keep or to thin-out older sessions
 --keep=_date-time_     | Specify date-time or tag of sessions to keep (prune).
 --tag=tagname[,desc]   | Use session tags (send, list).
 --save-to=_path_       | Save volume to _path_ (receive).
@@ -161,7 +162,7 @@ Run Wyng using the following commands and arguments in the form of:
 --chunk-factor         | (arch-init) Set archive chunk size.
 --meta-dir=_path_      | Use a different metadata dir than the default.
 --unattended, -u       | Don't prompt for interactive input.
---clean                | Perform garbage collection (arch-check) or medata removal (delete).
+--clean                | Perform garbage collection (arch-check) or metadata removal (delete).
 --force                | Not used with most commands.
 --verbose              | Increase details.
 --quiet                | Shhh...
@@ -335,7 +336,7 @@ wyng arch-init --dest=file:/mnt/backups/mybackup --compression=zstd:7
 #### arch-check
 
 Intensive check of archive integrity, reading each session completely starting with
-the newest and working back to the oldest. This differs from `verify` which first bulids a complete
+the newest and working back to the oldest. This differs from `verify` which first builds a complete
 index for the volume and then checks only/all data referenced in the index.
 
 Using `--session=newest` provides a 'verify the last session' function (useful after an incremental
@@ -369,7 +370,12 @@ space efficiency and performance balance, a factor of '2' or greater is suggeste
 that will store volumes larger than about 100GB. (default=2)
 
 
-`--encrypt` selects the encryption cipher/mode. See _Testing_ section for description of choices.
+`--encrypt` selects the encryption cipher/mode.  The available modes are:
+
+- `xchacha20-dgr` — Using HMAC-SHA256(rnd||hash) function.  This is the default.
+- `xchacha20-msr` — Using HMAC-SHA256(rnd||msg) function.
+- `xchacha20-ct` — Counter based; fast with certain risks (see issue [158](https://github.com/tasket/wyng-backup/issues/158)).
+- `off` — Turns off Wyng's authentication and encryption.
 
 Note that _encrypt, compression, hashtype_ and _chunk-factor_ cannot be changed for an archive once it is initialized.
 
@@ -433,7 +439,7 @@ want the added CPU usage of full `--sparse` mode.
 
 `--sparse`
 
-The sparse mode can be used with the `receive` command to intelligently retreive and overwrite
+The sparse mode can be used with the `receive` command to intelligently retrieve and overwrite
 an existing
 local volume so that only the differences between local and archived volumes will be fetched
 from the archive and written to the local volume. This results in reduced network
@@ -456,7 +462,7 @@ When used with the `send` command, data chunks from the new backup will be sent 
 they don't already exist somewhere in the archive. Otherwise, a link will be used saving
 disk space and possibly time and bandwith.
 
-The tradeoff for deduplicating is longer startup time for Wyng, in addition to using more
+The trade-off for deduplicating is longer startup time for Wyng, in addition to using more
 memory and CPU resources during backups. Using `--dedup` works best if you are backing-up
 multiple volumes that have a lot of the same content and/or you are backing-up over a slow
 Internet link.
@@ -485,6 +491,19 @@ __min__ removes sessions before the 366 day mark, but no thinning-out is perform
 
 __full__ removes all sessions that are due to expire according to above criteria.
 
+`--apdays=A:B:C:D`
+
+Adjust autoprune with the following four parameters:
+
+* A: The oldest day before which _all_ sessions are removed.  Default is 0 (disabled).
+* B: Thinning days; the number of days before which _some_ sessions will be removed
+according to the ratio _D/C_.  Default is 62 days.
+* C: Number of _days_ for the D/C ratio.  Default is 1.
+* D: Number of _sessions_ for the D/C ratio.  Default is 2.
+
+An example:  `--apdays=365:31:1:2` will cause autoprune to remove all sessions that are older
+than 365 days, and sessions older than 31 days will be thinned-out while preserving
+(roughly on average) two sessions per day.
 
 `--tag=<tagname[,description]>`
 
@@ -531,7 +550,7 @@ or to mount .cache on a separate volume that is not configured for backup.
 remove snapshots, there may be unwanted snapshots remaining under your old volume group
 or local directory.  LVM snapshots can be found with the patterns `*.tick` and `*.tock` with
 the tag "wyng";  Btrfs/XFS snapshots can be found with `sn*.wyng?`.
-Deleting them can prevent unecessary consumption of disk space.
+Deleting them can prevent unnecessary consumption of disk space.
 
 
 ### Troubleshooting notes
@@ -557,24 +576,6 @@ directory structure.  This means whatever you specify
 in `--dest` is all there is to the archive path.  It also means accessing an alpha1 or
 alpha2 archive will require you to either include those dirs explicitly in your --dest path
 or rename '../wyng.backup040/default' to something else you prefer to use.
-
-* Encryption is still considered a new feature and various crypto modes are available for
-testing, with `--encrypt=xchacha20-t3` currently being the default.
-
-Currently the testing designations of the new modes are:
-
-- `xchacha20-t2` — Using a 192-bit random nonce; fast.
-- `xchacha20-t3` — Using HMAC-SHA256(rnd||msg) function; safe.
-- `xchacha20-t4` — Using HMAC-SHA256(rnd||hash) function; see below.
-- `xchacha20-tc` — Counter based; fast with certain risks.  See issue [158](https://github.com/tasket/wyng-backup/issues/158).
-- `off` — Turns off Wyng's authentication and encryption.
-
-Note that the _t2, t3 & tc_ modes use methods recommended by the _libsodium_
-project, the experts on encryption using the XChaCha20 cipher.  The _t4_ mode is an
-attempt to combine the best aspects of safety and speed (issue [161](https://github.com/tasket/wyng-backup/issues/161).
-
-Of course, Wyng still works with BYOE (bring your own encryption) and can turn off its own internal
-encryption.
 
 * Testing goals are basically stability, usability, security and efficiency. Compatibility
 is also a valued topic, where source systems are generally expected to be a fairly recent

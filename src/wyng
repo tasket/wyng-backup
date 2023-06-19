@@ -21,10 +21,10 @@
 
 import sys, signal, os, stat, shutil, subprocess as SPr, time, datetime
 import re, mmap, bz2, zlib, gzip, tarfile, io, fcntl, tempfile
-import argparse, configparser, hashlib, hmac, functools, uuid, math
+import argparse, configparser, hashlib, hmac, functools, uuid
 import getpass, base64, platform, resource, itertools, string, struct
 import xml.etree.ElementTree, ctypes, ctypes.util, atexit
-from array import array         ; from urllib.parse import urlparse
+from array import array   ; from urllib.parse import urlparse   ; from math import ceil
 
 try:
     import zstd, warnings
@@ -68,10 +68,10 @@ class ArchiveSet:
         self.dedupsessions = []
         self.raw_hashval = None
         self.just_fetched= False
-        self.Volume      = ArchiveVolume
-
+        self.apdays      = None
         self.big_tmpdir  = self.path+"/.tmp"
         self.subdir      = None
+        self.Volume      = ArchiveVolume
 
         # persisted:
         self.format_ver  = 0
@@ -985,7 +985,7 @@ class DataCryptography:
 
     # Encrypt [X]ChaCha20-Poly1305 (HMAC nonce: message & random inputs)
     def _enc_chacha20_poly1305_msr(self, buf):
-        self.counter += math.ceil(len(buf) // 16384)
+        self.counter += ceil(len(buf) // 16384)
         if self.counter % self.ctcadence == 0:   self.save_counter()
         if self.counter > self.max_count:   raise ValueError("Key exhaustion.")
 
@@ -1810,9 +1810,9 @@ def get_configs(opts):
         x_it(0, "Done.")
 
     aset = get_configs_remote(dest, cachedir, int(opts.authmin))    ; os.utime(aset.path)
-
     if aset.updated_at is None:
         x_it(6, "Archive not found.")
+    aset.apdays = opts.apdays
 
     require_local = opts.action in ("monitor","send","receive","diff") and not opts.saveto
     if require_local and not local_url:
@@ -2054,8 +2054,12 @@ def catch_signals(sel=["INT","TERM","QUIT","ABRT","ALRM","TSTP","USR1"], iflag=F
 def handle_signal(sig, frame):
     if sig == signal.SIGALRM:   raise IOError("Timeout ALRM")
 
-def helper_send():
+def helper_send(volid=None):
     mkdirs = os.makedirs    ; hlink = os.link    ; dirname = os.path.dirname
+    assert volid.startswith("Vol_")
+    for i in os.scandir(volid):
+        if i.path.endswith("-tmp"):   shutil.rmtree(i.path, ignore_errors=True)
+
     with tarfile.open(mode="r|", fileobj=sys.stdin.buffer) as tarf:
         extract = tarf.extract    ; substitutions = {}    ; dirlist = set()
         for member in tarf:   sdir = member.name    ; mkdirs(sdir)    ; print(sdir)    ; break
@@ -2170,7 +2174,7 @@ if cmd == "merge":
 elif cmd == "receive":
     helper_receive(lstf if lstf else sys.stdin)
 elif cmd == "send":
-    helper_send()
+    helper_send(volid=sys.argv[2])
 elif cmd == "dedup":
     ddcount = 0    ; substitutions = {}
     for line in lstf:
@@ -2427,7 +2431,7 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only):
 
                 # Handle inadvertant mapfile snapshot mis-match
                 lvols[snap1].delete()
-                print("  Removed mis-matched snapshot for", datavol)
+                print("  Removed mis-matched snapshot for '%s'" % datavol)
 
             if not lvols[snap1].exists() and lvols[snap2].exists() \
             and vol.last in lvols[snap2].tags.split(",") and exists(mapfile)  \
@@ -2453,7 +2457,7 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only):
                 vol.init_deltamap()
 
         elif monitor_only:
-            print("  Skipping %s; No data." % datavol)    ; continue
+            print("  Skipping '%s'; No data." % datavol)    ; continue
 
         # Handle circumstances where a new mapping is needed. New volume or vol has history
         # but snap1 and/or deltamap are still missing after above checks.
@@ -2461,10 +2465,10 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only):
         if vol.sessions and exists(mapfile) and lvols[snap1].exists():
             incr_vols.append(datavol)
         elif not monitor_only:
-            print("  Mapping snapshot to", datavol)
+            print("  Preparing full scan of '%s'" % datavol)
             complete_vols.append(datavol)
         else:
-            print("  Skipping %s; No paired snapshot." % datavol)    ; continue
+            print("  Skipping '%s'; No paired snapshot." % datavol)    ; continue
 
         # Make fresh snap2vol
         lvols[snap2].delete()
@@ -2516,10 +2520,10 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only):
                 and os.stat(mapfile).st_blocks == 0):
                 # Handle inadvertant mapfile snapshot mis-match
                 lvols[snap1].delete()
-                print("  Removed mis-matched snapshot for", datavol)
+                print("  Removed mis-matched snapshot for '%s'" % datavol)
 
         elif monitor_only:
-            print("  Skipping %s; No data." % datavol)    ; continue
+            print("  Skipping '%s'; No data." % datavol)    ; continue
 
         # Handle circumstances where a new mapping is needed. New volume or vol has history
         # but snap1 and/or deltamap are still missing after above checks.
@@ -2527,10 +2531,10 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only):
         if vol.sessions and exists(mapfile) and lvols[snap1].exists():
             incr_vols.append(datavol)
         elif not monitor_only:
-            print("  Mapping snapshot to", datavol)
+            print("  Preparing full scan of '%s'" % datavol)
             complete_vols.append(datavol)
         else:
-            print("  Skipping %s; No paired snapshot." % datavol)    ; continue
+            print("  Skipping '%s'; No paired snapshot." % datavol)    ; continue
 
         # Make fresh snap2vol
         lvols[snap2].delete()
@@ -2734,16 +2738,17 @@ def update_delta_digest_reflink(storage, aset, datavol, monitor_only):
     # Chunks from 'markall_pos' onward will be marked for backup.
     next_chunk_addr  = vol.last_chunk_addr() + chunksize
     markall_pos = (next_chunk_addr//chunksize//8) if snap2size-1 >= next_chunk_addr else None
+    bsize = storage.block_size
 
     # Setup access to deltamap as an mmap object.
     with open(vol.mapfile(), "r+b") as bmapf, gzip.open(tmpdir+"/delta."+vol.vid, "r") as deltaf:
-        snap_ceiling = max(snap1size, snap2size) // storage.block_size
-        chunkblocks  = chunksize // storage.block_size
+        snap_ceiling = max(snap1size, snap2size) // bsize
+        chunkblocks  = chunksize // bsize
         bmap_size    = vol.mapsize(max(snap1size, snap2size))
         if bmap_size != os.fstat(bmapf.fileno()).st_size:
             bmapf.truncate(bmap_size)    ; bmapf.flush()
         bmap_mm      = mmap.mmap(bmapf.fileno(), 0)
-        dnewchunks   = isnew  = anynew = dfreedblocks = highwater = tally = 0
+        dnewblocks   = dfreedblocks = highwater = 0
 
         # Cycle through the merged 'filefrag' metadata, marking bits in bmap_mm as needed.
         # Entries carry a beginning block position and the length of changed blocks.
@@ -2751,20 +2756,14 @@ def update_delta_digest_reflink(storage, aset, datavol, monitor_only):
         for dln in deltaf:
             side, blockbegin, blocklen = map(int, dln.split()[:3])
 
-            tally += blocklen if side == 11 else -blocklen
             blockend     = min(blockbegin + blocklen, snap_ceiling)
             if blockend <= highwater:   continue
             highwater    = blockend
 
-            #if delta.tag in ("different", "right_only"):
-            isnew = anynew = 1 #### FIX: reconcile with tally
-
-            # Fix: compare '11' output with final output to find freed blocks
-
-            #elif delta.tag == "left_only":
-            #    isnew = 0    ; dfreedblocks += blockend - blockbegin
-            #else: # superfluous tag
-            #    continue
+            if side == 22:
+                dnewblocks += blocklen
+            else:
+                dfreedblocks += blockend - blockbegin
 
             # blockpos iterates over disk blocks.
             # block_size (local) & chunksize (dest) may be somewhat independant of each other.
@@ -2772,25 +2771,29 @@ def update_delta_digest_reflink(storage, aset, datavol, monitor_only):
                 volsegment = blockpos // chunkblocks
                 bmap_pos = volsegment // 8    ; b = 1 << (volsegment%8)
                 if not bmap_mm[bmap_pos] & b:
-                    bmap_mm[bmap_pos] |= b    ; dnewchunks += isnew
+                    bmap_mm[bmap_pos] |= b
 
         if markall_pos is not None:
             # If volsize increased, flag the corresponding bmap area as changed.
             if monitor_only:  print("  Volume size has increased.")
             for pos in range(markall_pos, bmap_size):  bmap_mm[pos] = 0xff
-            dnewchunks += (bmap_size - markall_pos) * 8
+            dnewblocks += (bmap_size - markall_pos) * 8 #### ###
 
+        if dnewblocks or dfreedblocks:   bmapf.flush()    ; os.fsync(bmapf.fileno())
+
+        estimate = sum((x.count("1") for x in map(bin, filter(None, memoryview(bmap_mm))))) \
+                 * chunksize if vol.map_used() else 0 ####
+        #print(f"Estimate: {estimate}, New {dnewblocks*bsize}, Freed {dfreedblocks*bsize}" ) ####
         del(bmap_mm)
-        if dnewchunks+dfreedblocks:   bmapf.flush()    ; os.fsync(bmapf.fileno())
 
     catch_signals()
-    map_updated = dnewchunks+dfreedblocks+anynew+vol.map_used() > 0
+    map_updated = dnewblocks+dfreedblocks+vol.map_used() > 0
     if monitor_only:
         t = lvols[datavol].rotate_snapshots(rotate=map_updated, timestamp_path=vol.mapfile())
-        print(("\r  %d ch, %d dis" % (dnewchunks, dfreedblocks//chunksize))
+        print(("\r  %d ch, %d dis" % (dnewblocks, dfreedblocks//chunksize))
                 if map_updated else "\r  No changes   ")
 
-    if dnewchunks:   vol.changed_bytes_add(dnewchunks*chunksize, save=True)
+    if dnewblocks:   vol.changed_bytes_add(dnewblocks * bsize, save=True)
     catch_signals(None)
     return map_updated, snap2size
 
@@ -2824,7 +2827,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
     aset        = vol.archive
     datavol     = vol.name                      ; dedup       = options.dedup
     snap2vol    = storage.lvols[storage.lvols[vol.name].snap2]
-    snap2size   = snap2vol.getsize()            ; verbose     = options.verbose
+    snap2size   = snap2vol.getsize()            ; status1     = not options.unattended
     bmap_size   = vol.mapsize(snap2size)        ; chunksize   = aset.chunksize
     chdigits    = max_address.bit_length()//4   ; chformat    = "x%0"+str(chdigits)+"x"
     bksession   = "S_"+curtime                  ; sdir        = pjoin(vol.vid, bksession)
@@ -2877,7 +2880,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
     untar_cmd = [dest.cd + " && mkdir -p ./"+sdir
                  + " && exec >>"+dest.dtmp+"/send.log 2>&1"
                  + " && echo "+vol.vid
-                 + " && python3 "+dest.dtmp+"/dest_helper.py send"
+                 + " && python3 "+dest.dtmp+"/dest_helper.py send "+vol.vid
                  + (" --sync" if options.maxsync else "")]
 
     # Open source volume and its delta bitmap as r, session manifest as w.
@@ -2935,17 +2938,10 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
                     if 0 < crypto_cadence < 101 and not benchmark:
                         aset.save_conf()    ; tarf_add(aset.confname)
                     # Show progress.
-                    if verbose or True: ####
+                    if status1:
                         percent = int(addr/snap2size*1000)
-                        #print("\x0d  %4.1f%% %7dM" % (percent/10, bcount//1000000),
-                            #end="", flush=True)
-                        print(("\r%0d-->%0d MB" % (snap2size/MB, bcount/MB)).ljust(18)
-                                + "|  %0d%% " % (percent//10),
-                        #print(("\r%0d-->%0d MB" % (snap2size/MB,
-                                                   #(bcount + snap2size-addr)/MB)).ljust(18),
-
-
-                                 #bcount/(time.monotonic() - testtime)/1048576,
+                        print(f"\r{bcount/MB: 7.1f}MB"[:10]
+                              + f"| {(percent//10):0d}%"[:7],
                               end="", flush=True)
                     counter = 0
 
@@ -2971,6 +2967,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
                     TarInfo  = tarfile.TarInfo         ; LNKTYPE = tarfile.LNKTYPE
                     tar_info = TarInfo(sdir+"-tmp")    ; tar_info.type  = tarfile.DIRTYPE
                     tarf_addfile(tarinfo=tar_info)     ; stream_started = True
+                    if status1:   print("         |     |", datavol, end="\r")
 
                 # Add entry to new manifest
                 print(b64hash, destfile, file=hashf)
@@ -3019,15 +3016,14 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
             # Advance addr, except when minibmap is zero len.
             if minibmap or send_all:  addr += chunksize
 
-    print(("\r%0d-->%0d MB" % (snap2size/MB, bcount/MB)).ljust(18) + "|  100% ",
-          end="", flush=True)
-    #print("\r  100% ", ("%8.1fM  |  %s" % (bcount/1000000, datavol)),
-          #("\n  (reduced %0.1fM)" % (ddbytes/1000000)) if ddbytes and options.verbose else "",
-          #end="")
-    #print("")
-
-    runtime = time.monotonic() - testtime
-    if benchmark:   print("\nTime:", runtime)
+    runtime  = time.monotonic() - testtime
+    t_m, t_s = divmod(runtime, 60); t_p = (f"{t_m}m" if t_m else "") + f"{ceil(t_s)}s"
+    if status1:
+        print(f"\r{bcount/MB: 7.1f}MB"[:10] +"|"+ t_p[:5].center(5), end="")
+    else:
+        print(f"\n{bcount/MB: 7.1f}MB", end="")
+    if ddbytes and options.verbose:
+        print("\n(reduced %0.1fM)" % (ddbytes/1000000))
 
     # Send session info, end stream and cleanup
     if fullmanifest:   fullmanifest.close()   ; os.remove(fullmanifest.name)
@@ -3111,7 +3107,7 @@ def init_dedup_index(aset, listfile=""):
     dataf_write = dataf.write   ; bfromhex = bytes().fromhex   ; b64dec = base64.urlsafe_b64decode
     if makelist:   dedupf = gzip.open(tmpdir+"/"+listfile, "wt")
 
-    count = match = 0
+    count = 0
     for sesnum, ses in enumerate(ddsessions):
         vol = ses.volume    ; vid = vol.vid    ; sesname = ses.name
         vol.decode_one_manifest(ses)
@@ -3122,13 +3118,10 @@ def init_dedup_index(aset, listfile=""):
                 bhashb = b64dec(ln1)
                 i      = int_frbytes(bhashb[:ht_ksize], "big")
                 pos    = hashtree[i].find(bhashb)
-                if pos % hash_w == 0:
-                    match += 1
+                if pos % hash_w == 0: ### FIX: make sure unaligned match doesn't repeat
                     if makelist:
-                        data_i = chtree[i][pos//hash_w]
-                        dataf_seek(data_i*(ses_w+ch_w))
-                        ddses  = ddsessions[int_frbytes(
-                                 dataf_read(ses_w),"big")]
+                        dataf_seek(chtree[i][pos//hash_w] * (ses_w+ch_w))
+                        ddses  = ddsessions[int_frbytes(dataf_read(ses_w),"big")]
                         ddchx  = dataf_read(ch_w).hex().zfill(chdigits)
                         print("%s/%s/%s/x%s %s/%s/%s/%s" % \
                             (ddses.volume.vid, ddses.name, ddchx[:addrsplit], ddchx,
@@ -3152,7 +3145,7 @@ def init_dedup_index(aset, listfile=""):
     vsz, rss = map(int, os.popen("ps -up"+str(os.getpid())).readlines()[-1].split()[4:6])
     print("\nMemory use: Max %dMB, index count: %d, matches: %d" %
         (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * resource.getpagesize() // 1024//1024,
-         count, match)
+         count)
         )
     print("Current: vsize %d, rsize %d" % (vsz/1000,rss/1000))
 
@@ -3181,12 +3174,12 @@ def dedup_existing(aset):
 def monitor_send(storage, aset, datavols, monitor_only):
 
     dest = aset.dest    ; storage.check_support()
+    status1 = not options.unattended   ; MB = 1024**2
 
     if options.autoprune.lower() == "full":
         for vol in aset.vols:   autoprune(vol, apmode="full")
 
     curtime = time.strftime("%Y%m%d-%H%M%S", time.localtime(time_start))
-    mstime_start = time.monotonic()
 
     print(f"\nPreparing snapshots in '{storage.path}'...")
     incrementals, send_alls \
@@ -3215,7 +3208,7 @@ def monitor_send(storage, aset, datavols, monitor_only):
             ses_tags.append(tag)
 
     if len(incrementals) > 0:
-        if verbose:   print("Acquiring deltas.")
+        if status1:   print("Acquiring deltas.")
         incrementals = storage.acquire_deltas(storage, aset, incrementals)
 
     if not monitor_only:
@@ -3226,13 +3219,14 @@ def monitor_send(storage, aset, datavols, monitor_only):
             x_it(1, "Error: Local and archive metadata differ.")
 
         print("\nSending backup session %s:" % curtime)
-        print("-" * (os.get_terminal_size().columns - 1))
+        if not status1:   print("-" * (os.get_terminal_size().columns - 1))
 
     totalvsize = totalbcount = 0
     for datavol in incrementals + send_alls:
-        vol = aset.vols[datavol]    ; updated = False    ; svsize = sbcount = stime = 0
-        print("Scan" if monitor_only else "Send", "volume      |       | ", datavol,
-              flush=True, end="")
+        vol = aset.vols[datavol]    ; updated = sent = False    ; svsize = sbcount = stime = 0
+        print(f"Volume '{datavol}'" if not status1 else
+              f"         |     | {datavol}",
+              flush=True, end="\r")
 
         if datavol in incrementals:
             updated, svsize = storage.process_deltas(storage, aset, datavol, monitor_only)
@@ -3259,14 +3253,14 @@ def monitor_send(storage, aset, datavols, monitor_only):
         else:
             storage.lvols[vol.name].rotate_snapshots(rotate=False)
 
-        print("\r" if sbcount else "\rno changes     ", flush=True)
+        p1, p2 = ("\r", "|  -") if status1 else ("\n", "")
+        print(p1 if sent else p1+"no change"+p2, flush=True)
         totalvsize += svsize    ; totalbcount += sbcount
 
     if not monitor_only and (volct := len(incrementals + send_alls)):
-        print("-" * (os.get_terminal_size().columns - 1))
-        print(" %0d ===> %0d MB    %0d volumes in %.1f seconds"
-              % (totalvsize/(1024**2), totalbcount/(1024**2),
-                 volct, time.monotonic() - mstime_start)
+        hl = "-" * (min(max([len(aset.vols[v].name) for v in incrementals+send_alls]+[20]), 60)+18)
+        print(hl+"\n" if status1 else "", " %0d volumes, %0d==>%0d MB in %.1f seconds."
+              % (volct, totalvsize/MB, totalbcount/MB, time.monotonic() - monotonic_start)
               )
 
 
@@ -3356,11 +3350,20 @@ def autoprune(vol, needed_space=0, apmode="off", include=set()):
         return dtdate(int(sesdate[2:6]),int(sesdate[6:8]),int(sesdate[8:10]))
 
     if len(vol.sesnames) < 2:   return False
+
+    today = dtdate.today()
+    if (apdays := vol.archive.apdays or "0:62:1:2") and all(is_num, tup := apdays.split(":")):
+        ap1, ap2, ndays, nsessions = map(int, tup)
+        if ap1 < 0 or ap2 < 0 or ndays < 1 or nsessions < 1:
+            x_it(1, "Days must be at least '0:0:1:1'")
+        oldest    = today - datetime.timedelta(days=ap1)
+        thin_days = datetime.timedelta(days=ap2)
+    if not apdays or not ap2:
+        apmode = "off"
+
     datavol   = vol.name                      ; dest    = vol.archive.dest
     apmode    = apmode.lower()                ; exclude = set()
     sessions  = vol.sesnames[:-1]             ; marked  = 0
-    today     = dtdate.today()                ; oldest  = today-datetime.timedelta(days=366)
-    thin_days = datetime.timedelta(days=32)   ; ndays   = 7      ; nsessions = 2
     startdate = to_date(sessions[0])          ; nthresh = 3 if apmode == "on" else 0
     enddate   = min(to_date(sessions[-2]), today-thin_days) if len(sessions) > 2 else None
 
@@ -3381,7 +3384,7 @@ def autoprune(vol, needed_space=0, apmode="off", include=set()):
     include -= exclude
 
     # Mark all sessions prior to oldest date setting, plus include list
-    for ses in sessions:
+    for ses in sessions if oldest else []:
         sdate = to_date(ses)
         if (apmode != "off" and sdate <= oldest) or ses in include:
             for dses in apcal[sdate.toordinal()]:
@@ -3389,7 +3392,7 @@ def autoprune(vol, needed_space=0, apmode="off", include=set()):
                     dses[1] = False    ; vol.sessions[ses].toggle = False
 
     # Mark sessions for thinning-out according to ndays + nsessions
-    if apmode != "off" and (needed_space or apmode != "min") and enddate:
+    if apmode != "off" and (needed_space or apmode != "min") and thin_days and enddate:
         for year in range(startdate.year, enddate.year+1):
             for span in range(dtdate(year,1,1).toordinal(),
                             min(dtdate(year,12,31), enddate).toordinal(), ndays):
@@ -3634,8 +3637,8 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
             return 0
 
     dest        = (aset := vol.archive).dest      ; magic        = dest.magic
-    verbose     = not options.quiet and verify_only != 2 ; debug = options.debug
     attended    = not options.unattended          ; remap        = options.remap
+    verbose     = attended and verify_only != 2   ; debug        = options.debug
     sparse      = options.sparse                  ; sparse_write = options.sparse_write or sparse
     chunksize   = aset.chunksize                  ; use_snapshot = False
     sessions    = vol.sesnames                    ; zeros        = bytes(chunksize)
@@ -3773,9 +3776,8 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
         volf_read = volf.read     ; volf_write = volf.write    ; volf_seek = volf.seek
         volfno    = volf.fileno() ; fcntl.lockf(volf, fcntl.LOCK_EX|fcntl.LOCK_NB)
 
-    if verbose:
-        print("\nReceiving" if save_path else "\nVerifying", "volume:", vol.name, select_ses[2:])
-        if save_path:    print("Saving to %s '%s'" % (save_type, save_path))
+    print("\nReceiving" if save_path else "\nVerifying", "volume:", vol.name, select_ses[2:])
+    if save_path:    print("Saving to %s '%s'" % (save_type, save_path))
 
     # Collect session manifests
     diff_ses = []
@@ -4223,7 +4225,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8wip"        ; prog_date = "20230613"
+prog_version          = "0.8wip"        ; prog_date = "20230617"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
@@ -4277,7 +4279,8 @@ parser_defs = [
                        "help": "YYYYMMDD-HHMMSS or ^tag_id exclude session by date|tag (prune)"}],
  [["--volex"],        {"action": "append", "default": [],
                        "help": "Exclude volume"}],
- [["--autoprune"],    {"default": "off",   "help": "Automatic pruning"}],
+ [["--autoprune"],    {"default": "off",       "help": "Automatic pruning"}],
+ [["--apdays"],       {"help": "Parameters for autoprune"}],
  [["--save-to"],      {"dest": "saveto", "default": "", "help": "Path to store volume for receive"}],
  [["--sparse"],       {"action": "store_true", "help": "Retrieve differences only"}],
  [["--sparse-write"], {"action": "store_true", "help": "Save differences only"}],
