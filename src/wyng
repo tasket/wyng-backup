@@ -23,7 +23,7 @@ import sys, signal, os, stat, shutil, subprocess as SPr, time, datetime
 import re, mmap, bz2, zlib, gzip, tarfile, io, fcntl, tempfile
 import argparse, configparser, hashlib, hmac, functools, uuid
 import getpass, base64, platform, resource, itertools, string, struct
-import xml.etree.ElementTree, ctypes, ctypes.util, atexit
+import xml.etree.ElementTree, json, ctypes, ctypes.util, atexit
 from array import array   ; from urllib.parse import urlparse   ; from math import ceil
 
 try:
@@ -2857,11 +2857,11 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
     # Code from init_dedup_indexN() localized here for efficiency.
     dedup_idx     = dedup_db = None
     if dedup:
-        hashtree, ht_ksize, hash_w, dataf, chtree, chdigits, ch_w, ses_w \
-                  = aset.dedupindex
-        chtree_max= 2**(chtree[0].itemsize*8)
-        idxcount  = dataf.seek(0,2) // (ch_w+ses_w)    ; ddblank_ch = bytes(hash_w)
-        ddsessions = aset.dedupsessions                ; ses_index = ddsessions.index(ses)
+        hashtree, ht_ksize, hash_w, ddataf, chtree, chdigits, ch_w, ses_w  =  aset.dedupindex
+        ddataf_read = ddataf.read    ; ddataf_seek = ddataf.seek    ; ddataf_write = ddataf.write
+        chtree_max  = 2**(chtree[0].itemsize*8)
+        idxcount    = ddataf.seek(0,2) // (ch_w+ses_w)   ; ddblank_ch = bytes(hash_w)
+        ddsessions  = aset.dedupsessions                 ; ses_index = ddsessions.index(ses)
 
     # Set current dir and make new session folder
     os.chdir(aset.path)    ; os.makedirs(sdir+"-tmp")
@@ -2978,20 +2978,22 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
 
                 # If chunk already in archive, link to it
                 if dedup:
-                    i      = b2int(bhashb[:ht_ksize], "big")
-                    pos    = hashtree[i].find(bhashb)     ; ddses = None
-                    if pos % hash_w == 0:
-                        data_i = chtree[i][pos//hash_w]   ; dataf.seek(data_i*(ses_w+ch_w))
-                        ddses  = ddsessions[b2int(dataf.read(ses_w),"big")]
-                        if ddses is None:
-                            hashtree[i][pos:pos+hash_w] = ddblank_ch # zero-out obsolete entry
-                        else:
-                            ddchx = dataf.read(ch_w).hex().zfill(chdigits)
-                            tar_info.type = LNKTYPE
-                        dataf.seek(0,2)
+                    i = b2int(bhashb[:ht_ksize], "big")   ; ddses = None   ; pos = 0
+                    while (pos := hashtree[i].find(bhashb, pos)) >= 0:
+                        if pos % hash_w == 0:
+                            ddataf_seek(chtree[i][pos//hash_w] * (ses_w+ch_w))
+                            ddses  = ddsessions[b2int(ddataf_read(ses_w),"big")]
+                            if ddses is None:
+                                hashtree[i][pos:pos+hash_w] = ddblank_ch # zero-out obsolete entry
+                            else:
+                                ddchx = ddataf_read(ch_w).hex().zfill(chdigits)
+                                tar_info.type = LNKTYPE
+                            ddataf_seek(0,2)    ; break
+                        pos += 1
+
                     if ddses is None and bhashb != ddblank_ch and idxcount < chtree_max:
                         hashtree[i].extend(bhashb)   ; chtree[i].append(idxcount)   ; idxcount += 1
-                        dataf.write(ses_index.to_bytes(ses_w,"big") + addr.to_bytes(ch_w,"big"))
+                        ddataf_write(ses_index.to_bytes(ses_w,"big") + addr.to_bytes(ch_w,"big"))
 
                 if tar_info.type == LNKTYPE:
                     tar_info.linkname = "%s/%s/%s/x%s" % \
@@ -3102,9 +3104,9 @@ def init_dedup_index(aset, listfile=""):
     aset.dedupsessions.sort(key=lambda x: x.name, reverse=True)
     ddsessions = aset.dedupsessions[:2**(ses_w*8)-(len(aset.vols))-1]
 
-    dataf  = open(tmpdir+"/hashindex.dat","w+b")
-    dataf_read  = dataf.read    ; dataf_seek = dataf.seek      ; int_frbytes = int.from_bytes
-    dataf_write = dataf.write   ; bfromhex = bytes().fromhex   ; b64dec = base64.urlsafe_b64decode
+    ddataf  = open(tmpdir+"/hashindex.dat","w+b")
+    ddataf_read = ddataf.read    ; ddataf_seek = ddataf.seek    ; b2int  = int.from_bytes
+    ddataf_write= ddataf.write   ; bfromhex = bytes().fromhex   ; b64dec = base64.urlsafe_b64decode
     if makelist:   dedupf = gzip.open(tmpdir+"/"+listfile, "wt")
 
     count = 0
@@ -3116,34 +3118,37 @@ def init_dedup_index(aset, listfile=""):
                 ln1, ln2 = ln.split()
                 if ln1 == "0":   continue
                 bhashb = b64dec(ln1)
-                i      = int_frbytes(bhashb[:ht_ksize], "big")
-                pos    = hashtree[i].find(bhashb)
-                if pos % hash_w == 0: ### FIX: make sure unaligned match doesn't repeat
-                    if makelist:
-                        dataf_seek(chtree[i][pos//hash_w] * (ses_w+ch_w))
-                        ddses  = ddsessions[int_frbytes(dataf_read(ses_w),"big")]
-                        ddchx  = dataf_read(ch_w).hex().zfill(chdigits)
-                        print("%s/%s/%s/x%s %s/%s/%s/%s" % \
-                            (ddses.volume.vid, ddses.name, ddchx[:addrsplit], ddchx,
-                            vid, sesname, ln2[1:addrsplit], ln2),
-                            file=dedupf)
-                        dataf_seek(0,2)
-                elif count < chtree_max:
-                    hashtree[i].extend(bhashb)
-                    chtree[i].append(count)
-                    dataf_write(sesnum.to_bytes(ses_w,"big"))
-                    dataf_write(bfromhex(ln2[1:]))  # Enh: scale no. digits to match vol size
-                    count += 1
+                i      = b2int(bhashb[:ht_ksize], "big")   ; pos = 0
+                while (pos := hashtree[i].find(bhashb, pos)) >= 0:
+                    if pos % hash_w == 0:
+                        if makelist:
+                            ddataf_seek(chtree[i][pos//hash_w] * (ses_w+ch_w))
+                            ddses  = ddsessions[b2int(ddataf_read(ses_w),"big")]
+                            ddchx  = ddataf_read(ch_w).hex().zfill(chdigits)
+                            print("%s/%s/%s/x%s %s/%s/%s/%s" % \
+                                (ddses.volume.vid, ddses.name, ddchx[:addrsplit], ddchx,
+                                vid, sesname, ln2[1:addrsplit], ln2),
+                                file=dedupf)
+                            ddataf_seek(0,2)
+                        break
+                    pos += 1
+                else: # while
+                    if count < chtree_max:
+                        hashtree[i].extend(bhashb)
+                        chtree[i].append(count)
+                        ddataf_write(sesnum.to_bytes(ses_w,"big"))
+                        ddataf_write(bfromhex(ln2[1:]))  # Enh: scale no. digits to match vol size
+                        count += 1
 
     if listfile:   dedupf.close()
 
-    aset.dedupindex    = (hashtree, ht_ksize, hash_w, dataf, chtree, chdigits, ch_w, ses_w)
+    aset.dedupindex    = (hashtree, ht_ksize, hash_w, ddataf, chtree, chdigits, ch_w, ses_w)
     aset.dedupsessions = ddsessions
 
     if not debug:  return
     print("\nIndexed in %.1f seconds." % (time.perf_counter()-ctime))
     vsz, rss = map(int, os.popen("ps -up"+str(os.getpid())).readlines()[-1].split()[4:6])
-    print("\nMemory use: Max %dMB, index count: %d, matches: %d" %
+    print("\nMemory use: Max %dMB, index count: %d" %
         (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * resource.getpagesize() // 1024//1024,
          count)
         )
@@ -3154,7 +3159,7 @@ def init_dedup_index(aset, listfile=""):
 
 def dedup_existing(aset):
 
-    print("Building deduplication index...", end="")
+    print("Building deduplication index...", end="", flush=True)
     init_dedup_index(aset, "dedup.lst.gz")
     dest = aset.dest
 
@@ -4062,6 +4067,13 @@ def remove_local_metadata(storage, archive, purge_other=False):
 def show_list(aset, selected_vols):
 
     if aset.dest.archive_ini_hash == "none":   print("(CACHED)")
+    if options.json:
+        print(json.dumps({"uuid": aset.uuid, "updated_at": aset.updated_at, "volumes":
+         {vname: {"vid": v.vid, "desc": v.desc, "sessions": {sname:
+          {"volsize": s.volsize, "sequence": s.sequence, "tags": {x:y for x,y in s.tags.items()}}
+           for sname, s in v.sessions.items()} } for vname, v in aset.vols.items() }}, indent=1)
+         )
+        return
     if options.verbose:
         print("\nArchive Settings:")
         for key, val in aset.conf["var"].items():
@@ -4073,7 +4085,6 @@ def show_list(aset, selected_vols):
         for dv in selected_vols or datavols:
             vol = aset.vols[dv]
             for tag, tses in vol.tags.items():
-                #tset = ( dv+" / "+x[2:] for x in tses )
                 tset = ( (dv, x[2:], vol.sessions[x].tags[tag] ) for x in tses )
                 if tag not in ltags:
                     ltags[tag] = list(tset)
@@ -4225,7 +4236,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8wip"        ; prog_date = "20230617"
+prog_version          = "0.8wip"        ; prog_date = "20230620"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
@@ -4295,7 +4306,8 @@ parser_defs = [
  [["--chunk-factor"], {"dest": "chfactor",
                        "help": "Init: set chunk size to N*64kB"}],
  [["--meta-dir"],     {"dest": "metadir", "default": "", "help": "Use alternate metadata path"}],
- [["--force"],        {"action": "store_true", "help": "For arch-delete"}],
+ [["--json"],         {"action": "store_true", "help": "Output as json format (list)"}],
+ [["--force"],        {"action": "store_true", "help": "Force action"}],
  [["--clean"],        {"action": "store_true", "help": "Clean snapshots, metadata"}],
  [["--maxsync"],      {"action": "store_true", "help": "Use more fs sync"}],
  [["--debug"],        {"action": "store_true", "help": "Debug mode"}],
