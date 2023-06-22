@@ -3273,10 +3273,11 @@ def monitor_send(storage, aset, datavols, monitor_only):
 
 def prune_sessions(vol, times):
 
-    sesnames = vol.sesnames
+    sesnames = vol.sesnames          ; allbefore = options.allbefore
     t1, t2   = "", ""                ; to_prune  = []
 
     if len(sesnames) < 2:    print("  No extra sessions to prune.")    ; return
+    if options.allbefore and len(times) != 1:  x_it(1, "Option --all-before requires one session.")
 
     # Validate date-time params
     for pos, dt in enumerate(times[:]):
@@ -3288,7 +3289,7 @@ def prune_sessions(vol, times):
         elif pos == 0:
             for sn in sesnames:
                 if dt[1:] in vol.sessions[sn].tags:
-                    if len(times) == 1 and not options.allbefore:
+                    if len(times) == 1 and not allbefore:
                         to_prune.append(sn)
                     else:
                         t1 = sn   ; break
@@ -3298,7 +3299,7 @@ def prune_sessions(vol, times):
 
     # t1 alone should be a specific session date-time,
     # t1 and t2 together are a date-time range.
-    if options.allbefore:   t1 = sesnames[0]    ; t2 = times[0]
+    if allbefore:   t1 = sesnames[0]    ; t2 = times[0]
     if not t1:   t1 = times[0]
     if not t2 and len(times) > 1:
         t2 = times[1]
@@ -3321,10 +3322,10 @@ def prune_sessions(vol, times):
             for ses in sesnames:
                 if ses > t1:   start = sesnames.index(ses)    ; break
         if t2 in sesnames:
-            end = sesnames.index(t2)+1
+            end = sesnames.index(t2) + int(not allbefore)
         else:
             for ses in reversed(sesnames):
-                if ses < t2:   end = sesnames.index(ses)+1    ; break
+                if ses < t2:   end = sesnames.index(ses) + 1  ; break
         to_prune = sesnames[start:end]
 
     if len(to_prune) and to_prune[-1] == sesnames[-1]:
@@ -4233,7 +4234,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8wip"        ; prog_date = "20230621"
+prog_version          = "0.8wip"        ; prog_date = "20230622"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
@@ -4448,7 +4449,7 @@ elif options.action == "prune":
     for dv in dvs:
         if dv in datavols:
             if options.session:
-                prune_sessions(aset.vols[dv], options.session.split(","))
+                prune_sessions(aset.vols[dv], options.session.split(",", maxsplit=1))
             elif options.autoprune.lower() in ("on","min","full"):
                 autoprune(aset.vols[dv], apmode=options.autoprune)
 
