@@ -3271,34 +3271,34 @@ def monitor_send(storage, aset, datavols, monitor_only):
 # Specify data volume and one or two member list with start [end] date-time
 # in YYYYMMDD-HHMMSS or ^tagname format.
 
-def prune_sessions(volume, times):
+def prune_sessions(vol, times):
 
-    sessions = volume.sesnames
+    sesnames = vol.sesnames
     t1, t2   = "", ""                ; to_prune  = []
 
-    if len(sessions) < 2:    print("  No extra sessions to prune.")    ; return
+    if len(sesnames) < 2:    print("  No extra sessions to prune.")    ; return
 
     # Validate date-time params
     for pos, dt in enumerate(times[:]):
         if not dt[0].startswith("^"):
             if not dt.startswith("S_"):   times[pos] = "S_"+dt.strip()
             datetime.datetime.strptime(times[pos][2:], "%Y%m%d-%H%M%S")
-        elif dt[1:] not in volume.tags:
+        elif dt[1:] not in vol.tags:
             print(" No match for", dt)    ; return
         elif pos == 0:
-            for sesname in sessions:
-                if dt[1:] in volume.sessions[sesname].tags:
+            for sn in sesnames:
+                if dt[1:] in vol.sessions[sn].tags:
                     if len(times) == 1 and not options.allbefore:
-                        to_prune.append(sesname)
+                        to_prune.append(sn)
                     else:
-                        t1 = sesname   ; break
+                        t1 = sn   ; break
         elif pos == 1:
-            for sesname in reversed(sessions):
-                if dt[1:] in volume.sessions[sesname].tags:   t2 = sesname   ; break
+            for sn in reversed(sesnames):
+                if dt[1:] in vol.sessions[sn].tags:   t2 = sn   ; break
 
     # t1 alone should be a specific session date-time,
     # t1 and t2 together are a date-time range.
-    if options.allbefore:   t1 = sessions[0]    ; t2 = times[0]
+    if options.allbefore:   t1 = sesnames[0]    ; t2 = times[0]
     if not t1:   t1 = times[0]
     if not t2 and len(times) > 1:
         t2 = times[1]
@@ -3310,31 +3310,31 @@ def prune_sessions(volume, times):
 
     elif t2 == "":
         # find single session
-        if t1 in sessions:   to_prune.append(t1)
+        if t1 in sesnames:   to_prune.append(t1)
 
     else:
         # find sessions in a date-time range
-        start = len(sessions)   ; end = 0
-        if t1 in sessions:
-            start = sessions.index(t1)
+        start = len(sesnames)   ; end = 0
+        if t1 in sesnames:
+            start = sesnames.index(t1)
         else:
-            for ses in sessions:
-                if ses > t1:   start = sessions.index(ses)    ; break
-        if t2 in sessions:
-            end = sessions.index(t2)+1
+            for ses in sesnames:
+                if ses > t1:   start = sesnames.index(ses)    ; break
+        if t2 in sesnames:
+            end = sesnames.index(t2)+1
         else:
-            for ses in reversed(sessions):
-                if ses < t2:   end = sessions.index(ses)+1    ; break
-        to_prune = sessions[start:end]
+            for ses in reversed(sesnames):
+                if ses < t2:   end = sesnames.index(ses)+1    ; break
+        to_prune = sesnames[start:end]
 
-    if len(to_prune) and to_prune[-1] == sessions[-1]:
+    if len(to_prune) and to_prune[-1] == sesnames[-1]:
         print("  Preserving latest session.")
         del(to_prune[-1])
     if len(to_prune) == 0:
         print("  No selections in this date-time range.")
         return
 
-    autoprune(volume, apmode=options.autoprune, include=set(to_prune))
+    autoprune(vol, apmode=options.autoprune, include=set(to_prune))
 
 
 # Parameters / vars for autoprune:
@@ -3777,7 +3777,8 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
         volf_read = volf.read     ; volf_write = volf.write    ; volf_seek = volf.seek
         volfno    = volf.fileno() ; fcntl.lockf(volf, fcntl.LOCK_EX|fcntl.LOCK_NB)
 
-    print("\nReceiving" if save_path else "\nVerifying", "volume:", vol.name, select_ses[2:])
+    if verify_only != 2:
+        print("\nReceiving" if save_path else "\nVerifying", "volume:", vol.name, select_ses[2:])
     if save_path:    print("Saving to %s '%s'" % (save_type, save_path))
 
     # Collect session manifests
