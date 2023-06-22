@@ -1902,6 +1902,7 @@ def prune_sessions(datavol, times):
     t1, t2 = "", ""                ; to_prune  = []
 
     if len(sessions) < 2:    print("  No extra sessions to prune.")    ; return
+    if options.allbefore and len(times) != 1:  x_it(1, "Option --all-before requires one session.")
 
     # Validate date-time params
     for pos, dt in enumerate(times[:]):
@@ -1946,10 +1947,10 @@ def prune_sessions(datavol, times):
             for ses in sessions:
                 if ses > t1:   start = sessions.index(ses)    ; break
         if t2 in sessions:
-            end = sessions.index(t2)+1
+            end = sessions.index(t2) + int(not options.allbefore)
         else:
             for ses in reversed(sessions):
-                if ses < t2:   end = sessions.index(ses)+1    ; break
+                if ses < t2:   end = sessions.index(ses) + 1    ; break
         to_prune = sessions[start:end]
 
     if len(to_prune) and to_prune[-1] == sessions[-1]:
@@ -2790,7 +2791,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.3.13"        ; prog_date = "20230608"
+prog_version          = "0.3.14"        ; prog_date = "20230622"
 format_version        = 2               ; debug     = False       ; tmpdir = None
 
 
