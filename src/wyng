@@ -3069,7 +3069,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
     catch_signals(None)
 
     runtime  = time.monotonic() - testtime
-    t_m, t_s = divmod(runtime, 60); t_p = (f"{t_m}m" if t_m else "") + f"{ceil(t_s)}s"
+    t_m, t_s = divmod(runtime, 60); t_p = (f"{int(t_m)}m" if t_m else "") + f"{ceil(t_s)}s"
     if status1:
         print(f"\r{bcount/MB: 7.1f}MB"[:10] +"|"+ t_p[:5].center(5), end="")
     else:
@@ -3255,7 +3255,7 @@ def monitor_send(storage, aset, datavols, monitor_only):
         else:
             storage.lvols[vol.name].rotate_snapshots(rotate=False)
 
-        p1, p2 = ("\r", "|  -") if status1 else ("\n", "")
+        p1, p2 = ("\r", "|  -" if sent else "") if status1 else ("\n", "")
         print(p1 if sent else p1+"no change"+p2, flush=True)
         totalvsize += svsize    ; totalbcount += sbcount
 
@@ -3398,7 +3398,7 @@ def autoprune(vol, needed_space=0, apmode="off", include=set()):
                     dses[1] = False    ; vol.sessions[ses].toggle = False
 
     # Mark sessions for thinning-out according to ndays + nsessions
-    if apmode != "off" and needed_space and thin_days and enddate:
+    if apmode != "off" and thin_days and enddate:
         for year in range(startdate.year, enddate.year+1):
             for span in range(dtdate(year,1,1).toordinal(),
                             min(dtdate(year,12,31), enddate).toordinal(), ndays):
@@ -3416,7 +3416,7 @@ def autoprune(vol, needed_space=0, apmode="off", include=set()):
                             break
 
     # Find contiguous marked ranges and merge/prune them. Repeat until free >= needed space.
-    factor = 1    ; sessions.append("End")
+    factor = 1    ; removed_total = 0    ; sessions.append("End")
     while True:
         to_prune = []    ; removed_ct = 0    ; skipped = False
         for ses in sessions:
@@ -3437,7 +3437,7 @@ def autoprune(vol, needed_space=0, apmode="off", include=set()):
                 to_prune.append(ses)
 
         if removed_ct:
-            if options.verbose:   print(datavol+": Removed", removed_ct)
+            removed_total += removed_ct
             dest.get_free(tmpdir+"/merge.log")    ; os.remove(tmpdir+"/merge.log")
 
         if skipped and apmode != "off":   continue # while
@@ -3448,6 +3448,7 @@ def autoprune(vol, needed_space=0, apmode="off", include=set()):
         else:
             factor += 2
 
+    if options.verbose:   print(datavol+": Removed", removed_total)
     return True
 
 
@@ -3592,6 +3593,7 @@ def merge_sessions(volume, sources, target, clear_sources=False):
         dest_cmds += " && tar --no-same-owner -xmf -"
 
     # Start merge operation on dest
+    catch_signals()
     retcode = do_exec([cmds, dest.run_args([dest_cmds + " && python3 "
                         + dest.dtmp+"/dest_helper.py merge "+merge_target
                         + (" --resume" if resume else "") + (" --sync" if options.maxsync else "")
@@ -3599,7 +3601,6 @@ def merge_sessions(volume, sources, target, clear_sources=False):
                         ], cwd=volume.path, check=False, out=tmpdir+"/merge.log"
                       )
 
-    catch_signals()
     if retcode == 50:
         # Initialization didn't complete, so reload aset and abort
         aset = ArchiveSet(aset.path, aset.dest, prior_auth=aset)
@@ -4243,7 +4244,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8wip"        ; prog_date = "20230623"
+prog_version          = "0.8wip"        ; prog_date = "20230624"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
