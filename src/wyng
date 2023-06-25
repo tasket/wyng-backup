@@ -1087,7 +1087,6 @@ class LocalStorage:
             self.process_deltas = update_delta_digest_reflink
             self.prep_snapshots = prepare_snapshots_reflink
 
-        print(loctype, self.path, pathxvg) ####
         if require_online and not self.online:
             x_it(7, "Local storage is offline: "+repr(localpath))
 
@@ -1116,6 +1115,9 @@ class LocalStorage:
             return fcntl.ioctl(fn, self.BLKDISCARD, struct.pack("LL", start, length))
         except Exception as e:
             return None
+
+    def exists(self, volname):
+        return exists(self.path + volname)
 
     def setperms(self, path, perms):
         if not perms:   return
@@ -1655,9 +1657,7 @@ def arch_check(storage, aset, vol_list=None, startup=False):
     chunksize= aset.chunksize
     compare_digest = hmac.compare_digest   ; b64enc    = base64.urlsafe_b64encode
 
-    decrypt  = aset.datacrypto.decrypt if aset.datacrypto else None
-
-    vol_list = vol_list or list(aset.vols.keys())
+    vol_list = vol_list or sorted(aset.vols.keys())
     vol_dirs = set((x.name for x in os.scandir(aset.path) \
                             if x.is_dir() and x.name.startswith("Vol_")))
 
@@ -1676,7 +1676,7 @@ def arch_check(storage, aset, vol_list=None, startup=False):
         if volname not in aset.vols:   continue
 
         vol = aset.vols[volname]
-        if not startup or debug:   print("Volume", volname, flush=True)
+        if not startup or debug:   print(f"Volume '{volname}'", flush=True)
 
         # Remove session tmp dirs
         for sdir in os.scandir(vol.path):
@@ -1759,7 +1759,8 @@ def parse_options(args, etcconf):
     if exists(etcconf):
         confp = configparser.ConfigParser()    ; confp.optionxform = lambda option: option
         confp["var-global-default"] = {}       ; confp.read_file(open(etcconf, "r"))
-        conf_block = ("debug","force","remap","save-to","session","unattended")
+        conf_block = ("debug","force","remap","save-to","session","unattended","volume-desc",
+                      "tag","all","all-before")
         for k, v in confp["var-global-default"].items():
             if (kopt := "--"+k) in parser_defs_d and k not in conf_block:
                 if parser_defs_d[kopt].get("action") == "append":
@@ -2399,16 +2400,16 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only):
 
     for datavol in datavols:
 
+        if not storage.exists(datavol):
+            err_out("Warning: Local '%s' does not exist!" % datavol)
+            continue
+
         if datavol not in aset.vols and not monitor_only:
             add_volume(aset, datavol, options.voldesc)
 
         # 'mapfile' is the deltamap file, snap1 holds vol state between send/monitor ops
         vol   = aset.vols[datavol]
         l_vol = storage.new_vol_entry(datavol, vol.vid)   ; snap1, snap2 = l_vol.snap1, l_vol.snap2
-
-        if not l_vol.exists():
-            err_out("Warning: Local '%s' does not exist!" % datavol)
-            continue
 
         if lvols[snap1].is_arch_member() == "false":
             if options.remap:
@@ -2482,16 +2483,16 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only):
 
     for datavol in datavols:
 
+        if not storage.exists(datavol):
+            err_out("Warning: Local '%s' does not exist!" % datavol)
+            continue
+
         if datavol not in aset.vols and not monitor_only:
             add_volume(aset, datavol, options.voldesc)
 
         # 'mapfile' is the deltamap file, snap1 holds vol state between send/monitor ops
         vol   = aset.vols[datavol]
         l_vol = storage.new_vol_entry(datavol, vol.vid)   ; snap1, snap2 = l_vol.snap1, l_vol.snap2
-
-        if not l_vol.exists():
-            err_out("Warning: Local '%s' does not exist!" % datavol)
-            continue
 
         # Make deltamap or initial snapshot if necessary. Try to recover paired state
         # by comparing timestamps; a match means remap is unnecessary.
@@ -3259,8 +3260,8 @@ def monitor_send(storage, aset, datavols, monitor_only):
         totalvsize += svsize    ; totalbcount += sbcount
 
     if not monitor_only and (volct := len(incrementals + send_alls)):
-        hl = "-" * (min(max([len(aset.vols[v].name) for v in incrementals+send_alls]+[20]), 60)+18)
-        print(hl+"\n" if status1 else "", " %0d volumes, %0d==>%0d MB in %.1f seconds."
+        hl = "–" * (min(max([len(aset.vols[v].name) for v in incrementals+send_alls]+[20]), 60)+18)
+        print(hl+"\n" if status1 else "", " %0d volumes, %0d––>%0d MB in %.1f seconds."
               % (volct, totalvsize/MB, totalbcount/MB, time.monotonic() - monotonic_start)
               )
 
@@ -3278,6 +3279,8 @@ def prune_sessions(vol, times):
 
     if len(sesnames) < 2:    print("  No extra sessions to prune.")    ; return
     if options.allbefore and len(times) != 1:  x_it(1, "Option --all-before requires one session.")
+    for ii in range(len(times)):
+        if times[ii] == "newest":   times[ii] = sesnames[-1]
 
     # Validate date-time params
     for pos, dt in enumerate(times[:]):
@@ -3360,8 +3363,9 @@ def autoprune(vol, needed_space=0, apmode="off", include=set()):
             x_it(1, "Days must be at least '0:0:1:1'")
         oldest    = today - datetime.timedelta(days=ap1)
         thin_days = datetime.timedelta(days=ap2)
-    if not apdays or not ap2:
+    if not apdays or not (ap1 + ap2):
         apmode = "off"
+    if apmode not in ("on","full") and not include:   return False
 
     datavol   = vol.name                      ; dest    = vol.archive.dest
     apmode    = apmode.lower()                ; exclude = set()
@@ -3386,15 +3390,15 @@ def autoprune(vol, needed_space=0, apmode="off", include=set()):
     include -= exclude
 
     # Mark all sessions prior to oldest date setting, plus include list
-    for ses in sessions if oldest else []:
+    for ses in sessions:
         sdate = to_date(ses)
-        if (apmode != "off" and sdate <= oldest) or ses in include:
+        if (apmode != "off" and oldest and sdate <= oldest) or ses in include:
             for dses in apcal[sdate.toordinal()]:
                 if dses[0] == ses and ses not in exclude:
                     dses[1] = False    ; vol.sessions[ses].toggle = False
 
     # Mark sessions for thinning-out according to ndays + nsessions
-    if apmode != "off" and (needed_space or apmode != "min") and thin_days and enddate:
+    if apmode != "off" and needed_space and thin_days and enddate:
         for year in range(startdate.year, enddate.year+1):
             for span in range(dtdate(year,1,1).toordinal(),
                             min(dtdate(year,12,31), enddate).toordinal(), ndays):
@@ -3668,7 +3672,7 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
             select_ses = "S_"+select_ses
 
         if select_ses not in sessions:
-            err_out(f"No volume {vol.name} in session {select_ses}.")
+            err_out(f"No volume '{vol.name}' in session {select_ses}.")
             return None
 
     elif len(sessions) > 0:
@@ -3779,7 +3783,7 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
         volfno    = volf.fileno() ; fcntl.lockf(volf, fcntl.LOCK_EX|fcntl.LOCK_NB)
 
     if verify_only != 2:
-        print("\nReceiving" if save_path else "\nVerifying", "volume:", vol.name, select_ses[2:])
+        print("\nReceiving" if save_path else "\nVerifying", f"volume '{vol.name}'",select_ses[2:])
     if save_path:    print("Saving to %s '%s'" % (save_type, save_path))
 
     # Collect session manifests
@@ -3931,8 +3935,9 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
                 % (addr+len(decompress(untrusted_buf)), volsize))
         return None
 
-    print("OK" if not diff_count else f"Diff bytes: {diff_count}", end="")
-    print(f" Data bytes: {bcount}", f"/ {addr+len(buf)}" if verify_only != 2 else "")
+    print("OK" if not diff_count else f"Diff bytes: {diff_count}", end="" if verbose else "\n")
+    if verbose:
+        print(f" Data bytes: {bcount}", f"/ {addr+len(buf)}" if verify_only != 2 else "")
 
     if save_path:
         volf.flush()    ; os.fsync(volf.fileno())    ; volf.close()
@@ -4066,11 +4071,15 @@ def show_list(aset, selected_vols):
 
     if aset.dest.archive_ini_hash == "none":   print("(CACHED)")
     if options.json:
-        print(json.dumps({"uuid": aset.uuid, "updated_at": aset.updated_at, "volumes":
-         {v.name: {"vid": v.vid, "desc": v.desc, "sessions": {s.name:
-          {"volsize": s.volsize, "sequence": s.sequence, "tags": {x:y for x,y in s.tags.items()}}
-           for s in v.sessions.values()} } for v in aset.vols.values() }}, indent=1)
-         )
+        try:
+            print(json.dumps({"uuid": aset.uuid, "updated_at": aset.updated_at,
+              "volumes": {v.name: {"vid": v.vid, "desc": v.desc,
+                "sessions": {s.name: {"volsize": s.volsize, "sequence": s.sequence,
+                  "tags": {x:y for x,y in s.tags.items()}}
+              for s in v.sessions.values()} } for v in aset.vols.values() }}, indent=1)
+            )
+        except BrokenPipeError:
+            pass
         return
     if options.verbose:
         print("\nArchive Settings:")
@@ -4080,7 +4089,7 @@ def show_list(aset, selected_vols):
     # Print list of sessions grouped by tag. First, organize by tag:
     if options.tag:
         print("\nTag Assignments")    ; ltags = {}
-        for dv in selected_vols or datavols:
+        for dv in selected_vols or sorted(aset.vols.keys()):
             vol = aset.vols[dv]
             for tag, tses in vol.tags.items():
                 tset = ( (dv, x[2:], vol.sessions[x].tags[tag] ) for x in tses )
@@ -4234,7 +4243,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8wip"        ; prog_date = "20230622"
+prog_version          = "0.8wip"        ; prog_date = "20230623"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
@@ -4279,7 +4288,7 @@ parser_defs = [
  [["--authmin"],      {"default": "0", "help": "Minutes to remember authentication"}],
  [["--all-before"],   {"dest": "allbefore", "action": "store_true",
                        "help": "Select all sessions before --session date-time."}],
- [["--all"],          {"action": "store_true"}],
+ [["--all", "-a"],    {"action": "store_true", "help": "Select all known volumes"}],
  [["--session"],      {"help": "YYYYMMDD-HHMMSS[,YYYYMMDD-HHMMSS] or ^tag_id"
                              " select session date|tag, singular or range."}],
  [["--tag"],          {"action": "append", "default": [],
@@ -4328,8 +4337,11 @@ if options.quiet and options.action not in ("list","version"):
 
 print("%s %s release %s" % (prog_name.capitalize(), prog_version, prog_date), flush=True)
 
+# Check consistency of arguments
 if options.action in write_actions+("arch-init","monitor") and not admin_permission:
-    x_it(1, "Must be root/admin user for %s." % options.action)
+    x_it(1, f"Must be root/admin user for {options.action}.")
+if not (options.volumes or options.all) and options.action not in ("arch-init","arch-check","list"):
+    x_it(1, f"Volume name(s) required for {options.action}.")
 if options.action == "version":   x_it(0,"")
 if options.action not in ("send", "arch-deduplicate"):   options.dedup = False
 if options.action == "arch-deduplicate":   options.dedup = True
@@ -4413,32 +4425,32 @@ print("Encrypted" if (aset.mcrypto and aset.datacrypto) else "Un-encrypted",
       f"archive '{dest.spec}'",
       "\nLast updated %s (%s)" % (arch_dt[:-6], arch_dt[-6:]), flush=True)
 
-# Check volume args against config
+
+## Process Volume Selections ##
+
 exclude_vols  = set(options.volex or [])
-datavols      = sorted(set(aset.vols.keys())  - exclude_vols)
-selected_vols = options.volumes[:]
+datavols      = sorted(set(aset.vols.keys()) - exclude_vols) if options.all else []
+selected_vols = sorted(set(options.volumes[:] + datavols))
 for vol in selected_vols[:]:
-    if selected_vols.count(vol) > 1:
-        selected_vols.remove(vol)
     if vol not in aset.vols and options.action not in {"add","rename","send"}:
-        print("Volume "+vol+" not configured; Skipping.")
+        print(f"Volume '{vol}' not configured; Skipping.")
         selected_vols.remove(vol)
 
 
 ## Process Commands ##
 
 if options.action   == "monitor":
-    monitor_send(storage, aset, selected_vols or datavols, monitor_only=True)
+    monitor_send(storage, aset, selected_vols, monitor_only=True)
 
 
 elif options.action == "send":
-    monitor_send(storage, aset, selected_vols or datavols, monitor_only=False)
+    monitor_send(storage, aset, selected_vols, monitor_only=False)
 
 
 elif options.action == "prune":
     if options.autoprune.lower() == "off" and not options.session:
         x_it(1, "Must specify --autoprune or --session for prune.")
-    dvs = selected_vols or datavols
+    dvs = selected_vols
 
     if not options.unattended and len(dvs):
         print("This operation will delete session(s) from the archive;")
@@ -4447,11 +4459,10 @@ elif options.action == "prune":
             x_it(0,"")
 
     for dv in dvs:
-        if dv in datavols:
-            if options.session:
-                prune_sessions(aset.vols[dv], options.session.split(",", maxsplit=1))
-            elif options.autoprune.lower() in ("on","min","full"):
-                autoprune(aset.vols[dv], apmode=options.autoprune)
+        if options.session:
+            prune_sessions(aset.vols[dv], options.session.split(",", maxsplit=1))
+        elif options.autoprune.lower() in ("on","full"):
+            autoprune(aset.vols[dv], apmode=options.autoprune)
 
 
 elif options.action == "receive":
@@ -4467,10 +4478,7 @@ elif options.action == "receive":
 
 
 elif options.action == "verify":
-    if not (loopvols := datavols if options.all else selected_vols):
-        x_it(1, "Volume name(s) required for verify.")
-
-    for dv in loopvols:
+    for dv in selected_vols:
         count = receive_volume(storage, aset.vols[dv],
                     select_ses="" if not options.session else options.session.split(",")[0],
                     verify_only=1, save_path="")
@@ -4478,16 +4486,13 @@ elif options.action == "verify":
 
 
 elif options.action == "diff":
-    if not (loopvols := datavols if options.all else selected_vols):
-        x_it(1, "Volume name(s) required for diff.")
-
-    for dv in loopvols:
+    for dv in selected_vols:
         count = receive_volume(storage, aset.vols[dv], save_path="", diff=True)
         if count is None:   error_cache.append(dv)
 
 
 elif options.action == "list":
-    show_list(aset, datavols if options.all else selected_vols)
+    show_list(aset, options.volumes)
 
 
 elif options.action == "add":
@@ -4522,7 +4527,7 @@ elif options.action == "delete":
         x_it(1, "Volume not found.")
 
     else:
-        delete_volume(storage, aset, selected_vols[0])
+        delete_volume(storage, aset, options.volumes[0])
 
 
 elif options.action == "arch-init":
@@ -4530,7 +4535,7 @@ elif options.action == "arch-init":
 
 
 elif options.action == "arch-check":
-    arch_check(storage, aset, selected_vols or datavols)
+    arch_check(storage, aset, selected_vols)
 
 
 elif options.action == "arch-delete":
