@@ -46,8 +46,9 @@ except:
 
 class ArchiveSet:
 
-    confname      = "archive.ini"   ; max_volumes  = 1024          ; vid_len     = 10
-    min_chunksize = 0x10000         ; mhash_sz     = 44            ; comment_len = 100
+    confname      = "archive.ini"   ; saltname    = "archive.salt"
+    max_volumes   = 1024            ; vid_len     = 10
+    min_chunksize = 0x10000         ; mhash_sz    = 44            ; comment_len = 100
     max_conf_sz   = (vid_len + comment_len + mhash_sz + 25) * max_volumes + 1000
 
     attr_ints   = {"format_ver","chunksize","mci_count","dataci_count"}
@@ -59,6 +60,7 @@ class ArchiveSet:
         self.dest        = dest
         self.path        = top
         self.confpath    = pjoin(self.path, self.confname)
+        self.saltpath    = pjoin(self.path, self.saltname)
         self.confprefix  = b"[WYNG%02d]\n" % format_version
         self.modeprefix  = b"ci = "
         self.mcrypto     = mcrypto = None
@@ -135,10 +137,14 @@ class ArchiveSet:
                 raise ValueError("No authentication input.")
             passphrase_s1 = passphrase[:] if passphrase else None
 
+            # temporary: change .ini.salt to .salt ###
+            if (saltini := self.confpath+".salt").endswith(".ini.salt") and exists(saltini):
+                os.replace(saltini, self.saltpath)
+
             # create both crypto instances and load metadata key
             self.datacrypto = datacrypto = DataCryptography()
             self.mcrypto    = mcrypto    = DataCryptography()
-            mcrypto.load(ci_types[1], self.confpath+".salt", slot=1,
+            mcrypto.load(ci_types[1], self.saltpath, slot=1,
                          passphrase=passphrase_s1, agentkeys=agentkeys)
 
         # initial decryption + auth of archive.ini (root body)
@@ -184,9 +190,6 @@ class ArchiveSet:
             datacrypto.load(data_ci, mcrypto.keyfile, slot=0, cadence=cadence,
                             passphrase=passphrase, agentkeys=agentkeys)
 
-            self.mci_count    = mcrypto.set_counter(self.mci_count)
-            self.dataci_count = datacrypto.set_counter(self.dataci_count)
-
             # datacrypto may not have AE, so test data chunk against a volinfo hash
             for vol, vf in ((x, x.path+"/vi.dat") for x in self.vols.values()):
                 if exists(vf):
@@ -198,6 +201,14 @@ class ArchiveSet:
             # persist keys to allow future invocations w/o passphrase input
             if pass_agent > 0 and not agentkeys:
                 agent_make(agent_name, pass_agent, [datacrypto.key, mcrypto.key])
+
+        if mcrypto:
+            # temporary: change .ini.salt to .salt ###
+            if (saltini := self.confpath+".salt").endswith(".ini.salt") and exists(saltini):
+                os.replace(saltini, self.saltpath)
+            # sync counters and set working salt file
+            self.mci_count    = mcrypto.set_counter(self.mci_count, saltfile=self.saltpath)
+            self.dataci_count = datacrypto.set_counter(self.dataci_count, saltfile=mcrypto.keyfile)
 
         # Enh: use 'hashtype' value for non-test modes ###
         if datacrypto and datacrypto.mhashkey:
@@ -838,17 +849,17 @@ class DataCryptography:
         # Load counter and key
         if not issubclass(type(keyfile), io.IOBase):
             if not exists(keyfile) and init:
-                open(keyfile, "wb").close()    ; self.keyfile = open(keyfile, "r+b", buffering=0)
+                open(keyfile, "wb").close()    ; self.keyfile = self.open_saltfile(keyfile)
                 for ii in range(4):
                     self.keyfile.seek(self.get_slot_offset(ii))
                     self.keyfile.write(bytes(self.countsz) + self.get_rnd(self.salt_sz))
             else:
-                self.keyfile = open(keyfile, "r+b", buffering=0)
+                self.keyfile = self.open_saltfile(keyfile)
 
         if os.fstat(self.keyfile.fileno()).st_size != self.max_keyfile_sz:
             self.keyfile.truncate(self.max_keyfile_sz)
 
-        ct, salt     = self.load_slot(self.slot)
+        ct, salt     = self.load_slot(self.slot, self.keyfile)
         # Kludge for original counter mode salt
         if ci_type in ("xchacha20","xchacha20-poly1305"):   salt = salt[:32]
 
@@ -862,12 +873,12 @@ class DataCryptography:
         assert len(self.key) == self.key_sz and type(self.key) is bytearray
 
         if mknoncekey:
-            _na, nk_salt  = self.load_slot(2)
+            _na, nk_salt  = self.load_slot(2, self.keyfile)
             self.noncekey = self.derive_subkey(self.key, 64, 0, nk_salt,
                                                b"Wyng_Nonces" + str(self.slot).encode())
 
         if mkmhashkey:
-            _na, mhk_salt = self.load_slot(3)
+            _na, mhk_salt = self.load_slot(3, self.keyfile)
             self.mhashkey = self.derive_subkey(self.key, 64, 1, mhk_salt,
                                                b"Wyng-Manifest-Hash" + str(self.slot).encode())
 
@@ -881,13 +892,23 @@ class DataCryptography:
         if self.mhashkey:   clear_array(self.mhashkey)
 
 
+    def open_saltfile(self, fpath, compare=False):
+        sf = open(fpath, "r+b", buffering=0)
+
+        # Test if working saltfile assignment matches initial
+        for ii in range(4 if compare else 0):
+            _na, s1 = self.load_slot(ii, self.keyfile)   ; _na, s2 = self.load_slot(ii, sf)
+            if s1 != s2:   raise ValueError(f"Salt mismatch, slot {ii}")
+
+        return sf
+
     def get_slot_offset(self, slot):
         return (self.salt_sz + (self.max_ct_bits//8)) * slot
 
-    def load_slot(self, slot):
-        self.keyfile.seek(self.get_slot_offset(slot))
-        counter = int.from_bytes(self.keyfile.read(self.countsz), "big")
-        salt    = self.keyfile.read(self.salt_sz)
+    def load_slot(self, slot, slotf):
+        slotf.seek(self.get_slot_offset(slot))
+        counter = int.from_bytes(slotf.read(self.countsz), "big")
+        salt    = slotf.read(self.salt_sz)
         assert len(salt) == self.salt_sz and salt != bytes(len(salt))
         return counter, salt
 
@@ -912,8 +933,13 @@ class DataCryptography:
         self.keyfile.write(self.counter.to_bytes(self.countsz, "big"))
         self.keyfile.flush()
 
-    # Update counter with a new value, if greater
-    def set_counter(self, ct):
+    # Update counter with a new value, if greater.  Update salt file location.
+    def set_counter(self, ct, saltfile=None):
+        if issubclass(type(saltfile), io.IOBase):
+            self.keyfile = saltfile
+        elif saltfile and saltfile != self.keyfile.name:
+            self.keyfile = self.open_saltfile(saltfile, compare=True)
+
         if ct > self.counter:
             self.counter = ct    ; self.save_counter()
         return self.counter
@@ -1600,11 +1626,12 @@ def arch_init(aset, opts):
                                              verify=True)
             aset.datacrypto = DataCryptography()
             aset.mcrypto    = DataCryptography()
-            aset.mcrypto.load(ci_t[1], aset.confpath+".salt", slot=1,
+            aset.mcrypto.load(ci_t[1], aset.saltpath, slot=1,
                                      passphrase=passphrase[:], init=True)
             aset.datacrypto.load(data_ci, aset.mcrypto.keyfile, slot=0,
                                      passphrase=passphrase, init=True)
-            with open(aset.confpath+".salt","rb") as inf, open(aset.path+"/salt.bak","wb") as outf:
+            # Write a copy of salt file, inverted so it isn't deduped.
+            with open(aset.saltpath,"rb") as inf, open(aset.path+"/salt.bak","wb") as outf:
                 outf.write(bytes(x ^ 0xff for x in inf.read()))
     else:
         x_it(1,"Error: Invalid cipher option.")
@@ -1646,8 +1673,8 @@ def arch_init(aset, opts):
             print("Large chunk size set:", aset.chunksize)
 
     aset.save_conf()    ; fssync(aset.path, force=True, sync=True)
-    update_dest(aset, pathlist=([aset.confname+".salt", "salt.bak"] if aset.datacrypto else [])
-                              + [aset.confname])
+    update_dest(aset, pathlist=([aset.saltname, "salt.bak"]
+                                if aset.datacrypto else []) + [aset.confname])
 
 
 # Check/verify an entire archive
@@ -1825,7 +1852,9 @@ def get_configs(opts):
 def get_configs_remote(dest, base_dir, authmin):
 
     recv_list = [(ArchiveSet.confname,  ArchiveSet.max_conf_sz),
-                 (ArchiveSet.confname+".salt", DataCryptography.max_keyfile_sz)]
+                 (ArchiveSet.confname+".salt", DataCryptography.max_keyfile_sz),
+                 (ArchiveSet.saltname, DataCryptography.max_keyfile_sz),
+                 ("salt.bak", DataCryptography.max_keyfile_sz)]
     fetch_file_blobs(recv_list, tmpdir, dest, skip0=True)
 
     # Instantiate ArchiveSet to authenticate archive.ini
@@ -1998,6 +2027,8 @@ class Destination:
 
                 # test write access and hardlinks
                 +r"  && touch archive.dat && echo 'wyng_writable'"
+                # temporary: rename salt file ###
+                +r"  && { if [ -e archive.ini.salt ]; then mv archive.ini.salt archive.salt; fi }"
                 +(r" && ln -f archive.dat .hardlink" if dedup else "")
                 ]
         try:
@@ -2027,9 +2058,9 @@ class Destination:
         else:
             for log in ("/dest-state.log", "/err.log"):
                 if exists(tmpdir+log):
-                    do_exec([ [CP.cat, "-v", tmpdir+log],  [CP.tail, "--bytes=2000"],
-                              [CP.grep, "-v", "^--+--"],
-                              [CP.tee, "--append", tmpdir+log+"-out" ] ])
+                    do_exec([ [CP.cat, "-v", tmpdir+log],  [CP.tail, "--bytes=1000"],
+                              [CP.grep, "-vFx", " --+--"] ],
+                              out=tmpdir+log+"-out", check=False)
                     err_out(open(tmpdir+log+"-out", "r").read())
 
         self.online = self.free is not None
@@ -2228,7 +2259,7 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", inlines=[], text=
         infunc  = gzip.open if infile.endswith(".gz") else open
         inf     = infunc(infile, "r"+ftype) if infile else SPr.DEVNULL
 
-    errf = open(tmpdir+"/err.log", "a")  ; print("--+--", file=errf)   ; err = None
+    errf = open(tmpdir+"/err.log", "a")  ; print(" --+--", file=errf)   ; err = None
     if debug:   print(commands, file=errf, flush=True)
 
     # Start each command, linking them via pipes
@@ -2278,7 +2309,7 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", inlines=[], text=
         other_rcs = otherctl[1]() if otherctl else [] # close other
         rclist = [0] + list(filter(bool if pipefail else str, ( x.returncode for x in procs )))
 
-        if check and any(rclist):
+        if check and any(rclist): # Enh: test pipefail and/or last rc here
             print(repr(rclist), file=errf, flush=True)
             raise SPr.CalledProcessError([x for x in rclist if x][0], commands)
 
@@ -2964,7 +2995,6 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
                     TarInfo  = tarfile.TarInfo         ; LNKTYPE = tarfile.LNKTYPE
                     tar_info = TarInfo(sdir+"-tmp")    ; tar_info.type  = tarfile.DIRTYPE
                     tarf_addfile(tarinfo=tar_info)     ; stream_started = True
-                    if status1:   print("         |     |", datavol, end="\r")
 
                 # Add entry to new manifest
                 print(b64hash, destfile, file=hashf)
@@ -3017,7 +3047,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
 
     # Send session info, end stream and cleanup
     if fullmanifest:   fullmanifest.close()   ; os.remove(fullmanifest.name)
-    if stream_started and not benchmark:
+    if (sent := stream_started) and not benchmark:
         # Save session info
         if crypto:   aset.datacrypto.save_counter()
         ses.save_info(ext=".tmp")
@@ -3071,7 +3101,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
     runtime  = time.monotonic() - testtime
     t_m, t_s = divmod(runtime, 60); t_p = (f"{int(t_m)}m" if t_m else "") + f"{ceil(t_s)}s"
     if status1:
-        print(f"\r{bcount/MB: 7.1f}MB"[:10] +"|"+ t_p[:5].center(5), end="")
+        print(f"\r{bcount/MB: 7.1f}MB"[:10] +"|"+ (t_p[:5].center(5) if sent else ""), end="")
     else:
         print(f"\n{bcount/MB: 7.1f}MB", end="")
     if ddbytes and options.verbose:
@@ -3255,13 +3285,13 @@ def monitor_send(storage, aset, datavols, monitor_only):
         else:
             storage.lvols[vol.name].rotate_snapshots(rotate=False)
 
-        p1, p2 = ("\r", "|  -" if sent else "") if status1 else ("\n", "")
+        p1, p2 = ("\r", "|  -" if not sent else "") if status1 else ("\n", "")
         print(p1 if sent else p1+"no change"+p2, flush=True)
         totalvsize += svsize    ; totalbcount += sbcount
 
     if not monitor_only and (volct := len(incrementals + send_alls)):
-        hl = "–" * (min(max([len(aset.vols[v].name) for v in incrementals+send_alls]+[20]), 60)+18)
-        print(hl+"\n" if status1 else "", " %0d volumes, %0d––>%0d MB in %.1f seconds."
+        hl = "—" * (min(max([len(aset.vols[v].name) for v in incrementals+send_alls]+[22]), 60)+17)
+        print(hl+"\n" if status1 else "", " %0d volumes, %0d——>%0d MB in %.1f seconds."
               % (volct, totalvsize/MB, totalbcount/MB, time.monotonic() - monotonic_start)
               )
 
@@ -4244,7 +4274,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8wip"        ; prog_date = "20230624"
+prog_version          = "0.8wip"        ; prog_date = "20230628"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 

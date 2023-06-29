@@ -184,6 +184,10 @@ A `send` operation may refuse to backup a volume if there is not enough space on
 destination. One way to avoid this situation is to specify `--autoprune=on` which
 will cause Wyng to remove older backup sessions from the archive when space is needed.
 
+Volume names for non-LVM storage may include subdirectories, making them relative paths in
+the same manner as file paths in `tar`.
+For example, `wyng --local=/mnt/pool1 send appvms/personal.img` will send the volume located
+at '/mnt/pool1/appvms/personal.img'.
 
 #### receive
 
@@ -202,7 +206,8 @@ wyng receive vm-work-private --local=vg/pool --dest=file:/mnt/drive1/mylaptop.ba
 ```
 
 ...restores a volume called 'vm-work-private' to 'myfile.img' in
-the default _local_ pool.
+the LVM thin pool 'vg/pool'.  Note that `--dest` always refers to the archive location, so
+the volume is being restored _from_ '/mnt/drive1/mylaptop.backup'.
 
 Its possible to receive to any valid file path or block device using the `--save-to` option,
 which can be used in place of `--local`.
@@ -335,9 +340,10 @@ wyng arch-init --dest=file:/mnt/backups/mybackup --compression=zstd:7
 
 #### arch-check
 
-Intensive check of archive integrity, reading each session completely starting with
+Intensive check of archive integrity, reading each session's _deltas_ completely starting with
 the newest and working back to the oldest. This differs from `verify` which first builds a complete
-index for the volume and then checks only/all data referenced in the index.
+index and checks a session as a complete volume (thus reading delta information from past sessions
+in addition to the specified session).
 
 Using `--session=newest` provides a 'verify the last session' function (useful after an incremental
 backup). Otherwise, supplying a date-time will make `arch-check` start the check from that point and
@@ -384,7 +390,8 @@ Note that _encrypt, compression, hashtype_ and _chunk-factor_ cannot be changed 
 
 `--dest=URL`
 
-This option tells Wyng where to access the archive. It accepts one of the following forms:
+This option tells Wyng where to access the archive and has the same meaning for all read or write
+commands. It accepts one of the following forms:
 
 | _URL Form_ | _Destination Type_
 |----------|-----------------
@@ -396,8 +403,11 @@ This option tells Wyng where to access the archive. It accepts one of the follow
 
 `--local`
 
-Takes one of two forms: Either the source volume group and pool as 'vgname/poolname'
-or a file path on a reflink-capable filesystem such as Btrfs or XFS (for Btrfs the path should
+The location of local storage where logical volumes, disk images, etc. reside.  This serves as
+the _source_ for `send` commands, and as the place where `receive` restores/saves volumes.
+
+This parameter takes one of two forms: Either the source volume group and pool as 'vgname/poolname'
+or a directory path on a reflink-capable filesystem such as Btrfs or XFS (for Btrfs the path should
 end at a subvolume).  Required for commands `send`, `monitor` and `diff` (and `receive` when
 not using `--saveto`).
 
