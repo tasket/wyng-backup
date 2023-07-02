@@ -641,7 +641,7 @@ Donations
 ---
 <a href="https://liberapay.com/tasket/donate"><img alt="Donate using Liberapay" src="media/lp_donate.svg" height=54></a>
 
-<a href="https://www.buymeacoffee.com/tasket"><img src="media/buymeacoffee_57.png" height=54>Buy me a coffee!</a> <a href="https://www.buymeacoffee.com/tasket">Buy me a coffee!</a>
+<a href="https://www.buymeacoffee.com/tasket"><img src="media/buymeacoffee_57.png" height=57></a> <a href="https://www.buymeacoffee.com/tasket">Buy me a coffee!</a>
 
 <a href="https://www.patreon.com/tasket"><img alt="Donate with Patreon" src="media/become_a_patron_button.png" height=50></a>
 
