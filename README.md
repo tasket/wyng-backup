@@ -65,7 +65,7 @@ Beta release v0.8 major enhancements:
  Wyng is released under a GPL license and comes with no warranties expressed or implied.
 
 
-v0.8beta1 Requirements & Setup
+v0.8beta Requirements & Setup
 ---
 
 Before starting:
@@ -113,7 +113,7 @@ and directory path.
 
 Run Wyng using the following commands and arguments in the form of:
 
-**wyng command \<parameters> [volume_name]**
+**wyng \<parameters> command [volume_name]**
 
 ### Command summary
 
@@ -134,39 +134,6 @@ Run Wyng using the following commands and arguments in the form of:
 | **arch-deduplicate**        | Deduplicate existing data in archive.
 | **version**                 | Print the Wyng version and exit.
 
-
-### Parameters / Options summary
-
-| _Option_                      | _Description_
-|-------------------------------|--------------
---local=_vg/pool_  _...or..._    | Storage pool containing local volumes.
---local=_/absolute/path_    | 
---dest=_type:location_   | Destination of backup archive.
---session=_date-time[,date-time]_ | Select a session or session range by date-time or tag (receive, verify, prune).
---authmin=_N_          | Remember authentication for N minutes.
---volex=_volname_      | Exclude volumes (send, monitor, list, prune).
---dedup, -d            | Use deduplication for send (see notes).
---all-before           | Select all sessions before the specified _--session date-time_ (prune).
---autoprune=off        | Automatic pruning by calendar date.
---apdays=_A:B:C:D_     | Number of days to keep or to thin-out older sessions
---keep=_date-time_     | Specify date-time or tag of sessions to keep (prune).
---tag=tagname[,desc]   | Use session tags (send, list).
---save-to=_path_       | Save volume to _path_ (receive).
---sparse               | Receive volume data sparsely (implies --sparse-write)
---sparse-write         | Overwrite local data only where it differs (receive)
---use-snapshot         | Use snapshots when available for faster `receive`.
---remap                | Remap volume during `send` or `diff`.
---encrypt=_cipher_     | Set encryption mode or _'off'_ (default: _'xchacha20-t3'_)
---compression          | (arch-init) Set compression type:level.
---hashtype             | (arch-init) Set data hash algorithm: _hmac-sha256_ or _blake2b_.
---chunk-factor         | (arch-init) Set archive chunk size.
---meta-dir=_path_      | Use a different metadata dir than the default.
---unattended, -u       | Don't prompt for interactive input.
---clean                | Perform garbage collection (arch-check) or metadata removal (delete).
---force                | Not used with most commands.
---verbose              | Increase details.
---quiet                | Shhh...
---debug                | Debug mode
 
 #### send
 
@@ -323,19 +290,22 @@ wyng arch-deduplicate
 
 #### arch-init
 
-Initialize a new backup archive configuration...
+Initialize a new archive on a mounted drive...
 ```
 
 wyng arch-init --dest=file:/mnt/backups/archive1
 
 ```
 
-Initialize a new backup archive with storage parameters...
+Initialize a new archive with stronger compression on a remote system...
 ```
 
-wyng arch-init --dest=file:/mnt/backups/mybackup --compression=zstd:7
+wyng arch-init --dest=ssh://user@example.com --compression=zstd:7
 
 ```
+
+Optional parameters for `arch-init` are _encrypt, compression, hashtype_ and _chunk-factor_.
+These cannot be changed for an archive after it is initialized.
 
 
 #### arch-check
@@ -355,38 +325,39 @@ complete form `arch-check` is to supply no parameters, which checks all sessions
 
 
 
-#### Options/Parameters for arch-init
+### Parameters / Options summary
 
-`--dest` (see below)
+| _Option_                      | _Description_
+|-------------------------------|--------------
+--dest=_URL_           | Location of backup archive.
+--local=_vg/pool_  _...or..._    | Storage pool containing local volumes.
+--local=_/absolute/path_    | 
+--session=_date-time[,date-time]_ | Select a session or session range by date-time or tag (receive, verify, prune).
+--authmin=_N_          | Remember authentication for N minutes.
+--volex=_volname_      | Exclude volumes (send, monitor, list, prune).
+--dedup, -d            | Use deduplication for send (see notes).
+--all-before           | Select all sessions before the specified _--session date-time_ (prune).
+--autoprune=off        | Automatic pruning by calendar date.
+--apdays=_A:B:C:D_     | Number of days to keep or to thin-out older sessions
+--keep=_date-time_     | Specify date-time or tag of sessions to keep (prune).
+--tag=tagname[,desc]   | Use session tags (send, list).
+--save-to=_path_       | Save volume to _path_ (receive).
+--sparse               | Receive volume data sparsely (implies --sparse-write)
+--sparse-write         | Overwrite local data only where it differs (receive)
+--use-snapshot         | Use snapshots when available for faster `receive`.
+--remap                | Remap volume during `send` or `diff`.
+--encrypt=_cipher_     | Set encryption mode or _'off'_ (default: _'xchacha20-t3'_)
+--compression          | (arch-init) Set compression type:level.
+--hashtype             | (arch-init) Set data hash algorithm: _hmac-sha256_ or _blake2b_.
+--chunk-factor         | (arch-init) Set archive chunk size.
+--meta-dir=_path_      | Use a different metadata dir than the default.
+--unattended, -u       | Don't prompt for interactive input.
+--clean                | Perform garbage collection (arch-check) or metadata removal (delete).
+--force                | Not used with most commands.
+--verbose              | Increase details.
+--quiet                | Shhh...
+--debug                | Debug mode
 
-
-`--compression` accepts the forms `type` or `type:level`. The three types available are `zstd` (zstandard), plus `zlib` and `bz2` (bzip2). Note that Wyng will only default
-to `zstd` when the 'python3-zstd' package is installed; otherwise it will fall back to the less
-capable `zlib`. (default=zstd:3)
-
-
-`--hashtype` accepts a value of either _'blake2b'_ or _'hmac-sha256'_ (default).
-The digest size is 256 bits.
-
-
-`--chunk-factor` sets the pre-compression data chunk size used within the destination archive.
-Accepted range is an integer exponent from '1' to '6', resulting in a chunk size of 64kB for
-factor '1', 128kB for factor '2', 256kB for factor '3' and so on. To maintain a good
-space efficiency and performance balance, a factor of '2' or greater is suggested for archives
-that will store volumes larger than about 100GB. (default=2)
-
-
-`--encrypt` selects the encryption cipher/mode.  The available modes are:
-
-- `xchacha20-dgr` — Using HMAC-SHA256(rnd||hash) function.  This is the default.
-- `xchacha20-msr` — Using HMAC-SHA256(rnd||msg) function.
-- `xchacha20-ct` — Counter based; fast with certain risks (see issue [158](https://github.com/tasket/wyng-backup/issues/158)).
-- `off` — Turns off Wyng's authentication and encryption.
-
-Note that _encrypt, compression, hashtype_ and _chunk-factor_ cannot be changed for an archive once it is initialized.
-
-
-### General Options
 
 `--dest=URL`
 
@@ -522,6 +493,38 @@ repeated on the command line to add multiple tags. Specifying an empty '' tag wi
 to ask for one or more tags to be manually input; this also causes `list` to display tag
 information when listing sessions.
 
+`--compression`
+
+Accepts the forms `type` or `type:level`. The three types available are `zstd` (zstandard),
+plus `zlib` and `bz2` (bzip2). Note that Wyng will only default
+to `zstd` when the 'python3-zstd' package is installed; otherwise it will fall back to the less
+capable `zlib`. (default=zstd:3)
+
+
+`--hashtype`
+
+Accepts a value of either _'blake2b'_ or _'hmac-sha256'_ (default).  The digest size is 256 bits.
+
+
+`--chunk-factor`
+
+Sets the pre-compression data chunk size used within the destination archive.
+Accepted range is an integer exponent from '1' to '6', resulting in a chunk size of 64kB for
+factor '1', 128kB for factor '2', 256kB for factor '3' and so on. To maintain a good
+space efficiency and performance balance, a factor of '2' or greater is suggested for archives
+that will store volumes larger than about 100GB. (default=2)
+
+
+`--encrypt`
+
+Selects the encryption cipher/mode.  The available modes are:
+
+- `xchacha20-dgr` — Using HMAC-SHA256(rnd||hash) function.  This is the default.
+- `xchacha20-msr` — Using HMAC-SHA256(rnd||msg) function.
+- `xchacha20-ct` — Counter based; fast with certain safety trade-offs (see issue [158](https://github.com/tasket/wyng-backup/issues/158)).
+- `off` — Turns off Wyng's authentication and encryption.
+
+
 
 ### Configuration files
 
@@ -537,7 +540,7 @@ An example _wyng.ini_ file:
 dedup = 1
 authmin = 10
 autoprune = full
-dest = qubes-ssh://sshfs:user@192.168.0.8/home/user/wyng.backup
+dest = ssh://user@192.168.0.8/home/user/wyng.backup
 local = /mnt/btrfs01/vms
 volex = misc/caches.img
   misc/deprecated_apps.img
@@ -570,6 +573,11 @@ This is because Wyng no longer adds '/wyng.backup040/default' to the `--dest` pa
 archives simply add those two dirs to the end of your `--dest` URLs.  Alternately, you can rename
 those subdirs to a single dir of your choosing.
 
+* A major change in v0.8 is that for `send` and `monitor` Wyng will no longer assume you want to
+act on all known volumes if you don't specify any volumes.  You must now use `-a` or `--all`, which
+now work for other commands as well.  This change also enables adding new volumes while doing a
+complete backup, for instance: `wyng -a send my-new-volume` – updates every volume already
+in the archive plus backup 'my-new-volume' as well.
 
 * Backup sessions shown in `list` output may be seemingly (but not actually) out of
 order if the system's local time shifts
@@ -577,6 +585,22 @@ substantially between backups, such as when moving between time zones (including
 If this results in undesired selections with `--session` ranges, its possible
 to nail down the precisely desired range by observing the output of
 `list volumename` and using exact date-times from the listing.
+
+* Wyng locally stores information about backups in two ways:  Snapshots alongside your local
+source volumes, and metadata under _/var/lib/wyng_.  In general, it is safe to _delete_
+Wyng snapshots without risking the integrity of backups (although `send` will become slower).
+However as with all CoW snapshot based backup tools, you should never attempt to directly mount,
+alter or otherwise utilize a Wyng snapshot,
+as this could (very likely) result in future backup sessions being corrupt (this is why Wyng
+snapshots are stored as read-only).  If you think you have somehow altered a Wyng snapshot, you
+should consider it corrupt and immediately delete it before the next `send`.
+If you're in a pinch and need to use the data in a Wyng snapshot, you should first make your own
+copy or snapshot of the Wyng snapshot using `cp --reflink` or `lvcreate -s` and use that instead.
+
+* Metadata cached under _/var/lib/wyng_ may also be manually deleted.  However, the _archive.\*_
+root files in each 'a_*' directory are part of Wyng's defense against rollback attacks, so if you
+feel the need to manually reclaim space used in this dir then consider leaving the _archive.\*_
+files in place.
 
 
 ### Testing
@@ -592,7 +616,7 @@ is also a valued topic, where source systems are generally expected to be a fair
 Linux distro or Qubes OS. Destination systems can vary a lot, they just need to have Python and
 Unix commands or support a compatible FUSE protocol such as sshfs(sftp) or s3.
 
-* If you wish to run Wyng operations that may want to roll back later,
+* If you wish to run Wyng operations that you want to roll back later,
 its possible to "backup the backup" in a relatively quick manner using a hardlink copy:
 ```
 sudo cp -rl /dest/path/wyng.backup /dest/path/wyng.backup-02

@@ -860,12 +860,13 @@ class DataCryptography:
             self.keyfile.truncate(self.max_keyfile_sz)
 
         ct, salt     = self.load_slot(self.slot, self.keyfile)
-        # Kludge for original counter mode salt
+        # Compatibility kludge for original counter mode salt
         if ci_type in ("xchacha20","xchacha20-poly1305"):   salt = salt[:32]
 
         # Advance counter with a safe margin 'cadence X2' if cadence is quick (<101)
         self.counter = self.ctstart = ct + (cadence * 2 * int(cadence < 101))
 
+        # Import or derive encryption key
         if agentkeys:
             self.key = agentkeys[slot]
         else:
@@ -873,11 +874,13 @@ class DataCryptography:
         assert len(self.key) == self.key_sz and type(self.key) is bytearray
 
         if mknoncekey:
+            # Derive subkey for generating nonces
             _na, nk_salt  = self.load_slot(2, self.keyfile)
             self.noncekey = self.derive_subkey(self.key, 64, 0, nk_salt,
                                                b"Wyng_Nonces" + str(self.slot).encode())
 
         if mkmhashkey:
+            # Derive subkey for data hashing
             _na, mhk_salt = self.load_slot(3, self.keyfile)
             self.mhashkey = self.derive_subkey(self.key, 64, 1, mhk_salt,
                                                b"Wyng-Manifest-Hash" + str(self.slot).encode())
@@ -3206,7 +3209,7 @@ def dedup_existing(aset):
 def monitor_send(storage, aset, datavols, monitor_only):
 
     dest = aset.dest    ; storage.check_support()
-    status1 = not options.unattended   ; MB = 1024**2
+    status1 = not options.unattended   ; MB = 1024**2    ; ms_start = time.monotonic()
 
     if options.autoprune.lower() == "full":
         for vol in aset.vols:   autoprune(vol, apmode="full")
@@ -3292,7 +3295,7 @@ def monitor_send(storage, aset, datavols, monitor_only):
     if not monitor_only and (volct := len(incrementals + send_alls)):
         hl = "—" * (min(max([len(aset.vols[v].name) for v in incrementals+send_alls]+[22]), 60)+17)
         print(hl+"\n" if status1 else "", " %0d volumes, %0d——>%0d MB in %.1f seconds."
-              % (volct, totalvsize/MB, totalbcount/MB, time.monotonic() - monotonic_start)
+              % (volct, totalvsize/MB, totalbcount/MB, time.monotonic() - ms_start)
               )
 
 
@@ -4274,7 +4277,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8wip"        ; prog_date = "20230628"
+prog_version          = "0.8beta"       ; prog_date = "20230630"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
