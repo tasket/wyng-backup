@@ -26,9 +26,9 @@ untrusted data in guest filesystems to bolster container-based security.
 
 ### Status
 
-Public release v0.3 with a range of features including:
+Public release with a range of features including:
 
- - Incremental backups of Linux logical volumes
+ - Incremental backups of Linux logical volumes from Btrfs, XFS and Thin-provisioned LVM
 
  - Supported destinations: Local filesystem, Virtual machine or SSH host
 
@@ -44,17 +44,19 @@ Public release v0.3 with a range of features including:
 
 Beta release v0.8 major enhancements:
 
- - Btrfs and XFS source volumes
+ - Btrfs and XFS reflink support
 
- - Authenticated encryption with auth caching & timeout
+ - Authenticated encryption with auth caching
+ 
+ - Full data & metadata integrity checking
  
  - Fast differential receive based on available snapshots
 
- - Simpler authentication of non-encrypted archives
- 
- - Overall faster detection of changed/unchanged volumes
+ - Overall faster operation
 
- - Metadata compression
+ - Change autoprune settings with --apdays
+
+ - Configure defaults in /etc/wyng/wyng.ini
 
  - Mountpoints no longer required at destination
 
@@ -323,7 +325,7 @@ Depending on how `arch-check` is used, the verification process can be shorter _
 than using `verify` as the latter is always the size of a volume snapshot. The longest, most
 complete form `arch-check` is to supply no parameters, which checks all sessions in all volumes.
 
-
+---
 
 ### Parameters / Options summary
 
@@ -358,6 +360,9 @@ complete form `arch-check` is to supply no parameters, which checks all sessions
 --quiet                | Shhh...
 --debug                | Debug mode
 
+---
+
+### Parameters / Options
 
 `--dest=URL`
 
@@ -635,6 +640,8 @@ this purpose).
 Donations
 ---
 <a href="https://liberapay.com/tasket/donate"><img alt="Donate using Liberapay" src="media/lp_donate.svg" height=54></a>
+
+<a href="https://www.buymeacoffee.com/tasket"><img alt="Buy me a coffee!" src="https://www.buymeacoffee.com/assets/img/bmc-meta-new/new/apple-icon-57x57.png" height=54></a>
 
 <a href="https://www.patreon.com/tasket"><img alt="Donate with Patreon" src="media/become_a_patron_button.png" height=50></a>
 

@@ -1,7 +1,7 @@
 Wyng Archive Format V3
 ======================
 
-Document version 0.9.3, Released 2023-06-28  
+Document version 0.9.4, Released 2023-07-01  
 Author:  Christopher Laprise,  tasket@protonmail.com  
 
 Home URLs:  
@@ -209,9 +209,9 @@ the precise _message_ layout is:
 
 ### archive.salt
 
-Holds four key salt + counter pairs, with the first two sets for data (slot 0) and metadata (slot 1). Slots 2 and 3 provide salts for derived subkeys for 'Wyng_Nonces' and 'Wyng-Manifest-Hash' contexts, respectively.  The offset for a key slot is calculated as: _(16 + 64) * slot_.
+Holds four key salt + counter pairs, with the first two sets for data (slot 0) and metadata (slot 1). Slots 2 and 3 provide salts for derived subkeys for 'Wyng_Nonces' and 'Wyng-Manifest-Hash' contexts, respectively.  The offset for a key slot is calculated as: _(16 + 64) \* slot_.
 
-The key derivation function is _scrypt(passphrase, salt, n=2^19, r=8, p=1, maxmem=640*1024*1024, keysize)_.
+The key derivation function is _scrypt(passphrase, salt, n=2^19, r=8, p=1, maxmem=640\*1024\*1024, keysize)_.
 The subkey derivation function is _HKDF(key, output_size, salt, 'SHA512', slot-2, context)_, where
 the SHA-512 hash function is used and _output_size_ is typically 64 (bytes).
 
@@ -219,6 +219,12 @@ the SHA-512 hash function is used and _output_size_ is typically 64 (bytes).
 |:-------|:--------|:-----|
 | 10     | int     | 80-bit counter, slot 0
 | 64     | binary  | 512-bit key salt, slot 0
+| 10     | int     | 80-bit counter, slot 1
+| 64     | binary  | 512-bit key salt, slot 1
+| 10     | int     | NULL / unused
+| 64     | binary  | 512-bit key salt, slot 2
+| 10     | int     | NULL / unused
+| 64     | binary  | 512-bit key salt, slot 3
 
 ---
 
@@ -284,7 +290,7 @@ by the corresponding hash in _manifest.z_.
 
 The chunk sizes before compression and encryption are uniform for each archive, with the
 exception of a volume's last chunk which is often smaller.
-The chunk size choices at archive creation time are _64KiB / 2 * (2^N)_, where _N_ is an
+The chunk size choices at archive creation time are _64KiB / 2 \* (2^N)_, where _N_ is an
 integer from 1 to 6.
 
 For the XChacha20 cipher, an encrypted chunk consists of a single _message_
