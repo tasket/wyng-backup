@@ -336,6 +336,7 @@ complete form `arch-check` is to supply no parameters, which checks all sessions
 --local=_/absolute/path_    | 
 --session=_date-time[,date-time]_ | Select a session or session range by date-time or tag (receive, verify, prune).
 --authmin=_N_          | Remember authentication for N minutes.
+--all                  | Select all volumes (most cmds); Clean all (delete).
 --volex=_volname_      | Exclude volumes (send, monitor, list, prune).
 --dedup, -d            | Use deduplication for send (see notes).
 --all-before           | Select all sessions before the specified _--session date-time_ (prune).
