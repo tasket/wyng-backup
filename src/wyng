@@ -228,8 +228,8 @@ class ArchiveSet:
 
                 self.load_volumes(children) # Enh: don't re-load vols ###
                 ff = fetch_file_blobs([(sp+"/manifest.z", self.vols[dv].sessions[s].manifest_max())
-                                        for sp,s,dv in ses_list],
-                                    self.path, self.dest, verifier=self.mcrypto, skip_exists=True)
+                       for sp,s,dv in ses_list if self.vols[dv].sessions[s].manifesthash != "0"],
+                     self.path, self.dest, verifier=self.mcrypto, skip_exists=True)
                 self.just_fetched = bool(ff)
 
     def load_volumes(self, children):
@@ -321,7 +321,7 @@ class ArchiveSet:
 
         while (vid := "Vol_"+os.urandom(3).hex()) in self.conf["volumes"]:   pass
 
-        self.vols[datavol] = vol = self.Volume(self, vid, "0", pjoin(self.path,vid),
+        self.vols[datavol] = vol = self.Volume(self, vid, None, pjoin(self.path,vid),
                                                name=datavol, children=0)
         vol.save_volinfo(ext)
         return vol
@@ -393,7 +393,7 @@ class ArchiveVolume:
         Ses = ArchiveSession
         if debug:  print("\n", vid, "-", name)
         if path and not exists(path):   os.makedirs(path)
-        if path and hashval != "0":
+        if path and hashval:
             with open(pjoin(path,"volinfo"), "rb") as f:
                 fsize = os.fstat(f.fileno()).st_size
                 if fsize > self.max_volinfosz:   raise ValueError("volinfo too large")
@@ -503,7 +503,7 @@ class ArchiveVolume:
         if timestamp:   os.utime(bmfile, ns=(timestamp,)*2)
 
     def new_session(self, sname, addtags={}):
-        ns = ArchiveSession(self, sname, "0", addtags=addtags)
+        ns = ArchiveSession(self, sname, None, addtags=addtags)
         ns.path = pjoin(self.path, sname)
         ns.sequence = self.sessions[self.last].sequence + 1 if self.sessions else 0
         ns.previous = self.last
@@ -542,6 +542,9 @@ class ArchiveVolume:
 
     def decode_one_manifest(self, ses, force=False):
         if not exists(ses.path+"/manifest") or force:
+            if ses.manifesthash == "0":
+                open(ses.path+"/manifest","wb").close()   ; return
+
             self.archive.decode_file(ses.path+"/manifest.z",
                                         digest=ses.manifesthash, max_sz=ses.manifest_max())
 
@@ -581,7 +584,7 @@ class ArchiveSession:
         self.permissions  = ""
         self.manifesthash = None
 
-        if path and hashval != "0":
+        if path and hashval:
             with open(pjoin(path,"info"), "rb") as sf:
                 fsize = os.fstat(sf.fileno()).st_size
                 if fsize > self.max_infosz:   raise ValueError("info too large")
@@ -655,8 +658,11 @@ class ArchiveSession:
 
     def save_info(self, ext=""):
         assert self.path   ; etag = b''   ; fname = "info"   ; arch = self.volume.archive
-        self.manifesthash = arch.encode_file(self.path+"/manifest"+ext,
-                                             fdest=self.path+"/manifest.z"+ext)
+        if os.path.getsize(self.path+"/manifest"+ext) == 0:
+            self.manifesthash = "0"
+        else:
+            self.manifesthash = arch.encode_file(self.path+"/manifest"+ext,
+                                                fdest=self.path+"/manifest.z"+ext)
         with io.StringIO() as f:
             for attr in self.attr_str+self.attr_int:
                 print(attr, "=", field := getattr(self, attr), file=f)
@@ -2087,7 +2093,7 @@ def handle_signal(sig, frame):
 
 def helper_send(volid=None):
     mkdirs = os.makedirs    ; hlink = os.link    ; dirname = os.path.dirname
-    assert volid.startswith("Vol_")
+    print(volid)    ; assert volid.startswith("Vol_")
     for i in os.scandir(volid):
         if i.path.endswith("-tmp"):   shutil.rmtree(i.path, ignore_errors=True)
 
@@ -2623,6 +2629,7 @@ def update_delta_digest_lvm(storage, aset, datavol, monitor_only):
     vol         = aset.vols[datavol]         ; chunksize  = aset.chunksize
     snap1vol    = lvols[vol.name].snap1      ; snap2vol   = lvols[vol.name].snap2
     snap1size   = lvols[snap1vol].getsize()  ; snap2size  = lvols[snap2vol].getsize()
+    volperms    = vol.sessions[vol.last].permissions
     assert len(vol.sessions) and exists(vol.mapfile())
     assert storage.block_size == 512
 
@@ -2631,8 +2638,9 @@ def update_delta_digest_lvm(storage, aset, datavol, monitor_only):
     dblocksize  = int(dtree.get("data_block_size"))
     dnewchunks  = isnew  = anynew = dfreedblocks = 0
 
-    # Check for volume size increase;
+    # Check for volume perms & size changes;
     # Chunks from 'markall_pos' onward will be marked for backup.
+    changed = snap2size != vol.volsize() or storage.lvols[datavol].getperms() != volperms
     next_chunk_addr  = vol.last_chunk_addr() + chunksize
     markall_pos = (next_chunk_addr//chunksize//8) if snap2size-1 >= next_chunk_addr else None
 
@@ -2681,19 +2689,19 @@ def update_delta_digest_lvm(storage, aset, datavol, monitor_only):
         if dnewchunks+dfreedblocks:   bmapf.flush()    ; os.fsync(bmapf.fileno())
 
     catch_signals()
-    map_updated = dnewchunks+dfreedblocks+anynew+vol.map_used() > 0
+    changed = changed or dnewchunks+dfreedblocks+anynew+vol.map_used() > 0
     if monitor_only:
         t1   = lvols[snap2vol].gettime()
         tags = ["--addtag="+vol.last, "--addtag=delta-"+str(t1)]
-        t2   = lvols[datavol].rotate_snapshots(rotate=map_updated, timestamp_path=vol.mapfile(),
+        t2   = lvols[datavol].rotate_snapshots(rotate=changed, timestamp_path=vol.mapfile(),
                                                addtags=tags)
         assert t1 == t2
         print(("\r  %d ch, %d dis" % (dnewchunks, dfreedblocks//chunksize))
-                if map_updated else "\r  No changes   ")
+                if changed else "\r  No changes   ")
 
     if dnewchunks:   vol.changed_bytes_add(dnewchunks*chunksize, save=True)
     catch_signals(None)
-    return map_updated, snap2size
+    return changed, snap2size, volperms
 
 
 def get_reflink_deltas(storage, aset, datavols):
@@ -2764,10 +2772,12 @@ def update_delta_digest_reflink(storage, aset, datavol, monitor_only):
     vol         = aset.vols[datavol]         ; chunksize  = aset.chunksize
     snap1vol    = l_vol.snap1                ; snap2vol   = l_vol.snap2
     snap1size   = lvols[snap1vol].getsize()  ; snap2size  = lvols[snap2vol].getsize()
+    volperms    = vol.sessions[vol.last].permissions
     assert len(vol.sessions) and exists(vol.mapfile())
 
-    # Check for volume size increase;
+    # Check for volume perms & size changes;
     # Chunks from 'markall_pos' onward will be marked for backup.
+    changed = snap2size != vol.volsize() or storage.lvols[datavol].getperms() != volperms
     next_chunk_addr  = vol.last_chunk_addr() + chunksize
     markall_pos = (next_chunk_addr//chunksize//8) if snap2size-1 >= next_chunk_addr else None
     bsize = storage.block_size
@@ -2813,21 +2823,21 @@ def update_delta_digest_reflink(storage, aset, datavol, monitor_only):
 
         if dnewblocks or dfreedblocks:   bmapf.flush()    ; os.fsync(bmapf.fileno())
 
-        estimate = sum((x.count("1") for x in map(bin, filter(None, memoryview(bmap_mm))))) \
-                 * chunksize if vol.map_used() else 0 ####
+        #estimate = sum((x.count("1") for x in map(bin, filter(None, memoryview(bmap_mm))))) \
+                 #* chunksize if vol.map_used() else 0 ####
         #print(f"Estimate: {estimate}, New {dnewblocks*bsize}, Freed {dfreedblocks*bsize}" ) ####
         del(bmap_mm)
 
     catch_signals()
-    map_updated = dnewblocks+dfreedblocks+vol.map_used() > 0
+    changed = changed or dnewblocks+dfreedblocks+vol.map_used() > 0
     if monitor_only:
-        t = lvols[datavol].rotate_snapshots(rotate=map_updated, timestamp_path=vol.mapfile())
+        t = lvols[datavol].rotate_snapshots(rotate=changed, timestamp_path=vol.mapfile())
         print(("\r  %d ch, %d dis" % (dnewblocks, dfreedblocks//chunksize))
-                if map_updated else "\r  No changes   ")
+                if changed else "\r  No changes   ")
 
     if dnewblocks:   vol.changed_bytes_add(dnewblocks * bsize, save=True)
     catch_signals(None)
-    return map_updated, snap2size
+    return changed, snap2size, volperms
 
 
 # Reads addresses from manifest and marks corresponding chunks in a volume's deltamap.
@@ -2856,11 +2866,10 @@ def manifest_to_deltamap(volume, manifest, mapsize):
 
 def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
 
-    aset        = vol.archive
-    datavol     = vol.name                      ; dedup       = options.dedup
+    aset        = vol.archive                   ; datavol     = vol.name
     snap2vol    = storage.lvols[storage.lvols[vol.name].snap2]
     snap2size   = snap2vol.getsize()            ; status1     = not options.unattended
-    bmap_size   = vol.mapsize(snap2size)        ; chunksize   = aset.chunksize
+    chunksize   = aset.chunksize                ; dedup       = options.dedup
     chdigits    = max_address.bit_length()//4   ; chformat    = "x%0"+str(chdigits)+"x"
     bksession   = "S_"+curtime                  ; sdir        = pjoin(vol.vid, bksession)
     prior_size  = vol.volsize()                 ; prior_ses   = vol.last
@@ -2904,16 +2913,20 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
         crypto   = True    ; crypto_cadence = aset.datacrypto.ctcadence
         encrypt  = aset.datacrypto.encrypt
     else:
-        crypto   = False    ; etag     = b''     ; crypto_cadence = 0
+        crypto   = False   ; crypto_cadence = 0    ; etag     = b''
 
 
     # Use tar to stream files to destination
-    stream_started = False
-    untar_cmd = [dest.cd + " && mkdir -p ./"+sdir
-                 + " && exec >>"+dest.dtmp+"/send.log 2>&1"
-                 + " && echo "+vol.vid
+    untar_cmd = [dest.cd + " && mkdir -p ./"+sdir + " && exec >>"+dest.dtmp+"/send.log 2>&1"
                  + " && python3 "+dest.dtmp+"/dest_helper.py send "+vol.vid
                  + (" --sync" if options.maxsync else "")]
+    untar = SPr.Popen(dest.run_args(untar_cmd), stdin =SPr.PIPE, stdout=SPr.DEVNULL)
+    tarf = tarfile.open(mode="w|", fileobj=untar.stdin)
+    tarf_addfile = tar_add_pass if benchmark else tarf.addfile
+    tarf_add     = tar_add_pass if benchmark else tarf.add
+    TarInfo  = tarfile.TarInfo         ; LNKTYPE = tarfile.LNKTYPE
+    tar_info = TarInfo(sdir+"-tmp")    ; tar_info.type  = tarfile.DIRTYPE
+    tarf_addfile(tarinfo=tar_info)     ; stream_started = True
 
     # Open source volume and its delta bitmap as r, session manifest as w.
     with open(snap2vol.path,"rb", buffering=chunksize) as vf,    \
@@ -2987,18 +3000,6 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
                     # Skip when current and prior chunks are the same
                     if compare_digest(fman_hash, b64hash):  continue
 
-                # Start tar stream
-                if not stream_started:
-                    untar = SPr.Popen(dest.run_args(untar_cmd),
-                            stdin =SPr.PIPE,    stdout=SPr.DEVNULL,
-                            stderr=SPr.DEVNULL)
-                    tarf = tarfile.open(mode="w|", fileobj=untar.stdin)
-                    tarf_addfile = tar_add_pass if benchmark else tarf.addfile
-                    tarf_add     = tar_add_pass if benchmark else tarf.add
-                    TarInfo  = tarfile.TarInfo         ; LNKTYPE = tarfile.LNKTYPE
-                    tar_info = TarInfo(sdir+"-tmp")    ; tar_info.type  = tarfile.DIRTYPE
-                    tarf_addfile(tarinfo=tar_info)     ; stream_started = True
-
                 # Add entry to new manifest
                 print(b64hash, destfile, file=hashf)
                 if b64hash == "0":   continue
@@ -3055,7 +3056,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
         if crypto:   aset.datacrypto.save_counter()
         ses.save_info(ext=".tmp")
         for f in ("manifest.z","info"):
-            fpath = sdir+"-tmp/"+f         ; tarf_add(fpath+".tmp", arcname=fpath)
+            if exists((fpath := sdir+"-tmp/"+f)+".tmp"):   tarf_add(fpath+".tmp", arcname=fpath)
         tarf_add(vol.vid+"/volinfo.tmp")   ; tarf_add(aset.confname+".tmp")
 
         tarf.close()    ; untar.stdin.close()
@@ -3264,7 +3265,7 @@ def monitor_send(storage, aset, datavols, monitor_only):
               flush=True, end="\r")
 
         if datavol in incrementals:
-            updated, svsize = storage.process_deltas(storage, aset, datavol, monitor_only)
+            updated, svsize, vperms = storage.process_deltas(storage, aset, datavol, monitor_only)
 
         if monitor_only:   continue
 
@@ -3509,9 +3510,10 @@ def merge_manifests(volume, msessions=None, mtarget=None, addcol=False, rdiff=[]
         cdir     = cdir_obj.name    ; slsort  = slist[1]
 
         # fix: extrapolate path with filename
-        do_exec([[CP.xargs, "-0", "-a", slist[0],
-                  CP.awk, r'{sub("/manifest","",FILENAME); print $0, FILENAME > "'
-                            +cdir+r'/"FILENAME}']], cwd=volume.path)
+        for fname in sespaths:
+            open(cdir+"/"+fname, "w").close()
+            do_exec([[CP.awk, r'{sub("/manifest","",FILENAME); print $0, FILENAME > "'
+                                +cdir+r'/"FILENAME}', fname+"/manifest"]], cwd=volume.path)
     else:
         cdir  = volume.path     ; slsort  = slist[0]
 
@@ -3991,7 +3993,7 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
     elif diff and diff_count:
         return None
 
-    os.remove(manifest)
+    if not debug:   os.remove(manifest)
     return bcount
 
 
