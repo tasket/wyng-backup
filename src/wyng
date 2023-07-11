@@ -190,14 +190,6 @@ class ArchiveSet:
             datacrypto.load(data_ci, mcrypto.keyfile, slot=0, cadence=cadence,
                             passphrase=passphrase, agentkeys=agentkeys)
 
-            # datacrypto may not have AE, so test data chunk against a volinfo hash
-            for vol, vf in ((x, x.path+"/vi.dat") for x in self.vols.values()):
-                if exists(vf):
-                    if not hmac.compare_digest(vol.hashval, self.b64hash(
-                        datacrypto.decrypt(open(vf,"rb").read()))[0]):
-                        x_it(3, "Error: Data hash check failed.")
-                    break
-
             # persist keys to allow future invocations w/o passphrase input
             if pass_agent > 0 and not agentkeys:
                 agent_make(agent_name, pass_agent, [datacrypto.key, mcrypto.key])
@@ -206,11 +198,16 @@ class ArchiveSet:
             # temporary: change .ini.salt to .salt ###
             if (saltini := self.confpath+".salt").endswith(".ini.salt") and exists(saltini):
                 os.replace(saltini, self.saltpath)
+
             # sync counters and set working salt file
             self.mci_count    = mcrypto.set_counter(self.mci_count, saltfile=self.saltpath)
             self.dataci_count = datacrypto.set_counter(self.dataci_count, saltfile=mcrypto.keyfile)
 
-        # Enh: use 'hashtype' value for non-test modes ###
+            # temporary: save updated salt file to archive ###
+            if mcrypto.salt_updated and dest.writable and not self.path.startswith("/tmp/"):
+                update_dest(self, pathlist=([self.saltname, "salt.bak"]))
+
+        # Enh: make 'hashtype' selectable for cipher modes that support hmac
         if datacrypto and datacrypto.mhashkey:
             self.getdatahash = datacrypto.getmhash_hmac
         else:
@@ -301,7 +298,7 @@ class ArchiveSet:
         self.save_conf(".tmp" if tmp else "")
 
         #if not tmp:   os.replace(self.confpath+".tmp", self.confpath)
-        if todest:      update_dest(aset, pathlist=[self.confname], ext=".tmp" if tmp else "")
+        if todest:      update_dest(self, pathlist=[self.confname], ext=".tmp" if tmp else "")
 
     def add_volume_meta(self, datavol, desc="", ext=""):
         errs = []
@@ -438,11 +435,6 @@ class ArchiveVolume:
             arch.conf["volumes"][self.vid] = arch.b64hash(buf)
 
         if arch.mcrypto:
-            # First encrypt as data, for data cipher verification at startup
-            with open(pjoin(self.path,"vi.dat"+ext), "wb") as df:
-                df.write(b''.join(arch.datacrypto.encrypt(buf, arch.gethash(buf))))
-                arch.datacrypto.save_counter()
-            # encrypt as metadata
             etag, buf = arch.mcrypto.encrypt(buf)
         with open(pjoin(self.path,fname+ext), "wb") as f:
             f.write(etag)  ; f.write(buf)
@@ -468,7 +460,9 @@ class ArchiveVolume:
 
     def last_chunk_addr(self, vsize=None):
         if vsize is None:  vsize = self.volsize()
-        return (vsize-1) - ((vsize-1) % self.archive.chunksize)
+        chdigits    = max_address.bit_length() // 4
+        lchunk_addr = (vsize-1) - ((vsize-1) % self.archive.chunksize)
+        return lchunk_addr, ("x%0"+str(chdigits)+"x") % lchunk_addr
 
     def mapfile(self, pos=None):
         if not self.sessions:   return None
@@ -590,6 +584,7 @@ class ArchiveSession:
                 if fsize > self.max_infosz:   raise ValueError("info too large")
                 buf = sf.read(fsize)
             if arch.mcrypto:   buf = arch.mcrypto.decrypt(buf)
+            if debug:   print(arch.decompress(buf).decode("UTF-8"))
             if not hmac.compare_digest(hashval, arch.b64hash(buf)):
                 raise ValueError("Session %s hash %s, expected %s" \
                                  % (name, arch.b64hash(buf), hashval))
@@ -769,9 +764,10 @@ def agent_make(agname, duration, keys):
 
 class DataCryptography:
 
-    crypto_key_bits = 256      ; max_ct_bits = 128        ; salt_sz = 64
-    max_keyfile_sz  = (salt_sz + (max_ct_bits // 8)) * 4  # max 4 slots
-    time_headroom   = int(60*60*24*365.25*50)             ; timesz  = 32 // 8
+    crypto_key_bits = 256      ; max_ct_bits = 128        ; salt_sz   = 64
+    nonce_sz        = 24       ; tag_sz      = 16         ; saltchksz = salt_sz+nonce_sz+tag_sz
+    max_keyfile_sz  = (salt_sz + (max_ct_bits // 8)) * 4 + saltchksz # max 4 slots
+    time_headroom   = int(60*60*24*365.25*50)             ; timesz    = 32 // 8
 
     # Matrix of recommended mode pairs = 'formatcode: (data, metadata, selectable)'
     # User selects a data cipher which is automatically paired w a metadata authentication cipher.
@@ -787,7 +783,7 @@ class DataCryptography:
                        "40":  ("n/a",                "n/a", 0)}
 
     __slots__ = ("key","keyfile","ci_type","counter","ctstart","ctcadence","countsz","max_count",
-                 "slot","slot_offset","key_sz","nonce_sz","tag_sz","randomsz","buf_start","mode",
+                 "slot","slot_offset","key_sz","randomsz","buf_start","mode","salt_updated",
                  "encrypt","decrypt","auth","ChaCha20_new","ChaCha20_Poly1305_new",
                  "time_start","monotonic_start","get_rnd","noncekey","mhashkey")
 
@@ -810,11 +806,11 @@ class DataCryptography:
         self.keyfile    = keyfile          ; self.ci_type     = ci_type
         self.ctcadence  = cadence          ; mknoncekey       = mkmhashkey = False
         self.get_rnd    = get_random_bytes ; self.auth        = False
+        self.salt_updated = False ####
 
         # xchacha20 common
         self.key_sz  = self.crypto_key_bits//8 ; self.max_count = 2**80-64
-        self.nonce_sz= 24                      ; self.buf_start = self.nonce_sz
-        self.countsz = 10
+        self.countsz = 10                      ; self.buf_start = self.nonce_sz
         self.randomsz=self.nonce_sz - self.countsz - self.timesz
         self.ChaCha20_new = Cipher_ChaCha20.new
         self.ChaCha20_Poly1305_new = Cipher_ChaCha20_Poly1305.new
@@ -825,7 +821,7 @@ class DataCryptography:
 
         elif ci_type in ("xchacha20-poly1305", "xchacha20-poly1305-ct"):
             self.max_count = 2**61-64
-            self.tag_sz  = 16                  ; self.buf_start = self.nonce_sz + self.tag_sz
+            self.buf_start = self.nonce_sz + self.tag_sz
             self.decrypt = self.auth = self._dec_chacha20_poly1305
             self.encrypt = self._enc_chacha20_poly1305_ct
 
@@ -839,7 +835,7 @@ class DataCryptography:
 
         elif ci_type == "xchacha20-poly1305-msr":
             self.max_count = 2**63-64
-            self.tag_sz  = 16                  ; self.buf_start = self.nonce_sz + self.tag_sz
+            self.buf_start = self.nonce_sz + self.tag_sz
             self.decrypt = self.auth = self._dec_chacha20_poly1305
             self.encrypt = self._enc_chacha20_poly1305_msr
             mknoncekey   = True
@@ -852,18 +848,21 @@ class DataCryptography:
             raise ValueError("Invalid cipher spec "+ci_type)
 
 
-        # Load counter and key
+        # Load counter and salt from salt file
         if not issubclass(type(keyfile), io.IOBase):
-            if not exists(keyfile) and init:
-                open(keyfile, "wb").close()    ; self.keyfile = self.open_saltfile(keyfile)
+            if init:
+                # initialize new salt file
+                assert slot == 1 and not exists(keyfile)
+                open(keyfile, "wb").close()    ; sf = self.keyfile = self.open_saltfile(keyfile)
                 for ii in range(4):
-                    self.keyfile.seek(self.get_slot_offset(ii))
-                    self.keyfile.write(bytes(self.countsz) + self.get_rnd(self.salt_sz))
+                    sf.write(bytes(self.countsz) + self.get_rnd(self.salt_sz))
+                    sf.seek(self.get_slot_offset(ii+1))
+                sf.write(b"".join(self.encrypt(self.hash_salts()[0])))    ; sf.flush()
+                # Write a copy of salt file, inverted so it isn't deduped.
+                with open(os.path.dirname(sf.name)+"/salt.bak","wb") as outf:
+                    sf.seek(0)    ; outf.write(bytes(x ^ 0xff for x in sf.read()))
             else:
-                self.keyfile = self.open_saltfile(keyfile)
-
-        if os.fstat(self.keyfile.fileno()).st_size != self.max_keyfile_sz:
-            self.keyfile.truncate(self.max_keyfile_sz)
+                self.keyfile = self.open_saltfile(keyfile) ##, verify=True)
 
         ct, salt     = self.load_slot(self.slot, self.keyfile)
         # Compatibility kludge for original counter mode salt
@@ -901,25 +900,42 @@ class DataCryptography:
         if self.mhashkey:   clear_array(self.mhashkey)
 
 
-    def open_saltfile(self, fpath, compare=False):
+    def open_saltfile(self, fpath, verify=False):
+        assert self.slot == 1
         sf = open(fpath, "r+b", buffering=0)
 
-        # Test if working saltfile assignment matches initial
-        for ii in range(4 if compare else 0):
-            _na, s1 = self.load_slot(ii, self.keyfile)   ; _na, s2 = self.load_slot(ii, sf)
-            if s1 != s2:   raise ValueError(f"Salt mismatch, slot {ii}")
+        # temporary: Add verification tag to salt file
+        if verify:
+            h, enc_h  = self.hash_salts(sf)
+            if len(enc_h) < self.saltchksz:
+                #raise ValueError...
+                buf = b"".join(self.encrypt(h))
+                sf.seek(self.get_slot_offset(4))    ; sf.write(buf)    ; sf.flush()
+                # Write a copy of salt file, inverted so it isn't deduped.
+                with open(os.path.dirname(sf.name)+"/salt.bak","wb") as outf:
+                    sf.seek(0)    ; outf.write(bytes(x ^ 0xff for x in sf.read()))
+                h, enc_h  = self.hash_salts(sf)    ; self.salt_updated = True
+            if not hmac.compare_digest(h, self.decrypt(enc_h)):   raise ValueError("Bad salt hash.")
 
         return sf
 
     def get_slot_offset(self, slot):
         return (self.salt_sz + (self.max_ct_bits//8)) * slot
 
-    def load_slot(self, slot, slotf):
-        slotf.seek(self.get_slot_offset(slot))
-        counter = int.from_bytes(slotf.read(self.countsz), "big")
-        salt    = slotf.read(self.salt_sz)
-        assert len(salt) == self.salt_sz and salt != bytes(len(salt))
+    def load_slot(self, slot, saltf=None):
+        saltf = saltf or self.keyfile
+        saltf.seek(self.get_slot_offset(slot))
+        counter = int.from_bytes(saltf.read(self.countsz), "big")
+        salt    = saltf.read(self.salt_sz)
+        saltf.seek(self.get_slot_offset(slot+1))
         return counter, salt
+
+    def hash_salts(self, saltf=None):
+        saltf = saltf or self.keyfile    ; slots = (0,1,2,3)
+        h = hashlib.blake2b(b"".join((self.load_slot(x, saltf)[1] for x in slots)),
+                            digest_size=self.salt_sz).digest()
+        enc_h = saltf.read()
+        return h, enc_h
 
     def derive_key(self, salt, passphrase, size):
         key = bytearray(hashlib.scrypt(passphrase, salt=salt, n=2**19, r=8, p=1,
@@ -947,10 +963,9 @@ class DataCryptography:
         if issubclass(type(saltfile), io.IOBase):
             self.keyfile = saltfile
         elif saltfile and saltfile != self.keyfile.name:
-            self.keyfile = self.open_saltfile(saltfile, compare=True)
+            self.keyfile = self.open_saltfile(saltfile, verify=True)
 
-        if ct > self.counter:
-            self.counter = ct    ; self.save_counter()
+        self.counter = max(ct, self.load_slot(self.slot)[0])    ; self.save_counter()
         return self.counter
 
     # Decrypt [X]ChaCha20:
@@ -1638,10 +1653,7 @@ def arch_init(aset, opts):
             aset.mcrypto.load(ci_t[1], aset.saltpath, slot=1,
                                      passphrase=passphrase[:], init=True)
             aset.datacrypto.load(data_ci, aset.mcrypto.keyfile, slot=0,
-                                     passphrase=passphrase, init=True)
-            # Write a copy of salt file, inverted so it isn't deduped.
-            with open(aset.saltpath,"rb") as inf, open(aset.path+"/salt.bak","wb") as outf:
-                outf.write(bytes(x ^ 0xff for x in inf.read()))
+                                     passphrase=passphrase)
     else:
         x_it(1,"Error: Invalid cipher option.")
 
@@ -1781,7 +1793,7 @@ def check_manifest_sequence(vol, sesnames, addcol=False):
             if addr != a1:
                 print(ln); raise ValueError("Manifest seq error. Expected %d got %d." % (addr, a1))
 
-    if addr != vol.last_chunk_addr(volsize):
+    if addr != vol.last_chunk_addr(volsize)[0]:
         raise ValueError("Manifest range stopped short at", addr)
 
     os.remove(manifest)
@@ -2641,7 +2653,7 @@ def update_delta_digest_lvm(storage, aset, datavol, monitor_only):
     # Check for volume perms & size changes;
     # Chunks from 'markall_pos' onward will be marked for backup.
     changed = snap2size != vol.volsize() or storage.lvols[datavol].getperms() != volperms
-    next_chunk_addr  = vol.last_chunk_addr() + chunksize
+    next_chunk_addr  = vol.last_chunk_addr()[0] + chunksize
     markall_pos = (next_chunk_addr//chunksize//8) if snap2size-1 >= next_chunk_addr else None
 
     # Setup access to deltamap as an mmap object.
@@ -2778,7 +2790,7 @@ def update_delta_digest_reflink(storage, aset, datavol, monitor_only):
     # Check for volume perms & size changes;
     # Chunks from 'markall_pos' onward will be marked for backup.
     changed = snap2size != vol.volsize() or storage.lvols[datavol].getperms() != volperms
-    next_chunk_addr  = vol.last_chunk_addr() + chunksize
+    next_chunk_addr  = vol.last_chunk_addr()[0] + chunksize
     markall_pos = (next_chunk_addr//chunksize//8) if snap2size-1 >= next_chunk_addr else None
     bsize = storage.block_size
 
@@ -2873,7 +2885,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
     chdigits    = max_address.bit_length()//4   ; chformat    = "x%0"+str(chdigits)+"x"
     bksession   = "S_"+curtime                  ; sdir        = pjoin(vol.vid, bksession)
     prior_size  = vol.volsize()                 ; prior_ses   = vol.last
-    addrsplit   = -address_split[1]             ; lchunk_addr = vol.last_chunk_addr(snap2size)
+    old_mapfile = vol.mapfile()                 ; addrsplit   = -address_split[1]
     compress = compressors[aset.compression][2] ; compresslevel = int(aset.compr_level)
 
     testtime = time.monotonic()
@@ -2882,13 +2894,12 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
     if len(vol.sessions):
         # Our chunks are usually smaller than LVM's, so generate a full manifest to detect
         # significant amount of unchanged chunks that are flagged in the delta bmap.
-        fullmanifest = open(merge_manifests(vol), "r")
+        fullmanifest = open(merge_manifests(vol, vsize=prior_size), "r")
         fullmanifest_readline = fullmanifest.readline
     else:
         fullmanifest = None
     fman_hash     = fman_fname = ""
 
-    old_mapfile     = vol.mapfile()
     ses = vol.new_session(bksession, addtags=ses_tags)
     ses.localtime   = str(snap2vol.gettime())
     ses.volsize     = snap2size
@@ -3086,6 +3097,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
                  ], trap=True)
 
         # Local finalize
+        if exists(ses.path+"/manifest.tmp"):   os.remove(ses.path+"/manifest.tmp")
         ses.path = ses.path.rsplit("-tmp",maxsplit=1)[0]   ; os.replace(ses.path+"-tmp", ses.path)
         ses.rename_saved(ext=".tmp")
         if old_mapfile and exists(old_mapfile):   os.remove(old_mapfile)
@@ -3489,15 +3501,15 @@ def autoprune(vol, needed_space=0, apmode="off", include=set()):
 # Accepts a list of session names in ascending order (or else uses all sessions in the volume)
 # and merges the manifests. Setting 'addcol' will add a colunm showing the session name.
 
-def merge_manifests(volume, msessions=None, mtarget=None, addcol=False, rdiff=[]):
+def merge_manifests(vol, msessions=None, mtarget=None, vsize=None, addcol=False, rdiff=[]):
     # Enh: implement mtarget to support merge_sessions()
-    aset      = volume.archive                    ; slist  = []
-    msessions = msessions or volume.sesnames
-    sespaths  = [ os.path.basename(volume.sessions[x].path) for x in msessions ]
-    tmp       = aset.big_tmpdir if volume.volsize() > 128000000000 else tmpdir
+    aset      = vol.archive                    ; slist  = []
+    msessions = msessions or vol.sesnames
+    sespaths  = [ os.path.basename(vol.sessions[x].path) for x in msessions ]
+    tmp       = aset.big_tmpdir if vol.volsize() > 128000000000 else tmpdir
     outfile   = tempfile.NamedTemporaryFile(dir=tmp, prefix="mout_", delete=False)
 
-    if not aset.dedupsessions:   volume.decode_manifests(msessions)
+    if not aset.dedupsessions:   vol.decode_manifests(msessions)
     for suffix in ("/manifest\x00", "\x00"):
         with tempfile.NamedTemporaryFile(dir=tmp, prefix="sl_", delete=False) as tmpf:
             tmpf.write(bytes(suffix.join(reversed(sespaths)), encoding="UTF-8"))
@@ -3513,17 +3525,21 @@ def merge_manifests(volume, msessions=None, mtarget=None, addcol=False, rdiff=[]
         for fname in sespaths:
             open(cdir+"/"+fname, "w").close()
             do_exec([[CP.awk, r'{sub("/manifest","",FILENAME); print $0, FILENAME > "'
-                                +cdir+r'/"FILENAME}', fname+"/manifest"]], cwd=volume.path)
+                                +cdir+r'/"FILENAME}', fname+"/manifest"]], cwd=vol.path)
     else:
-        cdir  = volume.path     ; slsort  = slist[0]
+        cdir  = vol.path     ; slsort  = slist[0]
 
     cmds = [[CP.sort, "-umsd", "-k2,2", "--batch-size=16", "--files0-from="+slsort]]
 
     if rdiff:
         # merge a different set of manifests, use their address column to filter the main merge:
-        mfilter = merge_manifests(volume, msessions=list(reversed(rdiff)), addcol=False)
+        mfilter = merge_manifests(vol, msessions=list(reversed(rdiff)), vsize=vsize, addcol=False)
         cmds.append([CP.sort, "-msd", "-k2,2", mfilter, "-"])
         cmds.append([CP.awk, r'{if (PREV==$2) print $0} {PREV=$2}'])
+
+    if vsize is not None and vsize < max(vol.sessions[x].volsize for x in msessions):
+        # session vol size shrank, so filter result by requested vsize
+        cmds.append([CP.awk, r'$2<="'+vol.last_chunk_addr(vsize)[1]+'"'])
 
     do_exec(cmds, out=outfile.file, cwd=cdir)
 
@@ -3542,8 +3558,6 @@ def merge_manifests(volume, msessions=None, mtarget=None, addcol=False, rdiff=[]
 def merge_sessions(volume, sources, target, clear_sources=False):
 
     aset       = volume.archive    ; dest = aset.dest    ; resume = bool(aset.in_process)
-    chdigits   = max_address.bit_length() // 4 # 4bits per digit
-    chformat   = "x%0"+str(chdigits)+"x"
     m_tmp      = tmpdir if volume.volsize() < 128000000000 else aset.big_tmpdir
 
     # Prepare manifests for efficient merge using fs mv/replace. The target is
@@ -3558,8 +3572,7 @@ def merge_sessions(volume, sources, target, clear_sources=False):
         volsize    = volume.sessions[target].volsize
         vol_shrank = volsize < max(x.volsize for x in volume.sessions.values()
                                     if x.name in sources)
-        last_chunk = chformat % volume.last_chunk_addr(volsize)
-        lc_filter  = '"'+last_chunk+'"'
+        lc_filter  = '"'+volume.last_chunk_addr(volsize)[1]+'"'
 
         with open("merge.lst", "wt") as lstf:
             print(merge_target, target, file=lstf)
@@ -3723,9 +3736,8 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
         return None
 
     ses_obj     = vol.sessions[select_ses]           ; volsize     = ses_obj.volsize
-    chdigits    = max_address.bit_length() // 4      ; chformat    = "x%0"+str(chdigits)+"x"
-    lchunk_addr = vol.last_chunk_addr(volsize)       ; last_chunkx = chformat % lchunk_addr
     addrsplit   = -address_split[1]                  ; rc = l_vol  = volf = None
+    lchunk_addr, last_chunkx = vol.last_chunk_addr(volsize)
 
     # Prepare save volume
     if not (diff or verify_only):
@@ -4279,7 +4291,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8beta"       ; prog_date = "20230630"
+prog_version          = "0.8beta"       ; prog_date = "20230708"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
