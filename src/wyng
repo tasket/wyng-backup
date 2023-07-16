@@ -366,7 +366,7 @@ class ArchiveSet:
             assert buf_start < len(inmap) <= max_sz ## Fix: move to get_configs_remote()
             mbuf = mcrypto.decrypt(inmap) if mcrypto else bytes(inmap)
             assert hmac.compare_digest(digest, self.b64hash(mbuf))
-            open(destname,"wb").write(self.decompress(mbuf))
+            with open(destname,"wb") as f:   f.write(self.decompress(mbuf))
 
 
 class ArchiveVolume:
@@ -531,16 +531,18 @@ class ArchiveVolume:
 
         self.last  = self.sesnames[-1] if len(self.sesnames) else "None"
 
-        if remove and exists(pjoin(self.path, sname)):   shutil.rmtree(ses.path)
+        if remove and exists(ses.path):   shutil.rmtree(ses.path)
+        if not remove and exists(ses.path+"/manifest"):   os.remove(ses.path+"/manifest")
         return affected
 
     def decode_one_manifest(self, ses, force=False):
-        if not exists(ses.path+"/manifest") or force:
-            if ses.manifesthash == "0":
-                open(ses.path+"/manifest","wb").close()   ; return
+        path = ses.path+"/manifest"
+        if not exists(path) or force:
+            if ses.manifesthash == "0":   open(path,"wb").close()   ; return
 
-            self.archive.decode_file(ses.path+"/manifest.z",
+            self.archive.decode_file(path+".z", fdest=path+".tmp",
                                         digest=ses.manifesthash, max_sz=ses.manifest_max())
+            os.replace(path+".tmp", path)
 
     def decode_manifests(self, sesnames, force=False):
         for ses in (self.sessions[x] for x in sesnames):
@@ -904,7 +906,7 @@ class DataCryptography:
         assert self.slot == 1
         sf = open(fpath, "r+b", buffering=0)
 
-        # temporary: Add verification tag to salt file
+        # temporary: Add verification tag to existing salt file
         if verify:
             h, enc_h  = self.hash_salts(sf)
             if len(enc_h) < self.saltchksz:
@@ -2448,7 +2450,7 @@ def fetch_file_blobs(recv_list, recv_dir, dest, ext="", skip0=False, skip_exists
 
 def prepare_snapshots_lvm(storage, aset, datavols, monitor_only):
 
-    incr_vols, complete_vols = [], []   ; lvols = storage.lvols
+    incr_vols, complete_vols, unchanged_vols = [], [], []   ; lvols = storage.lvols
 
     for datavol in datavols:
 
@@ -2526,12 +2528,12 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only):
         if monitor_only:   tagopts.append("--addtag=delta")
         lvols[snap2].create(snapshotfrom=datavol, ro=True, addtags=tagopts)
 
-    return incr_vols, complete_vols
+    return incr_vols, complete_vols, unchanged_vols
 
 
 def prepare_snapshots_reflink(storage, aset, datavols, monitor_only):
 
-    incr_vols, complete_vols = [], []   ; lvols = storage.lvols
+    incr_vols, complete_vols, unchanged_vols = [], [], []   ; lvols = storage.lvols
 
     for datavol in datavols:
 
@@ -2550,6 +2552,10 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only):
         # by comparing timestamps; a match means remap is unnecessary.
         if len(vol.sessions):
             mapfile = vol.mapfile()    ; lastses = vol.sessions[vol.last]
+
+            if lvols[snap1].exists() and lvols[snap1].gettime() == lvols[datavol].gettime() \
+            and lvols[snap1].getsize() == lvols[datavol].getsize():
+                unchanged_vols.append(datavol)   ; continue
 
             if not exists(mapfile) and lvols[snap1].exists() \
             and lastses.gettime() == lvols[snap1].gettime()  \
@@ -2590,7 +2596,7 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only):
         lvols[snap2].delete()
         lvols[snap2].create(snapshotfrom=datavol, ro=True)
 
-    return incr_vols, complete_vols
+    return incr_vols, complete_vols, unchanged_vols
 
 
 # Get raw lvm deltas between snapshots
@@ -2617,7 +2623,8 @@ def get_lvm_deltas(storage, aset, datavols):
                                         "--thin1=" + lvols[lv.snap1].thin_id,
                                         "--thin2=" + lvols[lv.snap2].thin_id,
                                         "/dev/mapper/"+vgname+"-"+poolname+"_tmeta"],
-                        [CP.grep, "-v", r"^\s*<same .*\/>$"]
+                        [CP.grep, "-v", r"^\s*<same .*\/>$"],
+                        [CP.gzip, "-2"]
                         ]
                 do_exec(cmds,  out=tmpdir+"/delta."+datavol)
         except Exception as e:
@@ -2646,7 +2653,7 @@ def update_delta_digest_lvm(storage, aset, datavol, monitor_only):
     assert storage.block_size == 512
 
     # Get xml parser and initialize vars
-    dtree       = xml.etree.ElementTree.parse(tmpdir+"/delta."+datavol).getroot()
+    dtree       = xml.etree.ElementTree.parse(gzip.open(tmpdir+"/delta."+datavol,"r")).getroot()
     dblocksize  = int(dtree.get("data_block_size"))
     dnewchunks  = isnew  = anynew = dfreedblocks = 0
 
@@ -2697,8 +2704,9 @@ def update_delta_digest_lvm(storage, aset, datavol, monitor_only):
             for pos in range(markall_pos, bmap_size):  bmap_mm[pos] = 0xff
             dnewchunks += (bmap_size - markall_pos) * 8
 
-        del(bmap_mm)
+        del(bmap_mm, dtree)
         if dnewchunks+dfreedblocks:   bmapf.flush()    ; os.fsync(bmapf.fileno())
+        if not debug:   os.remove(tmpdir+"/delta."+datavol)
 
     catch_signals()
     changed = changed or dnewchunks+dfreedblocks+anynew+vol.map_used() > 0
@@ -2839,6 +2847,7 @@ def update_delta_digest_reflink(storage, aset, datavol, monitor_only):
                  #* chunksize if vol.map_used() else 0 ####
         #print(f"Estimate: {estimate}, New {dnewblocks*bsize}, Freed {dfreedblocks*bsize}" ) ####
         del(bmap_mm)
+        if not debug:   os.remove(tmpdir+"/delta."+vol.vid)
 
     catch_signals()
     changed = changed or dnewblocks+dfreedblocks+vol.map_used() > 0
@@ -3119,7 +3128,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
     if status1:
         print(f"\r{bcount/MB: 7.1f}MB"[:10] +"|"+ (t_p[:5].center(5) if sent else ""), end="")
     else:
-        print(f"\n{bcount/MB: 7.1f}MB", end="")
+        print(f"{bcount/MB: 0.1f}MB", end="")
     if ddbytes and options.verbose:
         print(f"\n(reduced {ddbytes/MB:0.1f}MB)")
     if dedup and debug:   show_mem_stats()
@@ -3230,7 +3239,7 @@ def monitor_send(storage, aset, datavols, monitor_only):
     curtime = time.strftime("%Y%m%d-%H%M%S", time.localtime(time_start))
 
     print(f"\nPreparing snapshots in '{storage.path}'...")
-    incrementals, send_alls \
+    incrementals, send_alls, unchanged_vols \
         = storage.prep_snapshots(storage, aset, datavols, monitor_only)
     storage.update_vol_list([(x.name, x.vid) for x in aset.vols.values()])
 
@@ -3267,14 +3276,14 @@ def monitor_send(storage, aset, datavols, monitor_only):
             x_it(1, "Error: Local and archive metadata differ.")
 
         print("\nSending backup session %s:" % curtime)
-        if not status1:   print("-" * (os.get_terminal_size().columns - 1))
+        ##if not status1:   print("-" * (os.get_terminal_size().columns - 1))
 
     totalvsize = totalbcount = 0
-    for datavol in incrementals + send_alls:
+    for datavol in sorted(incrementals + send_alls + unchanged_vols):
         vol = aset.vols[datavol]    ; updated = sent = False    ; svsize = sbcount = stime = 0
-        print(f"Volume '{datavol}'" if not status1 else
+        print(f"Volume '{datavol}': " if not status1 else
               f"         |     | {datavol}",
-              flush=True, end="\r")
+              flush=True, end="\r" if status1 else "")
 
         if datavol in incrementals:
             updated, svsize, vperms = storage.process_deltas(storage, aset, datavol, monitor_only)
@@ -3301,7 +3310,7 @@ def monitor_send(storage, aset, datavols, monitor_only):
         else:
             storage.lvols[vol.name].rotate_snapshots(rotate=False)
 
-        p1, p2 = ("\r", "|  -" if not sent else "") if status1 else ("\n", "")
+        p1, p2 = ("\r", "|  -" if not sent else "") if status1 else ("", "")
         print(p1 if sent else p1+"no change"+p2, flush=True)
         totalvsize += svsize    ; totalbcount += sbcount
 
@@ -4169,8 +4178,7 @@ def show_list(aset, selected_vols):
 
     # Print list of sessions grouped by volume.
     # Get the terminal column width and set cols to number of list columns.
-    ttycols = os.popen('stty size', 'r').read().split()[1]
-    cols = max(4, min(10, int(ttycols)//17))
+    cols = max(4, min(10, shutil.get_terminal_size().columns // 17))
     for dv in selected_vols:
         print("\nSessions for volume '%s':\n" % dv)
         if not aset.vols[dv].sessions:   print("None.")    ; continue
@@ -4191,21 +4199,14 @@ def show_list(aset, selected_vols):
                 # group sessions by month
                 slist.append(sname)
             else:
-                # print the month listing: 'rows' is adjusted to carry the remainder on
-                # additional lines. 'extra' and 'steps' are used to eliminate ragged
-                # column on the right (a ragged row is more pleasing to the eye).
-                size  = len(slist)    ; rows = size//cols
-                rows += (size%rows)//cols if rows else 0     ; extra = size - cols*rows
-                heights = [rows+(x<extra) for x in range(cols) ]
-
-                # output one row at a time
-                for ii in range(max(heights)):
-                    print("  ".join(  slist[ii+sum(heights[:c])][2:] for c in range(cols)
-                                       if ii < heights[c]  ))
-                print()
+                # print the month list: 'rows' & 'c' are adjusted to reduce ragged columns.
+                rows, extra = divmod(size := len(slist), c := cols)   ; rows += bool(extra)
+                if extra and rows < 3 and (cols - extra) > 1:   c -= (cols - extra) // 2
+                for r in range(rows):
+                    print("  ".join(slist[x*rows+r][2:] for x in range(c) if x*rows+r < size))
 
                 # start new month list
-                lmonth = month    ; slist = [sname]
+                print()    ; lmonth = month    ; slist = [sname]
 
 
 def show_mem_stats():
@@ -4291,7 +4292,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8beta"       ; prog_date = "20230708"
+prog_version          = "0.8beta"       ; prog_date = "20230712"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
