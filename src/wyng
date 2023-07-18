@@ -857,14 +857,10 @@ class DataCryptography:
                 assert slot == 1 and not exists(keyfile)
                 open(keyfile, "wb").close()    ; sf = self.keyfile = self.open_saltfile(keyfile)
                 for ii in range(4):
+                    sf.seek(self.get_slot_offset(ii))
                     sf.write(bytes(self.countsz) + self.get_rnd(self.salt_sz))
-                    sf.seek(self.get_slot_offset(ii+1))
-                sf.write(b"".join(self.encrypt(self.hash_salts()[0])))    ; sf.flush()
-                # Write a copy of salt file, inverted so it isn't deduped.
-                with open(os.path.dirname(sf.name)+"/salt.bak","wb") as outf:
-                    sf.seek(0)    ; outf.write(bytes(x ^ 0xff for x in sf.read()))
             else:
-                self.keyfile = self.open_saltfile(keyfile) ##, verify=True)
+                sf = self.keyfile = self.open_saltfile(keyfile)
 
         ct, salt     = self.load_slot(self.slot, self.keyfile)
         # Compatibility kludge for original counter mode salt
@@ -891,6 +887,13 @@ class DataCryptography:
             _na, mhk_salt = self.load_slot(3, self.keyfile)
             self.mhashkey = self.derive_subkey(self.key, 64, 1, mhk_salt,
                                                b"Wyng-Manifest-Hash" + str(self.slot).encode())
+
+        if init and slot == 1:
+            sbuf = b"".join(self.encrypt(self.hash_salts()[0]))
+            sf.seek(self.get_slot_offset(4))    ; sf.write(sbuf)    ; sf.flush()
+            # Write a copy of salt file, inverted so it isn't deduped.
+            with open(os.path.dirname(sf.name)+"/salt.bak","wb") as outf:
+                sf.seek(0)    ; outf.write(bytes(x ^ 0xff for x in sf.read()))
 
         return self.counter
 
@@ -4292,7 +4295,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8beta"       ; prog_date = "20230712"
+prog_version          = "0.8beta"       ; prog_date = "20230717"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 

@@ -1,7 +1,7 @@
 Wyng Archive Format V3
 ======================
 
-Document version 0.9.4, Released 2023-07-01  
+Document version 0.9.5, Released 2023-07-17  
 Author:  Christopher Laprise,  tasket@protonmail.com  
 
 Home URLs:  
@@ -215,6 +215,9 @@ The key derivation function is _scrypt(passphrase, salt, n=2^19, r=8, p=1, maxme
 The subkey derivation function is _HKDF(key, output_size, salt, 'SHA512', slot-2, context)_, where
 the SHA-512 hash function is used and _output_size_ is typically 64 (bytes).
 
+The last 104 bytes are comprised of a BLAKE2b hash of all four salts, encrypted with the
+metadata cipher (slot 1).  This is used to check the salt file integrity.
+
 | Bytes  | Type    | Desc |
 |:-------|:--------|:-----|
 | 10     | int     | 80-bit counter, slot 0
@@ -225,6 +228,9 @@ the SHA-512 hash function is used and _output_size_ is typically 64 (bytes).
 | 64     | binary  | 512-bit key salt, slot 2
 | 10     | int     | NULL / unused
 | 64     | binary  | 512-bit key salt, slot 3
+| 24     | binary  | Salt hash nonce
+| 16     | binary  | Salt hash tag
+| 64     | binary  | Salt hash, encrypted
 
 ---
 
@@ -255,7 +261,7 @@ SESSION METADATA
 |'sequence = '     | int        | Session sequence number
 |'previous = '     | str        | Name of previous session or "None" for oldest session
 |'permissions  = ' | str        | mode_int:user:group or single char "r\|w"
-|'manifesthash = ' | 256bit_b64_str | hash for compressed 'manifest.z' file
+|'manifesthash = ' | 256bit_b64_str or '0' | manifest hash, or '0' if empty session
 |'tags = '         | str        | tag name and description (multiple)
 
 
