@@ -3109,9 +3109,9 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
                  ], trap=True)
 
         # Local finalize
-        if exists(ses.path+"/manifest.tmp"):   os.remove(ses.path+"/manifest.tmp")
         ses.path = ses.path.rsplit("-tmp",maxsplit=1)[0]   ; os.replace(ses.path+"-tmp", ses.path)
         ses.rename_saved(ext=".tmp")
+        if exists(ses.path+"/manifest.tmp"):   os.remove(ses.path+"/manifest.tmp")
         if old_mapfile and exists(old_mapfile):   os.remove(old_mapfile)
         fssync(vol.path)
 
@@ -3279,7 +3279,8 @@ def monitor_send(storage, aset, datavols, monitor_only):
             x_it(1, "Error: Local and archive metadata differ.")
 
         print("\nSending backup session %s:" % curtime)
-        ##if not status1:   print("-" * (os.get_terminal_size().columns - 1))
+        hl = "—" * (min(max([len(aset.vols[v].name) for v in incrementals+send_alls]+[22]), 60)+17)
+        if status1:   print(hl)
 
     totalvsize = totalbcount = 0
     for datavol in sorted(incrementals + send_alls + unchanged_vols):
@@ -3318,7 +3319,6 @@ def monitor_send(storage, aset, datavols, monitor_only):
         totalvsize += svsize    ; totalbcount += sbcount
 
     if not monitor_only and (volct := len(incrementals + send_alls)):
-        hl = "—" * (min(max([len(aset.vols[v].name) for v in incrementals+send_alls]+[22]), 60)+17)
         print(hl+"\n" if status1 else "", " %0d volumes, %0d——>%0d MB in %.1f seconds."
               % (volct, totalvsize/MB, totalbcount/MB, time.monotonic() - ms_start)
               )
@@ -3899,6 +3899,7 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
 
         # Process zeros quickly
         if cksum == "0":
+            buf = zeros
             if save_path:
                 volf_seek(addr)
                 if sparse_write and volf_read(chunksize) != zeros:
@@ -3990,9 +3991,8 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
         raise RuntimeError("Error code from getvol process: "+str(rc))
 
     if ((not sparse and verify_only != 2 and not use_snapshot and not diff) \
-    or (diff and remap)) and addr+len(decompress(untrusted_buf)) != volsize:
-        err_out("Received range %d does not match volume size %d."
-                % (addr+len(decompress(untrusted_buf)), volsize))
+    or (diff and remap)) and addr+len(buf) != volsize:
+        err_out("Received range %d does not match volume size %d." % (addr+len(buf), volsize))
         return None
 
     print("OK" if not diff_count else f"Diff bytes: {diff_count}", end="" if verbose else "\n")
@@ -4133,6 +4133,7 @@ def show_list(aset, selected_vols):
     if options.json:
         try:
             print(json.dumps({"uuid": aset.uuid, "updated_at": aset.updated_at,
+              "pooltype": storage.pooltype,
               "volumes": {v.name: {"vid": v.vid, "desc": v.desc,
                 "sessions": {s.name: {"volsize": s.volsize, "sequence": s.sequence,
                   "tags": {x:y for x,y in s.tags.items()}}
@@ -4295,7 +4296,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8beta"       ; prog_date = "20230717"
+prog_version          = "0.8beta"       ; prog_date = "20230718"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
