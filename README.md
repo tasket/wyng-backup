@@ -32,11 +32,11 @@ Public release with a range of features including:
 
  - Supported destinations: Local filesystem, Virtual machine or SSH host
 
- - Send, receive, verify and list contents
-
  - Fast pruning of old backup sessions
 
  - Basic archive management such as add/delete volume and auto-pruning
+
+ - Automatic management of local snapshots
 
  - Data deduplication
 
@@ -459,13 +459,9 @@ Internet link.
 
 Autoprune may be used with either the `prune` or `send` commands and will cause Wyng to
 automatically remove older backup sessions according to date criteria. When used with `send`
-specifically, the autopruning process will only be triggered if the destination filessytem is
-low on free space.
-
-The criteria are currently hard-coded to remove all sessions older than 366 days,
-and to thin-out the number of sessions older than 32 days down to a rate of 2 sessions
-every 7 days.
-In the future these parameters can be reconfigured by the user.
+specifically, the autopruning process will be triggered in advance of sending new sessions
+when using _full_ mode, or in _on_ mode only or if the destination filesytem is
+low on free space.  (See _--apdays_ to specify additional autoprune parameters.)
 
 Selectable modes are:
 
