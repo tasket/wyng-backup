@@ -1480,7 +1480,7 @@ class ReflinkVolume(LocalVolume):
 
     def is_paired(self, mapfile, sestag):
         if not self.name.endswith(self.snap_ext):   raise ValueError("Not a snapshot.")
-        return self.exists() and exists(mapfile) and self.gettime() == os.path.getmtime(mapfile)
+        return self.exists() and exists(mapfile) and self.gettime() == os.stat(mapfile).st_mtime_ns
         #Enh: also evaluate sestag
 
     def convert_pathname(self, path):
@@ -1593,7 +1593,7 @@ class LvmVolume(LocalVolume):
     def is_paired(self, mapfile, sestag):
         if not self.name.endswith(self.snap_ext):   raise ValueError("Not a snapshot.")
 
-        return self.exists() and exists(mapfile) and self.gettime() == os.path.getmtime(mapfile) \
+        return self.exists() and exists(mapfile) and self.gettime() == os.stat(mapfile).st_mtime_ns \
                and sestag in self.tags.split(",")
 
     def check_pathname(path):
@@ -3008,7 +3008,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
                     # Show progress.
                     if status1:
                         percent = int(addr/snap2size*1000)
-                        print(f"\r{bcount/MB: 7.1f}MB"[:10] + f"| {(percent//10):0d}%"[:7],
+                        print(f"\r{bcount/MB: 7.1f}MB"[:10] + f" | {(percent//10):0d}%"[:7],
                               end="", flush=True)
                     counter = 0
 
@@ -3129,7 +3129,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
     runtime  = time.monotonic() - testtime
     t_m, t_s = divmod(runtime, 60); t_p = (f"{int(t_m)}m" if t_m else "") + f"{ceil(t_s)}s"
     if status1:
-        print(f"\r{bcount/MB: 7.1f}MB"[:10] +"|"+ (t_p[:5].center(5) if sent else ""), end="")
+        print(f"\r{bcount/MB: 7.1f}MB"[:10] +" |"+ (t_p[:5].center(5) if sent else ""), end="")
     else:
         print(f"{bcount/MB: 0.1f}MB", end="")
     if ddbytes and options.verbose:
@@ -3279,14 +3279,14 @@ def monitor_send(storage, aset, datavols, monitor_only):
             x_it(1, "Error: Local and archive metadata differ.")
 
         print("\nSending backup session %s:" % curtime)
-        hl = "—" * (min(max([len(aset.vols[v].name) for v in incrementals+send_alls]+[22]), 60)+17)
+        hl = "—" * (min(max([len(aset.vols[v].name) for v in incrementals+send_alls]+[22]), 60)+20)
         if status1:   print(hl)
 
     totalvsize = totalbcount = 0
     for datavol in sorted(incrementals + send_alls + unchanged_vols):
         vol = aset.vols[datavol]    ; updated = sent = False    ; svsize = sbcount = stime = 0
         print(f"Volume '{datavol}': " if not status1 else
-              f"         |     | {datavol}",
+              f"          |     | {datavol}",
               flush=True, end="\r" if status1 else "")
 
         if datavol in incrementals:
@@ -3313,13 +3313,14 @@ def monitor_send(storage, aset, datavols, monitor_only):
 
         else:
             storage.lvols[vol.name].rotate_snapshots(rotate=False)
+            svsize = vol.volsize()
 
-        p1, p2 = ("\r", "|  -" if not sent else "") if status1 else ("", "")
+        p1, p2 = ("\r", " |  -" if not sent else "") if status1 else ("", "")
         print(p1 if sent else p1+"no change"+p2, flush=True)
         totalvsize += svsize    ; totalbcount += sbcount
 
-    if not monitor_only and (volct := len(incrementals + send_alls)):
-        print(hl+"\n" if status1 else "", " %0d volumes, %0d——>%0d MB in %.1f seconds."
+    if not monitor_only and (volct := len(incrementals + send_alls + unchanged_vols)):
+        print(hl+"\n" if status1 else "", "%0d volumes, %0d——>%0d MB in %.1f seconds."
               % (volct, totalvsize/MB, totalbcount/MB, time.monotonic() - ms_start)
               )
 
@@ -3762,6 +3763,7 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
                 save_storage = LocalStorage(ldir, auuid=aset.uuid,
                                             arch_vols=storage.arch_vols)
         else:
+            if not storage.online:   x_it(1, "Local storage is offline!")
             save_storage = storage    ; returned_home = storage.online
             save_type = "tlvm pool" if storage.pooltype=="tlvm" else "file"
             l_vol = save_storage.new_vol_entry(vol.name, vol.vid)    ; save_path = l_vol.path
@@ -3848,9 +3850,11 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
 
     # Collect session manifests
     diff_ses = []
-    if use_snapshot:
+    if use_snapshot and save_storage:
         # sessions after selected, except if last ses (then we're already done)
         if select_ses == vol.last:
+            save_storage.setperms(save_path, ses_obj.permissions)
+            if is_num(ses_obj.localtime):   save_storage.settime(save_path, int(ses_obj.localtime))
             print("Snapshot retrieved...Done.")
             return volsize
         incl_ses = sessions[:sessions.index(select_ses)+1]
@@ -4001,15 +4005,16 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
 
     if save_path:
         volf.flush()    ; os.fsync(volf.fileno())    ; volf.close()
-        storage.setperms(save_path, ses_obj.permissions)
-        if is_num(ses_obj.localtime):   storage.settime(save_path, int(ses_obj.localtime))
-        if returned_home and select_ses == sessions[-1] and storage.pooltype == "rlnk":
+        if save_storage:
+            save_storage.setperms(save_path, ses_obj.permissions)
+            if is_num(ses_obj.localtime):   save_storage.settime(save_path, int(ses_obj.localtime))
+        if returned_home and select_ses == sessions[-1]:
             vol.init_deltamap()
             tags = ["--addtag=wyng", "--addtag=arch-"+aset.uuid, "--addtag="+sessions[-1]]
             save_storage.lvols[l_vol.snap2].delete()
             save_storage.lvols[l_vol.snap2].create(snapshotfrom=vol.name, addtags=tags)
             l_vol.rotate_snapshots(timestamp_path=vol.mapfile())
-            print("  Snapshot paired for", vol.name)
+            print(f"  Snapshot paired for '{vol.name}'.")
     if remap:
         bmapf.close()
         if diff_count > 0 and options.action != "send":
@@ -4296,7 +4301,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8beta"       ; prog_date = "20230718"
+prog_version          = "0.8beta"       ; prog_date = "20230719"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
