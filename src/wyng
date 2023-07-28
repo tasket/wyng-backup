@@ -914,6 +914,8 @@ class DataCryptography:
             h, enc_h  = self.hash_salts(sf)
             if len(enc_h) < self.saltchksz:
                 #raise ValueError...
+                sf.truncate(self.max_keyfile_sz); sf.flush()
+                h, enc_h  = self.hash_salts(sf)
                 buf = b"".join(self.encrypt(h))
                 sf.seek(self.get_slot_offset(4))    ; sf.write(buf)    ; sf.flush()
                 # Write a copy of salt file, inverted so it isn't deduped.
@@ -4301,7 +4303,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8beta"       ; prog_date = "20230719"
+prog_version          = "0.8beta"       ; prog_date = "20230724"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
