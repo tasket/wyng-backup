@@ -73,7 +73,7 @@ class ArchiveSet:
         self.apdays      = None
         self.big_tmpdir  = self.path+"/.tmp"
         self.subdir      = None
-        self.Volume      = ArchiveVolume
+        self.gethash     = hash_funcs["blake2b"]
 
         # persisted:
         self.format_ver  = 0
@@ -109,7 +109,11 @@ class ArchiveSet:
             buf = f.read(self.max_conf_sz)
         self.raw_hashval = hashlib.sha256(header0 + header1 + buf).hexdigest()
         if not (header0 == self.confprefix and header1.startswith(self.modeprefix)):
-            raise ValueError("Not a Wyng format.")
+            if header0.startswith(b"[var]"):
+                self.format_ver = 2
+                return
+            else:
+                raise ValueError("Not a Wyng format.")
 
         # use existing auth if specified
         if isinstance(prior_auth, ArchiveSet):
@@ -171,6 +175,7 @@ class ArchiveSet:
             x_it(1,"Archive format ver = "+str(self.format_ver)+
                                 ". Expected = "+str(format_version))
 
+        # set final arch_init properties
         # use blake2b for metadata if hmac-sha256 is used for data:
         self.gethash     = hash_funcs["blake2b"] if self.hashtype == "hmac-sha256" \
                            else hash_funcs[self.hashtype]
@@ -249,7 +254,7 @@ class ArchiveSet:
             vid = key; hashval = value; vname = None
 
             #loadses = allvols or self.in_process or options.from_arch or options.dedup or
-            vol  = self.Volume(self, vid, hashval, pjoin(self.path,vid),
+            vol  = ArchiveVolume(self, vid, hashval, pjoin(self.path,vid),
                                name=vname, children=children)
             self.vols[vol.name] = vol
 
@@ -306,7 +311,7 @@ class ArchiveSet:
         if datavol in self.vols:
             print(datavol+" is already configured.")    ; return None
 
-        namecheck = self.Volume.volname_check(datavol)
+        namecheck = ArchiveVolume.volname_check(datavol)
         if namecheck:
             errs.append(namecheck+"\n")
         if len(desc.encode("UTF-8")) > self.comment_len:
@@ -318,7 +323,7 @@ class ArchiveSet:
 
         while (vid := "Vol_"+os.urandom(3).hex()) in self.conf["volumes"]:   pass
 
-        self.vols[datavol] = vol = self.Volume(self, vid, None, pjoin(self.path,vid),
+        self.vols[datavol] = vol = ArchiveVolume(self, vid, None, pjoin(self.path,vid),
                                                name=datavol, children=0)
         vol.save_volinfo(ext)
         return vol
@@ -334,7 +339,7 @@ class ArchiveSet:
 
     def rename_volume_meta(self, datavol, newname, ext=""):
         vol = self.vols[datavol]
-        if newname in self.vols or self.Volume.volname_check(newname):   return False
+        if newname in self.vols or ArchiveVolume.volname_check(newname):   return False
 
         vol.name = newname
         vol.save_volinfo(ext)
@@ -686,9 +691,141 @@ class ArchiveSession:
 # END class ArchiveSet, ArchiveVolume, ArchiveSession
 
 
+class OldArchiveSet_V2:
+    confname = "archive.ini"  ; format_ver = 2   ; a_ints = {"chunksize"}
+
+    def __init__(self, top, dest):
+        self.path  = top      ; self.dest = dest          ; self.vols  = {}
+        if exists(self.path+"/in_process"):
+            raise ValueError("in_process must be resolved before upgrade.")
+
+        # parser for the .ini formatted configuration
+        self.conf = cp   = configparser.ConfigParser()    ; cp.optionxform = lambda option: option
+        cp["var"], cp["volumes"] = {}, {}                 ; cp.read(pjoin(top, self.confname))
+        for name in cp["var"].keys():
+            setattr(self, name, int(cp["var"][name]) \
+                                if name in self.a_ints else cp["var"][name])
+
+        # load volume metadata objects
+        for key in cp["volumes"]:
+            fetch_file_blobs([(pjoin(key,"volinfo"), 100000000)], top, dest)
+            self.vols[key] = self.Volume(self, key, pjoin(top,key), self.vgname)
+
+    class Volume:
+        def __init__(self, archive, name, path, vgname):
+            self.archive = archive    ; self.name = name    ; self.path = path
+            self.format_ver = "0"     ; self.uuid = None    ; self.desc = ""
+            self.sessions, self.sesnames = {}, []
+            self.first = self.last = "None"
+
+            # load volume info
+            with open(pjoin(path,"volinfo"), "r") as f:
+                for ln in f:
+                    vname, value = ln.strip().split("=", maxsplit=1)
+                    setattr(self, vname.strip(), value.strip())
+
+            if self.format_ver != "2": raise ValueError("Format ver = "+self.format_ver)
+
+            # load sessions as reverse-linked list, starting with the last
+            if debug:  print("\nV2 VOLUME", self.name, self.first, self.last)
+            sprev = self.last
+            while sprev != "None":
+                if debug:  print(sprev, end="  ")
+                fetch_file_blobs([(f"{name}/{sprev}/info", 100000000),
+                                  (f"{name}/{sprev}/manifest", 100000000)], archive.path, archive.dest)
+                s = self.sessions[sprev] = self.Ses(self, sprev, path+"/"+sprev)
+                sprev = s.previous    ; self.sesnames.insert(0, s.name)
+                if sprev == "None" and self.first != s.name:
+                    raise ValueError("PREVIOUS MISMATCH: %s/%s, EXPECTED %s" 
+                                     % (self.name, s.name, self.first))
+
+        class Ses:
+            def __init__(self, volume, name, path="", addtags={}):
+                self.name     = name     ; self.path = path    ; self.volume = volume
+                self.previous = "None"   ; self.tags = {}
+                self.localtime= self.volsize  = self.format = self.sequence = None
+
+                with open(pjoin(path,"info"), "r") as sf:
+                    for ln in sf:
+                        if ln.strip() == "uuid =":  continue
+                        vname, value = ln.split("=", maxsplit=1)
+                        vname = vname.strip()    ; value = value.strip()
+                        if value == "none":   value = "None"
+                        if vname == "tag":
+                            self.tag_add(volume.Ses.tag_parse(value))
+                            continue
+
+                        setattr(self, vname, 
+                                int(value) if vname in ("volsize","sequence") else value)
+
+                    if not exists(pjoin(path,"manifest")):
+                        raise FileNotFoundError("ERROR: Manifest does not exist for "+name)
+
+                for tag in addtags:   self.tag_add(tag)
+
+            def tag_parse(tag, delim=" "):
+                parts = "".join(filter(str.isprintable, tag.strip())).split(delim, maxsplit=1)
+                tag_id = parts[0].strip().lower()    ; result = tuple()
+                if len(tag_id) > tag_len:
+                    sys.stderr.write("Error: Max "+tag_len+" chars for tag ID.\n")
+                elif re.match(".*[,=\^]", tag_id) or any(map(str.isspace, tag_id)):
+                    sys.stderr.write("Error: [space] and ',=^' chars not allowed.\n")
+                elif tag_id == "all":
+                    sys.stderr.write("Error: tag 'all' is reserved.")
+                else:
+                    result = (tag_id, "" if len(parts) == 1 else parts[1].strip())
+                return result
+
+            def tag_add(self, tag):
+                self.saved = False    ; voltags = self.volume.tags    ; tid = tag[0]
+                if tid not in self.tags:   self.tags[tid] = tag[1]
+                if tid in voltags:
+                    voltags[tid].add(self.name)
+                else:
+                    voltags[tid] = {self.name}
+                return True
+
+# END OldArchiveSet_V2
+
+
+def upgrade_from_v2(aset):
+    print("Creating metadata backup file 'wyng_metadata_bak.tbz'.")
+    do_exec([[CP.tar, "-cjf", "wyng_metadata_bak.tbz", aset.path]])
+    print("Upgrading archive format...", end="")   ; dest = aset.dest   ; sessions, moves = [],[]
+
+    os.mkdir(tmpdir+"/:upgrade:")
+    new_aset = ArchiveSet(tmpdir+"/:upgrade:", dest)
+    for attr in ("uuid","chunksize","compression","compr_level","hashtype"):
+        setattr(new_aset, attr, getattr(aset, attr))
+    new_aset.ci_mode = "00"    ; new_aset.save_conf()
+    new_aset = ArchiveSet(new_aset.path, dest)
+
+    for vname, vol in aset.vols.items():
+        newvol = new_aset.add_volume_meta(vname, desc=vol.desc)
+        assert newvol.vid not in aset.vols    ; moves.append(f"mv -T {vname} {newvol.vid}")
+        for sname in vol.sesnames:
+            ses = vol.sessions[sname]    ; newses = newvol.new_session(sname)
+            for attr in ("tags","volsize","localtime"):
+                setattr(newses, attr, getattr(ses, attr))
+            os.makedirs(newses.path, exist_ok=True)
+            with open(ses.path+"/manifest", "r") as mreadf, \
+                    open(newses.path+"/manifest", "w") as mwf:
+                for hexhash, addr in (ln.split() for ln in mreadf):
+                    print("0" if hexhash == "0" else
+                            base64.urlsafe_b64encode(bytes.fromhex(hexhash)).decode("ASCII"),
+                            addr, file=mwf)
+            newses.permissions = "w"    ; newses.save_info()
+            sessions.append(newses)     ; os.remove(ses.path+"/manifest")
+    catch_signals()
+    dest.run([dest.cd + " && " + " && ".join(moves)], trap=True)
+    update_dest(new_aset, pathlist=[new_aset.confname],
+                volumes=new_aset.vols.values(), sessions=sessions)
+    catch_signals(None)    ; print("Done.", end="")
+
+
 def agent_helper_write(path):
     agent_program = r'''#  Copyright Christopher Laprise 2018-2023
-#  Licensed under GNU General Public License v3. See github.com/tasket/wyng-backup
+#  Licensed under GNU General Public License v3. See wyng-backup/LICENSE file.
 import os, sys, signal
 
 def sighandler(s,f):
@@ -1672,8 +1809,6 @@ def arch_init(aset, opts):
 
     # Use hmac-sha256 as data hash if the mode supports it:
     aset.hashtype = "hmac-sha256" if aset.datacrypto and aset.datacrypto.mhashkey else "blake2b"
-    # Always use blake2b for metadata:
-    aset.gethash  = hash_funcs["blake2b"]
     print("Data Hashing  :", aset.hashtype)
 
     if opts.compression:
@@ -1707,10 +1842,14 @@ def arch_init(aset, opts):
 
 # Check/verify an entire archive
 
-def arch_check(storage, aset, vol_list=None, startup=False):
+def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
     dest     = aset.dest                   ; attended  = not options.unattended
-    chunksize= aset.chunksize
     compare_digest = hmac.compare_digest   ; b64enc    = base64.urlsafe_b64encode
+
+    if upgrade and aset.format_ver == 2 and sum(len(v.sessions) for v in aset.vols.values()):
+        upgrade_from_v2(aset)    ; return
+    elif upgrade:
+        x_it(1, "Cannot upgrade.")
 
     vol_list = vol_list or sorted(aset.vols.keys())
     vol_dirs = set((x.name for x in os.scandir(aset.path) \
@@ -1861,7 +2000,7 @@ def get_configs(opts):
         arch_init(ArchiveSet(tmpdir, dest), opts)
         x_it(0, "Done.")
 
-    aset = get_configs_remote(dest, cachedir, int(opts.authmin))    ; os.utime(aset.path)
+    aset = get_configs_remote(dest, cachedir, opts)    ; os.utime(aset.path)
     if aset.updated_at is None:
         x_it(6, "Archive not found.")
     aset.apdays = opts.apdays
@@ -1877,7 +2016,7 @@ def get_configs(opts):
 
 # Fetch copy of archive metadata from remote/dest
 
-def get_configs_remote(dest, base_dir, authmin):
+def get_configs_remote(dest, base_dir, opts):
 
     recv_list = [(ArchiveSet.confname,  ArchiveSet.max_conf_sz),
                  (ArchiveSet.confname+".salt", DataCryptography.max_keyfile_sz),
@@ -1886,10 +2025,19 @@ def get_configs_remote(dest, base_dir, authmin):
     fetch_file_blobs(recv_list, tmpdir, dest, skip0=True)
 
     # Instantiate ArchiveSet to authenticate archive.ini
-    aset = ArchiveSet(tmpdir, dest, children=0, pass_agent=authmin)
+    aset = ArchiveSet(tmpdir, dest, children=0, pass_agent=int(opts.authmin))
+    if aset.format_ver == 2:
+        if opts.action == "arch-check" and opts.upgrade_format:
+            os.mkdir(v2dir := tmpdir+"/:oldv2:")
+            os.replace(aset.path+"/"+aset.confname, v2dir+"/"+aset.confname)
+            arch_check(None, OldArchiveSet_V2(v2dir, dest), upgrade=True); x_it(0, "")
+        else:
+            x_it(1, "Error:  Old V2 format. "
+                    "To upgrade this archive run 'wyng arch-check --upgrade-format'.")
+    else:
+        assert aset.updated_at is not None
 
-    assert aset.updated_at is not None
-    arch_dir = base_dir + aset.subdir;   ini = pjoin(arch_dir, ArchiveSet.confname)
+    arch_dir = base_dir + aset.subdir    ; ini = pjoin(arch_dir, ArchiveSet.confname)
 
     if exists(ini) and not hmac.compare_digest(aset.raw_hashval,
                                         hashlib.sha256(open(ini,"rb").read()).hexdigest()):
@@ -4303,7 +4451,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8beta"       ; prog_date = "20230724"
+prog_version          = "0.8beta"       ; prog_date = "20230731"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
@@ -4377,6 +4525,8 @@ parser_defs = [
  [["--force"],        {"action": "store_true", "help": "Force action"}],
  [["--clean"],        {"action": "store_true", "help": "Clean snapshots, metadata"}],
  [["--maxsync"],      {"action": "store_true", "help": "Use more fs sync"}],
+ [["--upgrade-format"], {"action": "store_true",
+                       "help": "Upgrade archive to current spec (arch-check)"}],
  [["--debug"],        {"action": "store_true", "help": "Debug mode"}],
  [["--quiet"],        {"action": "store_true"}],
  [["--verbose"],      {"action": "count", "default": 0}],

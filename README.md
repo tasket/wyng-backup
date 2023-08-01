@@ -356,6 +356,7 @@ complete form `arch-check` is to supply no parameters, which checks all sessions
 --meta-dir=_path_      | Use a different metadata dir than the default.
 --unattended, -u       | Don't prompt for interactive input.
 --clean                | Perform garbage collection (arch-check) or metadata removal (delete).
+--upgrade-format       | Upgrade older Wyng archive to current format. (arch-check)
 --force                | Not used with most commands.
 --verbose              | Increase details.
 --quiet                | Shhh...
@@ -574,6 +575,16 @@ Deleting them can prevent unnecessary consumption of disk space.
 This is because Wyng no longer adds '/wyng.backup040/default' to the `--dest` path. To access the
 archives simply add those two dirs to the end of your `--dest` URLs.  Alternately, you can rename
 those subdirs to a single dir of your choosing.
+
+* Archives from older v0.3 versions of Wyng must be upgraded before they can be used with
+later versions.  Run `wyng arch-check --upgrade-format` to perform the upgrade, which will
+convert an archive in-place after creating a backup of the metadata as 'wyng_metadata_bak.tbz'
+in your current directory in case something goes wrong during the procedure.  A full manual
+backup of the archive is also recommended before running this procedure (see tip to efficiently
+'backup the backup' under the Testing section).  Also note that 'upgraded' archives continue
+to use the old hashing and compression settings and will remain unencrypted;  you may want to
+consider setting aside the old archive and create a new encrypted archive for your backups
+going forward.
 
 * A major change in v0.8 is that for `send` and `monitor` Wyng will no longer assume you want to
 act on all known volumes if you don't specify any volumes.  You must now use `-a` or `--all`, which
