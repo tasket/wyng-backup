@@ -802,7 +802,7 @@ def upgrade_from_v2(aset):
 
     for vname, vol in aset.vols.items():
         newvol = new_aset.add_volume_meta(vname, desc=vol.desc)
-        assert newvol.vid not in aset.vols    ; moves.append(f"mv -T {vname} {newvol.vid}")
+        assert newvol.vid not in aset.vols    ; moves.append(f"mv -T {vname} {newvol.vid}\n")
         for sname in vol.sesnames:
             ses = vol.sessions[sname]    ; newses = newvol.new_session(sname)
             for attr in ("tags","volsize","localtime"):
@@ -817,7 +817,7 @@ def upgrade_from_v2(aset):
             newses.permissions = "w"    ; newses.save_info()
             sessions.append(newses)     ; os.remove(ses.path+"/manifest")
     catch_signals()
-    dest.run([dest.cd + " && " + " && ".join(moves)], trap=True)
+    dest.run([dest.cd + "\n" + "".join(moves)], trap=True)
     update_dest(new_aset, pathlist=[new_aset.confname],
                 volumes=new_aset.vols.values(), sessions=sessions)
     catch_signals(None)    ; print("Done.", end="")
@@ -4451,7 +4451,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8beta"       ; prog_date = "20230731"
+prog_version          = "0.8beta"       ; prog_date = "20230801"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
