@@ -752,7 +752,7 @@ class OldArchiveSet_V2:
                         vname = vname.strip()    ; value = value.strip()
                         if value == "none":   value = "None"
                         if vname == "tag":
-                            self.tag_add(volume.Ses.tag_parse(value))
+                            self.tag_add(value.split(maxsplit=1))
                             continue
 
                         setattr(self, vname, 
@@ -763,27 +763,9 @@ class OldArchiveSet_V2:
 
                 for tag in addtags:   self.tag_add(tag)
 
-            def tag_parse(tag, delim=" "):
-                parts = "".join(filter(str.isprintable, tag.strip())).split(delim, maxsplit=1)
-                tag_id = parts[0].strip().lower()    ; result = tuple()
-                if len(tag_id) > tag_len:
-                    sys.stderr.write("Error: Max "+tag_len+" chars for tag ID.\n")
-                elif re.match(".*[,=\^]", tag_id) or any(map(str.isspace, tag_id)):
-                    sys.stderr.write("Error: [space] and ',=^' chars not allowed.\n")
-                elif tag_id == "all":
-                    sys.stderr.write("Error: tag 'all' is reserved.")
-                else:
-                    result = (tag_id, "" if len(parts) == 1 else parts[1].strip())
-                return result
-
             def tag_add(self, tag):
-                self.saved = False    ; voltags = self.volume.tags    ; tid = tag[0]
+                tid = tag[0]
                 if tid not in self.tags:   self.tags[tid] = tag[1]
-                if tid in voltags:
-                    voltags[tid].add(self.name)
-                else:
-                    voltags[tid] = {self.name}
-                return True
 
 # END OldArchiveSet_V2
 
@@ -2245,7 +2227,7 @@ class Destination:
     def write_helper_program(path):
 
         dest_program = r'''#  Copyright Christopher Laprise 2018-2023
-#  Licensed under GNU General Public License v3. See github.com/tasket/wyng-backup
+#  Licensed under GNU General Public License v3. See wyng-backup/LICENSE file.
 import os, sys, time, signal, shutil, subprocess as SPr, gzip, tarfile
 
 def fssync(path):
@@ -3038,7 +3020,7 @@ def manifest_to_deltamap(volume, manifest, mapsize):
 # Bytes sent will always be >0 if nonzero chunks were added to the manifest.
 # A result of (0, 0) means no change was detected or sent.
 
-def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
+def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False):
 
     aset        = vol.archive                   ; datavol     = vol.name
     snap2vol    = storage.lvols[storage.lvols[vol.name].snap2]
@@ -3054,8 +3036,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
     def tar_add_pass(*args, **kwargs):   pass
 
     if len(vol.sessions):
-        # Our chunks are usually smaller than LVM's, so generate a full manifest to detect
-        # significant amount of unchanged chunks that are flagged in the delta bmap.
+        # Generate a full manifest to detect unchanged chunks that are flagged in the delta bmap.
         fullmanifest = open(merge_manifests(vol, vsize=prior_size), "r")
         fullmanifest_readline = fullmanifest.readline
     else:
@@ -3164,20 +3145,17 @@ def send_volume(storage, vol, curtime, ses_tags, send_all, benchmark=False):
 
                 # Compress & write only non-empty chunks
                 if buf == zeros:
-                    if fman_hash == "0":   continue
-                    b64hash = "0"
-                else:
-                    # Compress chunk and hash it
-                    buf    = compress(buf, compresslevel)
-                    bhashb = gethash(buf)   ; b64hash = b64enc(bhashb).decode("ascii")
-                    # Skip when current and prior chunks are the same
-                    if compare_digest(fman_hash, b64hash):  continue
+                    if fman_hash != "0":   print("0", destfile, file=hashf)
+                    continue
 
-                # Add entry to new manifest
-                print(b64hash, destfile, file=hashf)
-                if b64hash == "0":   continue
+                # Compress chunk and hash it
+                buf    = compress(buf, compresslevel)
+                bhashb = gethash(buf)   ; b64hash = b64enc(bhashb).decode("ascii")
+                # Skip when current and prior chunks are the same
+                if compare_digest(fman_hash, b64hash):  continue
 
                 # Add buffer to stream
+                print(b64hash, destfile, file=hashf)
                 tar_info = TarInfo("%s-tmp/%s/%s" % (sdir, destfile[1:addrsplit], destfile))
 
                 # If chunk already in archive, link to it
@@ -4451,7 +4429,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8beta"       ; prog_date = "20230801"
+prog_version          = "0.8beta"       ; prog_date = "20230802"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
