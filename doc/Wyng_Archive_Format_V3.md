@@ -1,7 +1,7 @@
 Wyng Archive Format V3
 ======================
 
-Document version 0.9.5, Released 2023-07-17  
+Document version 0.9.6, date 2023-08-03  
 Author:  Christopher Laprise,  tasket@protonmail.com  
 
 Home URLs:  
@@ -241,10 +241,9 @@ VOLUME METADATA
   
 | Attribute Name  | Type       | Desc |
 |:----------------|:-----------|:-----|
-|'name = '        | str        | Volume name (max. 112 chars or 4000 chars)
+|'name = '        | str        | Volume name (max. 4000 chars or 112 chars for LVM)
 |'desc = '        | str        | Volume description (max. 100 chars)
-|session[0] ' = ' | 256bit_b64_str | Session name & hash for compressed 'info' file
-|session[N] ' = ' | 256bit_b64_str | Session name & hash for [...]
+|'S_YYYYMMDD-HHMMSS = ' | 256bit_b64_str | Session name = hash for compressed 'info' file (0 or more occurrences)
 
 
 ---
@@ -262,7 +261,7 @@ SESSION METADATA
 |'previous = '     | str        | Name of previous session or "None" for oldest session
 |'permissions  = ' | str        | mode_int:user:group or single char "r\|w"
 |'manifesthash = ' | 256bit_b64_str or '0' | manifest hash, or '0' if empty session
-|'tags = '         | str        | tag name and description (multiple)
+|'tag = '          | str        | 'tag_id description' (0 or more occurrences)
 
 
 ---
