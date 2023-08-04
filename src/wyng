@@ -2974,7 +2974,7 @@ def update_delta_digest_reflink(storage, aset, datavol, monitor_only):
             # If volsize increased, flag the corresponding bmap area as changed.
             if monitor_only:  print("  Volume size has increased.")
             for pos in range(markall_pos, bmap_size):  bmap_mm[pos] = 0xff
-            dnewblocks += (bmap_size - markall_pos) * 8 #### ###
+            dnewblocks += (bmap_size - markall_pos) * 8
 
         if dnewblocks or dfreedblocks:   bmapf.flush()    ; os.fsync(bmapf.fileno())
 
@@ -3365,7 +3365,7 @@ def monitor_send(storage, aset, datavols, monitor_only):
     status1 = not options.unattended   ; MB = 1024**2    ; ms_start = time.monotonic()
 
     if options.autoprune.lower() == "full":
-        for vol in aset.vols:   autoprune(vol, apmode="full")
+        for vol in aset.vols.values():   autoprune(vol, apmode="full")
 
     curtime = time.strftime("%Y%m%d-%H%M%S", time.localtime(time_start))
 
@@ -4429,7 +4429,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8beta"       ; prog_date = "20230802"
+prog_version          = "0.8beta"       ; prog_date = "20230804"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
