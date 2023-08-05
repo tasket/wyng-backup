@@ -1741,12 +1741,20 @@ def rel_chmod(fpath, op, mask):
 
 
 def ask_passphrase(prompt="Enter passphrase: ", verify=False):
+    def getpassinput(prompt):
+        if attended:
+            return getpass.getpass(prompt)
+        else:
+            err_out(prompt)
+            return sys.stdin.readline().rstrip("\n")
+
+    attended = sys.stdin.isatty()
     for ii in range(3):
-        passphrase  = bytearray(getpass.getpass(prompt), encoding="UTF-8")
+        passphrase  = bytearray(getpassinput(prompt), encoding="UTF-8")
         if not verify or len(passphrase) >= 10:   break
-        print("Passphrase must be 10 or more characters.")   ; clear_array(passphrase)
-        if ii == 2 or options.unattended:   x_it(3, "Passphrase required.")
-    if options.unattended or not verify:   return passphrase
+        err_out("Passphrase must be 10 or more characters.")   ; clear_array(passphrase)
+        if ii == 2 or not attended:   x_it(3, "Passphrase required.")
+    if not attended or not verify:   return passphrase
     passphrase2 = bytearray(getpass.getpass("Re-enter passphrase: "), encoding="UTF-8")
     if passphrase != passphrase2:
         clear_array(passphrase)   ; clear_array(passphrase2)
@@ -2806,7 +2814,6 @@ def update_delta_digest_lvm(storage, aset, datavol, monitor_only):
         if bmap_size != os.fstat(bmapf.fileno()).st_size:
             bmapf.truncate(bmap_size)    ; bmapf.flush()
         bmap_mm      = mmap.mmap(bmapf.fileno(), 0)
-        tally=0 ####
 
         # Cycle through the 'thin_delta' metadata, marking bits in bmap_mm as needed.
         # Entries carry a block position 'blockbegin' and the length of changed blocks.
@@ -2818,10 +2825,10 @@ def update_delta_digest_lvm(storage, aset, datavol, monitor_only):
             blockend   = min(blockbegin+blocklen, snap_ceiling)
             if delta.tag in ("different", "right_only"):
                 isnew = anynew = 1
-                if delta.tag == "right_only":   tally -= blocklen
+                #if delta.tag == "right_only":   tally -= blocklen
             elif delta.tag == "left_only":
                 isnew = 0    ; dfreedblocks += blockend - blockbegin
-                tally += blocklen
+                #tally += blocklen
             else: # superfluous tag
                 continue
 
@@ -2974,7 +2981,7 @@ def update_delta_digest_reflink(storage, aset, datavol, monitor_only):
             # If volsize increased, flag the corresponding bmap area as changed.
             if monitor_only:  print("  Volume size has increased.")
             for pos in range(markall_pos, bmap_size):  bmap_mm[pos] = 0xff
-            dnewblocks += (bmap_size - markall_pos) * 8
+            dnewblocks += (bmap_size - markall_pos) * 8 * (chunksize // bsize)
 
         if dnewblocks or dfreedblocks:   bmapf.flush()    ; os.fsync(bmapf.fileno())
 
@@ -4429,7 +4436,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8beta"       ; prog_date = "20230804"
+prog_version          = "0.8beta"       ; prog_date = "20230805"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
