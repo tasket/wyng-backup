@@ -3555,8 +3555,10 @@ def autoprune(vol, needed_space=0, apmode="off", include=set()):
         ap1, ap2, ndays, nsessions = map(int, tup)
         if ap1 < 0 or ap2 < 0 or ndays < 1 or nsessions < 1:
             x_it(1, "Days must be at least '0:0:1:1'")
-        oldest    = today - datetime.timedelta(days=ap1)
+        oldest    = (today - datetime.timedelta(days=ap1)) if ap1 else 0
         thin_days = datetime.timedelta(days=ap2)
+    else:
+        apmode = "off"
     if not apdays or not (ap1 + ap2):
         apmode = "off"
     if apmode not in ("on","full") and not include:   return False
@@ -4436,7 +4438,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8beta"       ; prog_date = "20230805"
+prog_version          = "0.8beta"       ; prog_date = "20230806"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
