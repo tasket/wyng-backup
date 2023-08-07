@@ -3556,7 +3556,7 @@ def autoprune(vol, needed_space=0, apmode="off", include=set()):
         if ap1 < 0 or ap2 < 0 or ndays < 1 or nsessions < 1:
             x_it(1, "Days must be at least '0:0:1:1'")
         oldest    = (today - datetime.timedelta(days=ap1)) if ap1 else 0
-        thin_days = datetime.timedelta(days=ap2)
+        thin_days = datetime.timedelta(days=ap2) if ap2 else 0
     else:
         apmode = "off"
     if not apdays or not (ap1 + ap2):
@@ -3567,7 +3567,7 @@ def autoprune(vol, needed_space=0, apmode="off", include=set()):
     apmode    = apmode.lower()                ; exclude = set()
     sessions  = vol.sesnames[:-1]             ; marked  = 0
     startdate = to_date(sessions[0])          ; nthresh = 3 if apmode == "on" else 0
-    enddate   = min(to_date(sessions[-2]), today-thin_days) if len(sessions) > 2 else None
+    enddate   = min(to_date(sessions[-2]), today-thin_days) if len(sessions) > 2 else 0
 
     # Make a 2d array of ordinal dates and populate with session id + flag
     apcal = { day: [] for day in range(dtdate(startdate.year,1,1).toordinal(),
@@ -4438,7 +4438,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8beta"       ; prog_date = "20230806"
+prog_version          = "0.8beta"       ; prog_date = "20230807"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
