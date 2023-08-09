@@ -4132,8 +4132,8 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
         raise RuntimeError("Error code from getvol process: "+str(rc))
 
     if ((not sparse and verify_only != 2 and not use_snapshot and not diff) \
-    or (diff and remap)) and addr+len(buf) != volsize:
-        err_out("Received range %d does not match volume size %d." % (addr+len(buf), volsize))
+    or (diff and remap)) and addr != lchunk_addr:
+        err_out("Last chunk at %d does not match volume %d." % (addr, lchunk_addr))
         return None
 
     print("OK" if not diff_count else f"Diff bytes: {diff_count}", end="" if verbose else "\n")
@@ -4438,7 +4438,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8beta"       ; prog_date = "20230807"
+prog_version          = "0.8beta"       ; prog_date = "20230809"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
