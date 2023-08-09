@@ -141,10 +141,6 @@ class ArchiveSet:
                 raise ValueError("No authentication input.")
             passphrase_s1 = passphrase[:] if passphrase else None
 
-            # temporary: change .ini.salt to .salt ###
-            if (saltini := self.confpath+".salt").endswith(".ini.salt") and exists(saltini):
-                os.replace(saltini, self.saltpath)
-
             # create both crypto instances and load metadata key
             self.datacrypto = datacrypto = DataCryptography()
             self.mcrypto    = mcrypto    = DataCryptography()
@@ -200,17 +196,9 @@ class ArchiveSet:
                 agent_make(agent_name, pass_agent, [datacrypto.key, mcrypto.key])
 
         if mcrypto:
-            # temporary: change .ini.salt to .salt ###
-            if (saltini := self.confpath+".salt").endswith(".ini.salt") and exists(saltini):
-                os.replace(saltini, self.saltpath)
-
             # sync counters and set working salt file
             self.mci_count    = mcrypto.set_counter(self.mci_count, saltfile=self.saltpath)
             self.dataci_count = datacrypto.set_counter(self.dataci_count, saltfile=mcrypto.keyfile)
-
-            # temporary: save updated salt file to archive ###
-            if mcrypto.salt_updated and dest.writable and not self.path.startswith("/tmp/"):
-                update_dest(self, pathlist=([self.saltname, "salt.bak"]))
 
         # Enh: make 'hashtype' selectable for cipher modes that support hmac
         if datacrypto and datacrypto.mhashkey:
@@ -1028,19 +1016,9 @@ class DataCryptography:
         assert self.slot == 1
         sf = open(fpath, "r+b", buffering=0)
 
-        # temporary: Add verification tag to existing salt file
         if verify:
             h, enc_h  = self.hash_salts(sf)
-            if len(enc_h) < self.saltchksz:
-                #raise ValueError...
-                sf.truncate(self.max_keyfile_sz); sf.flush()
-                h, enc_h  = self.hash_salts(sf)
-                buf = b"".join(self.encrypt(h))
-                sf.seek(self.get_slot_offset(4))    ; sf.write(buf)    ; sf.flush()
-                # Write a copy of salt file, inverted so it isn't deduped.
-                with open(os.path.dirname(sf.name)+"/salt.bak","wb") as outf:
-                    sf.seek(0)    ; outf.write(bytes(x ^ 0xff for x in sf.read()))
-                h, enc_h  = self.hash_salts(sf)    ; self.salt_updated = True
+            if len(enc_h) < self.saltchksz:   raise ValueError("Wrong salt hash size "+str(len(enc_h)))
             if not hmac.compare_digest(h, self.decrypt(enc_h)):   raise ValueError("Bad salt hash.")
 
         return sf
@@ -1880,13 +1858,6 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
 
         if len(vol.sessions) > 1 and exists(vol.mapfile(-2)):   os.remove(vol.mapfile(-2))
 
-        # temporary: migrate to new deltamap naming ###
-        if exists(vol.path+"/deltamap"):
-            if not exists(vol.mapfile()):
-                os.replace(vol.path+"/deltamap", vol.mapfile())
-            else:
-                os.remove(vol.path+"/deltamap")
-
         if startup:   continue
 
         # Remove stray volume dirs and other files
@@ -2193,8 +2164,6 @@ class Destination:
 
                 # test write access and hardlinks
                 +r"  && touch archive.dat && echo 'wyng_writable'"
-                # temporary: rename salt file ###
-                +r"  && { if [ -e archive.ini.salt ]; then mv archive.ini.salt archive.salt; fi }"
                 +(r" && ln -f archive.dat .hardlink" if dedup else "")
                 ]
         try:
@@ -4438,7 +4407,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8beta"       ; prog_date = "20230809"
+prog_version          = "0.8wip"        ; prog_date = "20230809"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
@@ -4559,12 +4528,6 @@ os.makedirs(tmpdir+"/rpc")
 
 Destination.write_helper_program(tmpdir+"/rpc")
 agent_helper_write(tmpdir)
-
-# temporary: migrate cache to vardir ###
-if exists(_oldcache:="/var/cache/wyng") and not options.metadir:
-    for fn in [x.name for x in os.scandir(_oldcache) if x.name.startswith("a_")]:
-        if not exists(cachedir+"/"+fn):   os.rename(_oldcache+"/"+fn, cachedir+"/"+fn)
-    shutil.rmtree(_oldcache, ignore_errors=True)
 
 # Dict of compressors in the form: (library, default_compress_level, compress_func)
 compressors      =    {"zlib":   (zlib, 4, zlib.compress),
