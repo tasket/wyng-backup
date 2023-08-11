@@ -1295,8 +1295,7 @@ class LocalStorage:
                 do_exec([[CP.lvm, "lvchange", path, "-p", "r"+p]])
 
     def getperms(self, path):
-        assert os.path.isfile(path) # file only
-        vstat = os.stat(path)    ; uid, gid = vstat.st_uid, vstat.st_gid
+        vstat = os.stat(os.path.realpath(path))    ; uid, gid = vstat.st_uid, vstat.st_gid
         # use names in place of uid/gid numbers:
         user  = [x for x, num in self.users.items()  if num == uid][0]
         group = [x for x, num in self.groups.items() if num == gid][0]
@@ -2570,7 +2569,7 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, import_others=[
                  if not monitor_only else {}
     incr_vols, complete_vols, unchanged_vols = [], [], []   ; lvols = storage.lvols
 
-    for datavol in datavols + other_vols.keys():
+    for datavol in datavols + list(other_vols.keys()):
 
         if (datavol in other_vols and not exists(other_vols[datavol])) \
         or not storage.exists(datavol):
@@ -2651,7 +2650,7 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, import_others=[
         if monitor_only:   tagopts.append("--addtag=delta")
         lvols[snap2].create(snapshotfrom=datavol, ro=True, addtags=tagopts)
 
-    return incr_vols, complete_vols, unchanged_vols
+    return incr_vols, complete_vols, unchanged_vols, other_vols
 
 
 def prepare_snapshots_reflink(storage, aset, datavols, monitor_only, import_others=[]):
@@ -2660,7 +2659,7 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only, import_othe
                  if not monitor_only else {}
     incr_vols, complete_vols, unchanged_vols = [], [], []   ; lvols = storage.lvols
 
-    for datavol in datavols + other_vols.keys():
+    for datavol in datavols + list(other_vols.keys()):
 
         if (datavol in other_vols and not exists(other_vols[datavol])) \
         or not storage.exists(datavol):
@@ -3017,10 +3016,10 @@ def manifest_to_deltamap(volume, manifest, mapsize):
 def send_volume(storage, vol, curtime, ses_tags, from_other=None, send_all=False, benchmark=False):
 
     if from_other:
-        # Use a plain file as a source volume
+        # Use a plain file or blockdev as a source volume
         volpath = from_other                    ; send_all    = True
-        volsize = os.path.getsize(volpath)      ; volperms    = storage.getperms(volpath)
-        vol_ts  = os.stat(volpath).st_mtime_ns
+        vol_ts  = os.stat(volpath).st_mtime_ns  ; volperms    = storage.getperms(volpath)
+        with open(volpath, "rb") as f:   volsize = f.seek(0,2)
     else:
         lvol    = storage.lvols[storage.lvols[vol.name].snap2]    ; volpath = lvol.path
         volsize = lvol.getsize()                ; volperms    = storage.lvols[vol.name].getperms()
@@ -3374,12 +3373,12 @@ def monitor_send(storage, aset, datavols, monitor_only):
     print(f"\nPreparing snapshots in '{storage.path}'...")
     incrementals, send_alls, unchanged_vols, other_vols \
         = storage.prep_snapshots(storage, aset, datavols, monitor_only,
-                                 from_others=options.import_other_from)
+                                 import_others=options.import_other_from)
     storage.update_vol_list([(x.name, x.vid) for x in aset.vols.values()])
 
     if monitor_only:   send_alls.clear()
 
-    if len(incrementals)+len(send_alls) == 0:
+    if len(incrementals)+len(send_alls)+len(other_vols) == 0:
         x_it(0, "No new data.")
 
     # Process session tags
@@ -3414,7 +3413,7 @@ def monitor_send(storage, aset, datavols, monitor_only):
         if status1:   print(hl)
 
     totalvsize = totalbcount = 0
-    for datavol in sorted(incrementals + send_alls + unchanged_vols + other_vols.keys()):
+    for datavol in sorted(incrementals + send_alls + unchanged_vols + list(other_vols.keys())):
         vol = aset.vols[datavol]    ; updated = sent = False    ; svsize = sbcount = stime = 0
         print(f"Volume '{datavol}': " if not status1 else
               f"          |     | {datavol}",
@@ -3425,7 +3424,7 @@ def monitor_send(storage, aset, datavols, monitor_only):
 
         if monitor_only:   continue
 
-        if datavol in send_alls+other_vols.keys() or updated:
+        if datavol in send_alls+list(other_vols.keys()) or updated:
             if options.dedup and not aset.dedupindex:
                 init_dedup_index(aset)
 
@@ -4435,7 +4434,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8wip"        ; prog_date = "20230810"
+prog_version          = "0.8wip"        ; prog_date = "20230811"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
@@ -4536,7 +4535,8 @@ print("%s %s release %s" % (prog_name.capitalize(), prog_version, prog_date), fl
 # Check consistency of arguments
 if options.action in write_actions+("arch-init","monitor") and not admin_permission:
     x_it(1, f"Must be root/admin user for {options.action}.")
-if not (options.volumes or options.all) and options.action not in ("arch-init","arch-check","list"):
+if not (options.volumes or options.all or options.import_other_from) \
+and options.action not in ("arch-init","arch-check","list"):
     x_it(1, f"Volume name(s) required for {options.action}.")
 if options.action == "version":   x_it(0,"")
 if options.action not in ("send", "arch-deduplicate"):   options.dedup = False
