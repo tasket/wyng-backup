@@ -348,6 +348,7 @@ complete form `arch-check` is to supply no parameters, which checks all sessions
 --sparse               | Receive volume data sparsely (implies --sparse-write)
 --sparse-write         | Overwrite local data only where it differs (receive)
 --use-snapshot         | Use snapshots when available for faster `receive`.
+--import-other-from    | Import volume data from a non-snapshot capable path during `send`
 --remap                | Remap volume during `send` or `diff`.
 --encrypt=_cipher_     | Set encryption mode or _'off'_ (default: _'xchacha20-t3'_)
 --compression          | (arch-init) Set compression type:level.
@@ -495,6 +496,19 @@ With `send`, attach a tag name of your choosing to the new backup session/snapsh
 repeated on the command line to add multiple tags. Specifying an empty '' tag will cause Wyng
 to ask for one or more tags to be manually input; this also causes `list` to display tag
 information when listing sessions.
+
+`--import-other-from=volname:|:path`
+
+Enables `send`ing a volume from a path that is not a supported snapshot storage type.  This may
+be any regular file or a block device which is seek-able.
+
+When it is specified this option causes slow delta comparisons to be used for the specified volume(s)
+instead of the default fast snapshot-based delta comparisons.  It is not recommended for regular
+use with large volumes.
+
+The special delimeter used to separate the _volname_ (archive volume name) and the _path_ is ':|:'
+which means this option cannot be used to `send` directly to volume names in the archive which
+contain that character sequence.
 
 `--compression`
 
