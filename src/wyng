@@ -356,7 +356,7 @@ class ArchiveSet:
         mcrypto = self.mcrypto         ; buf_start = mcrypto.buf_start if mcrypto else 0
 
         with  open(fname,"r+b") as inf,   mmap.mmap(inf.fileno(), 0) as inmap:
-            assert buf_start < len(inmap) <= max_sz ## Fix: move to get_configs_remote()
+            assert buf_start < len(inmap) <= max_sz + buf_start
             mbuf = mcrypto.decrypt(inmap) if mcrypto else bytes(inmap)
             assert hmac.compare_digest(digest, self.b64hash(mbuf))
             with open(destname,"wb") as f:   f.write(self.decompress(mbuf))
@@ -454,7 +454,7 @@ class ArchiveVolume:
     def last_chunk_addr(self, vsize=None):
         if vsize is None:  vsize = self.volsize()
         chdigits    = max_address.bit_length() // 4
-        lchunk_addr = (vsize-1) - ((vsize-1) % self.archive.chunksize)
+        lchunk_addr = max(0, (vsize-1) - ((vsize-1) % self.archive.chunksize))
         return lchunk_addr, ("x%0"+str(chdigits)+"x") % lchunk_addr
 
     def mapfile(self, pos=None):
@@ -599,7 +599,7 @@ class ArchiveSession:
 
 
     def manifest_max(self):
-        return self.volsize // self.archive.chunksize \
+        return (self.volsize // self.archive.chunksize + 1) \
                * (self.archive.mhash_sz + len(hex(max_address)) + 10)
 
     def tag_parse(tag, delim=" "):
@@ -1888,7 +1888,7 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
 
 
 def check_manifest_sequence(vol, sesnames, addcol=False):
-    volsize = vol.sessions[sesnames[-1]].volsize    ; aset = vol.archive
+    volsize = vol.sessions[sesnames[-1]].volsize    ; aset = vol.archive    ; addr = 0
     sesname_sz = vol.sesname_sz
     manifest = merge_manifests(vol, msessions=sesnames, addcol=addcol)
     with open(manifest, "r") as mrgf:
@@ -2565,7 +2565,8 @@ def fetch_file_blobs(recv_list, recv_dir, dest, ext="", skip0=False, skip_exists
 
 def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, import_others=[]):
 
-    other_vols = {x: y for x,y in map(lambda a: a.split(":|:", maxsplit=1), import_others)} \
+    other_vols = {x: os.path.abspath(y)
+                  for x,y in map(lambda a: a.split(":|:", maxsplit=1), import_others)} \
                  if not monitor_only else {}
     incr_vols, complete_vols, unchanged_vols = [], [], []   ; lvols = storage.lvols
 
@@ -2655,7 +2656,8 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, import_others=[
 
 def prepare_snapshots_reflink(storage, aset, datavols, monitor_only, import_others=[]):
 
-    other_vols = {x: y for x,y in map(lambda a: a.split(":|:", maxsplit=1), import_others)} \
+    other_vols = {x: os.path.abspath(y)
+                  for x,y in map(lambda a: a.split(":|:", maxsplit=1), import_others)} \
                  if not monitor_only else {}
     incr_vols, complete_vols, unchanged_vols = [], [], []   ; lvols = storage.lvols
 
@@ -3450,7 +3452,7 @@ def monitor_send(storage, aset, datavols, monitor_only):
         print(p1 if sent else p1+"no change"+p2, flush=True)
         totalvsize += svsize    ; totalbcount += sbcount
 
-    if not monitor_only and (volct := len(incrementals + send_alls + unchanged_vols)):
+    if not monitor_only and (volct:= sum(map(len,(incrementals,send_alls,unchanged_vols,other_vols)))):
         print(hl+"\n" if status1 else "", "%0d volumes, %0d——>%0d MB in %.1f seconds."
               % (volct, totalvsize/MB, totalbcount/MB, time.monotonic() - ms_start)
               )
@@ -4027,9 +4029,9 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
     gv_stdin = io.TextIOWrapper(getvol.stdin, encoding="utf-8") if sparse else None
 
     # Open manifest then receive, check and save data
-    addr = bcount = diff_count = 0    ; buf = b''
-    for mfline in open(manifest, "r"):
-        if addr >= lchunk_addr:   break
+    addr = -1    ; bcount = diff_count = 0    ; buf = b''
+    for mfline in open(manifest, "r") if volsize else []:
+        if lchunk_addr <= addr >= 0:   break
         cksum, faddr, ses = mfline.split()    ; addr = int(faddr[1:], 16)
 
         if verbose:   print("%.2f%%" % (addr/volsize*100), end="\x0d")
@@ -4434,7 +4436,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8wip"        ; prog_date = "20230811"
+prog_version          = "0.8wip"        ; prog_date = "20230812"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
