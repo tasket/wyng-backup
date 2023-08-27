@@ -40,7 +40,7 @@ Public release with a range of features including:
 
  - Data deduplication
 
- - Marking and selecting snapshots with user-defined tags
+ - Marking and selecting archived snapshots with user-defined tags
 
 Beta release v0.8 major enhancements:
 
@@ -89,27 +89,35 @@ without concern for python or Unix commands.
 
 * See the 'Testing' section below for tips and caveats about using the alpha and beta versions.
 
+
+## Getting Started
+
 Wyng is distributed as a single Python executable with no complex
 supporting modules or other program files; it can be placed in '/usr/local/bin'
 or another place of your choosing.
 
+
 Archives can be created with `wyng arch-init`:
 
 ```
-
 wyng arch-init --dest=ssh://me@exmaple.com:/home/me/mylaptop.backup
 
 ...or...
 
 wyng arch-init --dest=file:/mnt/drive1/mylaptop.backup
-
-
 ```
 
 The examples above create a 'mylaptop.backup' directory on the destination.
 The `--dest` argument includes the destination type, remote system (where applicable)
 and directory path.
 
+Next you can start making backups with `wyng send`:
+
+```
+wyng send --dest=file:/mnt/drive1/mylaptop.backup --local=volgrp1/pool1 root-volume home-volume
+```
+
+This command sends two volumes 'root-volume' and 'home-volume' from the LVM thin pool 'volgrp1/pool1' to the destination archive.
 
 ## Operation
 
@@ -564,6 +572,31 @@ volex = misc/caches.img
   windows10_recovery.vmdk
 ```
 
+
+### Verifying Code
+
+* Wyng code can be cryptographically verified using either `gpg` directly or via `git`:
+
+```sh
+# Import Key
+~$ cd wyng-backup
+~/wyng-backup$ gpg --import pubkey
+gpg: key 1DC4D106F07F1886: public key "Christopher Laprise <tasket@posteo.net>" imported
+gpg: Total number processed: 1
+gpg:               imported: 1
+
+# GPG Method
+~/wyng-backup$ gpg --verify src/wyng.gpg src/wyng
+
+# Git Method
+~/wyng-backup$ git verify-commit HEAD
+
+# Output:
+gpg: Signature made Sat 26 Aug 2023 04:20:46 PM EDT
+gpg:                using RSA key 0573D1F63412AF043C47B8C8448568C8B281C952
+gpg: Good signature from "Christopher Laprise <tasket@posteo.net>" [unknown]
+gpg:                 aka "Christopher Laprise <tasket@protonmail.com>" [unknown]
+```
 
 ### Tips
 
