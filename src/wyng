@@ -53,11 +53,12 @@ class ArchiveSet:
 
     attr_ints   = {"format_ver","chunksize","mci_count","dataci_count"}
 
-    def __init__(self, top, dest, ext="", allvols=False, children=2,
+    def __init__(self, top, dest, opts, ext="", allvols=False, children=2,
                  pass_agent=0, passphrase=None, prior_auth=None):
         self.time_start      = time_start
         self.monotonic_start = monotonic_start
         self.dest        = dest
+        self.opts        = opts
         self.path        = top
         self.confpath    = pjoin(self.path, self.confname)
         self.saltpath    = pjoin(self.path, self.saltname)
@@ -134,7 +135,7 @@ class ArchiveSet:
             agentkeys  = agent_get(agent_name, pass_agent)
 
             # get passphrase if we got no agentkeys
-            if not passphrase and not agentkeys:   passphrase = ask_passphrase()
+            if not passphrase and not agentkeys:   passphrase = get_passphrase(cmd=opts.passcmd)
             if passphrase:
                 assert passphrase != bytes(len(passphrase))
             elif not agentkeys:
@@ -764,11 +765,11 @@ def upgrade_from_v2(aset):
     print("Upgrading archive format...", end="")   ; dest = aset.dest   ; sessions, moves = [],[]
 
     os.mkdir(tmpdir+"/:upgrade:")
-    new_aset = ArchiveSet(tmpdir+"/:upgrade:", dest)
+    new_aset = ArchiveSet(tmpdir+"/:upgrade:", aset.dest, aset.opts)
     for attr in ("uuid","chunksize","compression","compr_level","hashtype"):
         setattr(new_aset, attr, getattr(aset, attr))
     new_aset.ci_mode = "00"    ; new_aset.save_conf()
-    new_aset = ArchiveSet(new_aset.path, dest)
+    new_aset = ArchiveSet(new_aset.path, aset.dest, aset.opts)
 
     for vname, vol in aset.vols.items():
         newvol = new_aset.add_volume_meta(vname, desc=vol.desc)
@@ -1627,7 +1628,7 @@ class LvmVolume(LocalVolume):
 
     def delete(self, sync=True, check=False, force=False):
         # Enh: re-write with asyncio
-        sync = (optsync := options.maxsync) or sync    ; clean = options.clean
+        sync = (optsync := options.maxsync) or sync    ; clean = options.clean # using global
         assert not (sync == False and check)
         assert force or self.name.endswith(self.snap_ext)
 
@@ -1711,7 +1712,7 @@ class LvmVolume(LocalVolume):
 
 # Try to sync only selected filesystem
 def fssync(path, force=False, sync=False):
-    if options.maxsync or force:
+    if options.maxsync or force: # global options
         rc = SPr.check_output([CP.sync,"-f",path]) if sync else SPr.Popen([CP.sync,"-f",path])
 
 
@@ -1721,7 +1722,14 @@ def rel_chmod(fpath, op, mask):
     os.chmod(fpath, (current & ~mask) if op=="-" else (current | mask))
 
 
-def ask_passphrase(prompt="Enter passphrase: ", verify=False):
+def get_passphrase(prompt="Enter passphrase: ", verify=False, cmd=None):
+    if cmd:
+        try:
+            return bytearray(SPr.check_output(cmd, shell=True, text=False).rstrip(b"\n"))
+        except SPr.CalledProcessError as e:
+            # Handle as error code so pw output does not get logged
+            x_it(e.returncode, "Error running passcmd: "+cmd)
+
     def getpassinput(prompt):
         if attended:
             return getpass.getpass(prompt)
@@ -1750,9 +1758,9 @@ def clear_array(ar):
 
 # Initialize a new ArchiveSet:
 
-def arch_init(aset, opts):
+def arch_init(aset):
 
-    data_ci = opts.encrypt or "xchacha20-dgr"
+    opts = aset.opts    ; data_ci = opts.encrypt or "xchacha20-dgr"
     # Fix: duplicates code in aset... move to aset class.
     if data_ci in (x[0] for x in DataCryptography.crypto_codes.values() if x[2]):
         aset.ci_mode, ci_t = [(x,y) for x,y in DataCryptography.crypto_codes.items()
@@ -1761,7 +1769,7 @@ def arch_init(aset, opts):
         if data_ci != "off":
             # Security Enh: Possibly use mmap+mlock to store passphrase/key values,
             #               and wipe them from RAM after use.
-            passphrase      = ask_passphrase(prompt="Enter new encryption passphrase: ",
+            passphrase      = get_passphrase(prompt="Enter new encryption passphrase: ",
                                              verify=True)
             aset.datacrypto = DataCryptography()
             aset.mcrypto    = DataCryptography()
@@ -1814,6 +1822,7 @@ def arch_init(aset, opts):
 # Check/verify an entire archive
 
 def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
+    options  = aset.opts
     dest     = aset.dest                   ; attended  = not options.unattended
     compare_digest = hmac.compare_digest   ; b64enc    = base64.urlsafe_b64encode
 
@@ -1961,7 +1970,7 @@ def get_configs(opts):
     if opts.action in ("arch-init",):
         if dest.archive_ini_hash != "none":
             x_it(1, "Archive already exists: "+dest.spec)
-        arch_init(ArchiveSet(tmpdir, dest), opts)
+        arch_init(ArchiveSet(tmpdir, dest, opts))
         x_it(0, "Done.")
 
     aset = get_configs_remote(dest, cachedir, opts)    ; os.utime(aset.path)
@@ -1989,7 +1998,7 @@ def get_configs_remote(dest, base_dir, opts):
     fetch_file_blobs(recv_list, tmpdir, dest, skip0=True)
 
     # Instantiate ArchiveSet to authenticate archive.ini
-    aset = ArchiveSet(tmpdir, dest, children=0, pass_agent=int(opts.authmin))
+    aset = ArchiveSet(tmpdir, dest, opts, children=0, pass_agent=int(opts.authmin))
     if aset.format_ver == 2:
         if opts.action == "arch-check" and opts.upgrade_format:
             os.mkdir(v2dir := tmpdir+"/:oldv2:")
@@ -2006,7 +2015,7 @@ def get_configs_remote(dest, base_dir, opts):
     if exists(ini) and not hmac.compare_digest(aset.raw_hashval,
                                         hashlib.sha256(open(ini,"rb").read()).hexdigest()):
         try:
-            cache_aset = ArchiveSet(arch_dir, dest, children=0, prior_auth=aset)
+            cache_aset = ArchiveSet(arch_dir, dest, opts, children=0, prior_auth=aset)
         except Exception as e:
             err_out(repr(e)+"\nCached archive.ini didn't load.")
             shutil.rmtree(arch_dir)
@@ -2042,7 +2051,7 @@ def get_configs_remote(dest, base_dir, opts):
                 shutil.copyfile(pjoin(tmpdir,f), pjoin(arch_dir,f))
 
     # Initial auth successful! Fetch + auth volume metadata...
-    return ArchiveSet(arch_dir, dest, children=2, allvols=True, prior_auth=aset)
+    return ArchiveSet(arch_dir, dest, opts, children=2, allvols=True, prior_auth=aset)
 
 
 class Destination:
@@ -2579,7 +2588,7 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, import_others=[
             continue
 
         if datavol not in aset.vols and not monitor_only:
-            add_volume(aset, datavol, options.voldesc)
+            add_volume(aset, datavol, aset.opts.voldesc)
 
         if datavol in other_vols:
             print("  Preparing full scan of import '%s'" % datavol)    ; continue
@@ -2589,7 +2598,7 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, import_others=[
         l_vol = storage.new_vol_entry(datavol, vol.vid)   ; snap1, snap2 = l_vol.snap1, l_vol.snap2
 
         if lvols[snap1].is_arch_member() == "false":
-            if options.remap:
+            if aset.opts.remap:
                 l_vol.delete    ; print("  Removed mis-matched snapshot", datavol)
             else:
                 print("  Skipping %s; snapshot is from a different archive." % datavol)
@@ -2670,7 +2679,7 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only, import_othe
             continue
 
         if datavol not in aset.vols and not monitor_only:
-            add_volume(aset, datavol, options.voldesc)
+            add_volume(aset, datavol, aset.opts.voldesc)
 
         if datavol in other_vols:
             print("  Preparing full scan of import '%s'" % datavol)    ; continue
@@ -2685,7 +2694,8 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only, import_othe
             mapfile = vol.mapfile()    ; lastses = vol.sessions[vol.last]
 
             if lvols[snap1].exists() and lvols[snap1].gettime() == lvols[datavol].gettime() \
-            and lvols[snap1].getsize() == lvols[datavol].getsize():
+            and lvols[snap1].getsize() == lvols[datavol].getsize() \
+            and exists(mapfile) and vol.map_used() == 0:
                 unchanged_vols.append(datavol)   ; continue
 
             if not exists(mapfile) and lvols[snap1].exists() \
@@ -3027,7 +3037,7 @@ def send_volume(storage, vol, curtime, ses_tags, from_other=None, send_all=False
         volsize = lvol.getsize()                ; volperms    = storage.lvols[vol.name].getperms()
         vol_ts  = lvol.gettime()
 
-    aset        = vol.archive                   ; status1     = not options.unattended
+    options     = (aset := vol.archive).opts    ; status1     = not options.unattended
     chunksize   = aset.chunksize                ; dedup       = options.dedup
     chdigits    = max_address.bit_length()//4   ; chformat    = "x%0"+str(chdigits)+"x"
     bksession   = "S_"+curtime                  ; sdir        = pjoin(vol.vid, bksession)
@@ -3357,19 +3367,20 @@ def dedup_existing(aset):
               [CP.cat,"-v"],  [CP.tail,"--bytes=2000"]
             ], infile=tmpdir+"/dedup.lst.gz", out=tmpdir+"/arch-dedup.log")
     print(" done.")
-    if options.verbose:   print("".join(open(tmpdir+"/arch-dedup.log","r")))
+    if verbose:   print("".join(open(tmpdir+"/arch-dedup.log","r")))
 
 
 # Controls flow of monitor and send_volume procedures:
 
 def monitor_send(storage, aset, datavols, monitor_only):
 
-    dest = aset.dest    ; storage.check_support()
-    status1 = not options.unattended   ; MB = 1024**2    ; ms_start = time.monotonic()
+    options = aset.opts                ; dest = aset.dest
+    status1 = not options.unattended   ; MB   = 1024**2     ; ms_start = time.monotonic()
 
     if options.autoprune.lower() == "full":
         for vol in aset.vols.values():   autoprune(vol, apmode="full")
 
+    storage.check_support()
     curtime = time.strftime("%Y%m%d-%H%M%S", time.localtime(time_start))
 
     print(f"\nPreparing snapshots in '{storage.path}'...")
@@ -3466,10 +3477,11 @@ def monitor_send(storage, aset, datavols, monitor_only):
 
 def prune_sessions(vol, times):
 
-    sesnames = vol.sesnames          ; allbefore = options.allbefore
-    t1, t2   = "", ""                ; to_prune  = []
+    options = vol.archive.opts    ; allbefore = options.allbefore
+    sesnames = vol.sesnames       ; t1, t2    = "", ""                ; to_prune  = []
 
-    if len(sesnames) < 2:    print("  No extra sessions to prune.")    ; return
+    print(vol.name, end=" -", flush=True)
+    if len(sesnames) < 2:    print(" No extra sessions to prune.")    ; return
     if options.allbefore and len(times) != 1:  x_it(1, "Option --all-before requires one session.")
     for ii in range(len(times)):
         if times[ii] == "newest":   times[ii] = sesnames[-1]
@@ -3524,13 +3536,13 @@ def prune_sessions(vol, times):
         to_prune = sesnames[start:end]
 
     if len(to_prune) and to_prune[-1] == sesnames[-1]:
-        print("  Preserving latest session.")
+        print(" Preserving latest session -", end="")
         del(to_prune[-1])
     if len(to_prune) == 0:
-        print("  No selections in this date-time range.")
+        print(" No selections in this date-time range.")
         return
 
-    autoprune(vol, apmode=options.autoprune, include=set(to_prune))
+    print(autoprune(vol, apmode=options.autoprune, include=set(to_prune)))
 
 
 # Parameters / vars for autoprune:
@@ -3541,6 +3553,7 @@ def prune_sessions(vol, times):
 # target_size (0 or MB int): User-selected size cap for archive (future)
 
 def autoprune(vol, needed_space=0, apmode="off", include=set()):
+    options = vol.archive.opts
 
     dtdate = datetime.date
     def to_date(sesdate):
@@ -3643,7 +3656,7 @@ def autoprune(vol, needed_space=0, apmode="off", include=set()):
             factor += 2
 
     if options.verbose:   print(datavol+": Removed", removed_total)
-    return True
+    return removed_total
 
 
 # Accepts a list of session names in ascending order (or else uses all sessions in the volume)
@@ -3792,14 +3805,14 @@ def merge_sessions(volume, sources, target, clear_sources=False):
     catch_signals()
     retcode = do_exec([cmds, dest.run_args([dest_cmds + " && python3 "
                         + dest.dtmp+"/dest_helper.py merge "+merge_target
-                        + (" --resume" if resume else "") + (" --sync" if options.maxsync else "")
+                        + (" --resume" if resume else "")+(" --sync" if aset.opts.maxsync else "")
                          ])
                         ], cwd=volume.path, check=False, out=tmpdir+"/merge.log"
                       )
 
     if retcode == 50:
         # Initialization didn't complete, so reload aset and abort
-        aset = ArchiveSet(aset.path, aset.dest, prior_auth=aset)
+        aset = ArchiveSet(aset.path, aset.dest, aset.opts, prior_auth=aset)
         aset.set_in_process(None)
         for f in ("merge.lst.gz", "volinfo.tmp", "vi.dat.tmp", target+"/info.tmp"):
             if exists(f):  os.remove(f)
@@ -3839,7 +3852,7 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
         else:
             return 0
 
-    dest        = (aset := vol.archive).dest      ; magic        = dest.magic
+    dest        = (aset := vol.archive).dest      ; options      = aset.opts
     attended    = not options.unattended          ; remap        = options.remap
     verbose     = attended and verify_only != 2   ; debug        = options.debug
     sparse      = options.sparse                  ; sparse_write = options.sparse_write or sparse
@@ -4029,7 +4042,7 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
     gv_stdin = io.TextIOWrapper(getvol.stdin, encoding="utf-8") if sparse else None
 
     # Open manifest then receive, check and save data
-    addr = -1    ; bcount = diff_count = 0    ; buf = b''
+    addr = -1    ; bcount = diff_count = 0    ; buf = b''    ; magic = dest.magic
     for mfline in open(manifest, "r") if volsize else []:
         if lchunk_addr <= addr >= 0:   break
         cksum, faddr, ses = mfline.split()    ; addr = int(faddr[1:], 16)
@@ -4436,7 +4449,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8beta"        ; prog_date = "20230812"
+prog_version          = "0.8beta"        ; prog_date = "20230826"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
@@ -4507,6 +4520,7 @@ parser_defs = [
  [["--hashtype"],     {"default": "", "help": "Init: hash function type"}],
  [["--chunk-factor"], {"dest": "chfactor",
                        "help": "Init: set chunk size to N*64kB"}],
+ [["--passcmd"],      {"help": "Command to fetch auth passphrase"}],
  [["--meta-dir"],     {"dest": "metadir", "default": "", "help": "Use alternate metadata path"}],
  [["--json"],         {"action": "store_true", "help": "Output as json format (list)"}],
  [["--force"],        {"action": "store_true", "help": "Force action"}],
@@ -4539,7 +4553,7 @@ if options.action in write_actions+("arch-init","monitor") and not admin_permiss
     x_it(1, f"Must be root/admin user for {options.action}.")
 if not (options.volumes or options.all or options.import_other_from) \
 and options.action not in ("arch-init","arch-check","list"):
-    x_it(1, f"Volume name(s) required for {options.action}.")
+    x_it(1, f"Volume name(s) or --all required for {options.action}.")
 if options.action == "version":   x_it(0,"")
 if options.action not in ("send", "arch-deduplicate"):   options.dedup = False
 if options.action == "arch-deduplicate":   options.dedup = True
@@ -4605,7 +4619,7 @@ if aset.in_process and dest.online  \
     else:
         raise ValueError("Bad in_process descriptor: "+repr(aset.in_process[0]))
 
-        aset = ArchiveSet(aset.path, aset.dest, allvols=True, prior_auth=aset)
+        aset = ArchiveSet(aset.path, aset.dest, aset.opts, allvols=True, prior_auth=aset)
         if compare_files(aset, pathlist=[aset.confname], volumes=[aset.vols[vname]]):
             x_it(1, "Error: Local and archive metadata differ.")
 
@@ -4633,6 +4647,7 @@ for vol in selected_vols[:]:
 
 if options.action   == "monitor":
     monitor_send(storage, aset, selected_vols, monitor_only=True)
+    print()
 
 
 elif options.action == "send":

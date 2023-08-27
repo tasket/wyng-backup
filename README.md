@@ -216,9 +216,6 @@ wyng prune --session=20180605-000000,20180701-140000 --dest=file:/mnt/drive1/myl
 volumes. Alternately, `--all-before` may be used with a single `--session` date-time
 to prune all sessions prior to that time.
 
-If volume names aren't specified, `prune` will operate across all
-enabled volumes.
-
 The `--keep` option can accept a single date-time or a tag in the form `^tagID`.
 Matching sessions will be excluded from pruning and autopruning.
 
@@ -236,7 +233,7 @@ specified if its desired to monitor only certain volumes.
 This rule in /etc/cron.d runs `monitor` every 20 minutes:
 
 ```
-*/20 * * * * root su -l -c '/usr/local/bin/wyng monitor'
+*/20 * * * * root su -l -c '/usr/local/bin/wyng monitor --all'
 ```
 
 #### diff
@@ -362,6 +359,7 @@ complete form `arch-check` is to supply no parameters, which checks all sessions
 --compression          | (arch-init) Set compression type:level.
 --hashtype             | (arch-init) Set data hash algorithm: _hmac-sha256_ or _blake2b_.
 --chunk-factor         | (arch-init) Set archive chunk size.
+--passcmd=_'command'_  | Read passphrase from output of a wallet/auth app
 --meta-dir=_path_      | Use a different metadata dir than the default.
 --unattended, -u       | Don't prompt for interactive input.
 --clean                | Perform garbage collection (arch-check) or metadata removal (delete).
@@ -504,6 +502,20 @@ With `send`, attach a tag name of your choosing to the new backup session/snapsh
 repeated on the command line to add multiple tags. Specifying an empty '' tag will cause Wyng
 to ask for one or more tags to be manually input; this also causes `list` to display tag
 information when listing sessions.
+
+`--authmin=<minutes>`  
+`--passcmd=<command>`
+
+These two options help automate Wyng authentication, and may be used together or separately.
+
+`--authmin` takes a numeric value with the 
+number of minutes to remember the current authentication for subsequent Wyng invocations.  Specifying
+a -1 will cancel a prior authentication.
+
+The `--passcmd` option takes a string representing a shell command that outputs a passphrase, which
+Wyng then reads instead of issuing an input prompt for the passphrase.  If a prior auth from
+`--authmin` is active, this option is ignored and the command will not be executed.
+
 
 `--import-other-from=volname:|:path`
 
