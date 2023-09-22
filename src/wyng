@@ -3256,6 +3256,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
         # Finalize on VM/remote
         catch_signals()
         dest.run([ dest.cd
+                 +" && rm -df "+sdir
                  +" && mv -T "+sdir+"-tmp "+sdir
                  +" && mv "+vol.vid+"/volinfo.tmp "+vol.vid+"/volinfo"
                  +" && mv archive.ini.tmp archive.ini"
