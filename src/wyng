@@ -369,7 +369,7 @@ class ArchiveVolume:
     max_volinfosz = (ArchiveSet.mhash_sz + sesname_sz + 10) * max_sessions \
                   + volname_len + ArchiveSet.comment_len + 10
 
-    __slots__ = ("vid","name","hashval","archive","path","sessions","sesnames",
+    __slots__ = ("vid","name","hashval","archive","path","alias","sessions","sesnames",
                  "_seslist","last","meta_checked","tags","desc","changed_bytes")
 
     def __init__(self, archive, vid, hashval, path, name=None, children=2):
@@ -377,6 +377,7 @@ class ArchiveVolume:
         self.archive   = archive                   ; self.path    = path
         self.hashval   = hashval                   ; self.changed_bytes = 0
         self.last      = "None"                    ; self.meta_checked  = False
+        self.alias     = None
         # persisted here:
         self.name      = name                      ; self.desc      = ""
         self.sessions  = {}                        ; self.sesnames= []
@@ -2581,20 +2582,21 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, import_others=[
 
     for datavol in datavols + list(other_vols.keys()):
 
-        if (datavol in other_vols and not exists(other_vols[datavol])) \
-        or not storage.exists(datavol):
-            err_out("Warning: Local '%s' does not exist!" % datavol)
+        if not exists(vpath := other_vols.get(datavol) or lvols[datavol].path):
+            err_out("Warning: Local '%s' does not exist!" % vpath)
             if datavol in other_vols:   del(other_vols[datavol])
             continue
 
         if datavol not in aset.vols and not monitor_only:
             add_volume(aset, datavol, aset.opts.voldesc)
 
+        vol   = aset.vols[datavol]
         if datavol in other_vols:
-            print("  Preparing full scan of import '%s'" % datavol)    ; continue
+            print("  Queuing full scan of import from '%s' as '%s'"
+                  % (other_vols[datavol], datavol))
+            vol.alias = other_vols[datavol]    ; continue
 
         # 'mapfile' is the deltamap file, snap1 holds vol state between send/monitor ops
-        vol   = aset.vols[datavol]
         l_vol = storage.new_vol_entry(datavol, vol.vid)   ; snap1, snap2 = l_vol.snap1, l_vol.snap2
 
         if lvols[snap1].is_arch_member() == "false":
@@ -2672,20 +2674,21 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only, import_othe
 
     for datavol in datavols + list(other_vols.keys()):
 
-        if (datavol in other_vols and not exists(other_vols[datavol])) \
-        or not storage.exists(datavol):
-            err_out("Warning: Local '%s' does not exist!" % datavol)
+        if not exists(vpath := other_vols.get(datavol) or lvols[datavol].path):
+            err_out("Warning: Local '%s' does not exist!" % vpath)
             if datavol in other_vols:   del(other_vols[datavol])
             continue
 
         if datavol not in aset.vols and not monitor_only:
             add_volume(aset, datavol, aset.opts.voldesc)
 
+        vol   = aset.vols[datavol]
         if datavol in other_vols:
-            print("  Preparing full scan of import '%s'" % datavol)    ; continue
+            print("  Queuing full scan of import from '%s' as '%s'"
+                  % (other_vols[datavol], datavol))
+            vol.alias = other_vols[datavol]    ; continue
 
         # 'mapfile' is the deltamap file, snap1 holds vol state between send/monitor ops
-        vol   = aset.vols[datavol]
         l_vol = storage.new_vol_entry(datavol, vol.vid)   ; snap1, snap2 = l_vol.snap1, l_vol.snap2
 
         # Make deltamap or initial snapshot if necessary. Try to recover paired state
@@ -3025,11 +3028,11 @@ def manifest_to_deltamap(volume, manifest, mapsize):
 # Bytes sent will always be >0 if nonzero chunks were added to the manifest.
 # A result of (0, 0) means no change was detected or sent.
 
-def send_volume(storage, vol, curtime, ses_tags, from_other=None, send_all=False, benchmark=False):
+def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False):
 
-    if from_other:
+    if vol.alias:
         # Use a plain file or blockdev as a source volume
-        volpath = from_other                    ; send_all    = True
+        volpath = vol.alias                     ; send_all    = True
         vol_ts  = os.stat(volpath).st_mtime_ns  ; volperms    = storage.getperms(volpath)
         with open(volpath, "rb") as f:   volsize = f.seek(0,2)
     else:
@@ -3261,7 +3264,7 @@ def send_volume(storage, vol, curtime, ses_tags, from_other=None, send_all=False
         catch_signals()
         vol.delete_session(bksession)    ; shutil.rmtree(aset.path+"/"+sdir+"-tmp")
 
-    if not from_other and not benchmark:
+    if not vol.alias and not benchmark:
         vol.init_deltamap()
         storage.lvols[vol.name].rotate_snapshots(rotate=True, timestamp_path=vol.mapfile(),
                                                  addtags=["--addtag="+vol.last])
@@ -3451,8 +3454,7 @@ def monitor_send(storage, aset, datavols, monitor_only):
                     continue
 
             sent, svsize, sbcount, stime = \
-                send_volume(storage, vol, curtime, ses_tags, send_all=datavol in send_alls,
-                            from_other=other_vols[datavol] if datavol in other_vols else None)
+                send_volume(storage, vol, curtime, ses_tags, send_all=datavol in send_alls)
             dest.free -= int(sbcount + (sbcount * 0.05))
 
         else:
@@ -4449,7 +4451,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8beta"        ; prog_date = "20230826"
+prog_version          = "0.8beta"       ; prog_date = "20230921"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
