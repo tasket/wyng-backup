@@ -1398,15 +1398,16 @@ class LocalStorage:
             self.new_vol_entry(vname, vid)
 
     # Retrieves survey of all LVM VGs/LVs
-    def update_lvm_list(self):
+    def update_lvm_list(self, vol=None):
         if not shutil.which(CP.lvm):   sys.stderr.write("LVM not available.\n"); return
 
         delim   = ":::"            ; colnames = LvmVolume.colnames
         vgs_all = self.vgs_all     ; LvmVol   = LvmVolume
 
-        do_exec([[CP.lvm, "lvs", "--units=b", "--noheadings", "--separator="+delim,
-                    "--options=" + ",".join(colnames)]],
-                out=tmpdir+"/volumes.lst")
+        cmd = [CP.lvm, "lvs", "--units=b", "--noheadings", "--separator="+delim,
+                    "--options=" + ",".join(colnames)]
+        if vol:   cmd.append(vol.path)
+        do_exec([cmd], out=tmpdir+"/volumes.lst")
 
         for ln in open(tmpdir+"/volumes.lst", "r"):
             lv = LvmVol(self, "", members=zip(colnames, ln.strip().split(delim)))
@@ -1561,6 +1562,9 @@ class ReflinkVolume(LocalVolume):
 
         self.storage.lvols[self.name] = self
 
+    def update(self):
+        return self
+
     def gettime(self):
         return os.stat(self.path).st_mtime_ns
 
@@ -1667,6 +1671,10 @@ class LvmVolume(LocalVolume):
                       + addtags + ["--thin", "-n", self.name, vg+"/"+self.storage.lvpool]])
 
         self.storage.lvols[self.name] = self
+
+    def update(self):
+        self.storage.update_lvm_list(vol=self)
+        return self.storage.lvols[self.name]
 
     def gettime(self):
         return int(time.mktime(time.strptime(self.lv_time, r"%Y-%m-%d %H:%M:%S %z"))*1000000000)
@@ -2591,6 +2599,7 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, import_others=[
             add_volume(aset, datavol, aset.opts.voldesc)
 
         vol   = aset.vols[datavol]
+        if vol.alias:   continue
         if datavol in other_vols:
             print("  Queuing full scan of import from '%s' as '%s'"
                   % (other_vols[datavol], datavol))
@@ -2683,6 +2692,7 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only, import_othe
             add_volume(aset, datavol, aset.opts.voldesc)
 
         vol   = aset.vols[datavol]
+        if vol.alias:   continue
         if datavol in other_vols:
             print("  Queuing full scan of import from '%s' as '%s'"
                   % (other_vols[datavol], datavol))
@@ -4163,7 +4173,7 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
             tags = ["--addtag=wyng", "--addtag=arch-"+aset.uuid, "--addtag="+sessions[-1]]
             save_storage.lvols[l_vol.snap2].delete()
             save_storage.lvols[l_vol.snap2].create(snapshotfrom=vol.name, addtags=tags)
-            l_vol.rotate_snapshots(timestamp_path=vol.mapfile())
+            l_vol = l_vol.update()    ; l_vol.rotate_snapshots(timestamp_path=vol.mapfile())
             print(f"  Snapshot paired for '{vol.name}'.")
     if remap:
         bmapf.close()
@@ -4451,7 +4461,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8beta"       ; prog_date = "20230921"
+prog_version          = "0.8beta"       ; prog_date = "20230922"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
