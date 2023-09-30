@@ -3097,7 +3097,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
 
 
     # Use tar to stream files to destination
-    untar_cmd = [dest.cd + " && mkdir -p ./"+sdir + " && exec >>"+dest.dtmp+"/send.log 2>&1"
+    untar_cmd = [dest.cd + " && mkdir -p ./"+sdir+"-tmp" + " && exec >>"+dest.dtmp+"/send.log 2>&1"
                  + " && python3 "+dest.dtmp+"/dest_helper.py send "+vol.vid
                  + (" --sync" if options.maxsync else "")]
     untar = SPr.Popen(dest.run_args(untar_cmd), stdin =SPr.PIPE, stdout=SPr.DEVNULL)
