@@ -2259,6 +2259,7 @@ def helper_send(volid=None):
                 except OSError as err:
                     print(err)    ; print("Substitution:", source, dest)
                     shutil.copyfile(source, dest)    ; substitutions[src_orig] = dest
+            tarf.members = []
 
 def helper_receive(lstf):
     stdout_write = sys.stdout.buffer.write   ; exists = os.path.exists   ; getsize= os.path.getsize
@@ -3167,7 +3168,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
                         percent = int(addr/volsize*1000)
                         print(f"\r{bcount/MB: 7.1f}MB"[:10] + f" | {(percent//10):0d}%"[:7],
                               end="", flush=True)
-                    counter = 0
+                    counter = 0    ; tarf.members = []
 
                 # Compress & write only non-empty chunks
                 if buf == zeros:
@@ -4462,7 +4463,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8beta"       ; prog_date = "20231002"
+prog_version          = "0.8wip"        ; prog_date = "20240219"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
