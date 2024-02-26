@@ -2684,7 +2684,7 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only, import_othe
 
     for datavol in datavols + list(other_vols.keys()):
 
-        if not exists(vpath := other_vols.get(datavol) or lvols[datavol].path):
+        if not exists(vpath := other_vols.get(datavol) or pjoin(storage.path, datavol)):
             err_out("Warning: Local '%s' does not exist!" % vpath)
             if datavol in other_vols:   del(other_vols[datavol])
             continue
@@ -3239,7 +3239,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
 
         tarf.close()    ; untar.stdin.close()
         try:
-            untar.wait(timeout=60)
+            untar.wait(timeout=180)
         except SPr.TimeoutExpired:
             print("Warning: tar process timeout.")
             retcode = 99
@@ -4463,7 +4463,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8wip"        ; prog_date = "20240219"
+prog_version          = "0.8beta"       ; prog_date = "20240225"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
