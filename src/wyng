@@ -1416,7 +1416,7 @@ class LocalStorage:
         self.lvols = vgs_all[self.vgname]
 
     # static
-    def vg_exists(vgname):
+    def vg_exists(vgname):  #### Fix: test if 'lvm' cmd is present
         try:
             do_exec([[CP.lvm, "vgdisplay", vgname]])
         except SPr.CalledProcessError:
@@ -2081,7 +2081,7 @@ class Destination:
         if not dest_url.isprintable():   x_it(1,"Error: [^control] not allowed in dest.")
         dparts      = urlparse(dest_url)    ; self.dtype = dtype = dparts.scheme
         if dtype not in self.url_types:
-            x_it(1,"'%s' not an accepted type." % dtype)
+            x_it(1,"'%s' not an accepted dest type." % dtype)
         if (dtype == "file" and (dparts.netloc or not dparts.path)) \
         or (dtype in ("ssh","qubes","qubes-ssh") and not dparts.netloc) \
         or (dtype == "qubes-ssh" and not all(dparts.netloc.partition(":"))) :
@@ -2238,15 +2238,17 @@ def catch_signals(sel=["INT","TERM","QUIT","ABRT","ALRM","TSTP","USR1"], iflag=F
 def handle_signal(sig, frame):
     if sig == signal.SIGALRM:   raise IOError("Timeout ALRM")
 
-def helper_send(volid=None):
+def helper_send(volid=None, ses=None):
     mkdirs = os.makedirs    ; hlink = os.link    ; dirname = os.path.dirname
-    print(volid)    ; assert volid.startswith("Vol_")
-    for i in os.scandir(volid):
-        if i.path.endswith("-tmp"):   shutil.rmtree(i.path, ignore_errors=True)
+    print(volid, ses)    ; assert volid.startswith("Vol_") and ses.startswith("S_")
 
     with tarfile.open(mode="r|", fileobj=sys.stdin.buffer) as tarf:
         extract = tarf.extract    ; substitutions = {}    ; dirlist = set()
-        for member in tarf:   sdir = member.name    ; mkdirs(sdir)    ; print(sdir)    ; break
+        for member in tarf:   destpath = member.name    ; break
+        os.chdir(destpath)
+        for i in os.scandir(volid):
+            if i.path.endswith("-tmp") and not i.path.endswith(ses+"-tmp"):
+                shutil.rmtree(i.path, ignore_errors=True)
         for member in tarf:
             if not member.islnk():
                 extract(member, set_attrs=False)
@@ -2360,7 +2362,7 @@ if cmd == "merge":
 elif cmd == "receive":
     helper_receive(lstf if lstf else sys.stdin)
 elif cmd == "send":
-    helper_send(volid=sys.argv[2])
+    helper_send(volid=sys.argv[2], ses=sys.argv[3])
 elif cmd == "dedup":
     ddcount = 0    ; substitutions = {}
     for line in lstf:
@@ -3041,6 +3043,15 @@ def manifest_to_deltamap(volume, manifest, mapsize):
 
 def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False):
 
+    def send_chunk_local(tar_info, etag, buf):
+        makedirs(pdirname(_fp := pjoin(destpath, tar_info.name)), exist_ok=True)
+        with open(_fp, "wb") as cf:   cf.write(etag); cf.write(buf)
+
+    def send_chunk_remote(tar_info, etag, buf):
+        fileobj = BytesIO()
+        tar_info.size = fileobj.write(etag) + fileobj.write(buf)   ; fileobj.seek(0)
+        tarf_addfile(tarinfo=tar_info, fileobj=fileobj)
+
     if vol.alias:
         # Use a plain file or blockdev as a source volume
         volpath = vol.alias                     ; send_all    = True
@@ -3051,7 +3062,8 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
         volsize = lvol.getsize()                ; volperms    = storage.lvols[vol.name].getperms()
         vol_ts  = lvol.gettime()
 
-    options     = (aset := vol.archive).opts    ; status1     = not options.unattended
+    dest        = (aset := vol.archive).dest    ; pjoin       = os.path.join
+    options     = aset.opts                     ; status1     = not options.unattended
     chunksize   = aset.chunksize                ; dedup       = options.dedup
     chdigits    = max_address.bit_length()//4   ; chformat    = "x%0"+str(chdigits)+"x"
     bksession   = "S_"+curtime                  ; sdir        = pjoin(vol.vid, bksession)
@@ -3097,17 +3109,27 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
         crypto   = False   ; crypto_cadence = 0    ; etag     = b''
 
 
+    if dest.dtype == "file" and options.tar_bypass:
+        # Bypass tar stream when sending chunks to local fs
+        print("\nBypassing tar stream...") ####
+        send_chunk = send_chunk_local
+        destpath   = dest.path
+        pdirname   = os.path.dirname   ; makedirs  = os.makedirs
+    else:
+        send_chunk = send_chunk_remote
+
     # Use tar to stream files to destination
-    untar_cmd = [dest.cd + " && mkdir -p ./"+sdir + " && exec >>"+dest.dtmp+"/send.log 2>&1"
-                 + " && python3 "+dest.dtmp+"/dest_helper.py send "+vol.vid
+    untar_cmd = ["exec >>"+dest.dtmp+"/send.log 2>&1"
+                 + " && python3 "+dest.dtmp+"/dest_helper.py send "+vol.vid+" "+bksession
                  + (" --sync" if options.maxsync else "")]
-    untar = SPr.Popen(dest.run_args(untar_cmd), stdin =SPr.PIPE, stdout=SPr.DEVNULL)
+    untar = SPr.Popen(dest.run_args(untar_cmd), stdin=SPr.PIPE, stdout=SPr.DEVNULL)
     tarf = tarfile.open(mode="w|", fileobj=untar.stdin)
     tarf_addfile = tar_add_pass if benchmark else tarf.addfile
     tarf_add     = tar_add_pass if benchmark else tarf.add
     TarInfo  = tarfile.TarInfo         ; LNKTYPE = tarfile.LNKTYPE
-    tar_info = TarInfo(sdir+"-tmp")    ; tar_info.type  = tarfile.DIRTYPE
+    tar_info = tardir_info = TarInfo(destpath)    ; tar_info.type  = tarfile.DIRTYPE
     tarf_addfile(tarinfo=tar_info)     ; stream_started = True
+
 
     # Open source volume and its delta bitmap as r, session manifest as w.
     with open(volpath,"rb", buffering=chunksize) as vf,    \
@@ -3168,7 +3190,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
                         percent = int(addr/volsize*1000)
                         print(f"\r{bcount/MB: 7.1f}MB"[:10] + f" | {(percent//10):0d}%"[:7],
                               end="", flush=True)
-                    counter = 0    ; tarf.members = []
+                    counter = 0
 
                 # Compress & write only non-empty chunks
                 if buf == zeros:
@@ -3219,10 +3241,10 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
                         etag, buf = encrypt(buf, bhashb)
 
                     # Send data chunk to the archive
-                    fileobj = BytesIO()
-                    tar_info.size = fileobj.write(etag) + fileobj.write(buf)   ; fileobj.seek(0)
-                    tarf_addfile(tarinfo=tar_info, fileobj=fileobj)
+                    send_chunk(tar_info, etag, buf)
                     bcount += len(buf)    ; counter += 1
+
+                tarf.members = []
 
             # Advance addr, except when minibmap is zero len.
             if minibmap or send_all:  addr += chunksize
@@ -4234,7 +4256,7 @@ def add_volume(aset, datavol, desc):
 
 def delete_volume(storage, aset, dv):
 
-    if not options.unattended and not aset.in_process:
+    if not options.unattended and not options.force and not aset.in_process:
         print("\nWarning! Delete will remove ALL metadata AND archived data",
               "for volume", dv)
 
@@ -4253,7 +4275,7 @@ def delete_volume(storage, aset, dv):
         aset.dest.run([aset.dest.cd + "  && rm -rf '%s'" % dvid])
     catch_signals(None)
 
-    # remove snapshots
+    # remove snapshots ### Fix lvols[dv] Key error
     for lvol_name in (storage.lvols[dv].snap1, storage.lvols[dv].snap2):
         storage.lvols[lvol_name].delete()
     return
@@ -4463,7 +4485,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8beta"       ; prog_date = "20240225"
+prog_version          = "0.8wip"        ; prog_date = "20240228"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
@@ -4542,6 +4564,7 @@ parser_defs = [
  [["--maxsync"],      {"action": "store_true", "help": "Use more fs sync"}],
  [["--upgrade-format"], {"action": "store_true",
                        "help": "Upgrade archive to current spec (arch-check)"}],
+ [["--tar-bypass"],   {"action": "store_true", "help": "Bypass tar for file: archives"}],
  [["--debug"],        {"action": "store_true", "help": "Debug mode"}],
  [["--quiet"],        {"action": "store_true"}],
  [["--verbose"],      {"action": "count", "default": 0}],
