@@ -3,7 +3,7 @@
 
 
 ###  Wyng – The Logical Volume Backup Tool
-###  Copyright Christopher Laprise 2018-2023 / tasket@protonmail.com
+###  Copyright Christopher Laprise 2018-2024 / tasket@protonmail.com
 ###  Licensed under GNU General Public License v3. See file 'LICENSE'.
 ###  Permission to redistribute under similar naming "Wyng", "wyng backup", etc.
 ###  is granted only for un-modified code (GPLv3 S.7-c).
@@ -796,7 +796,7 @@ def upgrade_from_v2(aset):
 
 
 def agent_helper_write(path):
-    agent_program = r'''#  Copyright Christopher Laprise 2018-2023
+    agent_program = r'''#  Copyright Christopher Laprise 2018-2024
 #  Licensed under GNU General Public License v3. See wyng-backup/LICENSE file.
 import os, sys, signal
 
@@ -2224,7 +2224,7 @@ class Destination:
 
     def write_helper_program(path):
 
-        dest_program = r'''#  Copyright Christopher Laprise 2018-2023
+        dest_program = r'''#  Copyright Christopher Laprise 2018-2024
 #  Licensed under GNU General Public License v3. See wyng-backup/LICENSE file.
 import os, sys, time, signal, shutil, subprocess as SPr, gzip, tarfile
 
@@ -3109,11 +3109,11 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
         crypto   = False   ; crypto_cadence = 0    ; etag     = b''
 
 
+    destpath = dest.path
     if dest.dtype == "file" and options.tar_bypass:
         # Bypass tar stream when sending chunks to local fs
         print("\nBypassing tar stream...") ####
         send_chunk = send_chunk_local
-        destpath   = dest.path
         pdirname   = os.path.dirname   ; makedirs  = os.makedirs
     else:
         send_chunk = send_chunk_remote
@@ -3127,7 +3127,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
     tarf_addfile = tar_add_pass if benchmark else tarf.addfile
     tarf_add     = tar_add_pass if benchmark else tarf.add
     TarInfo  = tarfile.TarInfo         ; LNKTYPE = tarfile.LNKTYPE
-    tar_info = tardir_info = TarInfo(destpath)    ; tar_info.type  = tarfile.DIRTYPE
+    tar_info = TarInfo(destpath)    ; tar_info.type  = tarfile.DIRTYPE
     tarf_addfile(tarinfo=tar_info)     ; stream_started = True
 
 
@@ -4485,7 +4485,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8wip"        ; prog_date = "20240228"
+prog_version          = "0.8wip"        ; prog_date = "20240229"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
