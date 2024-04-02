@@ -2091,7 +2091,7 @@ class Destination:
         self.sys    = dparts.netloc
         self.path   = os.path.normpath(dparts.path)
         self.cd     = " cd '"+self.path+"'"      ; self.archive_ini_hash = "none"
-        self.free   = self.dtmp     =  None
+        self.free   = self.dtmp     =  None      ; self.last_chunkdir    = ""
         self.online = self.writable =  False
 
         self.run_map = {"file":       [CP.sh],
@@ -3044,7 +3044,9 @@ def manifest_to_deltamap(volume, manifest, mapsize):
 def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False):
 
     def send_chunk_local(tar_info, etag, buf):
-        makedirs(pdirname(_fp := pjoin(destpath, tar_info.name)), exist_ok=True)
+        chunkdir = pdirname(_fp := pjoin(destpath, tar_info.name))
+        if not _fp.startswith(dest.last_chunkdir):
+            makedirs(chunkdir, exist_ok=True)    ; dest.last_chunkdir = chunkdir
         with open(_fp, "wb") as cf:   cf.write(etag); cf.write(buf)
 
     def send_chunk_remote(tar_info, etag, buf):
@@ -3112,7 +3114,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
     destpath = dest.path
     if dest.dtype == "file" and options.tar_bypass:
         # Bypass tar stream when sending chunks to local fs
-        print("\nBypassing tar stream...") ####
+        if debug:   print("\nBypassing tar stream...")
         send_chunk = send_chunk_local
         pdirname   = os.path.dirname   ; makedirs  = os.makedirs
     else:
@@ -3127,7 +3129,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
     tarf_addfile = tar_add_pass if benchmark else tarf.addfile
     tarf_add     = tar_add_pass if benchmark else tarf.add
     TarInfo  = tarfile.TarInfo         ; LNKTYPE = tarfile.LNKTYPE
-    tar_info = TarInfo(destpath)    ; tar_info.type  = tarfile.DIRTYPE
+    tar_info = TarInfo(destpath)       ; tar_info.type  = tarfile.DIRTYPE
     tarf_addfile(tarinfo=tar_info)     ; stream_started = True
 
 
