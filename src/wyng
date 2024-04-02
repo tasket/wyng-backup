@@ -1486,6 +1486,7 @@ class LocalVolume:
 
     def unlock(self):
         if self.lockfile:   self.lockfile.close()
+        self.lockfile = None
         return True
 
     def rotate_snapshots(self, rotate=True, timestamp_path=None, addtags=[]):
@@ -2174,7 +2175,7 @@ class Destination:
         cmd  = [r"mkdir -p "+self.path+r" && "+self.cd
 
                 # send helper program to remote dest
-                +r"  && mkdir -p " +tmpprefix + r" && chmod 777 " + tmpprefix
+                +r"  && mkdir -p -m 777 " + tmpprefix
                 +r"  && tdir=$(mktemp -d " + tmpprefix + ("X"*tmpdigits) + r") && echo $tdir"
                 +r"  && cat >$tdir/dest_helper.py"
 
@@ -2615,7 +2616,8 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, import_others=[
             if aset.opts.remap:
                 l_vol.delete    ; print("  Removed mis-matched snapshot", datavol)
             else:
-                print("  Skipping %s; snapshot is from a different archive." % datavol)
+                print("  Skipping %s; snapshot is from a different archive. Use --remap to clear it."
+                      % datavol)
                 continue
 
         # Make deltamap or initial snapshot if necessary. Try to recover paired state
@@ -3477,6 +3479,7 @@ def monitor_send(storage, aset, datavols, monitor_only):
 
         if datavol in send_alls+list(other_vols.keys()) or updated:
             if options.dedup and not aset.dedupindex:
+                if status1:   print("I/", end="\r", flush=True)
                 init_dedup_index(aset)
 
             # Enh: include send_alls and other_vols in changed bytes tally
@@ -4216,6 +4219,10 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
 
 def rename_volume(storage, aset, oldname, newname):
 
+    if not storage.online:
+        print("Note: A valid --local location was not specified; no local snapshots"
+              " will be renamed which may result in a slow rescan on the next 'send'.\n")
+
     os.chdir(aset.path)    ; vol = aset.vols[oldname]
     if not aset.rename_volume_meta(oldname, newname, ext=".tmp"):
         x_it(1, "Error: Cannot rename '%s' to '%s'." % (oldname,newname))
@@ -4224,8 +4231,10 @@ def rename_volume(storage, aset, oldname, newname):
     update_dest(aset, pathlist=[aset.confname], volumes=[vol], ext=".tmp")
     vol.rename_saved(ext=".tmp")
     catch_signals(None)
+    if verbose:   print("Archive volume renamed.")
 
     # move snapshots to new pathname
+    if not storage.online:   return
     new_lvol = storage.new_vol_entry(newname, vol.vid)    ; old_lvol = storage.lvols[oldname]
     for atr in ("snap1","snap2"):
         oldsnap, newsnap = storage.lvols[getattr(old_lvol, atr)], \
@@ -4235,6 +4244,7 @@ def rename_volume(storage, aset, oldname, newname):
             if oldsnap.exists():   oldsnap.rename(newsnap.name)
         else:
             oldsnap.delete()
+    if verbose:   print("Local snapshot renamed.")
 
 
 def add_volume(aset, datavol, desc):
@@ -4258,6 +4268,10 @@ def add_volume(aset, datavol, desc):
 
 def delete_volume(storage, aset, dv):
 
+    if not storage.online:
+        print("Note: A valid --local location was not specified; no volume snapshots"
+              " will be removed.\n")
+
     if not options.unattended and not options.force and not aset.in_process:
         print("\nWarning! Delete will remove ALL metadata AND archived data",
               "for volume", dv)
@@ -4277,9 +4291,9 @@ def delete_volume(storage, aset, dv):
         aset.dest.run([aset.dest.cd + "  && rm -rf '%s'" % dvid])
     catch_signals(None)
 
-    # remove snapshots ### Fix lvols[dv] Key error
-    for lvol_name in (storage.lvols[dv].snap1, storage.lvols[dv].snap2):
-        storage.lvols[lvol_name].delete()
+    if storage.online:
+        for lvol_name in (storage.lvols[dv].snap1, storage.lvols[dv].snap2):
+            storage.lvols[lvol_name].delete()
     return
 
 
@@ -4487,7 +4501,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8wip"        ; prog_date = "20240229"
+prog_version          = "0.8wip"        ; prog_date = "20240402"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
