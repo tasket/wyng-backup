@@ -2617,7 +2617,7 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, import_others=[
                 l_vol.delete    ; print("  Removed mis-matched snapshot", datavol)
             else:
                 print("  Skipping %s; snapshot is from a different archive. Use --remap to clear it."
-                      % datavol)
+                      % datavol)   ; error_cache.append(datavol)
                 continue
 
         # Make deltamap or initial snapshot if necessary. Try to recover paired state
@@ -2668,7 +2668,8 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, import_others=[
             print("  Preparing full scan of '%s'" % datavol)
             complete_vols.append(datavol)
         else:
-            print("  Skipping '%s'; No paired snapshot." % datavol)    ; continue
+            print("  Skipping '%s'; No paired snapshot." % datavol)
+            error_cache.append(datavol)    ; continue
 
         # Make fresh snap2vol
         lvols[snap2].delete()
@@ -2749,7 +2750,8 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only, import_othe
             print("  Preparing full scan of '%s'" % datavol)
             complete_vols.append(datavol)
         else:
-            print("  Skipping '%s'; No paired snapshot." % datavol)    ; continue
+            print("  Skipping '%s'; No paired snapshot." % datavol)
+            error_cache.append(datavol)    ; continue
 
         # Make fresh snap2vol
         lvols[snap2].delete()
@@ -2905,8 +2907,12 @@ def get_reflink_deltas(storage, aset, datavols):
             devs.add(os.stat(stpath+snapname).st_dev)
             cmds.append([
               [CP.env, "LC_ALL=''", CP.filefrag, "-vs", "-b"+blksz, stpath+snapname],
-              # awk checks the expected filefrag layout and removes punctuation;
-              # fields are arranged to complement sort & uniq field requirements.
+              # BEGIN defines the expected filefrag header layout (PAT);
+              # a non-matching line (00..wyng_input) is printed if 0 extents found.
+              # END exits with code 2 if no end line (extents found) was found or HEADER != PAT;
+              # printed fields are arranged to complement 'uniq' as it can only skip fields and
+              # then must compare the rest of the line.  gsub removes punctuation.
+              # 'outp' is used to redirect output for only one side (other side goes to stdout).
               [CP.awk, r'BEGIN {PAT="^\\s*ext:\\s+logical_offset:\\s+physical_offset:\\s+length:"}'
                        r' NR==1, $0 ~ PAT {if ($0 ~ /\s0 extents found$/) {ZXT="Y";'
                        r' print "00 0 1 0 0 0 wyng_input"' +outp+ r'} HEADER=$0; next}'
@@ -2919,7 +2925,9 @@ def get_reflink_deltas(storage, aset, datavols):
         if vol.name not in datavols:   continue
         assert len(devs) == 1
 
-        # Save output from first volume to a named pipe
+        # Save output from first volume to a named pipe. 'getctl' means run it async; below we
+        # will add it to the sort/uniq pipeline via 'otherctl'. This prevents tmp files
+        # being created, which would be very large due to high granularity of fiemap data.
         os.mkfifo(dpath+"-p")
         p11context = do_exec(cmds[0], timeout=60, getctl=True)
         #Enh: maybe use dev+inode as fname
@@ -3036,12 +3044,13 @@ def manifest_to_deltamap(volume, manifest, mapsize):
 # Send volume to destination.
 #
 # send_volume() has two main modes which are full (send_all) and incremental. After send
-# finishes a full session, the volume will have a blank deltamap and .tick snapshot to
-# track changes. After an incremental send, snapshots are rotated and the deltamap is reset.
+# finishes a full session, the volume will have a new deltamap and snapshot pair to track
+# future changes. After an incremental send, snapshots are rotated and the deltamap is reset.
+# An exception is when vol.alias is set and no deltamap or snapshot is used so the send will
+# perform more slowly like a traditional incremental backup.
 #
-# Returns (int, int) representing an estimate of bytes sent and chunks freed.
-# Bytes sent will always be >0 if nonzero chunks were added to the manifest.
-# A result of (0, 0) means no change was detected or sent.
+# Returns (bool, int, int, int) representing whether a session was sent, the current volume size,
+# the number of bytes sent and the runtime in seconds.
 
 def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False):
 
