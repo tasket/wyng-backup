@@ -1234,14 +1234,14 @@ class LocalStorage:
                 if (fs := LocalStorage.get_fs_type(self.path)) in self.rltypes:   self.fstype = fs
                 self.snappath = self.path+("wyng_snapshot_tmp/" if self.fstype == "btrfs" else "")
 
-            self.users  = {x[0]: int(x[2]) for x in
-                            (ln.split(":") for ln in open("/etc/passwd","r") if ln.strip())}
-            self.groups = {x[0]: int(x[2]) for x in
-                            (ln.split(":") for ln in open("/etc/group","r") if ln.strip())}
-
             self.acquire_deltas = get_reflink_deltas
             self.process_deltas = update_delta_digest_reflink
             self.prep_snapshots = prepare_snapshots_reflink
+
+        self.users  = {x[0]: int(x[2]) for x in
+                        (ln.split(":") for ln in open("/etc/passwd","r") if ln.strip())}
+        self.groups = {x[0]: int(x[2]) for x in
+                        (ln.split(":") for ln in open("/etc/group","r") if ln.strip())}
 
         if require_online and not self.online:
             x_it(7, "Local storage is offline: "+repr(localpath))
@@ -4510,7 +4510,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8wip"        ; prog_date = "20240402"
+prog_version          = "0.8wip"        ; prog_date = "20240403"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
