@@ -2067,10 +2067,16 @@ def get_configs_storage(aset, require_local=True):
 
     if fromlist and exists(fromlist):
         # Init a storage obj for each local source and subset of vols
-        locallists = json.load(open(fromlist, "r"))
+        try:
+            locallists = json.load(open(fromlist, "r"))
+        except json.decoder.JSONDecodeError as e:
+            x_it(1, "Empty/malformed json file")
+
         for url, vols in locallists.items():
+            if not vols:   x_it(1, "Empty vol list for "+url)
             storagesets[LocalStorage(url, require_online=require_local,
                                      arch_vols=arch_vols[:], auuid=aset.uuid)] = vols
+
     else:
         storage = LocalStorage(local_url or None, require_online=require_local,
                                 arch_vols=arch_vols[:], auuid=aset.uuid)
@@ -4526,7 +4532,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8wip"        ; prog_date = "20240407"
+prog_version          = "0.8wip"        ; prog_date = "20240408"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
@@ -4638,7 +4644,7 @@ if options.action in write_actions+("arch-init","monitor") and not admin_permiss
     x_it(1, f"Must be root/admin user for {options.action}.")
 if options.saveto and options.action != "receive":
     x_it(1, "Receive required for save-to option.")
-if not (options.volumes or options.all or options.import_other_from) \
+if not (options.volumes or options.all or options.import_other_from or options.local_from) \
 and options.action not in ("arch-init","arch-check","list"):
     x_it(1, f"Volume name(s) or --all required for {options.action}.")
 if options.action not in ("send", "arch-deduplicate"):   options.dedup = False
