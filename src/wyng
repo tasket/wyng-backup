@@ -1168,17 +1168,17 @@ class DataCryptography:
 # Define absolute paths of commands
 
 class CP:
-    awk    = "/usr/bin/awk"     ; sed   = "/bin/sed"        ; sort     = "/usr/bin/sort"
-    cat    = "/bin/cat"         ; mkdir = "/bin/mkdir"      ; python   = "/usr/bin/python3"
-    mv     = "/bin/mv"          ; grep  = "/bin/grep"       ; ssh      = "/usr/bin/ssh"
-    sh     = "/bin/sh"          ; tar   = "/bin/tar"        ; tail     = "/usr/bin/tail"
-    rm     = "/bin/rm"          ; lvm   = "/usr/sbin/lvm"   ; qvm_run  = "/usr/bin/qvm-run"
-    tee    = "/usr/bin/tee"     ; sync  = "/bin/sync"       ; dmsetup  = "/sbin/dmsetup"
-    chattr = "/usr/bin/chattr"  ; xargs = "/usr/bin/xargs"  ; sha256sum= "/usr/bin/sha256sum"
-    cmp    = "/usr/bin/cmp"     ; gzip  = "/bin/gzip"       ; env      = "/usr/bin/env"
-    ps     = "/usr/bin/ps"      ; uniq  = "/usr/bin/uniq"   ; filefrag = "/usr/sbin/filefrag"
-    thin_delta = "/usr/sbin/thin_delta"    ; cp     = "/bin/cp"
-    blkdiscard = "/sbin/blkdiscard"        ; ionice = "/usr/bin/ionice"
+    awk    = "/usr/bin/awk"     ; sed   = "/usr/bin/sed"     ; sort     = "/usr/bin/sort"
+    cat    = "/usr/bin/cat"     ; mkdir = "/usr/bin/mkdir"   ; python   = "/usr/bin/python3"
+    mv     = "/usr/bin/mv"      ; grep  = "/usr/bin/grep"    ; ssh      = "/usr/bin/ssh"
+    sh     = "/usr/bin/sh"      ; tar   = "/usr/bin/tar"     ; tail     = "/usr/bin/tail"
+    tee    = "/usr/bin/tee"     ; sync  = "/usr/bin/sync"    ; cp       = "/usr/bin/cp"
+    chattr = "/usr/bin/chattr"  ; xargs = "/usr/bin/xargs"   ; sha256sum= "/usr/bin/sha256sum"
+    cmp    = "/usr/bin/cmp"     ; gzip  = "/usr/bin/gzip"    ; env      = "/usr/bin/env"
+    ps     = "/usr/bin/ps"      ; uniq  = "/usr/bin/uniq"    ; ionice   = "/usr/bin/ionice"
+    qvm_run= "/usr/bin/qvm-run" ; rm    = "/usr/bin/rm"
+    thin_delta = "/usr/sbin/thin_delta" ; filefrag = "/usr/sbin/filefrag"  ; lvm = "/usr/sbin/lvm"
+    blkdiscard = "/sbin/blkdiscard"     ; dmsetup  = "/sbin/dmsetup"
     btrfs      = "/usr/sbin/btrfs" if os.path.exists("/usr/sbin/btrfs") else "/bin/btrfs"
 
 
@@ -1228,11 +1228,19 @@ class LocalStorage:
 
         elif loctype == "file" and exists(pathxvg):
             self.pooltype       = "rlnk"          ; self.path    = pathxvg
-            self.block_size     = 4096            ; self.online  = True
+            self.block_size     = 4096
 
-            if self.online:
+            if exists(self.path):
                 if (fs := LocalStorage.get_fs_type(self.path)) in self.rltypes:   self.fstype = fs
-                self.snappath = self.path+("wyng_snapshot_tmp/" if self.fstype == "btrfs" else "")
+                if fs == "btrfs":
+                    if os.stat(self.path).st_ino == 256:
+                        self.snappath = self.path+"wyng_snapshot_tmp/"   ; self.online = True
+                    else:
+                        print("Offline:", self.path, "is not a subvolume.")
+                elif fs == "xfs":
+                    self.snappath = ""   ; self.online = True
+                #self.snappath = self.path+("wyng_snapshot_tmp/" if fs == "btrfs" else "")
+                #self.online = fs == "xfs" or (fs == "btrfs" and os.stat(self.path).st_ino == 256)
 
             self.acquire_deltas = get_reflink_deltas
             self.process_deltas = update_delta_digest_reflink
@@ -1435,7 +1443,7 @@ class LocalStorage:
         if type(localpath) is not str or not localpath.isprintable():
             return (None, None, None, None)
 
-        abspath = os.path.abspath(localpath)
+        abspath = os.path.abspath(os.path.realpath(localpath))
         if LocalStorage.vg_exists(localpath):
             return ("lvm volgroup", None, None, os.path.basename(localpath))
 
@@ -2721,7 +2729,7 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only, import_othe
         vol   = aset.vols[datavol]
         if vol.alias:   continue
         if datavol in other_vols:
-            print("  Queuing full scan of import from '%s' as '%s'" % datavol)
+            print("  Queuing full scan of import from '%s'" % datavol)
             vol.alias = other_vols[datavol]    ; continue
 
         # 'mapfile' is the deltamap file, snap1 holds vol state between send/monitor ops
@@ -4532,7 +4540,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8wip"        ; prog_date = "20240408"
+prog_version          = "0.8beta"       ; prog_date = "20240411"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
@@ -4576,7 +4584,7 @@ parser_defs = [
  [["action"],         {"choices": local_actions+dest_actions, "help": "Wyng Commands"}],
  [["volumes"],        {"nargs": "*"}],
  [["--unattended", "-u"], {"action": "store_true", "help": "Non-interactive, supress prompts"}],
- [["--authmin"],      {"default": "0", "help": "Minutes to remember authentication"}],
+ [["--authmin"],      {"default": "2", "help": "Minutes to remember authentication (default=2)"}],
  [["--all-before"],   {"dest": "allbefore", "action": "store_true",
                        "help": "Select all sessions before --session date-time."}],
  [["--all", "-a"],    {"action": "store_true", "help": "Select all known volumes"}],
@@ -4590,7 +4598,7 @@ parser_defs = [
                        "help": "Exclude volume"}],
  [["--autoprune"],    {"default": "off",       "help": "Automatic pruning"}],
  [["--apdays"],       {"help": "Parameters for autoprune"}],
- [["--save-to"],      {"dest": "saveto", "default": "", "help": "Path to store volume for receive"}],
+ [["--save-to"],      {"help": "Path to store volume for receive"}],
  [["--sparse"],       {"action": "store_true", "help": "Retrieve differences only"}],
  [["--sparse-write"], {"action": "store_true", "help": "Save differences only"}],
  [["--use-snapshot"], {"action": "store_true",
@@ -4642,7 +4650,7 @@ if options.local_from and options.action not in ("send","monitor","receive","dif
     x_it(1, "local-from cannot be used with "+options.action)
 if options.action in write_actions+("arch-init","monitor") and not admin_permission:
     x_it(1, f"Must be root/admin user for {options.action}.")
-if options.saveto and options.action != "receive":
+if options.save_to and options.action != "receive":
     x_it(1, "Receive required for save-to option.")
 if not (options.volumes or options.all or options.import_other_from or options.local_from) \
 and options.action not in ("arch-init","arch-check","list"):
@@ -4680,7 +4688,7 @@ hash_funcs       = {"hmac-sha256": None,
 # Create ArchiveSet, LocalStorage and Destination objects with get_configs().
 # Passphrase input happens here; no stdin before this point!
 aset        = get_configs(options)    ; dest = aset.dest
-storage, storagesets = get_configs_storage(aset, require_local=not options.saveto and
+storage, storagesets = get_configs_storage(aset, require_local=not options.save_to and
                                            options.action in ("monitor","send","receive","diff"))
 
 # Handle unfinished in_process:
@@ -4769,7 +4777,7 @@ elif options.action == "prune":
 
 
 elif options.action == "receive":
-    if len(selected_vols) != 1 and options.saveto:
+    if len(selected_vols) != 1 and options.save_to:
         x_it(1, "Specify one volume for receive --save-to.")
     if options.session and len(options.session.split(",")) > 1:
         x_it(1, "Specify only one session for receive.")
@@ -4777,7 +4785,7 @@ elif options.action == "receive":
     for storage, vols in storagesets.items():
         for dv in vols or selected_vols:
             count = receive_volume(storage, aset.vols[dv], select_ses=options.session or "",
-                                            save_path=options.saveto or "")
+                                            save_path=options.save_to or "")
             if count is None:   error_cache.append(dv)
 
 
