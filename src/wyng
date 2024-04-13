@@ -1252,7 +1252,7 @@ class LocalStorage:
                         (ln.split(":") for ln in open("/etc/group","r") if ln.strip())}
 
         if require_online and not self.online:
-            x_it(7, "Local storage is offline: "+repr(localpath))
+            err_out("Local storage is offline: "+repr(localpath))
 
         if self.online:  #Fix: make conditional on send/monitor/receive
             self.LVolClass    = self.stypes[self.pooltype]
@@ -2723,6 +2723,7 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only, import_othe
             if datavol in other_vols:   del(other_vols[datavol])
             continue
 
+
         if datavol not in aset.vols and not monitor_only:
             add_volume(aset, datavol, aset.opts.voldesc)
 
@@ -3453,12 +3454,16 @@ def monitor_send(storage, aset, datavols, monitor_only, use_sesid=None):
 
     options = aset.opts                ; dest = aset.dest
     status1 = not options.unattended   ; MB   = 1024**2     ; ms_start = time.monotonic()
+    curtime = use_sesid or time.strftime("%Y%m%d-%H%M%S", time.localtime(time_start))
 
     if options.autoprune.lower() == "full":
         for vol in aset.vols.values():   autoprune(vol, apmode="full")
 
     storage.check_support()
-    curtime = use_sesid or time.strftime("%Y%m%d-%H%M%S", time.localtime(time_start))
+    if not storage.online:
+        err_out("\nStorage offline: " + storage.path); err_out(" Skipping " + ", ".join(datavols))
+        error_cache.extend(datavols)
+        return curtime
 
     print(f"\nPreparing snapshots in '{storage.path}'...")
     incrementals, send_alls, unchanged_vols, other_vols \
@@ -4531,7 +4536,7 @@ def cleanup():
         pass
     if error_cache:
         err_out("Error on volume(s): " + ", ".join(error_cache))
-        sys.exit(2)
+        os._exit(2)
 
 
 
@@ -4540,7 +4545,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8beta"       ; prog_date = "20240411"
+prog_version          = "0.8wip"        ; prog_date = "20240412"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
@@ -4783,7 +4788,12 @@ elif options.action == "receive":
         x_it(1, "Specify only one session for receive.")
 
     for storage, vols in storagesets.items():
-        for dv in vols or selected_vols:
+        dvlist = vols or selected_vols
+        if not storage.online:
+            err_out("\nStorage offline: " + storage.path + "\n Skipping " + ", ".join(dvlist))
+            error_cache.extend(dvlist)   ; continue
+
+        for dv in dvlist:
             count = receive_volume(storage, aset.vols[dv], select_ses=options.session or "",
                                             save_path=options.save_to or "")
             if count is None:   error_cache.append(dv)
@@ -4799,7 +4809,12 @@ elif options.action == "verify":
 
 elif options.action == "diff":
     for storage, vols in storagesets.items():
-        for dv in vols or selected_vols:
+        dvlist = vols or selected_vols
+        if not storage.online:
+            err_out("\nStorage offline: " + storage.path + "\n Skipping " + ", ".join(dvlist))
+            error_cache.extend(dvlist)   ; continue
+
+        for dv in dvlist:
             count = receive_volume(storage, aset.vols[dv], save_path="", diff=True)
             if count is None:   error_cache.append(dv)
 
