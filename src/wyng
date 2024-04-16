@@ -2642,7 +2642,7 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, import_others=[
         if datavol not in aset.vols and not monitor_only:
             add_volume(aset, datavol, aset.opts.voldesc)
 
-        vol   = aset.vols[datavol]
+        vol   = aset.vols[datavol]    ; mapfile = vol.mapfile()
         if vol.aliastype == "import_other":   continue
         if datavol in other_vols:
             print("  Queuing full scan of import '%s'" % datavol)
@@ -2663,7 +2663,7 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, import_others=[
         # Make deltamap or initial snapshot if necessary. Try to recover paired state
         # by comparing timestamps; a match means remap is unnecessary.
         if len(vol.sessions):
-            mapfile = vol.mapfile()    ; s1tags = lvols[snap1].tags.split(",")
+            s1tags = lvols[snap1].tags.split(",")
 
             if not lvols[snap1].exists() or not exists(mapfile)    \
             or os.stat(mapfile).st_mtime_ns != lvols[snap1].gettime() \
@@ -2738,7 +2738,7 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only, import_othe
         if datavol not in aset.vols and not monitor_only:
             add_volume(aset, datavol, aset.opts.voldesc)
 
-        vol   = aset.vols[datavol]
+        vol   = aset.vols[datavol]    ; mapfile = vol.mapfile()
         if vol.aliastype == "import_other":   continue
         if datavol in other_vols:
             print("  Queuing full scan of import '%s'" % datavol)
@@ -2751,11 +2751,11 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only, import_othe
         # Make deltamap or initial snapshot if necessary. Try to recover paired state
         # by comparing timestamps; a match means remap is unnecessary.
         if len(vol.sessions):
-            mapfile = vol.mapfile()    ; lastses = vol.sessions[vol.last]
+            lastses = vol.sessions[vol.last]
 
             if lvols[snap1].exists() and lvols[snap1].gettime() == lvols[datavol].gettime() \
             and lvols[snap1].getsize() == lvols[datavol].getsize() \
-            and exists(mapfile) and vol.map_used() == 0:
+            and exists(mapfile) and vol.map_used() == 0 and not options.send_unchanged:
                 unchanged_vols.append(datavol)   ; continue
 
             if not exists(mapfile) and lvols[snap1].exists() \
@@ -3351,7 +3351,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
         catch_signals()
         vol.delete_session(bksession)    ; shutil.rmtree(aset.path+"/"+sdir+"-tmp")
 
-    if not vol.alias and not benchmark:
+    if vol.aliastype != "import_other" and not benchmark:
         vol.init_deltamap()
         storage.lvols[vol.name].rotate_snapshots(rotate=True, timestamp_path=vol.mapfile(),
                                                  addtags=["--addtag="+vol.last])
@@ -3485,7 +3485,8 @@ def monitor_send(storage, aset, datavols, monitor_only, use_sesid=None):
 
     if monitor_only:   send_alls.clear()
 
-    if len(incrementals)+len(send_alls)+len(other_vols) == 0:
+    if len(incrementals)+len(send_alls)+len(other_vols) \
+        +(len(unchanged_vols if options.send_unchanged else [])) == 0:
         x_it(0, "No new data.")
 
     # Process session tags
@@ -3531,10 +3532,12 @@ def monitor_send(storage, aset, datavols, monitor_only, use_sesid=None):
 
         if monitor_only:   continue
 
-        if datavol in send_alls+list(other_vols.keys()) or updated:
+        if datavol in send_alls+list(other_vols) or updated:
             if options.dedup and not aset.dedupindex:
                 if status1:   print("I/", end="\r", flush=True)
                 init_dedup_index(aset)
+
+        if datavol in send_alls+list(other_vols) or updated or options.send_unchanged:
 
             # Enh: include send_alls and other_vols in changed bytes tally
             if vol.changed_bytes > dest.free:
@@ -4546,7 +4549,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8wip"        ; prog_date = "20240414"
+prog_version          = "0.8wip"        ; prog_date = "20240415"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
@@ -4612,6 +4615,7 @@ parser_defs = [
  [["--import-other-from"], {"action": "append", "default": [],
                        "help": "Import volume from non-snapshot file"}],
  [["--remap"],        {"action": "store_true", "help": "Remap volumes from other archive"}],
+ [["--send-unchanged"], {"action": "store_true", "help": "Record unchanged volumes (send)"}],
  [["--dest"],         {"default": "", "help": "URL to archive"}],
  [["--local"],        {"default": "", "help": "Init: LVM vg/pool containing source volumes"}],
  [["--local-from"],   {"help": "Specify multiple --local volume sets from text file (send)"}],
