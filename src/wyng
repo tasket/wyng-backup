@@ -2603,7 +2603,8 @@ def fetch_file_blobs(recv_list, recv_dir, dest, ext="", skip0=False, skip_exists
         untrusted_size = int.from_bytes(recvp.stdout.read(4),"big")
         if untrusted_size == 0 and skip0:   continue
         if not fsz >= untrusted_size > 0:
-            raise BufferError("Bad file size "+str(untrusted_size))
+            raise BufferError(f"Bad file size {untrusted_size}, expected {fsz} max.\n"
+                              f"{fpath} - {skip0}")
 
         # Size is OK.
         size = untrusted_size
@@ -4549,7 +4550,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8wip"        ; prog_date = "20240415"
+prog_version          = "0.8wip"        ; prog_date = "20240421"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
