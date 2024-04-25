@@ -15,8 +15,8 @@ Having nearly instantaneous access to volume changes and a nimble archival forma
 enables backing up even terabyte-sized volumes multiple times per hour with little
 impact on system resources.
 
-Wyng pushes data to archives in a stream-like fashion, which avoids writing temporary
-caches of data to disk. And Wyng's ingenious snapshot rotation avoids common
+Wyng pushes data to archives in a stream-like fashion, which avoids temporary data
+caches and re-processing data. And Wyng's ingenious snapshot rotation avoids common
 _aging snapshot_ space consumption pitfalls.
 
 Wyng also doesn't require the source admin system to ever mount processed volumes or
@@ -134,15 +134,20 @@ Run Wyng using the following commands and arguments in the form of:
 | **receive** _volume_name [*]_   | Restore volume(s) from the archive.
 | **verify** _volume_name [*]_    | Verify volumes' data integrity.
 | **prune** _[volume_name] [*]_   | Remove older backup sessions to recover archive space.
-| **monitor**                 | Collect volume change metadata & rotate snapshots.
-| **diff** _volume_name [*]_      | Compare local volume with archived volume.
-| **add** _volume_name [*]_       | Add a volume to the configuration.
 | **delete** _volume_name_    | Remove entire volume from config and archive.
 | **rename** _vol_name_ _new_name_  | Renames a volume in the archive.
 | **arch-init**               | Initialize archive configuration.
-| **arch-check** _[volume_name] [*]_    | Thorough check of archive data & metadata
 | **arch-deduplicate**        | Deduplicate existing data in archive.
 | **version**                 | Print the Wyng version and exit.
+
+
+### Advanced commands
+
+| _Command_ | _Description_  |
+| **monitor**                     | Collect volume change metadata & rotate snapshots.
+| **diff** _volume_name [*]_      | Compare local volume with archived volume.
+| **add** _volume_name [*]_       | Adds a volume name without session data to the archive.
+| **arch-check** _[volume_name] [*]_    | Thorough check of archive data & metadata
 
 
 #### send
@@ -218,37 +223,6 @@ to prune all sessions prior to that time.
 
 The `--keep` option can accept a single date-time or a tag in the form `^tagID`.
 Matching sessions will be excluded from pruning and autopruning.
-
-
-#### monitor
-
-Frees disk space that is cumulatively occupied by aging snapshots, thereby addressing a
-common resource usage issue with snapshot-based backups.
-After harvesting their change metadata, the older snapshots are replaced with
-new ones. Running `monitor` isn't strictly necessary, but it only takes a few seconds
-and is good to run on a frequent, regular basis if you have some volumes that are
-very active. Volume names may also be
-specified if its desired to monitor only certain volumes.
-
-This rule in /etc/cron.d runs `monitor` every 20 minutes:
-
-```
-*/20 * * * * root su -l -c '/usr/local/bin/wyng monitor --all'
-```
-
-#### diff
-
-Compare a local volume snapshot with the archive and report any differences.
-This is useful for diagnostics and can also be useful after a verification
-error has occurred. The `--remap` option will record any differences into the
-volume's current change map, resulting in those blocks being scanned on
-the next `send`.
-
-
-#### add
-
-Adds new, empty volumes to the archive.  On subsequent `send`, Wyng will backup
-the volume data if it present.
 
 
 #### delete
@@ -330,6 +304,40 @@ Depending on how `arch-check` is used, the verification process can be shorter _
 than using `verify` as the latter is always the size of a volume snapshot. The longest, most
 complete form `arch-check` is to supply no parameters, which checks all sessions in all volumes.
 
+
+
+#### monitor
+
+Frees disk space that is cumulatively occupied by aging snapshots, thereby addressing a
+common resource usage issue with snapshot-based backups.
+After harvesting their change metadata, the older snapshots are replaced with
+new ones occupying zero space.  Running `monitor` isn't necessary,
+but it only takes a few seconds and is good to run on a frequent, regular basis
+if you have some volumes that are very active. Volume names may also be
+specified if its desired to monitor only certain volumes.
+
+This rule in /etc/cron.d runs `monitor` every 20 minutes:
+
+```
+*/20 * * * * root su -l -c '/usr/local/bin/wyng monitor --all'
+```
+
+
+#### diff
+
+Compare a local volume snapshot with the archive and report any differences.
+This is useful for diagnostics and can also be useful after a verification
+error has occurred. The `--remap` option will record any differences into the
+volume's current change map, resulting in those blocks being scanned on
+the next `send`.
+
+
+#### add
+
+Adds new, empty volume name(s) to the archive.  On subsequent `send -a`, Wyng will backup
+the volume data if it present.
+
+
 ---
 
 ### Parameters / Options summary
@@ -339,39 +347,49 @@ complete form `arch-check` is to supply no parameters, which checks all sessions
 --dest=_URL_           | Location of backup archive.
 --local=_vg/pool_  _...or..._    | Storage pool containing local volumes.
 --local=_/absolute/path_    | 
---session=_date-time[,date-time]_ | Select a session or session range by date-time or tag (receive, verify, prune).
---authmin=_N_          | Remember authentication for N minutes.
---all                  | Select all volumes (most cmds); Clean all (delete).
+--authmin=_N_          | Remember authentication for N minutes (default: 2)
+--all, -a              | Select all volumes (most cmds); Or clean all (delete).
 --volex=_volname_      | Exclude volumes (send, monitor, list, prune).
 --dedup, -d            | Use deduplication for send (see notes).
+--session=_date-time[,date-time]_ | Select a session or session range by date-time or tag (receive, verify, prune).
 --all-before           | Select all sessions before the specified _--session date-time_ (prune).
 --autoprune=off        | Automatic pruning by calendar date.
 --apdays=_A:B:C:D_     | Number of days to keep or to thin-out older sessions
 --keep=_date-time_     | Specify date-time or tag of sessions to keep (prune).
 --tag=tagname[,desc]   | Use session tags (send, list).
---save-to=_path_       | Save volume to _path_ (receive).
 --sparse               | Receive volume data sparsely (implies --sparse-write)
 --sparse-write         | Overwrite local data only where it differs (receive)
 --use-snapshot         | Use snapshots when available for faster `receive`.
+--unattended, -u       | Don't prompt for interactive input.
+--clean                | Perform garbage collection (arch-check) or metadata removal (delete).
+--verbose              | Increase details.
+--quiet                | Shhh...
+
+
+### Advanced Options
+
+| _Option_                      | _Description_
+|-------------------------------|--------------
+--save-to=_path_       | Save volume to _path_ (receive).
+--local_from=_json file_ | Specify local:[volumes] sets instead of --local.
 --import-other-from    | Import volume data from a non-snapshot capable path during `send`
---remap                | Remap volume during `send` or `diff`.
 --encrypt=_cipher_     | Set encryption mode or _'off'_ (default: _'xchacha20-t3'_)
 --compression          | (arch-init) Set compression type:level.
 --hashtype             | (arch-init) Set data hash algorithm: _hmac-sha256_ or _blake2b_.
 --chunk-factor         | (arch-init) Set archive chunk size.
+--tar-bypass           | Use direct access for file:/ archives (send)
 --passcmd=_'command'_  | Read passphrase from output of a wallet/auth app
---meta-dir=_path_      | Use a different metadata dir than the default.
---unattended, -u       | Don't prompt for interactive input.
---clean                | Perform garbage collection (arch-check) or metadata removal (delete).
 --upgrade-format       | Upgrade older Wyng archive to current format. (arch-check)
+--remap                | Remap volume to current archive during `send` or `diff`.
+--json                 | Output volume: session info in json format (list).
 --force                | Not used with most commands.
---verbose              | Increase details.
---quiet                | Shhh...
+--meta-dir=_path_      | Use a different metadata dir than the default.
 --debug                | Debug mode
 
----
 
-### Parameters / Options
+
+
+### Options Detail
 
 `--dest=URL`
 
@@ -451,6 +469,12 @@ A faster-than-sparse option that uses a snapshot as the baseline for the
 sparse mode when snapshots are not already present.
 
 
+`--tar-bypass` _(experimental)_
+
+Use direct access for file:/ archives during `send`.  This can reduce sending times by
+up to 20%.
+
+
 `--dedup`, `-d`
 
 When used with the `send` command, data chunks from the new backup will be sent only if
@@ -508,9 +532,10 @@ information when listing sessions.
 
 These two options help automate Wyng authentication, and may be used together or separately.
 
-`--authmin` takes a numeric value with the 
-number of minutes to remember the current authentication for subsequent Wyng invocations.  Specifying
-a -1 will cancel a prior authentication.
+`--authmin` takes a numeric value from -1 to 60 for the
+number of minutes to remember the current authentication for subsequent Wyng invocations.
+The default authmin time is 2 minutes.  Specifying a -1 will cancel a prior authentication
+and 0 will skip storing the authentication.
 
 The `--passcmd` option takes a string representing a shell command that outputs a passphrase, which
 Wyng then reads instead of issuing an input prompt for the passphrase.  If a prior auth from
@@ -529,6 +554,18 @@ use with large volumes.
 The special delimeter used to separate the _volname_ (archive volume name) and the _path_ is ':|:'
 which means this option cannot be used to `send` directly to volume names in the archive which
 contain that character sequence.
+
+
+`--local_from=_json file_`
+
+Specify both local storage and volume names for `send` or `receive` as sets, instead
+of using --local and volume names on the command line.  The json file must take the form
+of `{local-a: [[volname1, alias1], [volnameN, aliasN], ...], ...]}`.  This allows multiple
+local storage sources to be sent/received in a single session.  However, the volume names (or aliases)
+must all be unique across different sources as they are stored in the same archive.  Aliases
+currently define which local volume name into which an archive volume will be received; they
+are ignored when sending.
+
 
 `--compression`
 
@@ -610,7 +647,16 @@ gpg: Good signature from "Christopher Laprise <tasket@posteo.net>" [unknown]
 gpg:                 aka "Christopher Laprise <tasket@protonmail.com>" [unknown]
 ```
 
-### Tips
+### Tips & Caveats
+
+* LVM users: Wyng has an internal snapshot manager which creates snapshots of volumes
+in addition to any snapshots you may already have on your local storage system.
+This can pose a serious challenge to _lvmthin_ (aka thin-provisioned LVM) as the default space
+allocated for metadata is often too small for rigorous & repeated snapshot rotation
+cycles.  It is recommended to _at least double_ the existing or default tmeta space
+on each thin pool used with `wyng send` or `wyng monitor`; see the man page
+section _[Manually manage free metadata space of a thin pool LV](https://www.linux.org/docs/man7/lvmthin.html)_ for guidance on using
+the `lvextend --poolmetadatasize` command.
 
 * To reduce the size of incremental backups it may be helpful to remove cache
 files, if they exist in your source volume(s). Typically, the greatest cache space
@@ -659,10 +705,10 @@ to nail down the precisely desired range by observing the output of
 `list volumename` and using exact date-times from the listing.
 
 * Wyng locally stores information about backups in two ways:  Snapshots alongside your local
-source volumes, and metadata under _/var/lib/wyng_.  In general, it is safe to _delete_
+source volumes, and metadata under _/var/lib/wyng_.  It is safe to _delete_
 Wyng snapshots without risking the integrity of backups (although `send` will become slower).
-However as with all CoW snapshot based backup tools, you should never attempt to directly mount,
-alter or otherwise utilize a Wyng snapshot,
+However, as with all CoW snapshot based backup tools, you should never attempt to directly mount,
+alter or otherwise utilize a Wyng snapshot
 as this could (very likely) result in future backup sessions being corrupt (this is why Wyng
 snapshots are stored as read-only).  If you think you have somehow altered a Wyng snapshot, you
 should consider it corrupt and immediately delete it before the next `send`.

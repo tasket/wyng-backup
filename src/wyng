@@ -2073,7 +2073,7 @@ def get_configs_remote(dest, base_dir, opts):
 # alias is used for receiving to a local vol name different from the archive vol name
 
 def get_configs_storage(aset, require_local=True):
-    storage, storagesets = None, {}
+    storage, storagesets, vol_set = None, {}, set()
     fromlist    = aset.opts.local_from      ; local_url = aset.opts.local
     arch_vols   = [(x.name, x.vid) for x in aset.vols.values()]
 
@@ -2091,6 +2091,9 @@ def get_configs_storage(aset, require_local=True):
                 if debug:   print("alias", vname, "=", alias)
                 if alias and vname in aset.vols:
                     aset.vols[vname].alias = alias    ; aset.vols[vname].aliastype = "rlnk-lvm"
+                # Test for volname uniqueness
+                if vname in vol_set:   x_it(1, f"Duplicate volume name: {vname}")
+                vol_set.add(vname)
 
             storagesets[LocalStorage(url, require_online=require_local,
                                      arch_vols=arch_vols[:], auuid=aset.uuid)] \
@@ -2667,6 +2670,11 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, import_others=[
         if len(vol.sessions):
             s1tags = lvols[snap1].tags.split(",")
 
+            if not exists(mapfile) and lvols[snap1].exists() \
+            and vol.last in s1tags and "delta" not in lvols[snap1].tags:
+                # Latest session matches current snapshot; OK to make blank map.
+                vol.init_deltamap(timestamp=lvols[snap1].gettime())
+
             if not lvols[snap1].exists() or not exists(mapfile)    \
             or os.stat(mapfile).st_mtime_ns != lvols[snap1].gettime() \
             or vol.last not in s1tags:
@@ -2690,13 +2698,6 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, import_others=[
                 ## Handle inadvertant mapfile snapshot mis-match
                 #vol.init_deltamap()
                 #lvols[snap1].delete()    ; print("  Removed mis-matched delta", snap1vol)
-
-            if not exists(mapfile) and lvols[snap1].exists() \
-            and vol.last in s1tags \
-            and "delta" not in lvols[snap1].tags \
-            and os.stat(mapfile).st_mtime_ns == lvols[snap1].gettime():
-                # Latest session matches current snapshot; OK to make blank map.
-                vol.init_deltamap()
 
         elif monitor_only:
             print("  Skipping '%s'; No data." % datavol)    ; continue
@@ -4253,7 +4254,7 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
             save_storage.lvols[l_vol.snap2].create(snapshotfrom=vol.alias, addtags=tags)
             l_vol = l_vol.update()    ; save_storage.lvols[l_vol.snap2].update()
             l_vol.rotate_snapshots(timestamp_path=vol.mapfile())
-            print(f"  Snapshot paired for '{vol.alias}'.")
+            if verbose:   print(f"Snapshot paired for '{vol.alias}'.")
     if remap:
         bmapf.close()
         if diff_count > 0 and options.action != "send":
@@ -4387,7 +4388,8 @@ def show_list(aset, selected_vols):
     if aset.dest.archive_ini_hash == "none":   print("(CACHED)")
     if options.json:
         try:
-            print(json.dumps({"uuid": aset.uuid, "updated_at": aset.updated_at,
+            print(json.dumps({"wversion": prog_version, "wdate": prog_date,
+              "uuid": aset.uuid, "updated_at": aset.updated_at,
               "pooltype": storage.pooltype, "url": aset.dest.spec,
               "volumes": {v.name: {"vid": v.vid, "desc": v.desc,
                 "sessions": {s.name: {"volsize": s.volsize, "sequence": s.sequence,
@@ -4551,7 +4553,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8wip"        ; prog_date = "20240422"
+prog_version          = "0.8beta"       ; prog_date = "20240423"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
@@ -4634,7 +4636,7 @@ parser_defs = [
  [["--maxsync"],      {"action": "store_true", "help": "Use more fs sync"}],
  [["--upgrade-format"], {"action": "store_true",
                        "help": "Upgrade archive to current spec (arch-check)"}],
- [["--tar-bypass"],   {"action": "store_true", "help": "Bypass tar for file: archives"}],
+ [["--tar-bypass"],   {"action": "store_true", "help": "Bypass tar for file: archives (send)"}],
  [["--debug"],        {"action": "store_true", "help": "Debug mode"}],
  [["--quiet"],        {"action": "store_true"}],
  [["--verbose"],      {"action": "count", "default": 0}],
