@@ -123,7 +123,8 @@ This command sends two volumes 'root-volume' and 'home-volume' from the LVM thin
 
 Run Wyng using the following commands and arguments in the form of:
 
-**wyng \<parameters> command [volume_name]**
+**wyng \[--options] command \[volume_names] \[--options]**
+
 
 ### Command summary
 
@@ -144,6 +145,7 @@ Run Wyng using the following commands and arguments in the form of:
 ### Advanced commands
 
 | _Command_ | _Description_  |
+|---------|---|
 | **monitor**                     | Collect volume change metadata & rotate snapshots.
 | **diff** _volume_name [*]_      | Compare local volume with archived volume.
 | **add** _volume_name [*]_       | Adds a volume name without session data to the archive.
@@ -750,15 +752,14 @@ this purpose).
 
 
 
-Donations
----
+### Donations
+
 <a href="https://liberapay.com/tasket/donate"><img alt="Donate using Liberapay" src="media/lp_donate.svg" height=54></a>
 
 <a href="https://www.buymeacoffee.com/tasket"><img src="media/buymeacoffee_57.png" height=57></a> <a href="https://www.buymeacoffee.com/tasket">Buy me a coffee!</a>
 
 <a href="https://www.patreon.com/tasket"><img alt="Donate with Patreon" src="media/become_a_patron_button.png" height=50></a>
 
-If you like Wyng or my other efforts, monetary contributions are welcome and can
-be made through [Liberapay](https://liberapay.com/tasket/donate)
+If you like this project, monetary contributions are welcome and can
+be made through [Liberapay](https://liberapay.com/tasket/donate) or [Buymeacoffee](https://www.buymeacoffee.com/tasket) 
 or [Patreon](https://www.patreon.com/tasket).
-
