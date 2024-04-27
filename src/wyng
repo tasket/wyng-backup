@@ -1942,12 +1942,12 @@ def check_manifest_sequence(vol, sesnames, addcol=False):
 
 def parse_options(args, pdefs, etcconf=None):
     parser_defs_d = {x[0]: y for x, y in pdefs}
+    conf_block = ("debug","force","save-to","session","unattended","volume-desc","tag","all",
+                    "all-before","local-from","import-other-from","upgrade-format")
 
     if etcconf and exists(etcconf):
         confp = configparser.ConfigParser()    ; confp.optionxform = lambda option: option
         confp["var-global-default"] = {}       ; confp.read_file(open(etcconf, "r"))
-        conf_block = ("debug","force","remap","save-to","session","unattended","volume-desc",
-                      "tag","all","all-before")
         for k, v in confp["var-global-default"].items():
             if (kopt := "--"+k) in parser_defs_d and k not in conf_block:
                 if parser_defs_d[kopt].get("action") == "append":
@@ -2938,6 +2938,7 @@ def get_reflink_deltas(storage, aset, datavols):
         lv = lvols[vol.name]                        ; cmds, devs = [], set()
         dpath = tmpdir+"/delta."+vol.vid
 
+        # Create a pair of piped command sets for diffing metadata of the two snapshots:
         for side, snapname, outp in (("11", lv.snap1, ' > "'+dpath+'-p"'), ("22", lv.snap2, "")):
             if not exists(stpath+snapname):
                 err_out("'%s' snapshot not found (different subvolume?); Skipping..." % fpath)
@@ -3955,7 +3956,7 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
             return 0
 
     dest        = (aset := vol.archive).dest      ; options      = aset.opts
-    attended    = not options.unattended          ; remap        = options.remap
+    attended    = not options.unattended          ; remap        = False
     verbose     = attended and verify_only != 2   ; debug        = options.debug
     sparse      = options.sparse                  ; sparse_write = options.sparse_write or sparse
     chunksize   = aset.chunksize                  ; use_snapshot = False
@@ -4066,7 +4067,7 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
             err_out("Local volume must exist for diff.")
             return None
         if remap:
-            raise NotImplementedError()
+            pass # raise NotImplementedError()
         else:
             if storage.lvols[snap1vol].exists():
                 l_vol = storage.lvols[snap1vol]
@@ -4534,7 +4535,7 @@ def err_out(text):
 def cleanup():
     if debug:
         shutil.rmtree("/tmp/"+prog_name+"-debug", ignore_errors=True)
-        shutil.move(tmpdir, "/tmp/"+prog_name+"-debug")
+        if tmpdir:   shutil.move(tmpdir, "/tmp/"+prog_name+"-debug")
     try:
         if not debug:
             if dest:   dest.remove_dtmp()
@@ -4553,7 +4554,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8beta"       ; prog_date = "20240423"
+prog_version          = "0.8beta"       ; prog_date = "20240426"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
