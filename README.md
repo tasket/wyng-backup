@@ -176,11 +176,9 @@ at '/mnt/pool1/appvms/personal.img'.
 #### receive
 
 Retrieves a volume instance (using the latest session ID
-if `--session` isn't specified) from the archive and saves it to either the volume's
-original path or the path specified with `--save-to`.  The `--local` option may also be
-specified when not using `--save-to`.
-If `--session` is used, only one date-time is accepted. The volume
-name is required.
+if `--session` isn't specified) from the archive and saves it to either the `--local`
+storage or the path specified with `--save-to`.
+If `--session` is used, only one date-time is accepted. The volume name is required.
 
 ```
 
@@ -216,7 +214,7 @@ To use, supply a single exact date-time in _YYYYMMDD-HHMMSS_ format to remove a
 specific session, or two date-times representing a range:
 
 ```
-wyng prune --session=20180605-000000,20180701-140000 --dest=file:/mnt/drive1/mylaptop.backup
+wyng prune --all --session=20180605-000000,20180701-140000 --dest=file:/mnt/drive1/mylaptop.backup
 ```
 
 ...removes backup sessions from midnight on June 5 through 2pm on July 1 for all
@@ -504,8 +502,6 @@ __off__ is the current default.
 __on__ removes more sessions than _min_ as space is needed, while trying to retain any/all older sessions
 whenever available storage space allows.
 
-__min__ removes sessions before the 366 day mark, but no thinning-out is performed.
-
 __full__ removes all sessions that are due to expire according to above criteria.
 
 `--apdays=A:B:C:D`
@@ -648,6 +644,38 @@ gpg:                using RSA key 0573D1F63412AF043C47B8C8448568C8B281C952
 gpg: Good signature from "Christopher Laprise <tasket@posteo.net>" [unknown]
 gpg:                 aka "Christopher Laprise <tasket@protonmail.com>" [unknown]
 ```
+
+
+### Protecting and Verifying Archive Authenticity
+
+With encryption enabled, Wyng provides a kind of built-in verification of archive authenticity;
+this is because it uses an AEAD cipher mode.  However, custom verification
+(BYOV) is also possible with Wyng and even works on non-encrypted archives.  All you need
+to do is sign the 'archive.ini' file from the top archive directory after executing any Wyng
+command that changes the archive (i.e. _arch-init, add, send, prune, delete, rename_).
+
+Subsequently, the steps to verify total archive authenticity would be to simply run
+`wyng arch-check --dest <URL>` (using Wyng's built-in authenticated encryption), or else using custom
+authentication based on GPG, for instance:
+```
+gpg --verify archive.ini.sig laptop1.backup/archive.ini && wyng arch-check --dest <URL>
+```
+Note that custom signature files should _not_ be stored within the archive directory.
+
+(Although volumes can be verified piecemeal with the `wyng verify` command, it is not suited
+to verifying everything within an archive.)
+
+#### Security side note
+
+Authentication schemes in general can only verify the authenticity for an
+object at any point in time; they aren't well suited to telling us if that object
+(i.e. a backup archive) is the most recent update, and so they are vulnerable to rollback
+attacks that replace your current archive with an older version (in Wyng this is related to
+replay attacks, but not downgrade attacks).  Wyng guards against
+such attacks by checking that the time encoded in your locally cached archive.ini isn't newer
+than the one on the destination/remote; Wyng also displays the last archive modification time
+whenever you access it.
+
 
 ### Tips & Caveats
 
