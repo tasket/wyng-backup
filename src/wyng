@@ -2576,7 +2576,7 @@ def update_dest(arch, pathlist=[], volumes=[], sessions=[], ext="", delete=False
         return
 
     do_exec([[CP.tar,"-cf","-","--no-recursion","--verbatim-files-from","--files-from", "-"],
-             dest.run_args([dest.cd + "  && tar --no-same-owner -xf -"]
+             dest.run_args([dest.cd + "  && tar -o -xf -"]
                                 + [" && mv '"+x+ext+"' '"+x+"'" for x in update_list if ext])
             ], inlines=[x+ext for x in update_list], cwd=lcd)
 
