@@ -383,13 +383,14 @@ the volume data if it present.
 --remap                | Remap volume to current archive during `send` or `diff`.
 --json                 | Output volume: session info in json format (list).
 --force                | Not used with most commands.
+--meta-reduce=_mode:N_ | Reduce or extend local metadata caching.
 --meta-dir=_path_      | Use a different metadata dir than the default.
 --debug                | Debug mode
 
 
 
 
-### Options Detail
+### Option Details
 
 `--dest=URL`
 
@@ -565,6 +566,22 @@ currently define which local volume name into which an archive volume will be re
 are ignored when sending.
 
 
+`--meta-reduce=mode:minutes`
+
+Control the degree to which locally cached session metadata is retained or removed when
+Wyng exits. This can effect a noticeable reduction in the space that Wyng uses in /var
+while trading off a little speed.
+
+___Mode___ is one of _off, on,_ or _extra_: _off_ results in no reduction (all metadata is
+retained); _on_ removes uncompressed metadata; _extra_ removes both compressed and uncompressed
+metadata.
+
+___Minutes___ is an integer defining the metadata's maximum age in minutes, where '0'
+will cause it to be removed immediately when Wyng exits.
+
+The default setting is _'on:3000'_.
+
+
 `--compression`
 
 Accepts the forms `type` or `type:level`. The three types available are `zstd` (zstandard),
@@ -595,6 +612,7 @@ Selects the encryption cipher/mode.  The available modes are:
 - `xchacha20-msr` — Using HMAC-SHA256(rnd||msg) function.
 - `xchacha20-ct` — Counter based; fast with certain safety trade-offs (see issue [158](https://github.com/tasket/wyng-backup/issues/158)).
 - `off` — Turns off Wyng's authentication and encryption.
+
 
 
 
