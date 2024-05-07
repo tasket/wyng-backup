@@ -374,7 +374,7 @@ class ArchiveVolume:
 
     max_sessions  = 16384    ; volname_len = 4000    ; sesname_sz = 17
     max_volinfosz = (ArchiveSet.mhash_sz + sesname_sz + 10) * max_sessions \
-                  + volname_len + ArchiveSet.comment_len + 10
+                  + volname_len * 4 + ArchiveSet.comment_len * 4 + 10
 
     __slots__ = ("vid","name","hashval","archive","path","alias","aliastype","sessions","sesnames",
                  "_seslist","last","meta_checked","tags","desc","changed_bytes")
@@ -575,7 +575,8 @@ class ArchiveSession:
     attr_misc = ("tags","volume","archive","name","path","saved","loaded","toggle",
                  "uuid","hashval","meta_checked","just_fetched")
     sesname_sz= ArchiveVolume.sesname_sz    ; tag_len = 25    ; max_tags = 5    ; max_field = 64
-    max_infosz= (tag_len + ArchiveSet.comment_len + 10) * max_tags \
+    max_permsz= 32 * 4 * 2 + 5  # user & group names in utf-8 plus mode
+    max_infosz= (tag_len * 4 + ArchiveSet.comment_len * 4 + 10) * max_tags + max_permsz \
               + sum(map(len, attr_str+attr_int)) + len(attr_str+attr_int)*(max_field+10)
     __slots__ = attr_str + attr_int + attr_misc
 
@@ -819,7 +820,7 @@ def upgrade_from_v2(aset):
             newses.permissions = "w"    ; newses.save_info()
             sessions.append(newses)     ; os.remove(ses.path+"/manifest")
     catch_signals()
-    dest.run([dest.cd + "\n" + "".join(moves)], trap=True)
+    dest.run(["".join(moves)], destcd=dest.path, trap=True)
     update_dest(new_aset, pathlist=[new_aset.confname],
                 volumes=new_aset.vols.values(), sessions=sessions)
     catch_signals(None)    ; print("Done.", end="")
@@ -1398,9 +1399,11 @@ class LocalStorage:
 
         if exists(dest):
             if delete:   gen = self._get_btrfs_generation(dest)
-            do_exec([[CP.btrfs, "subvolume", "delete", dest]])
+            do_exec([[CP.env, "-u", "LC_ALL",
+                      CP.btrfs, "subvolume", "delete", dest]])
         if not delete:
-            do_exec([[CP.btrfs, "subvolume", "snapshot", "-r", svpath, dest]])
+            do_exec([[CP.env, "-u", "LC_ALL",
+                      CP.btrfs, "subvolume", "snapshot", "-r", svpath, dest]])
             gen = self._get_btrfs_generation(dest)
             # possibly check /sys/fs/btrfs/uuid#/exclusive_operation
 
@@ -1408,7 +1411,7 @@ class LocalStorage:
         return gen, dest
 
     def _get_btrfs_generation(self, path):
-        res = SPr.check_output([CP.btrfs, "subvolume", "list", path])
+        res = SPr.check_output([CP.env, "-u", "LC_ALL", CP.btrfs, "subvolume", "list", path])
         if debug:   print("*generation", res)
         return int(res.split()[3])
 
@@ -1427,7 +1430,7 @@ class LocalStorage:
             vol = lvols[newname]    ; vol.vid = vid
 
         for sv in (vol.snap1, vol.snap2) if vol.snap1 else []:
-            if sv and sv not in lvols:   lvols[sv] = self.LVolClass(self, sv)
+            if sv and sv not in lvols:   lvols[sv] = self.LVolClass(self, sv, is_snap=True)
         return vol
 
     # Create survey of all interesting volumes
@@ -1511,13 +1514,13 @@ class LocalVolume:
     maxname   = 255    ; maxpath = 4096 - maxname
     __slots__ = ("storage","lockfile","pdir","path","name","vid","snap1","snap2")
 
-    def _my_init(self, storage, name, vid=None):
+    def _my_init(self, storage, name, vid=None, is_snap=False):
         assert storage.online
 
         self.storage   = storage                        ; self.lockfile = None
         self.pdir      = storage.path.rstrip("/")+"/"   ; self.path     = self.pdir+name
         self.name      = name                           ; self.vid      = vid
-        self.snap1 = self.snap2 = None
+        self.snap1 = self.snap2 = None                  ; self.is_snap  = is_snap
 
     def lock(self, mode="r+b"):
         self.lockfile = lf = open(self.path, mode)
@@ -1564,8 +1567,8 @@ class ReflinkVolume(LocalVolume):
 
     snap_ext = (".wyng1",".wyng2")
 
-    def __init__(self, storage, name, vid=None):
-        super()._my_init(storage, name, vid)
+    def __init__(self, storage, name, vid=None, is_snap=False):
+        super()._my_init(storage, name, vid, is_snap=is_snap)
 
         # assign snapshot names
         if not name.endswith(self.snap_ext):
@@ -1594,7 +1597,8 @@ class ReflinkVolume(LocalVolume):
         os.makedirs(self.pdir+subdir, exist_ok=True)
         if snapshotfrom:
             snap_path = self.storage.lvols[snapshotfrom].path
-            do_exec([[CP.cp, "-p", "--reflink=always", snap_path, self.path]])
+            do_exec([[CP.env, "-u", "LC_ALL", CP.cp, "-p", "--reflink=always",
+                      snap_path, self.path]])
         else:
             assert size is not None
             with open(self.path, "wb") as vf:  vf.truncate(size); vf.flush()
@@ -1644,12 +1648,12 @@ class LvmVolume(LocalVolume):
                  "lv_time","pool_lv","thin_id","tags")
     __slots__ = colnames
 
-    def __init__(self, storage, name=None, vid=None, members=[]):
+    def __init__(self, storage, name=None, vid=None, members=[], is_snap=False):
 
         self.tags = ""
         for attr, val in members:   setattr(self, attr, val)
 
-        super()._my_init(storage, name or self.lv_name, vid)
+        super()._my_init(storage, name or self.lv_name, vid, is_snap=is_snap)
         name = self.name    ; assert bool(name)
 
         # assign snapshot names
@@ -1775,7 +1779,8 @@ def rel_chmod(fpath, op, mask):
 def get_passphrase(prompt="Enter passphrase: ", verify=False, cmd=None):
     if cmd:
         try:
-            return bytearray(SPr.check_output(cmd, shell=True, text=False).rstrip(b"\n"))
+            return bytearray(SPr.check_output(CP.env + " -u LC_ALL " + cmd,
+                                              shell=True, text=False).rstrip(b"\n"))
         except SPr.CalledProcessError as e:
             # Handle as error code so pw output does not get logged
             x_it(e.returncode, "Error running passcmd: "+cmd)
@@ -1906,7 +1911,7 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
         for sdir in os.scandir(vol.path):
             if sdir.name.startswith("S_") and sdir.name.endswith("-tmp"):
                 if debug:   print("Removing partial session dir '%s'" % sdir.name)
-                dest.run([dest.cd + " && rm -rf " + vol.vid+"/"+sdir.name])
+                dest.run(["rm -rf " + vol.vid+"/"+sdir.name], destcd=dest.path)
                 shutil.rmtree(vol.path+"/"+sdir.name, ignore_errors=True)
 
         # Check session sequencing
@@ -1923,7 +1928,7 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
         if startup:   continue
 
         # Remove stray volume dirs and other files
-        if options.clean:   dest.run([dest.cd + " && rm -r"] + vdir_strays)
+        if options.clean:   dest.run(["rm -r"] + vdir_strays, destcd=dest.path)
         deepclean = options.clean and options.force
         for pos in list(range(len(vol.sessions)))[:-1]:
             if exists(vol.mapfile(pos)):   os.remove(vol.mapfile(pos))
@@ -2164,7 +2169,7 @@ class Destination:
         self.spec   = dest_url
         self.sys    = dparts.netloc
         self.path   = os.path.normpath(dparts.path)
-        self.cd     = " cd '"+self.path+"'"      ; self.archive_ini_hash = "none"
+        self.archive_ini_hash = "none"
         self.free   = self.dtmp     =  None      ; self.last_chunkdir    = ""
         self.online = self.writable =  False
 
@@ -2187,13 +2192,13 @@ class Destination:
             if ln.startswith("wyng_check_free"):  self.free = int(ln.split()[1])
 
     # Run system commands on destination
-    def run(self, commands, direct=False, timeout=None,
+    def run(self, commands, direct=False, timeout=None, destcd=None, lc="C",
             infile="", inlines=None, out="", check=True, trap=False):
 
         if direct:
             cmd = self.run_map[self.dtype] + commands
         else:
-            cmd = self.run_args(commands, trap=trap)
+            cmd = self.run_args(commands, trap=trap, destcd=destcd, lc=lc)
 
         return do_exec([cmd], infile=infile, inlines=inlines, out=out,
                        check=check, timeout=timeout)
@@ -2202,15 +2207,17 @@ class Destination:
     # The input commands are stored in a temp file and a standard command that
     # runs the temp file is returned.
 
-    def run_args(self, commands, trap=False, dest_type=None):
+    def run_args(self, commands, trap=False, dest_type=None, destcd=None, lc="C"):
 
         dest_type = dest_type or self.dtype    ; tmpprefix = "/tmp/wyngrpc/"
         trapcmd   = "trap '' INT TERM QUIT ABRT ALRM TSTP USR1\n" if trap else ""
         # shunt commands to local tmp file
         with tempfile.NamedTemporaryFile(dir=tmpdir+"/rpc", delete=False) as tmpf:
-            cmd = bytes(trapcmd + shell_prefix
-                        + " ".join(commands) + "\n", encoding="UTF-8")
-            tmpf.write(cmd)
+            cmd = trapcmd + shell_prefix \
+                + (f"cd '{destcd}'\n" if destcd else "") \
+                + (f"export LC_ALL={lc}\n" if lc else "") \
+                + " ".join(commands) + "\n"
+            tmpf.write(bytes(cmd, encoding="UTF-8"))
             remotetmp = os.path.basename(tmpf.name)
 
         if dest_type in {"qubes","qubes-ssh"}:
@@ -2245,7 +2252,7 @@ class Destination:
             do_exec([cmd])
 
         tmpprefix = "/tmp/wyngrpc/"    ; tmpdigits = 12
-        cmd  = [r"mkdir -p "+self.path+r" && "+self.cd
+        cmd  = [r"mkdir -p '"+self.path+r"' && cd '"+self.path+"'"
 
                 # send helper program to remote dest
                 +r"  && mkdir -p -m 777 " + tmpprefix
@@ -2587,8 +2594,8 @@ def compare_files(arch, pathlist=[], volumes=[], sessions=[], clear=True, manife
 
     do_exec([[CP.xargs, CP.sha256sum]], cwd=arch.path,
             infile=cmp_list, out=tmpdir+"/compare-hashes.local")
-    dest.run([dest.cd + " && xargs sha256sum"],
-             infile=cmp_list, out=tmpdir+"/compare-hashes.dest")
+    dest.run(["xargs sha256sum"],
+             destcd=dest.path, infile=cmp_list, out=tmpdir+"/compare-hashes.dest")
     # maybe switch cmp to diff/sha256sum if they are safe enough to read untrusted input
     files  = [tmpdir+"/compare-hashes.local", tmpdir+"/compare-hashes.dest"]
     result = do_exec([[CP.cmp] + files], check=False) > 0
@@ -2606,13 +2613,15 @@ def update_dest(arch, pathlist=[], volumes=[], sessions=[], ext="", delete=False
                 + [x.vid+"/volinfo" for x in volumes] + pathlist
 
     if delete:
-        assert not ext;  dest.run([dest.cd + " && xargs rm -f"], inlines=update_list)
+        assert not ext;  dest.run(["xargs rm -f"], destcd=dest.path, inlines=update_list)
         return
 
     do_exec([[CP.tar,"-cf","-","--no-recursion","--verbatim-files-from","--files-from", "-"],
-             dest.run_args([dest.cd + "  && tar -o -xf -"]
-                                + [" && mv '"+x+ext+"' '"+x+"'" for x in update_list if ext])
-            ], inlines=[x+ext for x in update_list], cwd=lcd)
+             dest.run_args(["tar -o -xf -"]
+                            + [" && mv '"+x+ext+"' '"+x+"'" for x in update_list if ext],
+                            destcd=dest.path)
+            ], inlines=[x+ext for x in update_list],
+            cwd=lcd)
 
 
 def fetch_file_blobs(recv_list, recv_dir, dest, ext="", skip0=False, skip_exists=False,
@@ -2623,10 +2632,9 @@ def fetch_file_blobs(recv_list, recv_dir, dest, ext="", skip0=False, skip_exists
     if not recv_list:   return []
 
     cmd = dest.run_args(
-            [dest.cd
-             +f" && exec 2>>{dest.dtmp}/receive.log"
+            [ f"exec 2>>{dest.dtmp}/receive.log"
              +f" && rm -f {dest.dtmp}/dest.lst.gz && python3 {dest.dtmp}/dest_helper.py receive"
-            ])
+            ], destcd=dest.path)
     recvp = SPr.Popen(cmd, stdout=SPr.PIPE, stdin=SPr.PIPE)
     recvp.stdin.write(("".join((x+"\n" for x,y in recv_list))).encode("UTF-8"))
     recvp.stdin.flush()    ; rc = recvp.poll()
@@ -2988,7 +2996,7 @@ def get_reflink_deltas(storage, aset, datavols):
 
             devs.add(os.stat(stpath+snapname).st_dev)
             cmds.append([
-              [CP.env, "LC_ALL=''", CP.filefrag, "-vs", "-b"+blksz, stpath+snapname],
+              [CP.filefrag, "-vs", "-b"+blksz, stpath+snapname],
               # BEGIN defines the expected filefrag header layout (PAT);
               # a non-matching line (00..wyng_input) is printed if 0 extents found.
               # END exits with code 2 if no end line (extents found) was found or HEADER != PAT;
@@ -3373,12 +3381,11 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
 
         # Finalize on VM/remote
         catch_signals()
-        dest.run([ dest.cd
-                 +" && mv -T "+sdir+"-tmp "+sdir
+        dest.run(["mv -T "+sdir+"-tmp "+sdir
                  +" && mv "+vol.vid+"/volinfo.tmp "+vol.vid+"/volinfo"
                  +" && mv archive.ini.tmp archive.ini"
                  +(" && ( nohup sync -f . 2&>/dev/null & )" if options.maxsync else "")
-                 ], trap=True)
+                 ], destcd=dest.path, trap=True)
 
         # Local finalize
         ses.path = ses.path.rsplit("-tmp",maxsplit=1)[0]   ; os.replace(ses.path+"-tmp", ses.path)
@@ -3492,10 +3499,10 @@ def dedup_existing(aset):
     dest = aset.dest
 
     print(" linking...", end="", flush=True)
-    do_exec( [dest.run_args([dest.cd
-               +" && /bin/cat >"+dest.dtmp+"/dest.lst.gz"
+    do_exec( [dest.run_args([
+               +"/bin/cat >"+dest.dtmp+"/dest.lst.gz"
                +" && /usr/bin/python3 "+dest.dtmp+"/dest_helper.py dedup"
-               ]),
+               ], destcd=dest.path),
               [CP.cat,"-v"],  [CP.tail,"--bytes=2000"]
             ], infile=tmpdir+"/dedup.lst.gz", out=tmpdir+"/arch-dedup.log")
     print(" done.")
@@ -3548,8 +3555,9 @@ def monitor_send(storage, aset, datavols, monitor_only, use_sesid=None):
             ses_tags.append(tag)
 
     if len(incrementals) > 0:
-        if status1:   print("Acquiring deltas.")
+        if status1:   print("Acquiring deltas.", end="", flush=True)
         incrementals = storage.acquire_deltas(storage, aset, incrementals)
+        print("", flush=True)
 
     if not monitor_only:
         cmpvols = [x for x in aset.vols.values()
@@ -3558,7 +3566,7 @@ def monitor_send(storage, aset, datavols, monitor_only, use_sesid=None):
         if compare_files(aset, volumes=cmpvols, sessions=cmpses):
             x_it(1, "Error: Local and archive metadata differ.")
 
-        print(f"\nSending backup session {curtime}:")
+        print(f"\nSending backup session {curtime}:", flush=True)
         hl = "—" * (min(max([len(aset.vols[v].name) for v in incrementals+send_alls]+[22]), 60)+20)
         if status1:   print(hl)
 
@@ -3700,7 +3708,7 @@ def autoprune(vol, needed_space=0, apmode="off", include=set()):
     def to_date(sesdate):
         return dtdate(int(sesdate[2:6]),int(sesdate[6:8]),int(sesdate[8:10]))
 
-    if len(vol.sesnames) < 2:   return False
+    if len(vol.sesnames) < 2:   return 0
 
     today = dtdate.today()
     if (apdays := vol.archive.apdays or "0:62:1:2") and all(map(is_num, tup := apdays.split(":"))):
@@ -3713,7 +3721,8 @@ def autoprune(vol, needed_space=0, apmode="off", include=set()):
         apmode = "off"
     if not apdays or not (ap1 + ap2):
         apmode = "off"
-    if apmode not in ("on","full") and not include:   return False
+
+    if apmode not in ("on","full") and not include:   return 0
 
     datavol   = vol.name                      ; dest    = vol.archive.dest
     apmode    = apmode.lower()                ; exclude = set()
@@ -3736,7 +3745,8 @@ def autoprune(vol, needed_space=0, apmode="off", include=set()):
             else:
                 exclude += {x.name for x in vol.sessions if sx[1:] in x.tags}
     include -= exclude
-
+    print("Dates:", startdate, enddate, oldest) ####
+    print("Include:", include, "Exclude:",exclude) #### ###
     # Mark all sessions prior to oldest date setting, plus include list
     for ses in sessions:
         sdate = to_date(ses)
@@ -3748,10 +3758,12 @@ def autoprune(vol, needed_space=0, apmode="off", include=set()):
     # Mark sessions for thinning-out according to ndays + nsessions
     if apmode != "off" and thin_days and enddate:
         for year in range(startdate.year, enddate.year+1):
+            print("Year:", year) #### ###
             for span in range(dtdate(year,1,1).toordinal(),
                             min(dtdate(year,12,31), enddate).toordinal(), ndays):
                 dlist = []    ; offset = 0
                 for day in range(span, min(span+ndays, enddate.toordinal())):
+                    #print("Day:", day) #### ###
                     dlist.append(sum( x[1] for x in apcal[day] ))
                 while sum(dlist) > nsessions: ## Enh: Make even distribution
                     bigday = dlist.index(max(dlist[offset:]), offset)
@@ -3868,7 +3880,7 @@ def merge_sessions(volume, sources, target, clear_sources=False):
     # processing the full range of volume chunks in the likely case that
     # the oldest (full) session is being pruned.
     merge_target  = sources[0]    ; merge_sources = ([target] + list(reversed(sources)))[:-1]
-    os.chdir(volume.path)         ; destvol       = "/"+volume.vid
+    os.chdir(volume.path)
 
     if not resume:
         volsize    = volume.sessions[target].volsize
@@ -3925,7 +3937,7 @@ def merge_sessions(volume, sources, target, clear_sources=False):
 
     if not resume:
         # Set archive in_process state to "merge"
-        aset.set_in_process(["merge", volume.name, str(clear_sources), target, sources],
+        aset.set_in_process(["merge", volume.vid, str(clear_sources), target, sources],
                             tmp=False, todest=False)
 
     # Update & send new metadata and process lists to dest
@@ -3933,7 +3945,7 @@ def merge_sessions(volume, sources, target, clear_sources=False):
         for ses in sources:
             if ses in volume.sessions:   volume.delete_session(ses, remove=False)
 
-    cmds = []    ; dest_cmds = dest.cd + destvol
+    cmds = []    ; dest_cmds = "cd " + volume.vid
     if not resume:
         aset.set_in_process(None, tmp=True, todest=False)
         volume.sessions[target].save_info(".tmp")
@@ -3944,9 +3956,9 @@ def merge_sessions(volume, sources, target, clear_sources=False):
     # Start merge operation on dest
     catch_signals()
     retcode = do_exec([cmds, dest.run_args([dest_cmds + " && python3 "
-                        + dest.dtmp+"/dest_helper.py merge "+merge_target
-                        + (" --resume" if resume else "")+(" --sync" if aset.opts.maxsync else "")
-                         ])
+                            + dest.dtmp+"/dest_helper.py merge "+merge_target
+                            + (" --resume" if resume else "")+(" --sync" if aset.opts.maxsync else "")
+                            ], destcd=dest.path)
                         ], cwd=volume.path, check=False, out=tmpdir+"/merge.log"
                       )
 
@@ -3957,7 +3969,8 @@ def merge_sessions(volume, sources, target, clear_sources=False):
         aset.set_in_process(None)
         for f in ("merge.lst.gz", "volinfo.tmp", "vi.dat.tmp", target+"/info.tmp"):
             if exists(f):  os.remove(f)
-        dest.run([dest.cd + destvol + " && rm -rf merge merge.lst.gz"], check=False)
+        dest.run([f"cd {volume.vid}  &&  rm -rf merge merge.lst.gz"],
+                 destcd=dest.path, check=False)
         x_it(1, "Error: Merge could not initialize!")
     elif retcode != 0:
         x_it(retcode, "Error: Remote exited!")
@@ -4085,7 +4098,8 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
 
         if save_type in("tlvm pool","block device") and exists(save_path):
             punch_hole = save_storage.block_discard_chunk
-            if not sparse_write:   do_exec([[CP.blkdiscard, save_path]])
+            if not sparse_write:
+                do_exec([[CP.env, "-u", "LC_ALL", CP.blkdiscard, save_path]])
             volf = open(save_path, "r+b")
 
         elif os.path.abspath(save_path).startswith("/dev/"):
@@ -4165,10 +4179,10 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
 
     # Create retriever process using py program
     cmd = dest.run_args(
-            [dest.cd + "/"+vol.vid
+            ["cd " + vol.vid
              +" && exec 2>>"+dest.dtmp+"/receive.log"
              +" && python3 "+dest.dtmp+"/dest_helper.py receive"
-            ])
+            ], destcd=dest.path)
     getvol   = SPr.Popen(cmd, stdout=SPr.PIPE,
                                      stdin =SPr.PIPE if sparse else SPr.DEVNULL)
     gv_stdin = io.TextIOWrapper(getvol.stdin, encoding="utf-8") if sparse else None
@@ -4364,11 +4378,16 @@ def add_volume(aset, datavol, desc):
 
 # Remove a volume from the archive
 
-def delete_volume(storage, aset, dv):
+def delete_volume(storage, aset, dv, vid=None):
 
     if not storage.online:
         print("Note: A valid --local location was not specified; no volume snapshots"
               " will be removed.\n")
+
+    if vid:
+        vols = [x for x in aset.vols.values() if x.vid == vid]
+        if not vols:   err_out(f"Volume {vid} not found.")   ; return
+        dv = vols[0].name
 
     if not options.unattended and not options.force and not aset.in_process:
         print("\nWarning! Delete will remove ALL metadata AND archived data",
@@ -4378,15 +4397,18 @@ def delete_volume(storage, aset, dv):
         if ans.lower() not in {"y","yes"}:   x_it(0,"")
         print()
 
-    print("Deleting volume", dv, "from archive.")
+    if not (vol := aset.vols.get(dv)):
+        err_out(f"Volume {dv} not found.")   ; return
+
+    print(f"Deleting volume '{dv}' ({vol.vid}) from archive.")
     catch_signals()
-    if not aset.in_process:       aset.set_in_process(["delete", dv])
+    if not aset.in_process:       aset.set_in_process(["delete", vol.vid])
     dvid = aset.delete_volume_meta(dv)
     update_dest(aset, pathlist=[aset.confname])
     aset.set_in_process(None)
 
     if dvid:
-        aset.dest.run([aset.dest.cd + "  && rm -rf '%s'" % dvid])
+        aset.dest.run(["rm -rf '%s'" % dvid], destcd=aset.dest.path)
     catch_signals(None)
 
     if storage.online:
@@ -4600,7 +4622,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8wip"        ; prog_date = "20240503"
+prog_version          = "0.8wip"        ; prog_date = "20240505"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
@@ -4629,7 +4651,8 @@ max_address           = 0xffffffffffffffff # 64bits
 address_split         = [len(hex(max_address))-2-7, 7]
 hash_bits             = 256    ; hash_bytes   = hash_bits // 8
 
-os.environ["LC_ALL"]  = "C"    ; shell_prefix = "set -e && export LC_ALL=C\n"
+os_env      = os.environ.copy(); os.environ["LC_ALL"] = "C"
+shell_prefix= "set -e\n"
 
 pjoin       = os.path.join     ; exists = os.path.exists   ; zipln = itertools.zip_longest
 
@@ -4775,14 +4798,15 @@ if aset.in_process and dest.online  \
     elif exists(aset.path+"/in_process_retry"):
         x_it(1, "Interrupted process already retried; Exiting.")
 
-    if aset.in_process and aset.in_process[0] in ("delete","merge"):
+    if aset.in_process and aset.in_process[0] in ("delete","merge") \
+    and aset.in_process[1].startswith("Vol_"):
         print("Completing prior operation in progress:", " ".join(aset.in_process[0:2]))
 
         if aset.in_process[0] == "delete":
-            vname = aset.in_process[1]
-            delete_volume(storage, aset, vname)
+            delete_volume(storage, aset, "", vid=aset.in_process[1])
+
         elif aset.in_process[0] == "merge":
-            vname = aset.in_process[1]
+            vname = [x.name for x in aset.vols.values() if x.vid == aset.in_process[1]][0]
             merge_sessions(aset.vols[vname], aset.in_process[4].split(":|"),
                         aset.in_process[3], clear_sources=bool(aset.in_process[2]))
     else:
