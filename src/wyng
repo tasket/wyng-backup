@@ -3745,8 +3745,7 @@ def autoprune(vol, needed_space=0, apmode="off", include=set()):
             else:
                 exclude += {x.name for x in vol.sessions if sx[1:] in x.tags}
     include -= exclude
-    print("Dates:", startdate, enddate, oldest) ####
-    print("Include:", include, "Exclude:",exclude) #### ###
+
     # Mark all sessions prior to oldest date setting, plus include list
     for ses in sessions:
         sdate = to_date(ses)
@@ -3758,12 +3757,10 @@ def autoprune(vol, needed_space=0, apmode="off", include=set()):
     # Mark sessions for thinning-out according to ndays + nsessions
     if apmode != "off" and thin_days and enddate:
         for year in range(startdate.year, enddate.year+1):
-            print("Year:", year) #### ###
             for span in range(dtdate(year,1,1).toordinal(),
                             min(dtdate(year,12,31), enddate).toordinal(), ndays):
                 dlist = []    ; offset = 0
                 for day in range(span, min(span+ndays, enddate.toordinal())):
-                    #print("Day:", day) #### ###
                     dlist.append(sum( x[1] for x in apcal[day] ))
                 while sum(dlist) > nsessions: ## Enh: Make even distribution
                     bigday = dlist.index(max(dlist[offset:]), offset)
