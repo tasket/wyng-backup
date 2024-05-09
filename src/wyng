@@ -1512,7 +1512,7 @@ class LocalStorage:
 
 class LocalVolume:
     maxname   = 255    ; maxpath = 4096 - maxname
-    __slots__ = ("storage","lockfile","pdir","path","name","vid","snap1","snap2")
+    __slots__ = ("storage","lockfile","pdir","path","name","vid","snap1","snap2","is_snap")
 
     def _my_init(self, storage, name, vid=None, is_snap=False):
         assert storage.online
@@ -1626,10 +1626,10 @@ class ReflinkVolume(LocalVolume):
     def is_arch_member(self):
         if not self.name.endswith(self.snap_ext) or not self.exists():
             return "na"
-        elif self.storage.arch_vols and self.name not in self.storage.arch_vols:
-            return "false"
-        else:
+        elif self.is_snap:
             return "true"
+        else:
+            return "false"
 
     def is_paired(self, mapfile, sestag):
         if not self.name.endswith(self.snap_ext):   raise ValueError("Not a snapshot.")
@@ -4619,7 +4619,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8wip"        ; prog_date = "20240505"
+prog_version          = "0.8wip"        ; prog_date = "20240507"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
