@@ -338,6 +338,7 @@ class ArchiveSet:
         if newname in self.vols or ArchiveVolume.volname_check(newname):   return False
 
         vol.name = newname
+        self.vols[newname] = vol    ; del(self.vols[datavol])
         vol.save_volinfo(ext)
         return True
 
@@ -1231,7 +1232,7 @@ class LocalStorage:
     fallocate.restype = ctypes.c_int
     fallocate.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int64, ctypes.c_int64]
 
-    def __init__(self, localpath, auuid=None, arch_vols=[], clean=False, sync=False,
+    def __init__(self, localpath, auuid=None, arch_vols={}, clean=False, sync=False,
                  require_online=False):
 
         self.stypes  = { "tlvm":  LvmVolume,   "rlnk": ReflinkVolume }
@@ -1428,6 +1429,7 @@ class LocalStorage:
             lvols[newname] = vol = self.LVolClass(self, newname, vid=vid)
         else:
             vol = lvols[newname]    ; vol.vid = vid
+        self.arch_vols[newname] = vid
 
         for sv in (vol.snap1, vol.snap2) if vol.snap1 else []:
             if sv and sv not in lvols:   lvols[sv] = self.LVolClass(self, sv, is_snap=True)
@@ -1437,7 +1439,7 @@ class LocalStorage:
     def update_vol_list(self, arch_vols):
         self.lvols.clear()
         if self.pooltype == "tlvm":   self.update_lvm_list()
-        for vname, vid in arch_vols:
+        for vname, vid in arch_vols.items():
             self.new_vol_entry(vname, vid)
 
     # Retrieves survey of all LVM VGs/LVs
@@ -1624,9 +1626,10 @@ class ReflinkVolume(LocalVolume):
         return self.storage.getperms(self.path)
 
     def is_arch_member(self):
-        if not self.name.endswith(self.snap_ext) or not self.exists():
+        if not self.name.startswith("sn") or not self.name.endswith(self.snap_ext) \
+        or not self.exists():
             return "na"
-        elif self.is_snap:
+        elif self.is_snap and self.name.startswith("".join((subdir,"sn",self.storage.auuid,"_"))):
             return "true"
         else:
             return "false"
@@ -1795,7 +1798,7 @@ def get_passphrase(prompt="Enter passphrase: ", verify=False, cmd=None):
     attended = sys.stdin.isatty()
     for ii in range(3):
         passphrase  = bytearray(getpassinput(prompt), encoding="UTF-8")
-        if not verify or len(passphrase) >= 10:   break
+        if not verify or len(passphrase) >= 10 or (debug and len(passphrase) > 0):   break
         err_out("Passphrase must be 10 or more characters.")   ; clear_array(passphrase)
         if ii == 2 or not attended:   x_it(3, "Passphrase required.")
     if not attended or not verify:   return passphrase
@@ -1895,10 +1898,16 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
         print("Stray volume dirs:", vdir_strays)
 
     # Remove orphan snapshots
-    for lv in (x for x in storage.lvols.values() if x.is_arch_member() == "false"):
-        if options.clean:
-            lv.delete()
-            print("Removed orphan snapshot:", lv.name)
+    if storage and storage.online:
+
+
+
+
+
+        for lv in (x for x in storage.lvols.values() if x.is_arch_member() == "false"):
+            if options.clean:
+                lv.delete()
+                print("Removed orphan snapshot:", lv.name)
 
     # Check volume contents at various levels (dirs, metadata, content)
     for volname in vol_list if dest.online else []:
@@ -1947,7 +1956,8 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
                 continue # Enh: use seq
 
             if attended:   print(" ", sesname[2:], end="... ", flush=True)
-            bcount = receive_volume(storage, vol, select_ses=sesname[2:], verify_only=2)
+            bcount = receive_volume(storage, vol, select_ses=sesname[2:], ses_strict=True,
+                                    verify_only=2)
             #if attended:   print(bcount, "bytes OK")
 
 
@@ -2110,7 +2120,7 @@ def get_configs_remote(dest, base_dir, opts):
 def get_configs_storage(aset, require_local=True):
     storage, storagesets, vol_set = None, {}, set()
     fromlist    = aset.opts.local_from      ; local_url = aset.opts.local
-    arch_vols   = [(x.name, x.vid) for x in aset.vols.values()]
+    arch_vols   = {x.name: x.vid for x in aset.vols.values()}
 
     if fromlist and exists(fromlist):
         # Init a storage obj for each local source and subset of vols
@@ -2120,23 +2130,23 @@ def get_configs_storage(aset, require_local=True):
             x_it(1, "Empty/malformed json file")
 
         for url, vols in locallists.items():
-            if not vols:   x_it(1, "Empty vol list for "+url)
+            if not vols:   err_out("Empty vol list for "+url)   ; continue
 
             for vname, alias in vols:
                 if debug:   print("alias", vname, "=", alias)
                 if alias and vname in aset.vols:
-                    aset.vols[vname].alias = alias    ; aset.vols[vname].aliastype = "rlnk-lvm"
+                    aset.vols[vname].alias = alias    ; aset.vols[vname].aliastype = "rename"
                 # Test for volname uniqueness
                 if vname in vol_set:   x_it(1, f"Duplicate volume name: {vname}")
                 vol_set.add(vname)
 
             storagesets[LocalStorage(url, require_online=require_local,
-                                     arch_vols=arch_vols[:], auuid=aset.uuid)] \
+                                     arch_vols=arch_vols, auuid=aset.uuid)] \
                         = [x[0] for x in vols]
 
     else:
         storage = LocalStorage(local_url or None, require_online=require_local,
-                                arch_vols=arch_vols[:], auuid=aset.uuid)
+                                arch_vols=arch_vols, auuid=aset.uuid)
         storagesets[storage] = []
 
     return storage, storagesets
@@ -3526,11 +3536,18 @@ def monitor_send(storage, aset, datavols, monitor_only, use_sesid=None):
         error_cache.extend(datavols)
         return curtime
 
+    # Try to rename aliased archive volume before sending
+    for dv, vol in ((x, aset.vols[x]) for x in datavols[:] if x in aset.vols and not monitor_only):
+        if vol.aliastype and vol.aliastype == "rename" and vol.alias != vol.name \
+        and vol.alias not in aset.vols:
+            rename_volume(storage, aset, vol.name, vol.alias)
+            del(datavols[datavols.index(dv)])   ; datavols.append(vol.alias)
+
     print(f"\nPreparing snapshots in '{storage.path}'...")
     incrementals, send_alls, unchanged_vols, other_vols \
         = storage.prep_snapshots(storage, aset, datavols, monitor_only,
                                  import_others=options.import_other_from)
-    storage.update_vol_list([(x.name, x.vid) for x in aset.vols.values()])
+    storage.update_vol_list({x.name: x.vid for x in aset.vols.values()})
 
     if monitor_only:   send_alls.clear()
 
@@ -3754,8 +3771,9 @@ def autoprune(vol, needed_space=0, apmode="off", include=set()):
                 if dses[0] == ses and ses not in exclude:
                     dses[1] = False    ; vol.sessions[ses].toggle = False
 
-    # Mark sessions for thinning-out according to ndays + nsessions
-    if apmode != "off" and thin_days and enddate:
+    # Mark sessions for thinning-out according to ndays + nsessions;
+    # avoid for "wyng-qubes-metadata".
+    if apmode != "off" and thin_days and enddate and vol.name != "wyng-qubes-metadata":
         for year in range(startdate.year, enddate.year+1):
             for span in range(dtdate(year,1,1).toordinal(),
                             min(dtdate(year,12,31), enddate).toordinal(), ndays):
@@ -3991,7 +4009,8 @@ def merge_sessions(volume, sources, target, clear_sources=False):
 # can be used to resync volume with archive if the deltamap or snapshots
 # are lost or if the local volume reverted to an earlier state.
 
-def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify_only=0):
+def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
+                   diff=False, verify_only=0):
 
     def diff_compare(dbuf,z):
         if dbuf != volf.read(chunksize):
@@ -4020,6 +4039,10 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
         save_path = ""
 
     # Set the session to retrieve
+    if not sessions:
+        err_out("No sessions available.")
+        return None
+
     if select_ses:
         if select_ses[0] == "^":
             # match tag to session id
@@ -4032,16 +4055,18 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
             datetime.datetime.strptime(select_ses, "%Y%m%d-%H%M%S")
             select_ses = "S_"+select_ses
 
-        if select_ses not in sessions:
+        if (ses_strict and select_ses not in sessions) \
+        or (not ses_strict and select_ses < sessions[0]):
             err_out(f"No volume '{vol.name}' in session {select_ses}.")
             return None
 
-    elif len(sessions) > 0:
+        if not ses_strict and select_ses not in sessions:
+            print(f"Selecting {select_ses[2:]} as ", end="")
+            select_ses = [s for s in sessions if s < select_ses][-1]   ; print(select_ses[2:]+".")
+
+    else:
         # default to last session
         select_ses = sessions[-1]
-    else:
-        err_out("No sessions available.")
-        return None
 
     if diff and remap and select_ses != sessions[-1]:
         err_out("Cannot use prior session for remap.")
@@ -4050,6 +4075,7 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
     ses_obj     = vol.sessions[select_ses]           ; volsize     = ses_obj.volsize
     addrsplit   = -address_split[1]                  ; rc = l_vol  = volf = None
     lchunk_addr, last_chunkx = vol.last_chunk_addr(volsize)
+    assert vol.aliastype in (None, "rename")
 
     # Prepare save volume
     if not (diff or verify_only):
@@ -4060,7 +4086,7 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
             save_type,_,_,_ = LocalStorage.parse_local_path(ldir := os.path.dirname(save_path))
             if save_type not in (None,"block device"):
                 save_storage = LocalStorage(ldir, auuid=aset.uuid,
-                                            arch_vols=storage.arch_vols)
+                                            arch_vols=storage.arch_vols.copy())
         else:
             if not storage.online:   x_it(1, "Local storage is offline!")
             save_storage = storage    ; returned_home = storage.online
@@ -4330,10 +4356,6 @@ def receive_volume(storage, vol, select_ses="", save_path="", diff=False, verify
 
 def rename_volume(storage, aset, oldname, newname):
 
-    if not storage.online:
-        print("Note: A valid --local location was not specified; no local snapshots"
-              " will be renamed which may result in a slow rescan on the next 'send'.\n")
-
     os.chdir(aset.path)    ; vol = aset.vols[oldname]
     if not aset.rename_volume_meta(oldname, newname, ext=".tmp"):
         x_it(1, "Error: Cannot rename '%s' to '%s'." % (oldname,newname))
@@ -4345,17 +4367,22 @@ def rename_volume(storage, aset, oldname, newname):
     if verbose:   print("Archive volume renamed.")
 
     # move snapshots to new pathname
-    if not storage.online:   return
+    if not storage.online:
+        print("Note: A valid --local location was not specified; no local snapshots"
+              " will be renamed which may result in a slow rescan on the next 'send'.\n")
+        return
+
     new_lvol = storage.new_vol_entry(newname, vol.vid)    ; old_lvol = storage.lvols[oldname]
     for atr in ("snap1","snap2"):
         oldsnap, newsnap = storage.lvols[getattr(old_lvol, atr)], \
                            storage.lvols[getattr(new_lvol, atr)]
         newsnap.delete()
-        if new_lvol.exists():
-            if oldsnap.exists():   oldsnap.rename(newsnap.name)
+        if new_lvol.exists() and oldsnap.name != newsnap.name:
+            if oldsnap.exists():
+                oldsnap.rename(newsnap.name)
+                if verbose:   print("Local snapshot renamed.")
         else:
             oldsnap.delete()
-    if verbose:   print("Local snapshot renamed.")
 
 
 def add_volume(aset, datavol, desc):
@@ -4619,7 +4646,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8wip"        ; prog_date = "20240507"
+prog_version          = "0.8wip"        ; prog_date = "20240510"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
@@ -4670,6 +4697,8 @@ parser_defs = [
  [["--all", "-a"],    {"action": "store_true", "help": "Select all known volumes"}],
  [["--session"],      {"help": "YYYYMMDD-HHMMSS[,YYYYMMDD-HHMMSS] or ^tag_id"
                              " select session date|tag, singular or range."}],
+ [["--session-strict"],{"choices": ["on","off"], "default": "on",
+                        "help": "Accept/reject inclusive session date"}],
  [["--tag"],          {"action": "append", "default": [],
                        "help": "tag_id[,description] Add tags when sending"}],
  [["--keep"],         {"action": "append", "default": [],
@@ -4880,7 +4909,8 @@ elif options.action == "receive":
 
         for dv in dvlist:
             count = receive_volume(storage, aset.vols[dv], select_ses=options.session or "",
-                                            save_path=options.save_to or "")
+                                   ses_strict=options.session_strict=="on",
+                                   save_path=options.save_to or "")
             if count is None:   error_cache.append(dv)
 
 
@@ -4888,6 +4918,7 @@ elif options.action == "verify":
     for dv in selected_vols:
         count = receive_volume(storage, aset.vols[dv],
                     select_ses="" if not options.session else options.session.split(",")[0],
+                    ses_strict=options.session_strict=="on",
                     verify_only=1, save_path="")
         if count is None:   error_cache.append(dv)
 
@@ -4905,7 +4936,7 @@ elif options.action == "diff":
 
 
 elif options.action == "list":
-    show_list(aset, options.volumes)
+    show_list(aset, selected_vols) #### options.volumes)
 
 
 elif options.action == "add":
