@@ -4646,7 +4646,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8wip"        ; prog_date = "20240510"
+prog_version          = "0.8wip"        ; prog_date = "20240511"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
@@ -4903,9 +4903,9 @@ elif options.action == "receive":
 
     for storage, vols in storagesets.items():
         dvlist = vols or selected_vols
-        if not storage.online:
-            err_out("\n Offline volumes: " + ", ".join(dvlist))
-            error_cache.extend(dvlist)   ; continue
+        if not storage.online and vols:
+            err_out("\n Offline volumes: " + ", ".join(vols))
+            error_cache.extend(vols)   ; continue
 
         for dv in dvlist:
             count = receive_volume(storage, aset.vols[dv], select_ses=options.session or "",
