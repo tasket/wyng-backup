@@ -2184,7 +2184,7 @@ class Destination:
         self.online = self.writable =  False
 
         self.run_map = {"file":       [CP.sh],
-                        "ssh":        [CP.ssh] + self.ssh_opts + [self.sys],
+                        "ssh":        [CP.ssh] + self.ssh_opts + ["ssh://"+self.sys],
                         "qubes":      [CP.qvm_run, "--no-color-stderr", "--no-color-output",
                                       "-p", self.sys],
                         "qubes-ssh":  [CP.qvm_run, "--no-color-stderr", "--no-color-output",
@@ -2239,7 +2239,8 @@ class Destination:
             if dest_type == "qubes":
                 add_cmd = [CP.sh+" "+tmpprefix+remotetmp]
             else:
-                add_cmd = [CP.ssh+" "+" ".join(self.ssh_opts)+" "+self.sys.split(":")[1]
+                add_cmd = [CP.ssh+" "+" ".join(self.ssh_opts)
+                        +" ssh://"+self.sys.split(":", maxsplit=1)[1]
                         +' "$('+CP.cat+' '+tmpprefix+remotetmp+')"']
 
         elif dest_type == "ssh":
@@ -4646,7 +4647,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8wip"        ; prog_date = "20240511"
+prog_version          = "0.8wip"        ; prog_date = "20240512"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
@@ -4926,9 +4927,9 @@ elif options.action == "verify":
 elif options.action == "diff":
     for storage, vols in storagesets.items():
         dvlist = vols or selected_vols
-        if not storage.online:
-            err_out("\n Offline volumes: " + ", ".join(dvlist))
-            error_cache.extend(dvlist)   ; continue
+        if not storage.online and vols:
+            err_out("\n Offline volumes: " + ", ".join(vols))
+            error_cache.extend(vols)   ; continue
 
         for dv in dvlist:
             count = receive_volume(storage, aset.vols[dv], save_path="", diff=True)
@@ -4936,7 +4937,7 @@ elif options.action == "diff":
 
 
 elif options.action == "list":
-    show_list(aset, selected_vols) #### options.volumes)
+    show_list(aset, selected_vols)
 
 
 elif options.action == "add":
