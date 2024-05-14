@@ -70,8 +70,6 @@ class ArchiveSet:
         self.dedupindex  = {}
         self.dedupsessions = []
         self.raw_hashval = None
-        self.meta_reduce, meta_min = opts.meta_reduce.split(":")
-        self.meta_min    = 3000 if meta_min == "" else int(meta_min)
         self.apdays      = None
         self.big_tmpdir  = self.path+"/.tmp"
         self.subdir      = None
@@ -555,6 +553,8 @@ class ArchiveVolume:
         else:
             os.utime(path)
 
+        if exists(path+".z"):   os.utime(path+".z")
+
     # Fetches files and passes them to decode_one_manifest()
     def decode_manifests(self, sesnames, force=False):
         apath    = self.archive.path    ; dest = self.archive.dest
@@ -623,14 +623,6 @@ class ArchiveSession:
 
         for tag in addtags:   self.tag_add(tag)
 
-    def __del__(self):
-        if self.archive.autoreduce and self.archive.meta_reduce in ("on","extra") \
-        and exists(mpath := self.path+"/manifest"):
-            if time.time() - self.archive.meta_min * 60 > os.stat(mpath).st_atime:
-                os.remove(mpath)
-                if debug:   print("Removed",mpath)
-                if self.archive.meta_reduce == "extra" and exists(mpath+".z"):
-                    os.remove(mpath+".z")
 
     def manifest_max(self):
         return (self.volsize // self.archive.chunksize + 1) \
@@ -1209,7 +1201,7 @@ class CP:
     chattr = "/usr/bin/chattr"  ; xargs = "/usr/bin/xargs"   ; sha256sum= "/usr/bin/sha256sum"
     cmp    = "/usr/bin/cmp"     ; gzip  = "/usr/bin/gzip"    ; env      = "/usr/bin/env"
     ps     = "/usr/bin/ps"      ; uniq  = "/usr/bin/uniq"    ; ionice   = "/usr/bin/ionice"
-    qvm_run= "/usr/bin/qvm-run" ; rm    = "/usr/bin/rm"
+    qvm_run= "/usr/bin/qvm-run" ; rm    = "/usr/bin/rm"      ; find     = "/usr/bin/find"
     thin_delta = "/usr/sbin/thin_delta" ; filefrag = "/usr/sbin/filefrag"  ; lvm = "/usr/sbin/lvm"
     blkdiscard = "/sbin/blkdiscard"     ; dmsetup  = "/sbin/dmsetup"
     btrfs      = "/usr/sbin/btrfs" if os.path.exists("/usr/sbin/btrfs") else "/bin/btrfs"
@@ -3178,7 +3170,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
 
     dest        = (aset := vol.archive).dest    ; pjoin       = os.path.join
     options     = aset.opts                     ; status1     = not options.unattended
-    chunksize   = aset.chunksize                ; dedup       = options.dedup
+    chunksize   = aset.chunksize                ; dedup       = False
     chdigits    = max_address.bit_length()//4   ; chformat    = "x%0"+str(chdigits)+"x"
     bksession   = "S_"+curtime                  ; sdir        = pjoin(vol.vid, bksession)
     prior_size  = vol.volsize()                 ; prior_ses   = vol.last
@@ -3203,8 +3195,8 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
     ses.path        = vol.path+"/"+bksession+"-tmp"
 
     # Code from init_dedup_indexN() localized here for efficiency.
-    dedup_idx     = dedup_db = None
-    if dedup:
+    if aset.dedupindex:
+        dedup       = True
         hashtree, ht_ksize, hash_w, ddataf, chtree, chdigits, ch_w, ses_w  =  aset.dedupindex
         ddataf_read = ddataf.read    ; ddataf_seek = ddataf.seek    ; ddataf_write = ddataf.write
         chtree_max  = 2**(chtree[0].itemsize*8)
@@ -4629,13 +4621,20 @@ def cleanup():
     if debug:
         shutil.rmtree("/tmp/"+prog_name+"-debug", ignore_errors=True)
         if tmpdir:   shutil.move(tmpdir, "/tmp/"+prog_name+"-debug")
+
     try:
         if not debug:
             if dest:   dest.remove_dtmp()
             if aset:   shutil.rmtree(aset.big_tmpdir, ignore_errors=True)
             if tmpdir and exists(tmpdir):   shutil.rmtree(tmpdir, ignore_errors=True)
-    except:
-        pass
+
+        if cachedir and meta_reduce in ("on","extra"):
+            SPr.run([CP.find, cachedir, "(", "-name", "manifest", "-o", "-name", "manifest.tmp"]
+                    + (["-o", "-name", "manifest.z"] if meta_reduce=="extra" else [])
+                    + [")", "-cmin", "+"+str(meta_min), "-delete"])
+    except Exception as e:
+        err_out("Cleanup error: "+repr(e))
+
     if error_cache:
         err_out("Error on volumes: " + ", ".join(error_cache))
         os._exit(2)
@@ -4647,10 +4646,11 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8wip"        ; prog_date = "20240513"
-format_version        = 3               ; debug     = False       ; tmpdir = None
+prog_version          = "0.8wip"        ; prog_date = "20240514"
+format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
+meta_reduce = meta_min = vardir = cachedir = tmpdir = None
 aset = dest = storage = None
 time_start, monotonic_start = time.time(), time.monotonic()
 signal_handlers  = {}    ; signals_caught = []    ; error_cache = []
@@ -4671,22 +4671,22 @@ except IOError:
 
 cpu_flags = [x for x in open("/proc/cpuinfo") if x.startswith("flags")] [0].split()[1:]
 
-max_address           = 0xffffffffffffffff # 64bits
+max_address     = 0xffffffffffffffff # 64bits
 # for 64bits, a subdir split of 9+7 allows =< 4096 files per dir:
-address_split         = [len(hex(max_address))-2-7, 7]
-hash_bits             = 256    ; hash_bytes   = hash_bits // 8
+address_split   = [len(hex(max_address))-2-7, 7]
+hash_bits       = 256    ; hash_bytes   = hash_bits // 8
 
-os_env      = os.environ.copy(); os.environ["LC_ALL"] = "C"
-shell_prefix= "set -e\n"
+LC_ALL          = os.environ.get("LC_ALL")   ; os.environ["LC_ALL"] = "C"
+shell_prefix    = "set -e\n"
 
-pjoin       = os.path.join     ; exists = os.path.exists   ; zipln = itertools.zip_longest
+pjoin           = os.path.join     ; exists = os.path.exists   ; zipln = itertools.zip_longest
 
 
 ## Parse Arguments & Etc Config ##
 
-local_actions       = ("monitor","version")
-write_actions       = ("add","send","prune","delete","rename","arch-delete","arch-deduplicate")
-dest_actions        = ("list","receive","verify","diff","arch-check","arch-init") + write_actions
+local_actions   = ("monitor","version")
+write_actions   = ("add","send","prune","delete","rename","arch-delete","arch-deduplicate")
+dest_actions    = ("list","receive","verify","diff","arch-check","arch-init") + write_actions
 
 parser_defs = [
  [["action"],         {"choices": local_actions+dest_actions, "help": "Wyng Commands"}],
@@ -4792,6 +4792,9 @@ os.makedirs(tmpdir+"/rpc")
 
 Destination.write_helper_program(tmpdir+"/rpc")
 agent_helper_write(tmpdir)
+
+meta_reduce, meta_min = options.meta_reduce.split(":")
+meta_min         = 3000 if meta_min == "" else int(meta_min)
 
 # Dict of compressors in the form: (library, default_compress_level, compress_func)
 compressors      =    {"zlib":   (zlib, 4, zlib.compress),
