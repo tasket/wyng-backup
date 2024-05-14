@@ -2156,9 +2156,9 @@ class Destination:
 
     url_types   = ("ssh", "file", "qubes-ssh", "qubes")
 
-    ssh_opts    = ["-x", "-o", "ControlPath=~/.ssh/controlsocket-%r@%h-%p",
-                         "-o", "ControlMaster=auto", "-o", "ControlPersist=60",
-                         "-o", "ServerAliveInterval=30", "-o", "ConnectTimeout=30",
+    ssh_opts    = ["-x", "-o", "ControlPath=~/.ssh/ctrl-%C",
+                         "-o", "ControlMaster=auto", "-o", "ControlPersist=120",
+                         "-o", "ServerAliveInterval=60", "-o", "ConnectTimeout=60",
                          "-o", "Compression=no"]
 
     magic       = b"\xff\x11\x15"
@@ -4647,7 +4647,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8wip"        ; prog_date = "20240512"
+prog_version          = "0.8wip"        ; prog_date = "20240513"
 format_version        = 3               ; debug     = False       ; tmpdir = None
 admin_permission      = os.getuid() == 0
 
