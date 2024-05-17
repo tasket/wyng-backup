@@ -3581,7 +3581,7 @@ def monitor_send(storage, aset, datavols, monitor_only, use_sesid=None):
         if status1:   print(hl)
 
     totalvsize = totalbcount = 0
-    for datavol in sorted(incrementals + send_alls + unchanged_vols + list(other_vols.keys())):
+    for datavol in list(other_vols.keys()) + sorted(incrementals + send_alls + unchanged_vols):
         vol = aset.vols[datavol]    ; updated = sent = False    ; svsize = sbcount = stime = 0
         print(f"Volume '{datavol}': " if not status1 else
               f"          |     | {datavol}",
@@ -3765,8 +3765,9 @@ def autoprune(vol, needed_space=0, apmode="off", include=set()):
                     dses[1] = False    ; vol.sessions[ses].toggle = False
 
     # Mark sessions for thinning-out according to ndays + nsessions;
-    # avoid for "wyng-qubes-metadata".
-    if apmode != "off" and thin_days and enddate and vol.name != "wyng-qubes-metadata":
+    # avoid for "wyng-*-metadata" volumes.
+    if apmode != "off" and thin_days and enddate \
+    and not (vol.name.startswith("wyng-") and vol.name.endswith("-metadata")):
         for year in range(startdate.year, enddate.year+1):
             for span in range(dtdate(year,1,1).toordinal(),
                             min(dtdate(year,12,31), enddate).toordinal(), ndays):
@@ -4646,7 +4647,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8wip"        ; prog_date = "20240514"
+prog_version          = "0.8beta"       ; prog_date = "20240515"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
