@@ -176,6 +176,8 @@ class ArchiveSet:
         # use blake2b for metadata if hmac-sha256 is used for data:
         self.gethash     = hash_funcs["blake2b"] if self.hashtype == "hmac-sha256" \
                            else hash_funcs[self.hashtype]
+        if self.compression == "zstd" and "zstd" not in compressors:
+            x_it(1, "This archive requires the 'python3-zstd' module, which is not installed.")
         self.compress    = compressors[self.compression][2]
         self.decompress  = compressors[self.compression][0].decompress
         self.subdir      = "/a_"+hashlib.blake2b(
@@ -2010,7 +2012,8 @@ def remove_local_snapshots(storage, archive, del_all=False, purge=None):
 def parse_options(args, pdefs, etcconf=None):
     parser_defs_d = {x[0]: y for x, y in pdefs}
     conf_block = ("debug","force","save-to","session","unattended","volume-desc","tag","all",
-                    "all-before","local-from","import-other-from","upgrade-format")
+                  "all-before","local-from","import-other-from","upgrade-format",
+                  "skip-corrupt-chunks")
 
     if etcconf and exists(etcconf):
         confp = configparser.ConfigParser()    ; confp.optionxform = lambda option: option
@@ -2222,6 +2225,7 @@ class Destination:
     def get_free(self, fpath): ## Enh: add sanitize
         for ln in open(fpath,"r"):
             if ln.startswith("wyng_check_free"):  self.free = int(ln.split()[1])
+        return self.free
 
     # Run system commands on destination
     def run(self, commands, direct=False, timeout=None, destcd=None, lc="C",
@@ -3460,8 +3464,8 @@ def init_dedup_index(aset, listfile=""):
     # Define arrays and element widths
     hash_w     = hash_bits // 8
     ht_ksize   = 2 # binary digits for tree key
-    hashtree   = [bytearray() for x in range(2**(ht_ksize*8))]
-    chtree     = [array("I") for x in range(2**(ht_ksize*8))]
+    hashtree   = tuple(bytearray() for x in range(2**(ht_ksize*8)))
+    chtree     = tuple(array("I") for x in range(2**(ht_ksize*8)))
     chtree_max = 2**(chtree[0].itemsize*8) # "I" has 32bit range
     chdigits   = max_address.bit_length() // 4 # 4bits per digit
     ses_w = 2; ch_w = chdigits //2
@@ -3527,18 +3531,21 @@ def init_dedup_index(aset, listfile=""):
 
 def dedup_existing(aset):
 
-    print("Building deduplication index...", end="", flush=True)
+    print("\nBuilding deduplication index...", end="", flush=True)
     init_dedup_index(aset, "dedup.lst.gz")
     dest = aset.dest
 
-    print(" linking...", end="", flush=True)
+    print("\n%dMB free on destination." % (dest.free//1024//1024))
+    print("linking...", end="", flush=True)
     do_exec( [dest.run_args([
-               +"/bin/cat >"+dest.dtmp+"/dest.lst.gz"
+               "/bin/cat >"+dest.dtmp+"/dest.lst.gz"
                +" && /usr/bin/python3 "+dest.dtmp+"/dest_helper.py dedup"
                ], destcd=dest.path),
               [CP.cat,"-v"],  [CP.tail,"--bytes=2000"]
             ], infile=tmpdir+"/dedup.lst.gz", out=tmpdir+"/arch-dedup.log")
     print(" done.")
+    dest.get_free(tmpdir+"/arch-dedup.log")
+    print("%dMB free after." % (dest.free//1024//1024))
     if verbose:   print("".join(open(tmpdir+"/arch-dedup.log","r")))
 
 
@@ -4046,6 +4053,10 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
         else:
             return 0
 
+    def punch_zero_hole(loc):
+        volf_seek(loc)   ; volf_write(zeros)   ; punch_hole(volfno, loc, chunksize)
+
+
     dest        = (aset := vol.archive).dest      ; options      = aset.opts
     attended    = not options.unattended          ; remap        = False
     verbose     = attended and verify_only != 2   ; debug        = options.debug
@@ -4248,9 +4259,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
             if save_path:
                 volf_seek(addr)
                 if sparse_write and volf_read(chunksize) != zeros:
-                    # Note: punch_hole() might not work, write zeros first anyway
-                    volf_seek(addr)    ; volf_write(zeros)    ; diff_count += chunksize
-                    punch_hole(volfno, addr, chunksize)
+                    punch_zero_hole(addr)    ; diff_count += chunksize
             elif diff:
                 volf_seek(addr)    ; diff_count += diff_compare(zeros,True)
                 if diff_count and not remap:   break
@@ -4272,7 +4281,16 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
 
         # allow for slight expansion from compression algo
         if untrusted_size > chunksize + (chunksize // 64) or untrusted_size < 1:
-            raise BufferError("Bad chunk size %d for %s" % (untrusted_size, mfline))
+            if options.skip_corrupt_chunks and save_path:
+                print("Skipping wrong-sized chunk at", addr)
+                punch_zero_hole(addr)
+                continue
+            else:
+                if save_path and save_type == "file":
+                    volf.truncate(0)
+                elif save_path:
+                    do_exec([[CP.env, "-u", "LC_ALL", CP.blkdiscard, save_path]])
+                raise BufferError("Bad chunk size %d for %s" % (untrusted_size, mfline))
 
         ##  Size is OK  ##
         size = untrusted_size
@@ -4299,7 +4317,16 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
         if not compare_digest(cksum, b64enc(gethash(untrusted_buf)).decode("ascii")):
             with open(tmpdir+"/bufdump", "wb") as dump:   dump.write(untrusted_buf)
             print(size, mfline)
-            raise ValueError("Bad hash "+faddr+" :: "+str(b64enc(gethash(untrusted_buf))))
+            if options.skip_corrupt_chunks and save_path:
+                print("Skipping corrupt chunk at", addr)
+                punch_zero_hole(addr)
+                continue
+            else:
+                if save_path and save_type == "file":
+                    volf.truncate(0)
+                elif save_path:
+                    do_exec([[CP.env, "-u", "LC_ALL", CP.blkdiscard, save_path]])
+                raise ValueError("Bad hash "+faddr+" :: "+str(b64enc(gethash(untrusted_buf))))
 
         ##  Buffer is OK  ##
         buf = untrusted_buf   ; bcount += len(buf)
@@ -4598,10 +4625,6 @@ def ask_input(text):
     return input()
 
 
-def show_dest_free(dest):
-    print("\n%dMB free on destination." % (dest.free//1024//1024))
-
-
 # Exit with simple message
 def x_it(code, text):
     err_out(text)
@@ -4642,7 +4665,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8wip"        ; prog_date = "20240517"
+prog_version          = "0.8wip"        ; prog_date = "20240518"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
@@ -4707,6 +4730,8 @@ parser_defs = [
  [["--save-to"],      {"help": "Path to store volume for receive"}],
  [["--sparse"],       {"action": "store_true", "help": "Retrieve differences only"}],
  [["--sparse-write"], {"action": "store_true", "help": "Save differences only"}],
+ [["--skip-corrupt-chunks"], {"action": "store_true",
+                       "help": "Continue despite corrupt chunks (receive)"}],
  [["--use-snapshot"], {"action": "store_true",
                        "help": "Use local snapshot as baseline for receive"}],
  [["--import-other-from"], {"action": "append", "default": [],
@@ -4992,7 +5017,6 @@ elif options.action == "arch-delete":
 
 
 elif options.action == "arch-deduplicate":
-    show_dest_free(aset.dest)
     dedup_existing(aset)
 
 
