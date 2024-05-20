@@ -36,7 +36,7 @@ Public release with a range of features including:
 
  - Basic archive management such as add/delete volume and auto-pruning
 
- - Automatic management of local snapshots
+ - Automatic creation & management of local snapshots
 
  - Data deduplication
 
@@ -54,15 +54,15 @@ Beta release v0.8 major enhancements:
 
  - Overall faster operation
 
- - Change autoprune settings with --apdays
+ - Change autoprune behavior with --apdays
 
  - Configure defaults in /etc/wyng/wyng.ini
 
  - Mountpoints no longer required at destination
 
- - Simple selection of archives and local paths: Choose any local or dest each time you run Wyng
+ - Simple selection of archives and local paths: Choose any _local_ or _dest_ each time you run Wyng
 
- - Multiple volumes can now be specified for most Wyng commands
+ - Multiple volumes can now be specified for most Wyng commands; send and receive support multiple storage pools
 
  Wyng is released under a GPL license and comes with no warranties expressed or implied.
 
@@ -77,14 +77,14 @@ Before starting:
 * For encryption and top performance, the _python3-pycryptodome_ and _python3-zstd_ packages
 should be installed, respectively.
 
-* Volumes to be backed-up must reside locally in one of the following snapshot-capable
-storage types:  LVM thin-provisioned pool, Btrfs subvolume, or XFS/reflink capable filesystem.
+* Volumes to be backed-up should reside locally in one of the following snapshot-capable
+storage types:  LVM thin-provisioned pool, Btrfs subvolume, or XFS/reflink capable filesystem. Otherwise, volumes may be imported from or saved to other filesystems at standard (slower) speeds.
 
-* For backing up from LVM, _thin-provisioning-tools & lvm2_ must be present on the source system.
+* For backing up from LVM, _thin-provisioning-tools & lvm2_ must be present on the source system.  For Btrfs, the `btrfs` command must be present.
 
 * The destination system where the Wyng archive is stored (if different from source) should
 also have python3, plus a basic Unix command set and filesystem (i.e. a typical Linux or BSD
-system). Otherwise, FUSE may be used to access remote storage using sftp or s3 protocols
+system). Otherwise, _samba_, FUSE, etc. may be used to access remote storage using smb, sftp, s3 or other protocols
 without concern for python or Unix commands.
 
 * See the 'Testing' section below for tips and caveats about using the alpha and beta versions.
@@ -104,7 +104,7 @@ wyng arch-init --dest=ssh://me@exmaple.com:/home/me/mylaptop.backup
 
 ...or...
 
-wyng arch-init --dest=file:/mnt/drive1/mylaptop.backup
+wyng arch-init --dest=file:/mnt/drive2/mylaptop.backup
 ```
 
 The examples above create a 'mylaptop.backup' directory on the destination.
@@ -137,8 +137,8 @@ Run Wyng using the following commands and arguments in the form of:
 | **prune** _[volume_name] [*]_   | Remove older backup sessions to recover archive space.
 | **delete** _volume_name_    | Remove entire volume from config and archive.
 | **rename** _vol_name_ _new_name_  | Renames a volume in the archive.
-| **arch-init**               | Initialize archive configuration.
-| **arch-deduplicate**        | Deduplicate existing data in archive.
+| **arch-init**               | Create a new Wyng archive.
+| **arch-deduplicate**        | Deduplicate existing data in an archive.
 | **version**                 | Print the Wyng version and exit.
 
 
@@ -271,14 +271,14 @@ wyng arch-deduplicate
 
 #### arch-init
 
-Initialize a new archive on a mounted drive...
+Create a new archive on a mounted drive...
 ```
 
 wyng arch-init --dest=file:/mnt/backups/archive1
 
 ```
 
-Initialize a new archive with stronger compression on a remote system...
+Create a new archive with stronger compression on a remote system...
 ```
 
 wyng arch-init --dest=ssh://user@example.com --compression=zstd:7
@@ -292,9 +292,7 @@ These cannot be changed for an archive after it is initialized.
 #### arch-check
 
 Intensive check of archive integrity, reading each session's _deltas_ completely starting with
-the newest and working back to the oldest. This differs from `verify` which first builds a complete
-index and checks a session as a complete volume (thus reading delta information from past sessions
-in addition to the specified session).
+the newest and working back to the oldest. This differs from `verify` which first builds a complete index and checks a complete volume.
 
 Using `--session=newest` provides a 'verify the last session' function (useful after an incremental
 backup). Otherwise, supplying a date-time will make `arch-check` start the check from that point and
@@ -302,7 +300,7 @@ then continue working toward the oldest session. Session ranges are not yet supp
 
 Depending on how `arch-check` is used, the verification process can be shorter _or much longer_
 than using `verify` as the latter is always the size of a volume snapshot. The longest, most
-complete form `arch-check` is to supply no parameters, which checks all sessions in all volumes.
+complete form of `arch-check` is to supply no parameters, which checks all sessions in all volumes.
 
 
 
@@ -313,7 +311,7 @@ common resource usage issue with snapshot-based backups.
 After harvesting their change metadata, the older snapshots are replaced with
 new ones occupying zero space.  Running `monitor` isn't necessary,
 but it only takes a few seconds and is good to run on a frequent, regular basis
-if you have some volumes that are very active. Volume names may also be
+if you have some volumes that are write-intensive. Volume names may also be
 specified if its desired to monitor only certain volumes.
 
 This rule in /etc/cron.d runs `monitor` every 20 minutes:
@@ -327,15 +325,13 @@ This rule in /etc/cron.d runs `monitor` every 20 minutes:
 
 Compare a local volume snapshot with the archive and report any differences.
 This is useful for diagnostics and can also be useful after a verification
-error has occurred. The `--remap` option will record any differences into the
-volume's current change map, resulting in those blocks being scanned on
-the next `send`.
+error has occurred.
 
 
 #### add
 
 Adds new, empty volume name(s) to the archive.  On subsequent `send -a`, Wyng will backup
-the volume data if it present.
+the volume data if present.
 
 
 ---
@@ -348,7 +344,7 @@ the volume data if it present.
 --local=_vg/pool_  _...or..._    | Storage pool containing local volumes.
 --local=_/absolute/path_    | 
 --authmin=_N_          | Remember authentication for N minutes (default: 2)
---all, -a              | Select all volumes (most cmds); Or clean all (delete).
+--all, -a              | Select all volumes (most cmds); Or clean all snapshots (delete).
 --volex=_volname_      | Exclude volumes (send, monitor, list, prune).
 --dedup, -d            | Use deduplication for send (see notes).
 --session=_date-time[,date-time]_ | Select a session or session range by date-time or tag (receive, verify, prune).
