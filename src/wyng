@@ -920,7 +920,7 @@ class DataCryptography:
                        "40":  ("n/a",                "n/a", 0)}
 
     __slots__ = ("key","keyfile","ci_type","counter","ctstart","ctcadence","countsz","max_count",
-                 "slot","slot_offset","key_sz","randomsz","buf_start","mode","salt_updated",
+                 "slot","slot_offset","key_sz","randomsz","buf_start","mode",
                  "encrypt","decrypt","auth","ChaCha20_new","ChaCha20_Poly1305_new",
                  "time_start","monotonic_start","get_rnd","noncekey","mhashkey")
 
@@ -944,7 +944,6 @@ class DataCryptography:
         self.keyfile    = keyfile          ; self.ci_type     = ci_type
         self.ctcadence  = cadence          ; mknoncekey       = mkmhashkey = False
         self.get_rnd    = get_random_bytes ; self.auth        = False
-        self.salt_updated = False ####
 
         # xchacha20 common
         self.key_sz  = self.crypto_key_bits//8 ; self.max_count = 2**80-64
@@ -2040,9 +2039,7 @@ def get_configs(opts):
     dest_url, local_url = opts.dest, opts.local
     dest = Destination(dest_url)
 
-    # FIX: allow monitor to function offline
-    # FIX: check dest names for meta path if 'local_actions'
-    if True: ####(opts.action not in local_actions and dest.sys is not None) or opts.remap:
+    if True:
         dest.detect_state(opts.dedup)
 
     # Check online status for certain commands.
@@ -2222,7 +2219,7 @@ class Destination:
             self.run([f"cd $(dirname {self.dtmp}) && rm -rf $(basename {self.dtmp})"],
                      timeout=10)
 
-    def get_free(self, fpath): ## Enh: add sanitize
+    def get_free(self, fpath):
         for ln in open(fpath,"r"):
             if ln.startswith("wyng_check_free"):  self.free = int(ln.split()[1])
         return self.free
@@ -2771,16 +2768,6 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, import_others=[
                 lvols[snap2].rename(snap1)
                 print("  Recovered interrupted snapshot rotation:", datavol)
  
-            #if lvols[snap1].exists() and "delta" in lvols[snap1].tags \
-            #and (     vol.map_used() == 0 
-                  #or (vol.map_used() > 0 and
-                      #"delta-"+str(int(os.path.getmtime(mapfile))) not in lvols[snap1].tags
-                      #)
-                 #):
-                ## Handle inadvertant mapfile snapshot mis-match
-                #vol.init_deltamap()
-                #lvols[snap1].delete()    ; print("  Removed mis-matched delta", snap1vol)
-
         elif monitor_only:
             print("  Skipping '%s'; No data." % datavol)    ; continue
 
@@ -4665,7 +4652,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8wip"        ; prog_date = "20240518"
+prog_version          = "0.8beta"       ; prog_date = "20240519"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
@@ -4991,8 +4978,8 @@ elif options.action == "delete":
         elif not options.force:
             x_it(1, "Ignoring clean/purge without --force.")
 
+        if options.all:   meta_reduce, meta_min = "extra", 0
         remove_local_snapshots(storage, None if options.all else aset, purge=options.purge)
-        #meta_reduce, meta_min = "extra", 0 ###
 
     elif len(options.volumes) != 1:
         x_it(1, "Specify one volume to delete.")
