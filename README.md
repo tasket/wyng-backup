@@ -1,6 +1,6 @@
 _<h1 align="center">Wyng</h1>_
 <p align="center">
-Fast incremental backups for logical volumes.
+Fast incremental backups for logical volumes and disk images.
 </p>
 
 ### Introduction
@@ -717,6 +717,15 @@ or local directory.  LVM snapshots can be found with the patterns `*.tick` and `
 the tag "wyng";  Btrfs/XFS snapshots can be found with `sn*.wyng?`.
 Deleting them can prevent unnecessary consumption of disk space.
 
+* If you wish to make a "backup of the backup", i.e. duplicate an archive,
+its possible to do so with the following:
+```
+       mv destpath destpath-updating
+       rsync -a --hard-links --delete sourcepath destpath-updating
+       mv destpath-updating destpath
+```
+
+> The above `rsync` command can also efficiently update a duplicate archive, since it can delete files that are no longer present in the origin archive (`cp` cannot do this). However, note that there is risk of absentmindedly corrupting the duplicate archive if the update process ever ends in an error – this includes when your system is running `rsync` and it just crashes, thus displaying no error; all errors/interruptions must be handled. By renaming the archive with a suffix like '-updating', the above commands provide some precautionary "oops!" information, a reminder that your update had an error ...and to re-run it to make it right. This risk could be eliminated if Wyng were able to perform the duplicating itself; for plans on adding such a feature, see [this](https://github.com/tasket/wyng-backup/issues/199) issue.
 
 ### Troubleshooting notes
 
@@ -777,21 +786,6 @@ or rename '../wyng.backup040/default' to something else you prefer to use.
 is also a valued topic, where source systems are generally expected to be a fairly recent
 Linux distro or Qubes OS. Destination systems can vary a lot, they just need to have Python and
 Unix commands or support a compatible FUSE protocol such as sshfs(sftp) or s3.
-
-* If you wish to run Wyng operations that you want to roll back later,
-its possible to "backup the backup" in a relatively quick manner using a hardlink copy:
-```
-sudo cp -rl /dest/path/wyng.backup /dest/path/wyng.backup-02
-
-...or...
-
-rsync -a --hard-links --delete source dest
-```
-
-The `rsync` command is also suitable for efficiently updating an archive copy, since it can
-delete files that are no longer present in the origin archive (`cp` is not suitable for
-this purpose).
-
 
 
 ### Donations
