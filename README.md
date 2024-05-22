@@ -720,12 +720,12 @@ Deleting them can prevent unnecessary consumption of disk space.
 * If you wish to make a "backup of the backup", i.e. duplicate an archive,
 its possible to do so with the following:
 ```
-       mv destpath destpath-updating
-       rsync -a --hard-links --delete sourcepath destpath-updating
-       mv destpath-updating destpath
+     mv destpath destpath-updating
+     rsync -a --hard-links --delete sourcepath destpath-updating
+     mv destpath-updating destpath
 ```
 
-> The above `rsync` command can also efficiently update a duplicate archive, since it can delete files that are no longer present in the origin archive (`cp` cannot do this). However, note that there is risk of absentmindedly corrupting the duplicate archive if the update process ever ends in an error – this includes when your system is running `rsync` and it just crashes, thus displaying no error; all errors/interruptions must be handled. By renaming the archive with a suffix like '-updating', the above commands provide some precautionary "oops!" information, a reminder that your update had an error ...and to re-run it to make it right. This risk could be eliminated if Wyng were able to perform the duplicating itself; for plans on adding such a feature, see [this](https://github.com/tasket/wyng-backup/issues/199) issue.
+* The above `rsync` command can also efficiently update a duplicate archive, since it can delete files that are no longer present in the origin archive (`cp` cannot do this). However, note that there is risk of absentmindedly corrupting the duplicate archive if the update process ever ends in an error – this includes when your system is running `rsync` and it just crashes, thus displaying no error; all errors/interruptions must be handled. By renaming the archive with a suffix like '-updating', the above commands provide some precautionary "oops!" information, a reminder that your update had an error ...and to re-run it to make it right. This risk could be eliminated if Wyng were able to perform the duplicating itself; for plans on adding such a feature, see [this](https://github.com/tasket/wyng-backup/issues/199) issue.
 
 ### Troubleshooting notes
 
