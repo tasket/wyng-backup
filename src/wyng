@@ -2208,9 +2208,9 @@ class Destination:
         self.run_map = {"file":       [CP.sh],
                         "ssh":        [CP.ssh] + self.ssh_opts + ["ssh://"+self.sys],
                         "qubes":      [CP.qvm_run, "--no-color-stderr", "--no-color-output",
-                                      "-p", self.sys],
+                                      "--no-filter-escape-chars", "-p", self.sys],
                         "qubes-ssh":  [CP.qvm_run, "--no-color-stderr", "--no-color-output",
-                                      "-p", self.sys.split(":")[0]]
+                                      "--no-filter-escape-chars", "-p", self.sys.split(":")[0]]
                         }
 
 
@@ -2254,7 +2254,8 @@ class Destination:
             remotetmp = os.path.basename(tmpf.name)
 
         if dest_type in {"qubes","qubes-ssh"}:
-            do_exec([[CP.qvm_run, "--no-color-stderr", "--no-color-output", "-p",
+            do_exec([[CP.qvm_run, "--no-color-stderr", "--no-color-output",
+                    "--no-filter-escape-chars", "-p",
                       (self.sys if dest_type == "qubes" else self.sys.split(":")[0]),
                       (CP.mkdir+" -p "+tmpprefix+"; " if not self.dtmp else "")
                       +CP.cat+" >"+tmpprefix+remotetmp
@@ -4349,7 +4350,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
             if diff_count and not remap:   break
 
     try:
-        getvol.wait(timeout=10)
+        getvol.wait(timeout=30)
     except SPr.TimeoutExpired:
         err_out("Warning: tar process timeout.")
         rc = 99
@@ -4655,7 +4656,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8test1"      ; prog_date = "20240522"
+prog_version          = "0.8test2"      ; prog_date = "20240522"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
@@ -4998,7 +4999,7 @@ elif options.action == "arch-init":
 
 
 elif options.action == "arch-check":
-    arch_check(storage, aset, vols or selected_vols)
+    arch_check(storage, aset, selected_vols)
 
 
 elif options.action == "arch-delete":
