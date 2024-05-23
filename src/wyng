@@ -2178,7 +2178,7 @@ class Destination:
 
     url_types   = ("ssh", "file", "qubes-ssh", "qubes")
 
-    ssh_opts    = ["-x", "-o", "ControlPath=~/.ssh/ctrl-%C",
+    ssh_opts    = ["-x", "-T", "-e", "none", "-o", "ControlPath=~/.ssh/ctrl-%C",
                          "-o", "ControlMaster=auto", "-o", "ControlPersist=120",
                          "-o", "ServerAliveInterval=60", "-o", "ConnectTimeout=60",
                          "-o", "Compression=no"]
@@ -2490,11 +2490,14 @@ elif cmd == "dedup":
             try:
                 os.link(source, dest+"-lnk")    ; replace(dest+"-lnk", dest)
             except OSError as err:
+                try:
+                    remove(dest+"-lnk")
+                except:
+                    pass
                 if err.errno == 31:
                     # source has too many links; substitute
                     substitutions[src_orig] = dest   ; ddcount -= deststat.st_size   ; continue
                 else:
-                    if exists(dest+"-lnk"):   remove(dest+"-lnk")
                     print(err)   ; raise err
     print(ddcount, "bytes reduced.")
     print("wyng_check_free", shutil.disk_usage(".").free, flush=True)
@@ -4292,7 +4295,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
             with open(tmpdir+"/bufdump", "wb") as dump:
                 dump.write(untrusted_buf)
             print(mfline)
-            raise BufferError("Got %d bytes, expected %d" % (len(untrusted_buf), size))
+            raise BufferError("rc=%s. Got %d bytes, expected %d" % (repr(rc), len(untrusted_buf), size))
 
 
         # Decrypt the data chunk
@@ -4652,7 +4655,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8beta"       ; prog_date = "20240519"
+prog_version          = "0.8test1"      ; prog_date = "20240522"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
@@ -4803,7 +4806,6 @@ Destination.write_helper_program(tmpdir+"/rpc")
 agent_helper_write(tmpdir)
 
 meta_reduce, meta_min = options.meta_reduce.split(":")
-meta_min         = 3000 if meta_min == "" else int(meta_min)
 
 # Dict of compressors in the form: (library, default_compress_level, compress_func)
 compressors      =    {"zlib":   (zlib, 4, zlib.compress),
