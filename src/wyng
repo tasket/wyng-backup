@@ -4262,7 +4262,10 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
         if lchunk_addr <= addr >= 0:   break
         cksum, faddr, ses = mfline.split()    ; addr = int(faddr[1:], 16)
 
-        if verbose:   print("%.2f%%" % (addr/volsize*100), end="\x0d")
+        if debug:
+            print("%.2f%%" % (addr/volsize*100), faddr, ses, end="\x0d")
+        elif verbose:
+            print("%.2f%%" % (addr/volsize*100), end="\x0d")
 
         # Process zeros quickly
         if cksum == "0":
@@ -4369,6 +4372,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
             volf_seek(addr)    ; diff_count += diff_compare(buf,False)
             if diff_count and not remap:   break
 
+    if debug:   print("END receive stream.")
     if gv_stdin:   gv_stdin.close()
     rc = getvol.poll()
     if rc:
@@ -4672,7 +4676,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8test3"      ; prog_date = "20240524"
+prog_version          = "0.8test4"      ; prog_date = "20240525"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
