@@ -2402,7 +2402,7 @@ def helper_receive(lstf):
             stdout_write(fdata); stdout_flush()
     stdout_write(magicm); stdout_write(b'\xFF'*128); stdout_flush(); time.sleep(2)
     sys.stdout.close()
-    sys.stderr.write(f"Last item: {fname}\n")
+    sys.stderr.write(f"Last item: {fname} {fsize}\n")
 
 def helper_merge():
     exists = os.path.exists    ; replace = os.replace    ; remove = os.remove
@@ -2717,7 +2717,7 @@ def fetch_file_blobs(recv_list, recv_dir, dest, ext="", skip0=False, skip_exists
         if debug:   print("Fetched", fname, len(untrusted_buf))
 
     rc  = recvp.poll()
-    assert recvp.stdout.read(3) == magic # and recv.stdout.read(16)
+    assert recvp.stdout.read(3) == magic
     recvp.kill()
     return recv_list
 
@@ -4063,8 +4063,8 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
 
 
     dest        = (aset := vol.archive).dest      ; options      = aset.opts
-    attended    = not options.unattended          ; remap        = False
-    verbose     = attended and verify_only != 2   ; debug        = options.debug
+    attended    = not options.unattended          ; debug, remap = options.debug, False
+    verbose     = (options.verbose or attended) and verify_only != 2
     sparse      = options.sparse                  ; sparse_write = options.sparse_write or sparse
     chunksize   = aset.chunksize                  ; use_snapshot = False
     sessions    = vol.sesnames                    ; zeros        = bytes(chunksize)
@@ -4263,9 +4263,10 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
         cksum, faddr, ses = mfline.split()    ; addr = int(faddr[1:], 16)
 
         if debug:
-            print("%.2f%%" % (addr/volsize*100), faddr, ses, end="\x0d")
+            print(f"\r{(addr/volsize):.1%}", faddr, ses, end=" ")
         elif verbose:
-            print("%.2f%%" % (addr/volsize*100), end="\x0d")
+            print("".join(("\r", "[", ("=" * ceil((x:=addr/volsize)*20)).ljust(20), "]",
+                  f" {x:.1%}")), end=" ", flush=True)
 
         # Process zeros quickly
         if cksum == "0":
@@ -4372,7 +4373,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
             volf_seek(addr)    ; diff_count += diff_compare(buf,False)
             if diff_count and not remap:   break
 
-    if debug:   print("END receive stream.")
+    if debug:   print("\nEND receive stream.")
     if gv_stdin:   gv_stdin.close()
     rc = getvol.poll()
     if rc:
@@ -4676,7 +4677,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8test4"      ; prog_date = "20240525"
+prog_version          = "0.8beta"       ; prog_date = "20240525"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
