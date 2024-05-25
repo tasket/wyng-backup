@@ -2216,8 +2216,10 @@ class Destination:
 
     def remove_dtmp(self):
         if self.online:
-            self.run([f"cd $(dirname {self.dtmp}) && rm -rf $(basename {self.dtmp})"],
-                     timeout=10)
+            tmpprefix = "/tmp/wyngrpc/"
+            self.run([f"rm -rf {tmpprefix}tmp*"], timeout=10)
+            if self.dtype == "qubes-ssh":
+                self.run([f"rm -rf {tmpprefix}tmp*"], direct=True)
 
     def get_free(self, fpath):
         for ln in open(fpath,"r"):
@@ -2233,6 +2235,7 @@ class Destination:
         else:
             cmd = self.run_args(commands, trap=trap, destcd=destcd, lc=lc)
 
+        if debug:   print(cmd)
         return do_exec([cmd], infile=infile, inlines=inlines, out=out,
                        check=check, timeout=timeout)
 
@@ -2258,7 +2261,7 @@ class Destination:
                     "--no-filter-escape-chars", "-p",
                       (self.sys if dest_type == "qubes" else self.sys.split(":")[0]),
                       (CP.mkdir+" -p "+tmpprefix+"; " if not self.dtmp else "")
-                      +CP.cat+" >"+tmpprefix+remotetmp
+                      + CP.cat+" >"+tmpprefix+remotetmp
                     ]], infile=pjoin(tmpdir,"rpc",remotetmp))
             if dest_type == "qubes":
                 add_cmd = [CP.sh+" "+tmpprefix+remotetmp]
@@ -2291,7 +2294,7 @@ class Destination:
 
                 # send helper program to remote dest
                 +r"  && mkdir -p -m 777 " + tmpprefix
-                +r"  && tdir=$(mktemp -d " + tmpprefix + ("X"*tmpdigits) + r") && echo $tdir"
+                +r"  && tdir=$(mktemp -d " + tmpprefix +"tmp"+ ("X"*tmpdigits) + r") && echo $tdir"
                 +r"  && cat >$tdir/dest_helper.py"
 
                 # check free space and archive.ini status on remote
@@ -2324,7 +2327,7 @@ class Destination:
                 elif ln.startswith(tmpprefix):
                     self.dtmp = ln.strip()
 
-            if not self.dtmp or len(self.dtmp) != len(tmpprefix)+tmpdigits \
+            if not self.dtmp or len(self.dtmp) != len(tmpprefix)+tmpdigits+3 \
             or not set(self.dtmp[5:]) <= set(string.ascii_letters + string.digits + "/"):
                 raise ValueError("Missing or malformed tmp dir: "+repr(self.dtmp))
         else:
@@ -2353,6 +2356,10 @@ def catch_signals(sel=["INT","TERM","QUIT","ABRT","ALRM","TSTP","USR1"], iflag=F
 
 def handle_signal(sig, frame):
     if sig == signal.SIGALRM:   raise IOError("Timeout ALRM")
+
+def x_it(ec, text=None):
+    if text:   sys.stderr.write(text+"\n")
+    sys.exit(ec)
 
 def helper_send(volid=None, ses=None):
     mkdirs = os.makedirs    ; hlink = os.link    ; dirname = os.path.dirname
@@ -2390,8 +2397,12 @@ def helper_receive(lstf):
         fsize = getsize(fname) if exists(fname) else 0
         stdout_write(magicm + fsize.to_bytes(4,"big"))
         if fsize:
-            with open(fname,"rb") as dataf:   stdout_write(dataf.read(fsize))
-        stdout_flush()
+            with open(fname,"rb") as dataf:   fdata = dataf.read(fsize)
+            if len(fdata) != fsize:   x_it(20, f"Size mismatch: {len(fdata)} vs {fsize}")
+            stdout_write(fdata); stdout_flush()
+    stdout_write(magicm); stdout_write(b'\xFF'*128); stdout_flush(); time.sleep(2)
+    sys.stdout.close()
+    sys.stderr.write(f"Last item: {fname}\n")
 
 def helper_merge():
     exists = os.path.exists    ; replace = os.replace    ; remove = os.remove
@@ -2675,10 +2686,10 @@ def fetch_file_blobs(recv_list, recv_dir, dest, ext="", skip0=False, skip_exists
             ], destcd=dest.path)
     recvp = SPr.Popen(cmd, stdout=SPr.PIPE, stdin=SPr.PIPE)
     recvp.stdin.write(("".join((x+"\n" for x,y in recv_list))).encode("UTF-8"))
-    recvp.stdin.flush()    ; rc = recvp.poll()
+    recvp.stdin.flush()    ; rc = recvp.poll()    ; recvp.stdin.close()
 
     for fname, fsz in list(recv_list):
-        if rc is not None:   raise RuntimeError("Process terminated early.")
+        if rc is not None:   raise RuntimeError("Process terminated early. rc="+repr(rc))
         fpath = recv_dir+"/"+fname+ext
         if exists(fpath):   os.remove(fpath)
         assert recvp.stdout.read(3) == magic
@@ -2695,6 +2706,7 @@ def fetch_file_blobs(recv_list, recv_dir, dest, ext="", skip0=False, skip_exists
         size = untrusted_size
         # Read chunk buffer
         untrusted_buf = recvp.stdout.read(size)    ; rc  = recvp.poll()
+        if rc is not None:   raise RuntimeError("Process terminated early. rc="+repr(rc))
         if len(untrusted_buf) != size:
             with open(tmpdir+"/bufdump", "wb") as dump:   dump.write(untrusted_buf)
             raise BufferError("Got %d bytes, expected %d" % (len(untrusted_buf), size))
@@ -2704,6 +2716,8 @@ def fetch_file_blobs(recv_list, recv_dir, dest, ext="", skip0=False, skip_exists
         with open(fpath, "wb") as outf:   outf.write(untrusted_buf)
         if debug:   print("Fetched", fname, len(untrusted_buf))
 
+    rc  = recvp.poll()
+    assert recvp.stdout.read(3) == magic # and recv.stdout.read(16)
     recvp.kill()
     return recv_list
 
@@ -4216,6 +4230,12 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
     vol.decode_manifests(incl_ses+diff_ses, force=True)
     manifest = merge_manifests(vol, msessions=incl_ses, addcol=True, rdiff=diff_ses)
 
+    if debug:
+        print(f"{vol.vid} CHUNK SIZE: {chunksize}\nEND SEQUENCE:")
+        import collections
+        print("\n".join(collections.deque(  (" ".join(x.split()[1:]) for x in open(manifest)
+                                            if not x.startswith("0 ")), 10)))
+
     if not sparse:
         cmds = [[CP.sed, "-E", r"/" +last_chunkx+ r"/q", manifest],  ## Enh: detect vol_shrank
                 [CP.sed, "-E", r"/^0\s/ d; "
@@ -4295,7 +4315,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
         if len(untrusted_buf) != size:
             with open(tmpdir+"/bufdump", "wb") as dump:
                 dump.write(untrusted_buf)
-            print(mfline)
+            print(mfline)    ; rc  = getvol.poll()
             raise BufferError("rc=%s. Got %d bytes, expected %d" % (repr(rc), len(untrusted_buf), size))
 
 
@@ -4349,17 +4369,13 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
             volf_seek(addr)    ; diff_count += diff_compare(buf,False)
             if diff_count and not remap:   break
 
-    try:
-        getvol.wait(timeout=30)
-    except SPr.TimeoutExpired:
-        err_out("Warning: tar process timeout.")
-        rc = 99
-        getvol.kill()
-    else:
-        rc = getvol.poll()
-
-    if rc is not None and rc != 0:
-        raise RuntimeError("Error code from getvol process: "+str(rc))
+    if gv_stdin:   gv_stdin.close()
+    rc = getvol.poll()
+    if rc:
+        err_out("Warn: Helper exited rc="+repr(rc))
+    elif getvol.stdout.read(3) != magic and debug:
+        err_out("Warn: No magic.")
+    getvol.kill()
 
     if ((not sparse and verify_only != 2 and not use_snapshot and not diff) \
     or (diff and remap)) and addr != lchunk_addr:
@@ -4617,8 +4633,8 @@ def ask_input(text):
 
 
 # Exit with simple message
-def x_it(code, text):
-    err_out(text)
+def x_it(code, text=None):
+    if text:   err_out(text)
     sys.exit(code)
 
 
@@ -4656,7 +4672,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8test2"      ; prog_date = "20240522"
+prog_version          = "0.8test3"      ; prog_date = "20240524"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
