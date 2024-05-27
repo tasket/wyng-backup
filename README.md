@@ -518,8 +518,7 @@ than 365 days, and sessions older than 31 days will be thinned-out while preserv
 `--tag=<tagname[,description]>`
 
 With `send`, attach a tag name of your choosing to the new backup session/snapshot; this may be
-repeated on the command line to add multiple tags. Specifying an empty '' tag will cause Wyng
-to ask for one or more tags to be manually input; this also causes `list` to display tag
+repeated on the command line to add multiple tags. Specifying an empty '' or '@' tag will cause Wyng to ask for one or more tags to be manually input; this also causes `list` to display tag
 information when listing sessions.
 
 `--authmin=<minutes>`  

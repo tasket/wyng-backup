@@ -17,6 +17,7 @@
 # 5 - Destination not ready
 # 6 - Archive not found
 # 7 - Local storage not ready
+# 8 - Signal
 
 
 import sys, signal, os, stat, shutil, subprocess as SPr, time, datetime
@@ -638,7 +639,7 @@ class ArchiveSession:
             errs.append("Error: Max "+ArchiveSession.tag_len+" size for tag ID.\n")
         if len(comment.encode("UTF-8")) > ArchiveSet.comment_len:
             errs.append("Error: Max "+ArchiveSet.comment_len+" size for comment.\n")
-        if re.match(".*[,=\^]", tag_id) or any(map(str.isspace, tag_id)) \
+        if re.match(r".*[,=\^]", tag_id) or any(map(str.isspace, tag_id)) \
         or not tag_id.isprintable():
             errs.append("Error: [^control], [space], and ',^=' not allowed in tag ID.\n")
         if not comment.isprintable():
@@ -818,13 +819,15 @@ def upgrade_from_v2(aset):
     dest.run(["".join(moves)], destcd=dest.path, trap=True)
     update_dest(new_aset, pathlist=[new_aset.confname],
                 volumes=new_aset.vols.values(), sessions=sessions)
-    catch_signals(None)    ; print("Done.", end="")
+    catch_signals(**signormal)    ; print("Done.", end="")
 
 
 def agent_helper_write(path):
     agent_program = r'''#  Copyright Christopher Laprise 2018-2024
 #  Licensed under GNU General Public License v3. See wyng-backup/LICENSE file.
-import os, sys, signal
+import os, sys, signal, time
+
+def gettimes():    return time.clock_gettime(time.CLOCK_BOOTTIME), time.monotonic()
 
 def sighandler(s,f):
     if s == ALRM:   raise TimeoutError("SIGALRM")
@@ -849,16 +852,23 @@ SIGINT = signal.SIGINT    ; USR1   = signal.SIGUSR1      ; ALRM   = signal.SIGAL
 for s in (SIGINT,USR1,ALRM):   signal.signal(s, sighandler)   ; signal.siginterrupt(s, True)
 
 signal.alarm(10)    ; do_mkpipe()    ; duration = min(inread(1)[0], 60) * 60
+bstart, mstart = gettimes()
 for slot in range(2):
     KH.keys.append(bytearray(inread(inread(1)[0])))   ; assert inread(3) == magic
 
 while True:
     try:
-        signal.alarm(0)   ; res = signal.sigtimedwait({USR1}, duration)   ; signal.alarm(10)
-        if res is None:   break
+        signal.alarm(0)   ; res = signal.sigtimedwait({USR1}, 60)   ; signal.alarm(10)
+        btime, mtime = gettimes()
+        if res is None and (abs(btime - mtime) > abs(bstart - mstart) + 5
+                            or btime - bstart >= duration):
+            break
+        elif res is None:
+            continue
         with open("/tmp/"+agent_name,"wb") as npipe:
             for key in KH.keys:
                 npipe.write(magic + len(key).to_bytes(1,"big"))   ; npipe.write(key)
+        bstart, mstart = gettimes()
     except TimeoutError:
         print("timeout")    ; do_mkpipe()    ; continue
 '''
@@ -884,7 +894,7 @@ def agent_get(agname, duration):
         result = None    ; os_kill(pid)
     finally:
         if duration == -1:   os_kill(pid)
-        signal.alarm(0)  ; catch_signals(None)
+        signal.alarm(0)  ; catch_signals(**signormal)
         return result
 
 
@@ -2037,7 +2047,7 @@ def get_configs(opts):
     load_children = 1 if opts.action in ("arch-delete","delete","add") else 2
 
     dest_url, local_url = opts.dest, opts.local
-    dest = Destination(dest_url)
+    dest = Destination(dest_url, user_ssh_opts=opts.opt_ssh, user_qubes_opts=opts.opt_qubes)
 
     if True:
         dest.detect_state(opts.dedup)
@@ -2183,11 +2193,15 @@ class Destination:
                          "-o", "ServerAliveInterval=60", "-o", "ConnectTimeout=60",
                          "-o", "Compression=no"]
 
+    qubes_opts  = ["--no-color-stderr", "--no-color-output"]
+
     magic       = b"\xff\x11\x15"
 
-    def __init__(self, dest_url):
+    def __init__(self, dest_url, user_ssh_opts=[], user_qubes_opts=[]):
 
         # parse and validate dest spec
+        self.ssh_opts   = user_ssh_opts or self.ssh_opts
+        self.qubes_opts = user_qubes_opts or self.qubes_opts
         if not dest_url:                 x_it(1,"Error: Missing dest specification.")
         if not dest_url.isprintable():   x_it(1,"Error: [^control] not allowed in dest.")
         dparts      = urlparse(dest_url)    ; self.dtype = dtype = dparts.scheme
@@ -2207,10 +2221,10 @@ class Destination:
 
         self.run_map = {"file":       [CP.sh],
                         "ssh":        [CP.ssh] + self.ssh_opts + ["ssh://"+self.sys],
-                        "qubes":      [CP.qvm_run, "--no-color-stderr", "--no-color-output",
-                                      "--no-filter-escape-chars", "-p", self.sys],
-                        "qubes-ssh":  [CP.qvm_run, "--no-color-stderr", "--no-color-output",
-                                      "--no-filter-escape-chars", "-p", self.sys.split(":")[0]]
+                        "qubes":      [CP.qvm_run] + self.qubes_opts
+                                      + ["-p", self.sys],
+                        "qubes-ssh":  [CP.qvm_run] + self.qubes_opts
+                                      + ["-p", self.sys.split(":")[0]]
                         }
 
 
@@ -2925,7 +2939,7 @@ def get_lvm_deltas(storage, aset, datavols):
         finally:
             storage.metadata_unlock(apool)
 
-    catch_signals(None)
+    catch_signals(**signormal)
     return datavols
 
 
@@ -3011,7 +3025,7 @@ def update_delta_digest_lvm(storage, aset, datavol, monitor_only):
                 if changed else "\r  No changes   ")
 
     if dnewchunks:   vol.changed_bytes_add(dnewchunks*chunksize, save=True)
-    catch_signals(None)
+    catch_signals(**signormal)
     return changed, snap2size, volperms
 
 
@@ -3155,7 +3169,7 @@ def update_delta_digest_reflink(storage, aset, datavol, monitor_only):
                 if changed else "\r  No changes   ")
 
     if dnewblocks:   vol.changed_bytes_add(dnewblocks * bsize, save=True)
-    catch_signals(None)
+    catch_signals(**signormal)
     return changed, snap2size, volperms
 
 
@@ -3445,7 +3459,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
         vol.init_deltamap()
         storage.lvols[vol.name].rotate_snapshots(rotate=True, timestamp_path=vol.mapfile(),
                                                  addtags=["--addtag="+vol.last])
-    catch_signals(None)
+    catch_signals(**signormal)
 
     runtime  = time.monotonic() - testtime
     t_m, t_s = divmod(runtime, 60); t_p = (f"{int(t_m)}m" if t_m else "") + f"{ceil(t_s)}s"
@@ -3592,7 +3606,7 @@ def monitor_send(storage, aset, datavols, monitor_only, use_sesid=None):
 
     # Process session tags
     ses_tags = []
-    if options.tag and options.tag == [""] and not options.unattended and not monitor_only:
+    if options.tag and not monitor_only and (options.tag == [""] or "@" in options.tag):
         print("Enter tag info as 'tagID[, tag description]'. Blank to end input.")
         while ans := ask_input("[%d]: " % (len(ses_tags)+1)).strip():
             tag = ArchiveSession.tag_parse(ans, delim=",")
@@ -3600,8 +3614,9 @@ def monitor_send(storage, aset, datavols, monitor_only, use_sesid=None):
             ses_tags.append(tag)
             if len(ses_tags) == ArchiveSession.max_tags:   break
         print(len(ses_tags), "tags total.")
-    elif options.tag and not monitor_only:
+    if options.tag and not monitor_only:
         for tag_opt in options.tag:
+            if tag_opt in ("", "@"):   continue
             tag = ArchiveSession.tag_parse(tag_opt, delim=",")
             if not tag:   raise ValueError("Invalid tag "+tag_opt)
             ses_tags.append(tag)
@@ -4029,7 +4044,7 @@ def merge_sessions(volume, sources, target, clear_sources=False):
     # Local finalize
     volume.sessions[target].rename_saved(ext=".tmp")
     aset.set_in_process(None, save=False)
-    catch_signals(None)
+    catch_signals(**signormal)
 
     # Check consistency after resuming merge
     if resume and compare_files(aset, volumes=[volume], sessions=[volume.sessions[target]],
@@ -4265,8 +4280,8 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
         if debug:
             print(f"\r{(addr/volsize):.1%}", faddr, ses, end=" ")
         elif verbose:
-            print("".join(("\r", "[", ("=" * ceil((x:=addr/volsize)*20)).ljust(20), "]",
-                  f" {x:.1%}")), end=" ", flush=True)
+            print("".join(("\r[", ("|" * ceil((x:=addr/volsize)*20)).ljust(20,"."),
+                  f"] {x:.1%}")), end=" ", flush=True)
 
         # Process zeros quickly
         if cksum == "0":
@@ -4387,7 +4402,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
         err_out("Last chunk at %d does not match volume %d." % (addr, lchunk_addr))
         return None
 
-    print("OK" if not diff_count else f"Diff bytes: {diff_count}", end="" if verbose else "\n")
+    print(": OK" if not diff_count else f"Diff bytes: {diff_count}", end="" if verbose else "\n")
     if verbose:
         print(f" Data bytes: {bcount}", f"/ {volsize}" if verify_only != 2 else "")
 
@@ -4426,7 +4441,7 @@ def rename_volume(storage, aset, oldname, newname):
     catch_signals()
     update_dest(aset, pathlist=[aset.confname], volumes=[vol], ext=".tmp")
     vol.rename_saved(ext=".tmp")
-    catch_signals(None)
+    catch_signals(**signormal)
     if verbose:   print("Archive volume renamed.")
 
     # move snapshots to new pathname
@@ -4455,7 +4470,7 @@ def add_volume(aset, datavol, desc):
     catch_signals()
     update_dest(aset, pathlist=[aset.confname], volumes=[vol], ext=".tmp")
     vol.rename_saved(ext=".tmp")
-    catch_signals(None)
+    catch_signals(**signormal)
 
     new_lvol = storage.new_vol_entry(datavol, vol.vid)
     for atr in ("snap1","snap2"):
@@ -4496,7 +4511,7 @@ def delete_volume(storage, aset, dv, vid=None):
 
     if dvid:
         aset.dest.run(["rm -rf '%s'" % dvid], destcd=aset.dest.path)
-    catch_signals(None)
+    catch_signals(**signormal)
 
     if storage.online:
         for lvol_name in (storage.lvols[dv].snap1, storage.lvols[dv].snap2):
@@ -4511,6 +4526,7 @@ def show_list(aset, selected_vols):
         try:
             print(json.dumps({"wversion": prog_version, "wdate": prog_date,
               "uuid": aset.uuid, "updated_at": aset.updated_at,
+              "encrypted": bool(aset.mcrypto and aset.datacrypto), "is_auth": bool(aset.mcrypto),
               "pooltype": storage.pooltype, "url": aset.dest.spec,
               "volumes": {v.name: {"vid": v.vid, "desc": v.desc,
                 "sessions": {s.name: {"volsize": s.volsize, "sequence": s.sequence,
@@ -4591,6 +4607,11 @@ def show_list(aset, selected_vols):
                 print()    ; lmonth = month    ; slist = [sname]
 
 
+def ts_to_datetime(ts):
+    raw = datetime.datetime.fromtimestamp(ts, datetime.timezone.utc)
+    return raw.astimezone().isoformat(sep=u" ")
+
+
 def show_mem_stats():
     vsz, rss = map(int, os.popen("ps -up"+str(os.getpid())).readlines()[-1].split()[4:6])
     print("\n  Memory use: Max %dMB" %
@@ -4627,9 +4648,10 @@ def catch_signals(sel=["INT","TERM","QUIT","ABRT","ALRM","TSTP","USR1","USR2"], 
 
 
 def handle_signal(signum, frame):
-    sys.stderr.write(" *** Caught signal "+str(signum))
+    if signum == signal.SIGINT:   x_it(8, "^C")
     if signum == signal.SIGALRM:  raise TimeoutError("SIGALRM")
     if signum not in signals_caught:   signals_caught.append(signum)
+    sys.stderr.write(" *** Caught signal "+str(signum))
 
 
 def ask_input(text):
@@ -4667,7 +4689,7 @@ def cleanup():
         err_out("Cleanup error: "+repr(e))
 
     if error_cache:
-        err_out("Error on volumes: " + ", ".join(error_cache))
+        err_out("Error on volumes: " + ", ".join(sorted(set(error_cache))))
         os._exit(2)
 
 
@@ -4677,7 +4699,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8beta"       ; prog_date = "20240525"
+prog_version          = "0.8beta"       ; prog_date = "20240526"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
@@ -4769,6 +4791,8 @@ parser_defs = [
  [["--upgrade-format"], {"action": "store_true",
                        "help": "Upgrade archive to current spec (arch-check)"}],
  [["--tar-bypass"],   {"action": "store_true", "help": "Bypass tar for file: archives (send)"}],
+ [["--opt-ssh"],      {"action": "append", "default": [], "help": "Override ssh options"}],
+ [["--opt-qubes"],    {"action": "append", "default": [], "help": "Override qvm-run options"}],
  [["--debug"],        {"action": "store_true", "help": "Debug mode"}],
  [["--quiet"],        {"action": "store_true"}],
  [["--verbose"],      {"action": "count", "default": 0}],
@@ -4787,6 +4811,8 @@ if debug:   options.verbose = True; options.quiet = False
 if options.quiet and options.action not in ("list","version"):
     options.unattended = True
     sys.stdout = open(os.devnull, "w")
+signormal = {"sel": ["INT"], "iflag": True} if not debug else {"sel": None}
+catch_signals(**signormal)
 
 print("%s %s release %s" % (prog_name.capitalize(), prog_version, prog_date), flush=True)
 
@@ -4838,7 +4864,6 @@ hash_funcs       = {"hmac-sha256": None,
                     "sha256"     : lambda x: hashlib.sha256(x).digest(),
                     "blake2b"    : lambda x: hashlib.blake2b(x, digest_size=hash_bytes).digest()}
 
-
 # Create ArchiveSet, LocalStorage and Destination objects with get_configs().
 # Passphrase input happens here; no stdin before this point!
 aset        = get_configs(options)    ; dest = aset.dest
@@ -4881,12 +4906,10 @@ if aset.in_process and dest.online  \
             x_it(1, "Error: Local and archive metadata differ.")
 
 # Display archive update time as local time
-arch_dt_raw = datetime.datetime.fromtimestamp(float(aset.updated_at), datetime.timezone.utc)
-arch_dt     = arch_dt_raw.astimezone().isoformat(sep=u" ")
-
+arch_time = ts_to_datetime(float(aset.updated_at))
 print("Encrypted" if (aset.mcrypto and aset.datacrypto) else "Un-encrypted",
       f"archive '{dest.spec}'",
-      "\nLast updated %s (%s)" % (arch_dt[:-6], arch_dt[-6:]), flush=True)
+      "\nLast updated %s (%s)" % (arch_time[:-6], arch_time[-6:]), flush=True)
 
 
 ## Process Volume Selections ##
