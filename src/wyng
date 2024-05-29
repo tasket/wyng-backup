@@ -501,7 +501,7 @@ class ArchiveVolume:
             bmapf.truncate(self.mapsize())    ; bmapf.flush()
         if timestamp:   os.utime(bmfile, ns=(timestamp,)*2)
 
-    def new_session(self, sname, addtags={}):
+    def new_session(self, sname, addtags=[]):
         ns = ArchiveSession(self, sname, None, addtags=addtags)
         ns.path = pjoin(self.path, sname)
         ns.sequence = self.sessions[self.last].sequence + 1 if self.sessions else 0
@@ -584,7 +584,7 @@ class ArchiveSession:
               + sum(map(len, attr_str+attr_int)) + len(attr_str+attr_int)*(max_field+10)
     __slots__ = attr_str + attr_int + attr_misc
 
-    def __init__(self, volume, name, hashval, path="", addtags={}):
+    def __init__(self, volume, name, hashval, path="", addtags=[]):
         self.volume   = volume;    self.archive = arch = volume.archive
         self.name     = name
         self.path     = path
@@ -632,13 +632,10 @@ class ArchiveSession:
                * (self.archive.mhash_sz + len(hex(max_address)) + 10)
 
     def tag_parse(tag, delim=" "):
-        result = tuple()    ; errs = []      ; parts   = tag.strip().split(delim, maxsplit=1)
-        tag_id = parts[0].strip().lower()    ; comment = parts[1].strip() if len(parts)>1 else ""
+        errs = []      ; parts   = tag.strip().split(delim, maxsplit=1)
+        tag_id = parts[0].strip().lower()[:ArchiveSession.tag_len]
+        comment = parts[1].strip() if len(parts)>1 else ""
 
-        if len(tag_id.encode("UTF-8")) > ArchiveSession.tag_len:
-            errs.append("Error: Max "+ArchiveSession.tag_len+" size for tag ID.\n")
-        if len(comment.encode("UTF-8")) > ArchiveSet.comment_len:
-            errs.append("Error: Max "+ArchiveSet.comment_len+" size for comment.\n")
         if re.match(r".*[,=\^]", tag_id) or any(map(str.isspace, tag_id)) \
         or not tag_id.isprintable():
             errs.append("Error: [^control], [space], and ',^=' not allowed in tag ID.\n")
@@ -647,10 +644,7 @@ class ArchiveSession:
         if tag_id == "all":   errs.append("Error: tag 'all' is reserved.\n")
         sys.stderr.write("".join(errs))
 
-        if not errs:
-            result = (tag_id, "" if len(parts) == 1
-                                    else parts[1].strip()[:ArchiveSet.comment_len])
-        return result
+        return tuple() if errs else (tag_id, comment)
 
     def tag_add(self, tag):
         if len(self.tags) >= ArchiveSession.max_tags:
@@ -860,8 +854,8 @@ while True:
     try:
         signal.alarm(0)   ; res = signal.sigtimedwait({USR1}, 60)   ; signal.alarm(10)
         btime, mtime = gettimes()
-        if res is None and (abs(btime - mtime) > abs(bstart - mstart) + 5
-                            or btime - bstart >= duration):
+        if (res is None and btime - bstart >= duration) \
+        or abs(btime - mtime) > abs(bstart - mstart) + 5:
             break
         elif res is None:
             continue
@@ -872,13 +866,13 @@ while True:
     except TimeoutError:
         print("timeout")    ; do_mkpipe()    ; continue
 '''
-    with open(path+"/agent_helper.py", "wb") as progf:
+    with open(f"{path}/{prog_name}_agent.py", "wb") as progf:
         progf.write(bytes(agent_program, encoding="UTF-8"))
 
 
 def agent_get(agname, duration):
     ps = SPr.check_output([CP.ps, "-u"+str(os.getuid()), "-o", "pid,command"], text=True)
-    findp  = [x for x in ps.splitlines() if (agname in x and "agent_helper.py store" in x)]
+    findp  = [x for x in ps.splitlines() if (agname in x and prog_name+"_agent.py store" in x)]
     if not findp:   return None
     pid    = int(findp[0].split()[0])   ;  os_kill(pid, signal.SIGUSR1)
     result = []   ; catch_signals(["ALRM"], iflag=True) ;   signal.alarm(10)
@@ -899,8 +893,8 @@ def agent_get(agname, duration):
 
 
 def agent_make(agname, duration, keys):
-    p = SPr.Popen([CP.python, tmpdir+"/agent_helper.py","store",agname], text=False,
-                          shell=False, stdin=SPr.PIPE, stdout=SPr.DEVNULL, stderr=SPr.DEVNULL)
+    p = SPr.Popen([CP.python, f"{tmpdir}/{prog_name}_agent.py","store",agname], text=False,
+                  shell=False, stdin=SPr.PIPE, stdout=SPr.DEVNULL, stderr=SPr.STDOUT)
     pwrite = p.stdin.write   ; pwrite(min(duration,60).to_bytes(1,"big"))
     for k in keys:   pwrite(len(k).to_bytes(1,"big"))   ; pwrite(k)   ; pwrite(Destination.magic)
     p.poll(); p.stdin.flush(); p.stdin.close()
@@ -3230,6 +3224,8 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
     old_mapfile = vol.mapfile()                 ; addrsplit   = -address_split[1]
     compress = compressors[aset.compression][2] ; compresslevel = int(aset.compr_level)
 
+    if not status1:   print("  [", end="")
+    progress, MB = 0, 2**20
     testtime = time.monotonic()
     def tar_add_pass(*args, **kwargs):   pass
 
@@ -3241,7 +3237,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
         fullmanifest = None
     fman_hash     = fman_fname = ""
 
-    ses = vol.new_session(bksession, addtags=ses_tags)
+    ses = vol.new_session(bksession, addtags=list(ses_tags.items()))
     ses.localtime   = str(vol_ts)
     ses.volsize     = volsize
     ses.permissions = volperms
@@ -3298,7 +3294,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
         vf_seek = vf.seek; vf_read = vf.read   ; BytesIO = io.BytesIO
         gethash = aset.getdatahash             ; b64enc  = base64.urlsafe_b64encode
         b2int   = int.from_bytes               ; islice  = itertools.islice
-        compare_digest = hmac.compare_digest   ; zeros   = bytes(chunksize)     ; MB = 2**20
+        compare_digest = hmac.compare_digest   ; zeros   = bytes(chunksize)
 
         # Feed delta bmap to inner loop in pieces segmented by large zero delimeter.
         # This allows skipping most areas when changes are few.
@@ -3349,6 +3345,9 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
                         percent = int(addr/volsize*1000)
                         print(f"\r{bcount/MB: 7.1f}MB"[:10] + f" | {(percent//10):0d}%"[:7],
                               end="", flush=True)
+                    elif (addr/volsize)*100 > progress:
+                        print("|", end="", flush=True)   ; progress += 5
+
                     counter = 0
 
                 # Compress & write only non-empty chunks
@@ -3466,12 +3465,12 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
     if status1:
         print(f"\r{bcount/MB: 7.1f}MB"[:10] +" |"+ (t_p[:5].center(5) if sent else ""), end="")
     else:
-        print(f"{bcount/MB: 0.1f}MB", end="")
+        print("|"*((100-progress)//5) + "]", f" 100% {bcount/MB: 0.1f}MB ", end="")
     if ddbytes and options.verbose:
-        print(f"\n(reduced {ddbytes/MB:0.1f}MB)")
+        print("\n" if status1 else "", f"(reduced {ddbytes/MB:0.1f}MB)")
     if dedup and debug:   show_mem_stats()
 
-    return stream_started, ses.volsize, bcount, runtime
+    return stream_started, ses.volsize, bcount, ddbytes, runtime
 
 
 # Build deduplication hash index and list
@@ -3605,24 +3604,24 @@ def monitor_send(storage, aset, datavols, monitor_only, use_sesid=None):
         x_it(0, "No new data.")
 
     # Process session tags
-    ses_tags = []
-    if options.tag and not monitor_only and (options.tag == [""] or "@" in options.tag):
-        print("Enter tag info as 'tagID[, tag description]'. Blank to end input.")
-        while ans := ask_input("[%d]: " % (len(ses_tags)+1)).strip():
-            tag = ArchiveSession.tag_parse(ans, delim=",")
-            if not tag:   continue
-            ses_tags.append(tag)
-            if len(ses_tags) == ArchiveSession.max_tags:   break
-        print(len(ses_tags), "tags total.")
+    ses_tags = {}
     if options.tag and not monitor_only:
         for tag_opt in options.tag:
             if tag_opt in ("", "@"):   continue
             tag = ArchiveSession.tag_parse(tag_opt, delim=",")
             if not tag:   raise ValueError("Invalid tag "+tag_opt)
-            ses_tags.append(tag)
+            ses_tags.update((tag,))
+    if options.tag and not monitor_only and (options.tag == [""] or "@" in options.tag):
+        print("Enter tag info as 'tagID[, tag description]'. Blank to end input.")
+        while ans := ask_input("[%d]: " % (len(ses_tags)+1)).strip():
+            tag = ArchiveSession.tag_parse(ans, delim=",")
+            if not tag or tag[0] in ses_tags:   continue
+            ses_tags.update((tag,))
+            if len(ses_tags) == ArchiveSession.max_tags:   break
+        print(len(ses_tags), "tags total.")
 
     if len(incrementals) > 0:
-        if status1:   print("Acquiring deltas.", end="", flush=True)
+        print("Acquiring deltas.", end="", flush=True)
         incrementals = storage.acquire_deltas(storage, aset, incrementals)
         print("", flush=True)
 
@@ -3635,14 +3634,13 @@ def monitor_send(storage, aset, datavols, monitor_only, use_sesid=None):
 
         print(f"\nSending backup session {curtime}:", flush=True)
         hl = "—" * (min(max([len(aset.vols[v].name) for v in incrementals+send_alls]+[22]), 60)+20)
-        if status1:   print(hl)
+        print(hl)
 
     totalvsize = totalbcount = 0
     for datavol in list(other_vols.keys()) + sorted(incrementals + send_alls + unchanged_vols):
         vol = aset.vols[datavol]    ; updated = sent = False    ; svsize = sbcount = stime = 0
-        print(f"Volume '{datavol}': " if not status1 else
-              f"          |     | {datavol}",
-              flush=True, end="\r" if status1 else "")
+        print(f"Volume '{datavol}'\n" if not status1 else
+              f"          |     | {datavol}\r", flush=True, end="")
 
         if datavol in incrementals:
             updated, svsize, vperms = storage.process_deltas(storage, aset, datavol, monitor_only)
@@ -3665,7 +3663,7 @@ def monitor_send(storage, aset, datavols, monitor_only, use_sesid=None):
                     error_cache.append(datavol)
                     continue
 
-            sent, svsize, sbcount, stime = \
+            sent, svsize, sbcount, ddbytes, stime = \
                 send_volume(storage, vol, curtime, ses_tags, send_all=datavol in send_alls)
             dest.free -= int(sbcount + (sbcount * 0.05))
 
@@ -3674,11 +3672,11 @@ def monitor_send(storage, aset, datavols, monitor_only, use_sesid=None):
             svsize = vol.volsize()
 
         p1, p2 = ("\r", " |  -" if not sent else "") if status1 else ("", "")
-        print(p1 if sent else p1+"no change"+p2, flush=True)
+        print(p1 if sbcount or ddbytes else p1+"no change"+p2, flush=True)
         totalvsize += svsize    ; totalbcount += sbcount
 
     if not monitor_only and (volct:= sum(map(len,(incrementals,send_alls,unchanged_vols,other_vols)))):
-        print(hl+"\n" if status1 else "", "%0d volumes, %0d——>%0d MB in %.1f seconds."
+        print(hl, "\n%0d volumes, %0d——>%0d MB in %.1f seconds."
               % (volct, totalvsize/MB, totalbcount/MB, time.monotonic() - ms_start)
               )
 
@@ -4024,9 +4022,10 @@ def merge_sessions(volume, sources, target, clear_sources=False):
     retcode = do_exec([cmds, dest.run_args([dest_cmds + " && python3 "
                             + dest.dtmp+"/dest_helper.py merge "+merge_target
                             + (" --resume" if resume else "")+(" --sync" if aset.opts.maxsync else "")
-                            ], destcd=dest.path)
-                        ], cwd=volume.path, check=False, out=tmpdir+"/merge.log"
-                      )
+                            ], destcd=dest.path),
+                       [CP.cat, "-v"], [CP.tail, "--bytes=2000"]
+                      ], cwd=volume.path, check=False, out=tmpdir+"/merge.log"
+                     )
 
     if retcode == 50:
         # Initialization didn't complete, so reload aset and abort
@@ -4079,7 +4078,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
 
     dest        = (aset := vol.archive).dest      ; options      = aset.opts
     attended    = not options.unattended          ; debug, remap = options.debug, False
-    verbose     = (options.verbose or attended) and verify_only != 2
+    verbose     = (options.verbose or attended) and verify_only != 2    ; MB = 2**20
     sparse      = options.sparse                  ; sparse_write = options.sparse_write or sparse
     chunksize   = aset.chunksize                  ; use_snapshot = False
     sessions    = vol.sesnames                    ; zeros        = bytes(chunksize)
@@ -4148,7 +4147,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
             save_type = "tlvm pool" if storage.pooltype=="tlvm" else "file"
             l_vol = save_storage.new_vol_entry(vol.alias, vol.vid)    ; save_path = l_vol.path
 
-        if exists(save_path) and attended:
+        if exists(save_path) and attended and not options.force:
             print("\n!! This will", "overwrite" if sparse_write else "erase all",
                 "existing data in",save_path,"!!")
             ans = ask_input("   Are you sure? [y/N]: ")
@@ -4216,7 +4215,8 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
 
     if verify_only != 2:
         print("\nReceiving" if save_path else "\nVerifying", f"volume '{vol.name}'",select_ses[2:])
-    if save_path:    print("Saving to %s '%s'" % (save_type, save_path))
+        if save_path:    print("Saving to %s '%s'" % (save_type, save_path))
+        if not verbose:   print("[", end="")
 
     # Collect session manifests
     diff_ses = []
@@ -4272,7 +4272,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
     gv_stdin = io.TextIOWrapper(getvol.stdin, encoding="utf-8") if sparse else None
 
     # Open manifest then receive, check and save data
-    addr = -1    ; bcount = diff_count = 0    ; buf = b''    ; magic = dest.magic
+    addr = -1    ; bcount = diff_count = progress = 0    ; buf = b''    ; magic = dest.magic
     for mfline in open(manifest, "r") if volsize else []:
         if lchunk_addr <= addr >= 0:   break
         cksum, faddr, ses = mfline.split()    ; addr = int(faddr[1:], 16)
@@ -4282,6 +4282,9 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
         elif verbose:
             print("".join(("\r[", ("|" * ceil((x:=addr/volsize)*20)).ljust(20,"."),
                   f"] {x:.1%}")), end=" ", flush=True)
+        elif (addr/volsize)*100 > progress and verify_only != 2:
+            print("|", end="", flush=True)   ; progress += 5
+
 
         # Process zeros quickly
         if cksum == "0":
@@ -4402,7 +4405,9 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
         err_out("Last chunk at %d does not match volume %d." % (addr, lchunk_addr))
         return None
 
-    print(": OK" if not diff_count else f"Diff bytes: {diff_count}", end="" if verbose else "\n")
+    if verbose:   print("\r[" + "|"*20, end="")
+    print("] 100%", ": OK" if not diff_count else f"Diff bytes: {diff_count}",
+          end="" if verbose else "\n")
     if verbose:
         print(f" Data bytes: {bcount}", f"/ {volsize}" if verify_only != 2 else "")
 
@@ -4412,13 +4417,13 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
             save_storage.setperms(save_path, ses_obj.permissions)
             if is_num(ses_obj.localtime):   save_storage.settime(save_path, int(ses_obj.localtime))
         if returned_home and select_ses == sessions[-1]:
+            if debug:   print(f"Pairing snapshot.")
             vol.init_deltamap()
             tags = ["--addtag=wyng", "--addtag=arch-"+aset.uuid, "--addtag="+sessions[-1]]
             save_storage.lvols[l_vol.snap2].delete()
             save_storage.lvols[l_vol.snap2].create(snapshotfrom=vol.alias, addtags=tags)
             l_vol = l_vol.update()    ; save_storage.lvols[l_vol.snap2].update()
             l_vol.rotate_snapshots(timestamp_path=vol.mapfile())
-            if verbose:   print(f"Snapshot paired for '{vol.alias}'.")
     if remap:
         bmapf.close()
         if diff_count > 0 and options.action != "send":
@@ -4648,7 +4653,7 @@ def catch_signals(sel=["INT","TERM","QUIT","ABRT","ALRM","TSTP","USR1","USR2"], 
 
 
 def handle_signal(signum, frame):
-    if signum == signal.SIGINT:   x_it(8, "^C")
+    if signum == signal.SIGINT:   x_it(8)
     if signum == signal.SIGALRM:  raise TimeoutError("SIGALRM")
     if signum not in signals_caught:   signals_caught.append(signum)
     sys.stderr.write(" *** Caught signal "+str(signum))
@@ -4699,7 +4704,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8beta"       ; prog_date = "20240526"
+prog_version          = "0.8beta"       ; prog_date = "20240527"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
