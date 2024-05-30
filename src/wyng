@@ -610,8 +610,8 @@ class ArchiveSession:
             if arch.mcrypto:   buf = arch.mcrypto.decrypt(buf)
             if debug:   print(self.volume.vid, self.name); print(arch.decompress(buf).decode("UTF-8"))
             if not hmac.compare_digest(hashval, arch.b64hash(buf)):
-                raise ValueError("Session %s hash %s, expected %s" \
-                                 % (name, arch.b64hash(buf), hashval))
+                raise ValueError("%s Session %s hash %s, expected %s" \
+                                 % (volume.vid, name, arch.b64hash(buf), hashval))
             with io.StringIO(arch.decompress(buf).decode("UTF-8")) as sf:
                 for ln in sf:
                     vname, value = map(str.strip, ln.split("=", maxsplit=1))
@@ -670,12 +670,14 @@ class ArchiveSession:
             return int(time.mktime(time.strptime(self.localtime, "%Y%m%d-%H%M%S"))*1000000000)
 
     def save_info(self, ext=""):
-        assert self.path   ; etag = b''   ; fname = "info"   ; arch = self.volume.archive
+        assert self.path   ; saved_files = []
+        etag = b''   ; fname = "info"   ; arch = self.volume.archive
+
         if os.path.getsize(self.path+"/manifest"+ext) == 0:
             self.manifesthash = "0"
         else:
-            self.manifesthash = arch.encode_file(self.path+"/manifest"+ext,
-                                                fdest=self.path+"/manifest.z"+ext)
+            saved_files.append(mfz := "manifest.z"+ext)
+            self.manifesthash = arch.encode_file(self.path+"/manifest"+ext, fdest=self.path+"/"+mfz)
         with io.StringIO() as f:
             for attr in self.attr_str+self.attr_int:
                 print(attr, "=", field := getattr(self, attr), file=f)
@@ -690,8 +692,9 @@ class ArchiveSession:
         if arch.mcrypto:   etag, buf = arch.mcrypto.encrypt(buf)
         with open(pjoin(self.path,fname+ext), "wb") as f:
             f.write(etag)  ; f.write(buf)
-        self.saved = self.loaded = True
+        saved_files.append(fname+ext)    ; self.saved = self.loaded = True
         self.volume.save_volinfo(ext)
+        return saved_files
 
     def rename_saved(self, ext=".tmp"):
         assert ext and exists(pjoin(self.path,"info")+ext)
@@ -1891,7 +1894,7 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
     if storage.path and exists(storage.path):
         remove_local_snapshots(storage, aset)
 
-    vol_list = vol_list or sorted(aset.vols.keys())
+    vol_list = vol_list or sorted(set(aset.vols.keys()) - set(options.volex))
     vol_dirs = {x.name for x in os.scandir(aset.path) \
                        if x.is_dir() and x.name.startswith("Vol_")}
 
@@ -2421,7 +2424,7 @@ def helper_merge():
         else:
             print("Merge: Initialization.")
             replace("archive.ini", "../archive.ini")
-            for f in (target+"/info", target+"/manifest.z", "volinfo", "archive.ini"):
+            for f in (target+"/info", "volinfo", "archive.ini"):
                 if not exists(f+".tmp"):  raise FileNotFoundError(f)
             for ex in ("","-init"):  shutil.rmtree("merge"+ex, ignore_errors=True)
             os.makedirs("merge-init")   ; replace(merge_target, "merge-init/"+merge_target)
@@ -2432,7 +2435,7 @@ def helper_merge():
             for i in os.scandir("merge-init"):
                 if i.is_dir() and i.name.startswith("S_"):   replace(i.path, i.name)
         elif not exists("merge"):
-            for f in (target+"/info.tmp", target+"/manifest.tmp", "volinfo.tmp", "merge.lst.gz"):
+            for f in (target+"/info.tmp", target+"/manifest.z.tmp", "volinfo.tmp", "merge.lst.gz"):
                 if exists(f):   os.remove(f)
         fssync(".")    ; print(err)    ; sys.exit(50)
     try:
@@ -2458,15 +2461,17 @@ def helper_merge_finalize():
     try:
         print("Merge: Finalize target")
         m = "merge/"    ; open(m+"CHECK-start-finalize","w").close()
-        for f in ("/info", "/manifest.z"):
-            if not resume or exists(m+target+f+".tmp"): replace(m+target+f+".tmp", m+merge_target+f)
+        if not resume or exists(m+target+"/info.tmp"):
+            replace(m+target+"/info.tmp", m+merge_target+"/info")
+        if exists(m+target+"/manifest.z.tmp"):
+            replace(m+target+"/manifest.z.tmp", m+merge_target+"/manifest.z")
         if not resume or not exists(target):         replace(m+merge_target, target)
         if not resume or exists("volinfo.tmp"):      replace("volinfo.tmp", "volinfo")
         if not resume or exists("archive.ini.tmp"):  replace("archive.ini.tmp", "../archive.ini")
         if not exists(target):   raise FileNotFoundError(target)
         fssync(".")
     except Exception as err:
-        print(err)    ; sys.exit(70)
+        x_it(70, repr(err))
     shutil.rmtree("merge", ignore_errors=True)    ; remove("merge.lst.gz")
     print("wyng_check_free", shutil.disk_usage(".").free, flush=True)
 
@@ -2522,7 +2527,7 @@ elif cmd == "dedup":
     print(ddcount, "bytes reduced.")
     print("wyng_check_free", shutil.disk_usage(".").free, flush=True)
 
-sys.stderr.write("--+--\n")
+sys.stderr.write("--==--\n")
 '''
         with open(path+"/dest_helper.py", "wb") as progf:
             progf.write(bytes(dest_program, encoding="UTF-8"))
@@ -3412,9 +3417,8 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
     if (sent := stream_started) and not benchmark:
         # Save session info
         if crypto:   aset.datacrypto.save_counter()
-        ses.save_info(ext=".tmp")
-        for f in ("manifest.z","info"):
-            if exists((fpath := sdir+"-tmp/"+f)+".tmp"):   tarf_add(fpath+".tmp", arcname=fpath)
+        for fpath in (sdir+"-tmp/"+x for x in ses.save_info(ext=".tmp")):
+            tarf_add(fpath, arcname=fpath[:-4])
         tarf_add(vol.vid+"/volinfo.tmp")   ; tarf_add(aset.confname+".tmp")
 
         tarf.close()    ; untar.stdin.close()
@@ -3615,7 +3619,7 @@ def monitor_send(storage, aset, datavols, monitor_only, use_sesid=None):
         print("Enter tag info as 'tagID[, tag description]'. Blank to end input.")
         while ans := ask_input("[%d]: " % (len(ses_tags)+1)).strip():
             tag = ArchiveSession.tag_parse(ans, delim=",")
-            if not tag or tag[0] in ses_tags:   continue
+            if not tag or tag[0] in ses_tags:   print("(not added)"); continue
             ses_tags.update((tag,))
             if len(ses_tags) == ArchiveSession.max_tags:   break
         print(len(ses_tags), "tags total.")
@@ -4012,9 +4016,9 @@ def merge_sessions(volume, sources, target, clear_sources=False):
     cmds = []    ; dest_cmds = "cd " + volume.vid
     if not resume:
         aset.set_in_process(None, tmp=True, todest=False)
-        volume.sessions[target].save_info(".tmp")
-        cmds += [CP.tar, "-cf", "-", "../archive.ini", "../archive.ini.tmp", "merge.lst.gz",
-                            target+"/manifest.z.tmp", target+"/info.tmp", "volinfo.tmp"]
+        sesfiles = volume.sessions[target].save_info(".tmp")
+        cmds += [CP.tar, "-cf", "-"] + [target+"/"+x for x in sesfiles] + ["../archive.ini",
+                 "../archive.ini.tmp", "volinfo.tmp", "merge.lst.gz"]
         dest_cmds += " && tar -o -xf -"
 
     # Start merge operation on dest
@@ -4406,7 +4410,8 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
         return None
 
     if verbose:   print("\r[" + "|"*20, end="")
-    print("] 100%", ": OK" if not diff_count else f"Diff bytes: {diff_count}",
+    print("] 100%" if verify_only != 2 else "",
+          ": OK" if not diff_count else f"Diff bytes: {diff_count}",
           end="" if verbose else "\n")
     if verbose:
         print(f" Data bytes: {bcount}", f"/ {volsize}" if verify_only != 2 else "")
@@ -4568,9 +4573,10 @@ def show_list(aset, selected_vols):
         print("\nNo volumes.")    ; return
     elif not selected_vols and not len(options.volumes):
         print("\nVolumes:")
-        maxwidth = max(len(x.name) for x in aset.vols.values())
+        maxwidth = max(len(x.name) for x in aset.vols.values())    ; session = options.session
         fmt    = "%7.2f GB  %s  %-" + str(maxwidth+2) + "s  %s (%3d)"
-        for vname in sorted(x.name for x in aset.vols.values()):
+        for vname in sorted(x.name for x in aset.vols.values()
+                            if not session or "S_"+session in x.sesnames):
             vol = aset.vols[vname]   ; sname = vol.sesnames[-1][2:] if len(vol.sesnames) else " "
             if options.verbose:
                 print(fmt % ((vol.volsize() / 1024**3), vol.vid, vname, sname, len(vol.sessions)))
@@ -4704,7 +4710,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8beta"       ; prog_date = "20240527"
+prog_version          = "0.8 beta"      ; prog_date = "20240528"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
