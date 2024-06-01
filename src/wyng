@@ -1235,7 +1235,7 @@ class LocalStorage:
     def __init__(self, localpath, auuid=None, arch_vols={}, clean=False, sync=False,
                  require_online=False):
 
-        self.stypes  = { "tlvm":  LvmVolume,   "rlnk": ReflinkVolume }
+        self.stypes  = { "tlvm":  LvmVolume, "rlnk": ReflinkVolume }
         self.rltypes = { "btrfs", "xfs" }
 
         assert len(auuid) > 8
@@ -1287,7 +1287,7 @@ class LocalStorage:
         if require_online and not self.online:
             err_out("Local storage is offline: "+repr(localpath)+ol_reason)
 
-        if self.online:  #Fix: make conditional on send/monitor/receive
+        if self.online and self.pooltype in ("tlvm","rlnk"):
             self.LVolClass    = self.stypes[self.pooltype]
             self.path = self.path.rstrip("/")+"/"
             self.update_vol_list(arch_vols)
@@ -1363,7 +1363,8 @@ class LocalStorage:
             elif self.fstype == "xfs":
                 pass # possibly file-lock and chmod -r rlnk snapshots
         else:
-            raise ValueError(self.pooltype+" no metadata.")
+            raise ValueError(f"'{self.pooltype}' pooltype, no metadata.")
+
         self.locked = True
         return mark, spath
 
@@ -1378,7 +1379,7 @@ class LocalStorage:
             if self.fstype == "btrfs":
                 mark_t = self._btrfs_subvol_snapshot(delete=True)
         else:
-            raise ValueError(self.pooltype+" no metadata.")
+            if debug:   print(f"'{self.pooltype}' pooltype, no metadata.")
 
         self.locked = False
         return mark_t
@@ -4720,7 +4721,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20240530"
+prog_version          = "0.8 beta"      ; prog_date = "20240531"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
