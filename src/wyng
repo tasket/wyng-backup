@@ -1243,7 +1243,8 @@ class LocalStorage:
         self.clean     = clean       ; self.sync    = sync       ; self.arch_vols = arch_vols
         self.lvols, self.vgs_all = {}, {}
         self.users, self.groups  = {}, {}
-        self.path = self.pooltype = self.fstype = self.lvpool = None; self.online = False
+        self.path = self.pooltype = self.fstype = self.lvpool = None
+        self.online = self.can_snapshot = False
 
         loctype, locvol, locpool, pathxvg = LocalStorage.parse_local_path(localpath)
         ol_reason = ""
@@ -1253,30 +1254,28 @@ class LocalStorage:
 
         elif loctype in ("lvm volgroup", "tlvm pool"):
             self.pooltype       = "tlvm"          ; self.path    = "/dev/"+pathxvg+"/"
-            self.block_size     = 512             ; self.online  = exists(self.path)
+            self.block_size     = 512
             self.vgname         = pathxvg         ; self.lvpool  = locpool
+            self.online  = self.can_snapshot = exists(self.path)
 
             self.acquire_deltas = get_lvm_deltas
             self.process_deltas = update_delta_digest_lvm
             self.prep_snapshots = prepare_snapshots_lvm
 
         elif loctype == "file" and exists(pathxvg):
-            self.pooltype       = "rlnk"          ; self.path    = pathxvg
-            self.block_size     = 4096
+            self.path       = pathxvg     ; self.online, self.can_snapshot = True, False
+            self.fstype     = fs = LocalStorage.get_fs_type(self.path)
+            self.pooltype   = "rlnk" if fs in self.rltypes else "file"
 
-            if exists(self.path):
-                if (fs := LocalStorage.get_fs_type(self.path)) in self.rltypes:   self.fstype = fs
-                if fs == "btrfs":
-                    if os.stat(self.path).st_ino == 256:
-                        self.snappath = self.path+"wyng_snapshot_tmp/"   ; self.online = True
-                    else:
-                        ol_reason = " is not a subvolume."
-                elif fs == "xfs":
-                    self.snappath = ""   ; self.online = True
-                #self.snappath = self.path+("wyng_snapshot_tmp/" if fs == "btrfs" else "")
-                #self.online = fs == "xfs" or (fs == "btrfs" and os.stat(self.path).st_ino == 256)
+            if fs == "btrfs":
+                if os.stat(self.path).st_ino == 256:
+                    self.snappath = self.path+"wyng_snapshot_tmp/"   ; self.can_snapshot = True
+                self.block_size = 4096
+            elif fs == "xfs":
+                self.snappath = ""   ; self.can_snapshot = True    ; self.block_size = 4096
 
-            self.acquire_deltas = get_reflink_deltas
+            if self.can_snapshot:
+                self.acquire_deltas = get_reflink_deltas
             self.process_deltas = update_delta_digest_reflink
             self.prep_snapshots = prepare_snapshots_reflink
 
@@ -1363,6 +1362,8 @@ class LocalStorage:
                 mark, spath = self._btrfs_subvol_snapshot()
             elif self.fstype == "xfs":
                 pass # possibly file-lock and chmod -r rlnk snapshots
+        else:
+            raise ValueError(self.pooltype+" no metadata.")
         self.locked = True
         return mark, spath
 
@@ -1376,6 +1377,8 @@ class LocalStorage:
         elif self.pooltype == "rlnk":
             if self.fstype == "btrfs":
                 mark_t = self._btrfs_subvol_snapshot(delete=True)
+        else:
+            raise ValueError(self.pooltype+" no metadata.")
 
         self.locked = False
         return mark_t
@@ -1396,6 +1399,8 @@ class LocalStorage:
             # maybe also check kernel version and xfs reflink support...
 
     def _btrfs_subvol_snapshot(self, delete=False):
+        if delete and not self.can_snapshot:   return None, None
+
         svpath = self.path    ; dest = self.snappath    ; gen = 0
 
         if exists(dest):
@@ -1593,6 +1598,7 @@ class ReflinkVolume(LocalVolume):
         if self.exists():   os.remove(self.path)
 
     def create(self, size=None, snapshotfrom=None, ro=True, addtags=[]):
+        assert self.storage.online and self.storage.fstype in self.storage.rltypes
         if self.exists():   raise ValueError(f"Volume {self.name} already exists.")
 
         subdir, fname  = os.path.split(self.name)
@@ -3583,8 +3589,10 @@ def monitor_send(storage, aset, datavols, monitor_only, use_sesid=None):
         for vol in aset.vols.values():   autoprune(vol, apmode="full")
 
     storage.check_support()
-    if not storage.online:
-        err_out("\nOffline volumes: " + ", ".join(datavols))
+    if not storage.can_snapshot:
+        reason = "Local not a subvolume or no snapshot feature."
+        if not storage.online:   reason = "Local path not found."
+        err_out(f"\nError: {reason}\nOffline volumes: " + ", ".join(datavols))
         error_cache.extend(datavols)
         return curtime
 
@@ -4159,7 +4167,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
                 return None
 
         # possibly use snapshot as baseline for receive
-        if returned_home and options.use_snapshot \
+        if returned_home and options.use_snapshot and save_storage.pooltype in ("rlnk","tlvm") \
         and (snap_lv := save_storage.lvols[l_vol.snap1]).is_paired(vol.mapfile(), vol.last):
             print("Using snapshot as baseline.")   ; assert l_vol.path == save_path
             sparse_write = use_snapshot = True    ; sparse = False
@@ -4190,6 +4198,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
         else:
             save_type = "file"   ; punch_hole = save_storage.file_punch_hole
             if not exists(save_path) or not sparse_write:
+                os.makedirs(os.path.dirname(save_path), exist_ok=True)
                 open(save_path, "wb").close()    ; sparse_write = sparse = False
 
             volf = open(save_path, "r+b")    ; volf.truncate(volsize)
@@ -4421,7 +4430,8 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
         if save_storage:
             save_storage.setperms(save_path, ses_obj.permissions)
             if is_num(ses_obj.localtime):   save_storage.settime(save_path, int(ses_obj.localtime))
-        if returned_home and select_ses == sessions[-1]:
+        if returned_home and save_storage.pooltype in ("rlnk","tlvm") \
+        and select_ses == sessions[-1]:
             if debug:   print(f"Pairing snapshot.")
             vol.init_deltamap()
             tags = ["--addtag=wyng", "--addtag=arch-"+aset.uuid, "--addtag="+sessions[-1]]
@@ -4710,7 +4720,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20240528"
+prog_version          = "0.8 beta"      ; prog_date = "20240530"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
@@ -4930,7 +4940,7 @@ datavols      = sorted(set(aset.vols.keys()) - exclude_vols) if options.all else
 selected_vols = sorted(set(options.volumes[:] + datavols))
 for vol in selected_vols[:]:
     if vol not in aset.vols and options.action not in {"add","rename","send"}:
-        print(f"Volume '{vol}' not configured; Skipping.")
+        print(f"Volume '{vol}' not found; Skipping.")
         selected_vols.remove(vol)
 
 
