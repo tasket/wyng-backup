@@ -1201,7 +1201,7 @@ class DataCryptography:
 # Define absolute paths of commands
 
 class CP:
-    awk    = "/usr/bin/awk"     ; sed   = "/usr/bin/sed"     ; sort     = "/usr/bin/sort"
+    awk    = "/usr/bin/gawk"    ; sed   = "/usr/bin/sed"     ; sort     = "/usr/bin/sort"
     cat    = "/usr/bin/cat"     ; mkdir = "/usr/bin/mkdir"   ; python   = "/usr/bin/python3"
     mv     = "/usr/bin/mv"      ; grep  = "/usr/bin/grep"    ; ssh      = "/usr/bin/ssh"
     sh     = "/usr/bin/sh"      ; tar   = "/usr/bin/tar"     ; tail     = "/usr/bin/tail"
@@ -1235,7 +1235,7 @@ class LocalStorage:
     def __init__(self, localpath, auuid=None, arch_vols={}, clean=False, sync=False,
                  require_online=False):
 
-        self.stypes  = { "tlvm":  LvmVolume, "rlnk": ReflinkVolume }
+        self.stypes  = { "tlvm":  LvmVolume, "rlnk": ReflinkVolume, "file": FileVolume }
         self.rltypes = { "btrfs", "xfs" }
 
         assert len(auuid) > 8
@@ -1287,11 +1287,11 @@ class LocalStorage:
         if require_online and not self.online:
             err_out("Local storage is offline: "+repr(localpath)+ol_reason)
 
-        if self.online and self.pooltype in ("tlvm","rlnk"):
+        if self.online:
             self.LVolClass    = self.stypes[self.pooltype]
             self.path = self.path.rstrip("/")+"/"
-            self.update_vol_list(arch_vols)
             self.metadata_unlock()
+            self.update_vol_list(arch_vols)
 
         if debug:
             print("**fstype is", self.fstype)
@@ -1569,6 +1569,12 @@ class LocalVolume:
             return "Non-printable characters not allowed in volume names."
         if any([x in (".","..") for x in path.strip().split("/")]):
             return "Bad volume name."
+
+
+class FileVolume(LocalVolume):
+
+    def __init__(self, storage, name, vid=None, parent=None):
+        super()._my_init(storage, name, vid, parent=parent)
 
 
 class ReflinkVolume(LocalVolume):
@@ -2316,7 +2322,7 @@ class Destination:
                 +r"  && cat >$tdir/dest_helper.py"
 
                 # check free space and archive.ini status on remote
-                +r"  && echo -n 'wyng_check_free ' && stat -f -c '%a %S' ."
+                +r"  && echo -n 'wyng_check_free ' && df -P . | tail -1"
                 +r"  && echo -n 'wyng_archive_ini '"
                 +r"  && { if [ -e archive.ini ]; then sha256sum archive.ini; else echo none; fi }"
 
@@ -2339,7 +2345,7 @@ class Destination:
                 if ln.startswith("wyng_archive_ini"):
                     self.archive_ini_hash = ln.split()[1]
                 elif ln.startswith("wyng_check_free"):
-                    parts = ln.split()    ; self.free = int(parts[1]) * int(parts[2])
+                    parts = ln.split()    ; self.free = int(parts[4]) * 1024
                 elif ln.startswith("wyng_writable"):
                     self.writable = True
                 elif ln.startswith(tmpprefix):
@@ -2406,7 +2412,7 @@ def helper_send(volid=None, ses=None):
 
 def helper_receive(lstf):
     stdout_write = sys.stdout.buffer.write   ; exists = os.path.exists   ; getsize= os.path.getsize
-    stdout_flush = sys.stdout.buffer.flush   ; magicm = magic
+    stdout_flush = sys.stdout.buffer.flush   ; magicm = magic            ; fname, fsize= "(none)",0
     for line in lstf:
         fname = line.strip()
         if not fname:   break
@@ -2418,7 +2424,7 @@ def helper_receive(lstf):
             with open(fname,"rb") as dataf:   fdata = dataf.read(fsize)
             if len(fdata) != fsize:   x_it(20, f"Size mismatch: {len(fdata)} vs {fsize}")
             stdout_write(fdata); stdout_flush()
-    stdout_write(magicm); stdout_write(b'\xFF'*128); stdout_flush(); time.sleep(2)
+    stdout_write(magicm); stdout_write(b'\xFF'*128); stdout_flush(); time.sleep(0.2)
     sys.stdout.close()
     sys.stderr.write(f"Last item: {fname} {fsize}\n")
 
@@ -4160,13 +4166,6 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
             save_type = "tlvm pool" if storage.pooltype=="tlvm" else "file"
             l_vol = save_storage.new_vol_entry(vol.alias, vol.vid)    ; save_path = l_vol.path
 
-        if exists(save_path) and attended and not options.force:
-            print("\n!! This will", "overwrite" if sparse_write else "erase all",
-                "existing data in",save_path,"!!")
-            ans = ask_input("   Are you sure? [y/N]: ")
-            if ans.lower() not in {"y","yes"}:
-                return None
-
         # possibly use snapshot as baseline for receive
         if returned_home and options.use_snapshot and save_storage.pooltype in ("rlnk","tlvm") \
         and (snap_lv := save_storage.lvols[l_vol.snap1]).is_paired(vol.mapfile(), vol.last):
@@ -4278,10 +4277,9 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
     # Create retriever process using py program
     cmd = dest.run_args(
             ["cd " + vol.vid
-             +" && exec 2>>"+dest.dtmp+"/receive.log"
              +" && python3 "+dest.dtmp+"/dest_helper.py receive"
             ], destcd=dest.path)
-    getvol   = SPr.Popen(cmd, stdout=SPr.PIPE,
+    getvol   = SPr.Popen(cmd, stdout=SPr.PIPE, stderr=open(tmpdir+"/receive.log","w"),
                                      stdin =SPr.PIPE if sparse else SPr.DEVNULL)
     gv_stdin = io.TextIOWrapper(getvol.stdin, encoding="utf-8") if sparse else None
 
@@ -4408,7 +4406,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
     if debug:   print("\nEND receive stream.")
     if gv_stdin:   gv_stdin.close()
     rc = getvol.poll()
-    if rc:
+    if rc and debug:
         err_out("Warn: Helper exited rc="+repr(rc))
     elif getvol.stdout.read(3) != magic and debug:
         err_out("Warn: No magic.")
@@ -4721,7 +4719,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20240531"
+prog_version          = "0.8 beta"      ; prog_date = "20240601"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
@@ -4737,12 +4735,13 @@ if sys.hexversion < 0x3080000:
 # Allow only one instance at a time
 lockpath = "/var/lock/"+prog_name
 try:
+    os.makedirs(os.path.dirname(lockpath), exist_ok=True)
     lockf = open(lockpath, "w")
     fcntl.lockf(lockf, fcntl.LOCK_EX|fcntl.LOCK_NB)
 except PermissionError:
-    x_it(1, "ERROR: No writing permission on %s.  Run %s as root." % (lockpath,prog_name))
+    x_it(1, "ERROR: No writing permission on %s.  Please run %s as root." % (lockpath,prog_name))
 except IOError:
-    x_it(1, "ERROR: "+prog_name+" is already running.")
+    x_it(1, "I/O ERROR obtaining lock on "+lockpath)
 
 cpu_flags = [x for x in open("/proc/cpuinfo") if x.startswith("flags")] [0].split()[1:]
 
@@ -4978,10 +4977,16 @@ elif options.action == "prune":
 
 
 elif options.action == "receive":
+
     if len(selected_vols) != 1 and options.save_to:
         x_it(1, "Specify one volume for receive --save-to.")
     if options.session and len(options.session.split(",")) > 1:
         x_it(1, "Specify only one session for receive.")
+
+    if not options.unattended and not options.force:
+        print("\nWarning:  Receiving to existing volumes will overwrite them!")
+        ans = ask_input("Are you sure? [y/N]: ")
+        if ans.lower() not in {"y","yes"}:   x_it(1)
 
     for storage, vols in storagesets.items():
         dvlist = vols or selected_vols
