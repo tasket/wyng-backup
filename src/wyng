@@ -1228,9 +1228,12 @@ class LocalStorage:
     FALLOC_FL_INSERT_RANGE   = 0x20             ; FALLOC_FL_UNSHARE_RANGE = 0x40
     FALLOC_FL_PUNCH_FULL     = FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE
 
-    fallocate = ctypes.CDLL(ctypes.util.find_library("c")).fallocate
-    fallocate.restype = ctypes.c_int
-    fallocate.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int64, ctypes.c_int64]
+    try:
+        fallocate = ctypes.CDLL(ctypes.util.find_library("c")).fallocate
+        fallocate.restype = ctypes.c_int
+        fallocate.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int64, ctypes.c_int64]
+    except:
+        fallocate = None    ; print("fallocate() function not available.")
 
     def __init__(self, localpath, auuid=None, arch_vols={}, clean=False, sync=False,
                  require_online=False):
@@ -1305,13 +1308,18 @@ class LocalStorage:
 
     # Note: file_punch_hole() and block_discard_chunk() have the same arg signature...
     def file_punch_hole(self, fn, start, length):
-        return self.fallocate(fn, self.FALLOC_FL_PUNCH_FULL, start, length)
+        if self.fallocate(fn, self.FALLOC_FL_PUNCH_FULL, start, length) == 0:
+            return True
+        else:
+            return False
 
     def block_discard_chunk(self, fn, start, length):
         try:
             return fcntl.ioctl(fn, self.BLKDISCARD, struct.pack("LL", start, length))
-        except Exception as e:
-            return None
+        except OSError:
+            return False
+        else:
+            return True
 
     def exists(self, volname):
         return exists(self.path + volname)
@@ -1831,6 +1839,8 @@ def clear_array(ar):
 # Initialize a new ArchiveSet:
 
 def arch_init(aset):
+
+    if not zstd:   print("Package python3-zstd is not installed.")
 
     opts = aset.opts    ; data_ci = opts.encrypt or "xchacha20-dgr"
     # Fix: duplicates code in aset... move to aset class.
@@ -4091,8 +4101,9 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
         else:
             return 0
 
-    def punch_zero_hole(loc):
-        volf_seek(loc)   ; volf_write(zeros)   ; punch_hole(volfno, loc, chunksize)
+    def punch_zero_hole(fn, loc):
+        if not punch_hole(fn, loc, chunksize):
+            volf_seek(loc)   ; volf_write(zeros)
 
 
     dest        = (aset := vol.archive).dest      ; options      = aset.opts
@@ -4153,6 +4164,10 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
     # Prepare save volume
     if not (diff or verify_only):
 
+        if not LocalStorage.fallocate:
+            sparse = sparse_write = use_snapshot = False
+            print("Sparse and snapshot modes disabled.")
+
         # Decode save path semantics
         if save_path:
             save_storage = None       ; returned_home = False
@@ -4169,7 +4184,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
         # possibly use snapshot as baseline for receive
         if returned_home and options.use_snapshot and save_storage.pooltype in ("rlnk","tlvm") \
         and (snap_lv := save_storage.lvols[l_vol.snap1]).is_paired(vol.mapfile(), vol.last):
-            print("Using snapshot as baseline.")   ; assert l_vol.path == save_path
+            assert l_vol.path == save_path
             sparse_write = use_snapshot = True    ; sparse = False
             l_vol.delete(force=True)
             l_vol.create(snapshotfrom=snap_lv.name, ro=False)
@@ -4240,6 +4255,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
             if is_num(ses_obj.localtime):   save_storage.settime(save_path, int(ses_obj.localtime))
             print("Snapshot retrieved...Done.")
             return volsize
+        print("Using snapshot as baseline.")
         incl_ses = sessions[:sessions.index(select_ses)+1]
         diff_ses = sessions[sessions.index(select_ses)+1:]
     elif verify_only == 2:
@@ -4304,7 +4320,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
             if save_path:
                 volf_seek(addr)
                 if sparse_write and volf_read(chunksize) != zeros:
-                    punch_zero_hole(addr)    ; diff_count += chunksize
+                    punch_zero_hole(volfno, addr)    ; diff_count += chunksize
             elif diff:
                 volf_seek(addr)    ; diff_count += diff_compare(zeros,True)
                 if diff_count and not remap:   break
@@ -4328,7 +4344,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
         if untrusted_size > chunksize + (chunksize // 64) or untrusted_size < 1:
             if options.skip_corrupt_chunks and save_path:
                 print("Skipping wrong-sized chunk at", addr)
-                punch_zero_hole(addr)
+                punch_zero_hole(volfno, addr)
                 continue
             else:
                 if save_path and save_type == "file":
@@ -4364,7 +4380,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
             print(size, mfline)
             if options.skip_corrupt_chunks and save_path:
                 print("Skipping corrupt chunk at", addr)
-                punch_zero_hole(addr)
+                punch_zero_hole(volfno, addr)
                 continue
             else:
                 if save_path and save_type == "file":
@@ -4418,8 +4434,8 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
         return None
 
     if verbose:   print("\r[" + "|"*20, end="")
-    print("] 100%" if verify_only != 2 else "",
-          ": OK" if not diff_count else f"Diff bytes: {diff_count}",
+    print("] 100%" if verify_only != 2 else "", ": OK" if not diff_count or save_path else "",
+          f" Diff bytes: {diff_count}" if diff_count else "",
           end="" if verbose else "\n")
     if verbose:
         print(f" Data bytes: {bcount}", f"/ {volsize}" if verify_only != 2 else "")
@@ -4719,7 +4735,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20240601"
+prog_version          = "0.8 beta"      ; prog_date = "20240602"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
