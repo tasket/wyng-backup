@@ -219,18 +219,14 @@ class ArchiveSet:
             self.load_volumes(1)
 
             if children > 1:
-                # fetch session metadata 'info' from remote
-                ses_list =[(x.volume.vid+"/"+x.name, x.name, x.volume.name) for sub in
-                        (vol.sessions.values() for vol in self.vols.values()) for x in sub]
-                fetch_file_blobs([(x+"/info", ArchiveSession.max_infosz) for x,_,_ in ses_list],
-                                self.path, self.dest, skip_exists=True)
-
                 # load volume objects fully
                 self.load_volumes(children)
 
-    def load_volumes(self, children):
+    def load_volumes(self, children, vnames=[], vids=[], handle=False):
+
+        errors = []    ; vids = vids or list(self.conf["volumes"].keys())
         recv_list = [(x+"/volinfo", ArchiveVolume.max_volinfosz)
-                       for x in self.conf["volumes"].keys()]
+                       for x in self.conf["volumes"].keys() if x in vids]
         fetch_file_blobs(recv_list, self.path, self.dest, skip_exists=True)
         do_exec([[CP.chattr, "+c"] + list(self.conf["volumes"].keys())],
                 cwd=self.path, check=False)
@@ -245,12 +241,21 @@ class ArchiveSet:
             #if children: ## and (allvols or self.in_process or options.from_arch or \
             ##(len(options.volumes)==0 or key in options.volumes or options.dedup)):
                 # instantiate:
+
+            if vids and key not in vids:   continue
             vid = key; hashval = value; vname = None
 
             #loadses = allvols or self.in_process or options.from_arch or options.dedup or
-            vol  = ArchiveVolume(self, vid, hashval, pjoin(self.path,vid),
-                               name=vname, children=children)
+            try:
+                vol  = ArchiveVolume(self, vid, hashval, pjoin(self.path,vid),
+                                name=vname, children=children)
+            except Exception as e:
+                errors.append((vid, e))
+                if not handle:   raise e
+
             self.vols[vol.name] = vol
+
+        return errors
 
 
     def save_conf(self, ext=""):
@@ -409,22 +414,48 @@ class ArchiveVolume:
                     vname, value = ln.split("=", maxsplit=1)
                     vname = vname.strip()    ; value = value.strip()
                     if vname.startswith("S_"):
-                        self.sessions[vname] = Ses(self, vname, value,
-                                                   path+"/"+vname if children > 1 else "")
+                        self.sessions[vname] = Ses(self, vname, value, "")
                     else:
                         setattr(self, vname, value)
         if not self.name: raise ValueError("Vol name missing")
         self.alias = self.name
 
-        # session name list sorted by sequence field
-        self._seslist = list(self.sessions.values()) if children > 1 else []
-        self._seslist.sort(key=lambda x: x.sequence)
-        self.sesnames = sesnames = [y.name for y in self._seslist]
-        if sesnames:   self.last = sesnames[-1]
+        if children > 1:
+            self.load_sessions()
 
         if exists(pjoin(path,"volchanged")):
             self.changed_bytes = int(open(pjoin(path,"volchanged"),"r").readlines()[0].strip())
 
+    def load_sessions(self, sesids=[], handle=False, mfdecode=False):
+
+        sessions, path, vid, vname = self.sessions, self.path, self.vid, self.name
+        Ses = ArchiveSession    ; sesids = sesids or list(sessions.keys())    ; errors = []
+
+        # fetch session metadata 'info' from remote
+        ses_list =[(vid+"/"+x, x, vname) for x in sesids]
+        fetch_file_blobs([(x+"/info", ArchiveSession.max_infosz) for x,_,_ in ses_list],
+                         self.archive.path, self.archive.dest, skip_exists=True)
+
+        for sname in sesids or sessions:
+            if not (s := sessions[sname]).loaded:
+                try:
+                    s = sessions[sname] = Ses(self, sname, s.hashval, path+"/"+sname)
+                except Exception as e:
+                    #err_out(f"{self.vid} - {sname}\n{repr(e)}")
+                    errors.append((sname, e))
+                    if not handle:   raise e
+
+
+        # session name list sorted by sequence field
+        self._seslist = list(self.sessions.values())
+        self._seslist.sort(key=lambda x: x.sequence)
+        self.sesnames = sesnames = [y.name for y in self._seslist]
+        if sesnames:   self.last = sesnames[-1]
+
+        if mfdecode:
+            errors.extend(self.decode_manifests(sesids, force=True, handle=handle))
+
+        return errors
 
     def save_volinfo(self, ext=""):
         os.makedirs(self.path, exist_ok=True)
@@ -559,8 +590,8 @@ class ArchiveVolume:
         if exists(path+".z"):   os.utime(path+".z")
 
     # Fetches files and passes them to decode_one_manifest()
-    def decode_manifests(self, sesnames, force=False):
-        apath    = self.archive.path    ; dest = self.archive.dest
+    def decode_manifests(self, sesnames, force=False, handle=False):
+        apath    = self.archive.path    ; dest = self.archive.dest    ; errors = []
         ses_list = [self.sessions[ses] for ses in sesnames]
 
         ff = fetch_file_blobs([(pjoin(self.vid, ses.name, "manifest.z"), ses.manifest_max())
@@ -569,7 +600,13 @@ class ArchiveVolume:
                               apath, dest, skip_exists=not force)
 
         for ses in ses_list:
-            self.decode_one_manifest(ses, force=force)
+            try:
+                self.decode_one_manifest(ses, force=force)
+            except Exception as e:
+                errors.append((ses.name, e))
+                if not handle:   raise e
+
+        return errors
 
 
 class ArchiveSession:
@@ -1475,10 +1512,10 @@ class LocalStorage:
         self.lvols = vgs_all[self.vgname]
 
     # static
-    def vg_exists(vgname):  #### Fix: test if 'lvm' cmd is present
+    def vg_exists(vgname):
         try:
             do_exec([[CP.lvm, "vgdisplay", vgname]])
-        except SPr.CalledProcessError:
+        except (SPr.CalledProcessError, FileNotFoundError):
             return False
         else:
             return True
@@ -1904,7 +1941,7 @@ def arch_init(aset):
 # Check/verify an entire archive
 
 def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
-    options  = aset.opts
+    options  = aset.opts                   ; error_cache.clear()
     dest     = aset.dest                   ; attended  = not options.unattended
     compare_digest = hmac.compare_digest   ; b64enc    = base64.urlsafe_b64encode
 
@@ -1912,6 +1949,51 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
         upgrade_from_v2(aset)    ; return
     elif upgrade:
         x_it(1, "Cannot upgrade.")
+
+    # Test volume metadata loading
+    for vid in aset.conf["volumes"] if not startup and dest.online else []:
+
+        # try volume "volinfo" only
+        v_errs = aset.load_volumes(1, vids=[vid], handle=True)
+        for v, e in v_errs:
+            err_out(v+" - "+repr(e)); error_cache.append(v)
+
+        if v_errs:   continue
+
+        # try sessions
+        vol = [x for x in aset.vols.values() if x.vid == vid][0]
+        ses_errs = vol.load_sessions(handle=True, mfdecode=True)
+
+        for s, e in ses_errs:
+            del(seslist[s])   ; err_out(vol.name+" - "+s+" - "+repr(e))
+
+        if ses_errs:
+            seslist  = list(vol.sessions.values())    ; error_cache.append(vol.name)
+            seslist.sort(key=lambda x: x.sequence)    ; sesnames = [y.name for y in seslist]
+
+            for si in range(len(seslist)):
+                if not check_session_seq(vol, seslist=seslist, seq=si):   break
+
+            if si == 0:
+                err_out(f"\nVolume '{vol.name}' cannot be recovered.")
+            else:
+                sgood = vol.sesnames[si-1]
+                print(f"\nVolume '{vol.name}' error in session: {sn[2:]}"
+                        f"\nLast good session: {sgood[2:]}")
+                if not options.unattended:
+                    ans = ask_input("Rewind volume to this session to recover? ")
+                    if ans.lower() in ("y","yes"):
+
+                        print("\nRewinding volume to", sgood[2:])
+                        while (ses := seslist.pop()).name != sgood:
+                            del(vol.sessions[ses.name])
+                        vol.save_volinfo(ext=".tmp")
+                        catch_signals()
+                        update_dest(self, pathlist=[self.confname], volumes=[vol], ext=".tmp")
+                        vol.rename_saved(ext=".tmp")
+                        x_it(0, "Done.")
+        else:
+            print(f"{vol.vid}: OK", end="\r")
 
     # Remove orphan snapshots. Don't test storage.online bc --local might not be CoW path.
     if storage.path and exists(storage.path):
@@ -1934,7 +2016,7 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
         if volname not in aset.vols:   continue
 
         vol = aset.vols[volname]
-        if not startup or debug:   print(f"Volume '{volname}'", flush=True)
+        if not startup or debug:   print(f"\nVolume '{volname}'", flush=True)
 
         # Remove session tmp dirs
         for sdir in os.scandir(vol.path):
@@ -1943,17 +2025,10 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
                 dest.run(["rm -rf " + vol.vid+"/"+sdir.name], destcd=dest.path)
                 shutil.rmtree(vol.path+"/"+sdir.name, ignore_errors=True)
 
-        # Check session sequencing
-        seslist = vol._seslist
-        for si, ses in enumerate(seslist[1:]):
-            if ses.previous != seslist[si].name:
-                raise ValueError(f"Prev Out of sequence: {ses.name} -> {seslist[si].name}")
-            if ses.sequence == seslist[si].sequence:
-                raise ValueError(f"Duplicate sequence {ses.sequence} in {ses.name}")
-        vol._seslist = None
 
-        if len(vol.sessions) > 1 and exists(vol.mapfile(-2)):   os.remove(vol.mapfile(-2))
+        if len(vol.sessions) > 1 and exists(vol.mapfile(-2)):   os.remove(vol.mapfile(-2)) ####
 
+        if not check_session_seq(vol):   x_it(1, "Session out of sequence error.")
         if startup:   continue
 
         # Remove stray volume dirs and other files
@@ -1974,11 +2049,24 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
             and sesname != vol.sesnames[-1]) or "S_"+options.session < sesname):
                 continue # Enh: use seq
 
-            if attended:   print(" ", sesname[2:], end="... ", flush=True)
+            print(" ", sesname[2:], end=" :", flush=True)
             bcount = receive_volume(storage, vol, select_ses=sesname[2:], ses_strict=True,
                                     verify_only=2)
             #if attended:   print(bcount, "bytes OK")
 
+def check_session_seq(vol, seslist=None, seq=None):
+    seslist = seslist or vol._seslist    ; seq = seq or len(seslist)    ; err = False
+    if not seslist:   return True
+
+    if seslist[0].previous != "None":
+        err_out(f"Missing oldest. [0] = {seslist[0].name} -> {seslist[0].previous}"); err = True
+    for si, ses in enumerate(seslist[1:seq+1]):
+        if ses.previous != seslist[si].name:
+            err_out(f"Prev Out of sequence: {ses.name} -> {seslist[si].name}"); err = True
+        if ses.sequence == seslist[si].sequence:
+            err_out(f"Duplicate sequence {ses.sequence} in {ses.name}"); err = True
+
+    return not err
 
 def check_manifest_sequence(vol, sesnames, addcol=False):
     volsize = vol.sessions[sesnames[-1]].volsize    ; aset = vol.archive    ; addr = 0
@@ -2064,7 +2152,6 @@ def parse_options(args, pdefs, etcconf=None):
 # Get configuration settings:
 
 def get_configs(opts):
-    load_children = 1 if opts.action in ("arch-delete","delete","add") else 2
 
     dest_url, local_url = opts.dest, opts.local
     dest = Destination(dest_url, user_ssh_opts=opts.opt_ssh, user_qubes_opts=opts.opt_qubes)
@@ -2101,7 +2188,6 @@ def get_configs(opts):
 def get_configs_remote(dest, base_dir, opts):
 
     recv_list = [(ArchiveSet.confname,  ArchiveSet.max_conf_sz),
-                 (ArchiveSet.confname+".salt", DataCryptography.max_keyfile_sz),
                  (ArchiveSet.saltname, DataCryptography.max_keyfile_sz),
                  ("salt.bak", DataCryptography.max_keyfile_sz)]
     fetch_file_blobs(recv_list, tmpdir, dest, skip0=True)
@@ -2160,7 +2246,13 @@ def get_configs_remote(dest, base_dir, opts):
                 shutil.copyfile(pjoin(tmpdir,f), pjoin(arch_dir,f))
 
     # Initial auth successful! Fetch + auth volume metadata...
-    return ArchiveSet(arch_dir, dest, opts, children=2, allvols=True, prior_auth=aset)
+    if opts.action in ("arch-check"):
+        depth = 0
+    elif opts.action in ("delete","add"):
+        depth = 1
+    else:
+        depth = 2
+    return ArchiveSet(arch_dir, dest, opts, children=depth, allvols=True, prior_auth=aset)
 
 
 # Returns either a single LocalStorage obj from --local, or a dict of them
@@ -4735,7 +4827,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20240602"
+prog_version          = "0.8 wip"       ; prog_date = "20240604"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
@@ -4775,14 +4867,14 @@ pjoin           = os.path.join     ; exists = os.path.exists   ; zipln = itertoo
 ## Parse Arguments & Etc Config ##
 
 local_actions   = ("monitor","version")
-write_actions   = ("add","send","prune","delete","rename","arch-delete","arch-deduplicate")
+write_actions   = ("add","send","prune","delete","rename","arch-deduplicate")
 dest_actions    = ("list","receive","verify","diff","arch-check","arch-init") + write_actions
 
 parser_defs = [
  [["action"],         {"choices": local_actions+dest_actions, "help": "Wyng Commands"}],
  [["volumes"],        {"nargs": "*"}],
  [["--unattended", "-u"], {"action": "store_true", "help": "Non-interactive, supress prompts"}],
- [["--authmin"],      {"default": "2", "help": "Minutes to remember authentication (default=2)"}],
+ [["--authmin"],      {"default": "5", "help": "Minutes to remember authentication (default=2)"}],
  [["--all-before"],   {"dest": "allbefore", "action": "store_true",
                        "help": "Select all sessions before --session date-time."}],
  [["--all", "-a"],    {"action": "store_true", "help": "Select all known volumes"}],
@@ -4912,7 +5004,7 @@ storage, storagesets = get_configs_storage(aset, require_local=not options.save_
 # a runtime invocation (i.e. the 'options' objects), or they must test such variables
 # in conjunction with aset.in_process.
 if aset.in_process and dest.online  \
-    and options.action not in ("arch-init","arch-delete","list"):
+    and options.action not in ("delete","list"):
 
     if (options.action == "delete" and aset.in_process[1] == options.volumes[0]) \
         or (options.clean and options.force):
@@ -5087,10 +5179,6 @@ elif options.action == "arch-init":
 
 elif options.action == "arch-check":
     arch_check(storage, aset, selected_vols)
-
-
-elif options.action == "arch-delete":
-    raise NotImplementedError()
 
 
 elif options.action == "arch-deduplicate":

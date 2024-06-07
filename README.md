@@ -42,7 +42,7 @@ Public release with a range of features including:
 
  - Marking and selecting archived snapshots with user-defined tags
 
-Beta release v0.8 major enhancements:
+Release candidate 1 major enhancements:
 
  - Btrfs and XFS reflink support
 
@@ -67,7 +67,7 @@ Beta release v0.8 major enhancements:
  Wyng is released under a GPL license and comes with no warranties expressed or implied.
 
 
-v0.8beta Requirements & Setup
+Wyng v0.8 Requirements & Setup
 ---
 
 Before starting:
@@ -531,8 +531,9 @@ number of minutes to remember the current authentication for subsequent Wyng inv
 The default authmin time is 2 minutes.  Specifying a -1 will cancel a prior authentication
 and 0 will skip storing the authentication.
 
-The `--passcmd` option takes a string representing a shell command that outputs a passphrase, which
-Wyng then reads instead of issuing an input prompt for the passphrase.  If a prior auth from
+The `--passcmd` option takes a string representing a shell command that outputs a passphrase
+to _stdout_ which
+Wyng then reads instead of prompting for passphrase input.  If a prior auth from
 `--authmin` is active, this option is ignored and the command will not be executed.
 
 
@@ -555,10 +556,11 @@ contain that character sequence.
 Specify both local storage and volume names for `send` or `receive` as sets, instead
 of using --local and volume names on the command line.  The json file must take the form
 of `{local-a: [[volname1, alias1], [volnameN, aliasN], ...], ...]}`.  This allows multiple
-local storage sources to be sent/received in a single session.  However, the volume names (or aliases)
-must all be unique across different sources as they are stored in the same archive.  Aliases
-currently define which local volume name into which an archive volume will be received; they
-are ignored when sending.
+local storage sources to be sent/received in a single session.
+
+_Alias_ can be _'null'_ for no alias or any valid name. However, the volume names (or aliases)
+must all be unique across different sources as they are stored in the same archive.  Aliases define which local volume name into which an archive volume will be received, or when sending
+they indicate a request to actually _rename_ the target volume to the alias.
 
 
 `--meta-reduce=mode:minutes`
@@ -659,7 +661,29 @@ gpg:                 aka "Christopher Laprise <tasket@protonmail.com>" [unknown]
 ```
 
 
-### Protecting and Verifying Archive Authenticity
+### Security notes
+
+#### Automated authentication:
+
+Wyng supports two modes of supplying passphrase secrets:  Standard input
+and the `--passcmd` option. The former can accept a secret from a pipe or
+redirect because when auth is necessary it is always the first input prompt.
+However, the prompt may not always occur when `--authmin` value > 0 is used since
+the passphrase may not be needed for repeat invocations of Wyng.
+
+#### Persistence of cached archive.ini & archive.salt:
+
+Authentication schemes in general can only verify the authenticity for an
+object at any point in time; they aren't well suited to telling us if that object
+(i.e. a backup archive) is the most recent update, and so they are vulnerable to rollback
+attacks that replace your current archive with an older version (in Wyng this is related to
+replay attacks, but not downgrade attacks).  Wyng guards against
+such attacks by checking that the time encoded in your locally cached archive.ini isn't newer
+than the one on the destination/remote; Wyng also displays the last archive modification time
+whenever you access it.
+
+
+#### Protecting and Verifying Archive Authenticity:
 
 With encryption enabled, Wyng provides a kind of built-in verification of archive authenticity;
 this is because it uses an AEAD cipher mode.  However, custom verification
@@ -677,17 +701,6 @@ Note that custom signature files should _not_ be stored within the archive direc
 
 (Although volumes can be verified piecemeal with the `wyng verify` command, it is not suited
 to verifying everything within an archive.)
-
-#### Security side note
-
-Authentication schemes in general can only verify the authenticity for an
-object at any point in time; they aren't well suited to telling us if that object
-(i.e. a backup archive) is the most recent update, and so they are vulnerable to rollback
-attacks that replace your current archive with an older version (in Wyng this is related to
-replay attacks, but not downgrade attacks).  Wyng guards against
-such attacks by checking that the time encoded in your locally cached archive.ini isn't newer
-than the one on the destination/remote; Wyng also displays the last archive modification time
-whenever you access it.
 
 
 ### Tips & Caveats
