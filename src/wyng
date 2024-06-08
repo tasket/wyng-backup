@@ -426,7 +426,7 @@ class ArchiveVolume:
         if exists(pjoin(path,"volchanged")):
             self.changed_bytes = int(open(pjoin(path,"volchanged"),"r").readlines()[0].strip())
 
-    def load_sessions(self, sesids=[], handle=False, mfdecode=False):
+    def load_sessions(self, sesids=[], handle=False, mfdecode=False, force=False):
 
         sessions, path, vid, vname = self.sessions, self.path, self.vid, self.name
         Ses = ArchiveSession    ; sesids = sesids or list(sessions.keys())    ; errors = []
@@ -434,7 +434,7 @@ class ArchiveVolume:
         # fetch session metadata 'info' from remote
         ses_list =[(vid+"/"+x, x, vname) for x in sesids]
         fetch_file_blobs([(x+"/info", ArchiveSession.max_infosz) for x,_,_ in ses_list],
-                         self.archive.path, self.archive.dest, skip_exists=True)
+                         self.archive.path, self.archive.dest, skip_exists=not force, skip0=True)
 
         for sname in sesids or sessions:
             if not (s := sessions[sname]).loaded:
@@ -1965,7 +1965,7 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
 
         # try sessions
         vol = [x for x in aset.vols.values() if x.vid == vid][0]
-        ses_errs = vol.load_sessions(handle=True, mfdecode=True)
+        ses_errs = vol.load_sessions(handle=True, force=True, mfdecode=True)
         seslist  = list(vol.sessions.values())    ; removed = []
 
         for ses, sn, e in ((vol.sessions[x], x, y) for x, y in ses_errs):
@@ -1992,7 +1992,9 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
 
                         print("\nRewinding volume to", sgood[2:])
                         while (ses := seslist.pop()).name != sgood:
-                            del(vol.sessions[ses.name])    ; removed.append(ses.name)
+                            removed.append(ses.name)
+                        for sn in removed:
+                            if sn in vol.sessions:   del(vol.sessions[ses.name])
                         vol.save_volinfo(ext=".tmp")
                         catch_signals()
                         update_dest(aset, pathlist=[aset.confname], volumes=[vol], ext=".tmp")
@@ -4838,7 +4840,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20240605"
+prog_version          = "0.8 beta"      ; prog_date = "20240607"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
