@@ -447,10 +447,11 @@ class ArchiveVolume:
 
 
         # session name list sorted by sequence field
-        self._seslist = list(self.sessions.values())
-        self._seslist.sort(key=lambda x: x.sequence)
-        self.sesnames = sesnames = [y.name for y in self._seslist]
-        if sesnames:   self.last = sesnames[-1]
+        if not errors:
+            self._seslist = list(self.sessions.values())
+            self._seslist.sort(key=lambda x: x.sequence)
+            self.sesnames = [y.name for y in self._seslist]
+        if self.sesnames:   self.last = self.sesnames[-1]
 
         if mfdecode:
             errors.extend(self.decode_manifests(sesids, force=True, handle=handle))
@@ -1967,15 +1968,17 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
         ses_errs = vol.load_sessions(handle=True, mfdecode=True)
         seslist  = list(vol.sessions.values())    ; removed = []
 
-        for s, e in ses_errs:
-            del(seslist[seslist.index(s)])   ; removed.append(s)
-            err_out(vol.name+" - "+s+" - "+repr(e))
+        for ses, sn, e in ((vol.sessions[x], x, y) for x, y in ses_errs):
+            if ses in seslist:    del(seslist[seslist.index(ses)])
+            removed.append(sn)   ; err_out(vol.name+" - "+sn+" - "+repr(e))
 
         if ses_errs:
             error_cache.append(vol.name)    ; seslist.sort(key=lambda x: x.sequence)
 
             for si in range(len(seslist)):
                 if not check_session_seq(vol, seslist=seslist, seq=si):   break
+            else:
+                si += 1
 
             if si == 0:
                 err_out(f"\nVolume '{vol.name}' ({vid}) cannot be recovered.")
@@ -1992,7 +1995,7 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
                             del(vol.sessions[ses.name])    ; removed.append(ses.name)
                         vol.save_volinfo(ext=".tmp")
                         catch_signals()
-                        update_dest(self, pathlist=[self.confname], volumes=[vol], ext=".tmp")
+                        update_dest(aset, pathlist=[aset.confname], volumes=[vol], ext=".tmp")
                         vol.rename_saved(ext=".tmp")
                         catch_signals(**signormal)
                         dest.run([f"rm -rf {vid}/{x}\n" for x in removed], destcd=dest.path)
@@ -2032,8 +2035,7 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
                 dest.run(["rm -rf " + vol.vid+"/"+sdir.name], destcd=dest.path)
                 shutil.rmtree(vol.path+"/"+sdir.name, ignore_errors=True)
 
-
-        if len(vol.sessions) > 1 and exists(vol.mapfile(-2)):   os.remove(vol.mapfile(-2)) ####
+        if len(vol.sessions) > 1 and exists(vol.mapfile(-2)):   os.remove(vol.mapfile(-2))
 
         if not check_session_seq(vol):   x_it(1, "Session out of sequence error.")
         if startup:   continue
@@ -2062,7 +2064,8 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
             #if attended:   print(bcount, "bytes OK")
 
 def check_session_seq(vol, seslist=None, seq=None):
-    seslist = seslist or vol._seslist    ; seq = seq or len(seslist)    ; err = False
+    seslist = seslist or vol._seslist    ; err = False
+    if seq is None:   seq = len(seslist)-1
     if not seslist:   return True
 
     if seslist[0].previous != "None":
@@ -4534,9 +4537,9 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
         return None
 
     if verbose:   print("\r[" + "|"*20, end="")
-    print("] 100%" if verify_only != 2 else "", ": OK" if not diff_count or save_path else "",
+    print("] 100% " if verify_only != 2 else "", ": OK " if not diff_count or save_path else " ",
           f" Diff bytes: {diff_count}" if diff_count else "",
-          end="" if verbose else "\n")
+          end="" if verbose else "\n", sep="")
     if verbose:
         print(f" Data bytes: {bcount}", f"/ {volsize}" if verify_only != 2 else "")
 
@@ -4835,7 +4838,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 wip"       ; prog_date = "20240604"
+prog_version          = "0.8 beta"      ; prog_date = "20240605"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
