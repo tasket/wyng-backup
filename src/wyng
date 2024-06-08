@@ -1958,39 +1958,46 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
         for v, e in v_errs:
             err_out(v+" - "+repr(e)); error_cache.append(v)
 
-        if v_errs:   continue
+        if v_errs:
+            err_out(f"\n{vid} cannot be recovered.")
+            continue
 
         # try sessions
         vol = [x for x in aset.vols.values() if x.vid == vid][0]
         ses_errs = vol.load_sessions(handle=True, mfdecode=True)
+        seslist  = list(vol.sessions.values())    ; removed = []
 
         for s, e in ses_errs:
-            del(seslist[s])   ; err_out(vol.name+" - "+s+" - "+repr(e))
+            del(seslist[seslist.index(s)])   ; removed.append(s)
+            err_out(vol.name+" - "+s+" - "+repr(e))
 
         if ses_errs:
-            seslist  = list(vol.sessions.values())    ; error_cache.append(vol.name)
-            seslist.sort(key=lambda x: x.sequence)    ; sesnames = [y.name for y in seslist]
+            error_cache.append(vol.name)    ; seslist.sort(key=lambda x: x.sequence)
 
             for si in range(len(seslist)):
                 if not check_session_seq(vol, seslist=seslist, seq=si):   break
 
             if si == 0:
-                err_out(f"\nVolume '{vol.name}' cannot be recovered.")
+                err_out(f"\nVolume '{vol.name}' ({vid}) cannot be recovered.")
             else:
-                sgood = vol.sesnames[si-1]
+                sgood = seslist[si-1].name
                 print(f"\nVolume '{vol.name}' error in session: {sn[2:]}"
                         f"\nLast good session: {sgood[2:]}")
-                if not options.unattended:
+                if removed and not options.unattended:
                     ans = ask_input("Rewind volume to this session to recover? ")
                     if ans.lower() in ("y","yes"):
 
                         print("\nRewinding volume to", sgood[2:])
                         while (ses := seslist.pop()).name != sgood:
-                            del(vol.sessions[ses.name])
+                            del(vol.sessions[ses.name])    ; removed.append(ses.name)
                         vol.save_volinfo(ext=".tmp")
                         catch_signals()
                         update_dest(self, pathlist=[self.confname], volumes=[vol], ext=".tmp")
                         vol.rename_saved(ext=".tmp")
+                        catch_signals(**signormal)
+                        dest.run([f"rm -rf {vid}/{x}\n" for x in removed], destcd=dest.path)
+                        for s in removed:
+                            shutil.rmtree(f"{vol.path}/{s}", ignore_errors=True)
                         x_it(0, "Done.")
         else:
             print(f"{vol.vid}: OK", end="\r")
@@ -2473,8 +2480,8 @@ class Destination:
 #  Licensed under GNU General Public License v3. See wyng-backup/LICENSE file.
 import os, sys, time, signal, shutil, subprocess as SPr, gzip, tarfile
 
-def fssync(path):
-    if msync:   SPr.Popen(["sync","-f",path])
+def fssync(path, force=False):
+    if msync or force:   SPr.Popen(["sync","-f",path])
 
 def catch_signals(sel=["INT","TERM","QUIT","ABRT","ALRM","TSTP","USR1"], iflag=False):
     for sval in (getattr(signal,"SIG"+x) for x in sel):
@@ -2511,6 +2518,7 @@ def helper_send(volid=None, ses=None):
                     print(err)    ; print("Substitution:", source, dest)
                     shutil.copyfile(source, dest)    ; substitutions[src_orig] = dest
             tarf.members = []
+    fssync(".", force=True)
 
 def helper_receive(lstf):
     stdout_write = sys.stdout.buffer.write   ; exists = os.path.exists   ; getsize= os.path.getsize
