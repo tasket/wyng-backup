@@ -222,7 +222,7 @@ class ArchiveSet:
                 # load volume objects fully
                 self.load_volumes(children)
 
-    def load_volumes(self, children, vnames=[], vids=[], handle=False):
+    def load_volumes(self, children, vids=[], handle=False):
 
         errors = []    ; vids = vids or list(self.conf["volumes"].keys())
         recv_list = [(x+"/volinfo", ArchiveVolume.max_volinfosz)
@@ -330,10 +330,13 @@ class ArchiveSet:
         vol.save_volinfo(ext)
         return vol
 
-    def delete_volume_meta(self, datavol):
+    def delete_volume_meta(self, vname=None, vid=None):
         # Enh: add delete-by-vid
-        vid = self.vols[datavol].vid    ; vpath = self.vols[datavol].path
-        del(self.vols[datavol], self.conf["volumes"][vid])
+        vid = self.vols[vname].vid if vname else vid
+        assert vid.startswith("Vol_")
+        vpath = self.path+"/"+vid
+        del(self.conf["volumes"][vid])
+        if vname in self.vols: del(self.vols[datavol])
         self.save_conf()
 
         if exists(vpath):    shutil.rmtree(vpath)
@@ -1959,6 +1962,7 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
         for v, e in v_errs:
             err_out(v+" - "+repr(e)); error_cache.append(v)
 
+        # Enh: Offer to reconstruct volinfo from available session data
         if v_errs:
             err_out(f"\n{vid} cannot be recovered.")
             continue
@@ -1968,19 +1972,24 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
         ses_errs = vol.load_sessions(handle=True, force=True, mfdecode=True)
         seslist  = list(vol.sessions.values())    ; removed = []
 
+        # un-loaded sessions cannot be sorted, so remove them from seslist
         for ses, sn, e in ((vol.sessions[x], x, y) for x, y in ses_errs):
             if ses in seslist:    del(seslist[seslist.index(ses)])
             removed.append(sn)   ; err_out(vol.name+" - "+sn+" - "+repr(e))
 
         if ses_errs:
-            error_cache.append(vol.name)    ; seslist.sort(key=lambda x: x.sequence)
+            # find last good session and reset volume to it:
 
+            # flag volume and sort the session list by sequence#
+            error_cache.append(vol.name)    ; seslist.sort(key=lambda x: x.sequence)   ; si = -1
+
+            # find longest coherent chain of sessions
             for si in range(len(seslist)):
                 if not check_session_seq(vol, seslist=seslist, seq=si):   break
             else:
                 si += 1
 
-            if si == 0:
+            if si < 1:
                 err_out(f"\nVolume '{vol.name}' ({vid}) cannot be recovered.")
             else:
                 sgood = seslist[si-1].name
@@ -2110,6 +2119,9 @@ def check_manifest_sequence(vol, sesnames, addcol=False):
 def remove_local_snapshots(storage, archive, del_all=False, purge=None):
     purge_other = purge == "other"    ; del_all = purge == "full"
     assert not (purge_other and not archive)
+
+    if not storage.arch_vols:
+        storage.update_vol_list({x.name: x.vid for x in archive.vols.values()})
 
     # Remove LVM snapshots
     for lv in (x for vg in storage.vgs_all.values() for x in vg.values()):
@@ -2258,9 +2270,9 @@ def get_configs_remote(dest, base_dir, opts):
                 shutil.copyfile(pjoin(tmpdir,f), pjoin(arch_dir,f))
 
     # Initial auth successful! Fetch + auth volume metadata...
-    if opts.action in ("arch-check"):
+    if opts.action in ("arch-check","delete"):
         depth = 0
-    elif opts.action in ("delete","add"):
+    elif opts.action in ("add",):
         depth = 1
     else:
         depth = 2
@@ -2486,7 +2498,7 @@ class Destination:
 import os, sys, time, signal, shutil, subprocess as SPr, gzip, tarfile
 
 def fssync(path, force=False):
-    if msync or force:   SPr.Popen(["sync","-f",path])
+    if msync or force:   misc_procs.append(SPr.Popen(["sync","-f",path]))
 
 def catch_signals(sel=["INT","TERM","QUIT","ABRT","ALRM","TSTP","USR1"], iflag=False):
     for sval in (getattr(signal,"SIG"+x) for x in sel):
@@ -2605,7 +2617,7 @@ def helper_merge_finalize():
 
 ## MAIN ##
 cmd = sys.argv[1]   ; msync = "--sync" in sys.argv   ; magic  = b"\xff\x11\x15"
-tmpdir = os.path.dirname(os.path.abspath(sys.argv[0]))  
+tmpdir = os.path.dirname(os.path.abspath(sys.argv[0]))  ; misc_procs = []
 exists = os.path.exists    ; replace = os.replace    ; remove = os.remove
 if cmd in ("receive","dedup") and exists(tmpdir+"/dest.lst.gz"):
     lstf = gzip.open(tmpdir+"/dest.lst.gz", "rt")
@@ -4620,43 +4632,50 @@ def add_volume(aset, datavol, desc):
 
 # Remove a volume from the archive
 
-def delete_volume(storage, aset, dv, vid=None):
+def delete_volume(storage, aset, dv=None, vid=None):
+    assert not (dv and vid)   ; inproc = aset.in_process and aset.in_process[0] == "delete"
 
     if not storage.online:
         print("Note: A valid --local location was not specified; no volume snapshots"
               " will be removed.\n")
 
     if vid:
-        vols = [x for x in aset.vols.values() if x.vid == vid]
-        if not vols:   err_out(f"Volume {vid} not found.")   ; return
-        dv = vols[0].name
+        if vid not in aset.conf["volumes"] or not vid.startswith("Vol_"):
+            if inproc:   aset.set_in_process(None)
+            err_out(f"Vid '{vid}' not found.")
+    else:
+        aset.load_volumes(1)
+        if dv not in aset.vols:
+            x_it(1, f"Volume '{dv}' not found.")
+        vid = aset.vols[dv].vid
 
-    if not options.unattended and not options.force and not aset.in_process:
+    if not options.unattended and not options.force and not inproc:
         print("\nWarning! Delete will remove ALL metadata AND archived data",
-              "for volume", dv)
+              f"for volume '{dv or vid}'")
 
         ans = ask_input("Are you sure? [y/N]: ")
         if ans.lower() not in {"y","yes"}:   x_it(0,"")
-        print()
 
-    if not (vol := aset.vols.get(dv)):
-        err_out(f"Volume {dv} not found.")   ; return
+    if vid in aset.conf["volumes"]:
+        print(f"\nDeleting volume '{dv or vid}' from archive.")
+        catch_signals()    ; inproc = True
+        aset.set_in_process(["delete", vid])
+        dvid = aset.delete_volume_meta(vid=vid)
+        update_dest(aset, pathlist=[aset.confname])
+        aset.set_in_process(None)
+        catch_signals(**signormal)
 
-    print(f"Deleting volume '{dv}' ({vol.vid}) from archive.")
-    catch_signals()
-    if not aset.in_process:       aset.set_in_process(["delete", vol.vid])
-    dvid = aset.delete_volume_meta(dv)
-    update_dest(aset, pathlist=[aset.confname])
-    aset.set_in_process(None)
-
-    if dvid:
+    if dvid.startswith("Vol_") and inproc:
         aset.dest.run(["rm -rf '%s'" % dvid], destcd=aset.dest.path)
-    catch_signals(**signormal)
 
-    if storage.online:
+    if storage.online and dv:
+        storage.new_vol_entry(dv, dvid)
         for lvol_name in (storage.lvols[dv].snap1, storage.lvols[dv].snap2):
             storage.lvols[lvol_name].delete()
-    return
+    else:
+        print("(Skipping snapshot removal.)")
+
+    x_it(int(not inproc))
 
 
 def show_list(aset, selected_vols):
@@ -4840,7 +4859,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20240607"
+prog_version          = "0.8 beta"      ; prog_date = "20240608"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
@@ -4922,6 +4941,7 @@ parser_defs = [
  [["--hashtype"],     {"default": "", "help": "Init: hash function type"}],
  [["--chunk-factor"], {"dest": "chfactor",
                        "help": "Init: set chunk size to N*64kB"}],
+ [["--vid"],          {"help": "Reference a volume by ID number (delete)"}],
  [["--passcmd"],      {"help": "Command to fetch auth passphrase"}],
  [["--meta-dir"],     {"dest": "metadir", "default": "", "help": "Use alternate metadata path"}],
  [["--meta-reduce"],  {"default": "on:3000", "help": "Metadata retention policy (see doc)"}],
@@ -5033,7 +5053,7 @@ if aset.in_process and dest.online  \
         print("Completing prior operation in progress:", " ".join(aset.in_process[0:2]))
 
         if aset.in_process[0] == "delete":
-            delete_volume(storage, aset, "", vid=aset.in_process[1])
+            delete_volume(storage, aset, vid=aset.in_process[1])
 
         elif aset.in_process[0] == "merge":
             vname = [x.name for x in aset.vols.values() if x.vid == aset.in_process[1]][0]
@@ -5059,10 +5079,10 @@ print("Encrypted" if (aset.mcrypto and aset.datacrypto) else "Un-encrypted",
 exclude_vols  = set(options.volex or [])
 datavols      = sorted(set(aset.vols.keys()) - exclude_vols) if options.all else []
 selected_vols = sorted(set(options.volumes[:] + datavols))
-for vol in selected_vols[:]:
-    if vol not in aset.vols and options.action not in {"add","rename","send"}:
-        print(f"Volume '{vol}' not found; Skipping.")
-        selected_vols.remove(vol)
+for v in selected_vols[:]:
+    if v not in aset.vols and options.action not in {"add","delete","rename","send","arch-check"}:
+        print(f"Volume '{v}' not found; Skipping.")
+        selected_vols.remove(v)
 
 
 ## Process Commands ##
@@ -5176,14 +5196,12 @@ elif options.action == "delete":
         if options.all:   meta_reduce, meta_min = "extra", 0
         remove_local_snapshots(storage, None if options.all else aset, purge=options.purge)
 
-    elif len(options.volumes) != 1:
+    elif len(options.volumes) + bool(options.vid) != 1:
         x_it(1, "Specify one volume to delete.")
 
-    elif options.volumes[0] not in aset.vols:
-        x_it(1, "Volume not found.")
-
     else:
-        delete_volume(storage, aset, options.volumes[0])
+        delete_volume(storage, aset, **{"vid": options.vid} if options.vid
+                                  else { "dv": options.volumes[0]})
 
 
 elif options.action == "arch-init":

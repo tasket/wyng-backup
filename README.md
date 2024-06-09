@@ -47,9 +47,9 @@ Release candidate 1 major enhancements:
  - Btrfs and XFS reflink support
 
  - Authenticated encryption with auth caching
- 
+
  - Full data & metadata integrity checking
- 
+
  - Fast differential receive based on available snapshots
 
  - Overall faster operation
@@ -356,6 +356,7 @@ the volume data if present.
 --sparse               | Receive volume data sparsely (implies --sparse-write)
 --sparse-write         | Overwrite local data only where it differs (receive)
 --use-snapshot         | Use snapshots when available for faster `receive`.
+--send-unchanged       | Record unchanged volumes, don't skip them (send)
 --unattended, -u       | Don't prompt for interactive input.
 --clean                | Perform garbage collection (arch-check) or metadata removal (delete).
 --verbose              | Increase details.
@@ -369,10 +370,12 @@ the volume data if present.
 --save-to=_path_       | Save volume to _path_ (receive).
 --local_from=_json file_ | Specify local:[volumes] sets instead of --local.
 --import-other-from    | Import volume data from a non-snapshot capable path during `send`
---encrypt=_cipher_     | Set encryption mode or _'off'_ (default: _'xchacha20-t3'_)
+--session-strict=_on|off_ | Don't retrieve volume from next-oldest session if no exact session match
+--encrypt=_cipher_     | Set encryption mode or _'off'_ (default: _'xchacha20-dgr'_)
 --compression          | (arch-init) Set compression type:level.
 --hashtype             | (arch-init) Set data hash algorithm: _hmac-sha256_ or _blake2b_.
 --chunk-factor         | (arch-init) Set archive chunk size.
+--vid                  | Select volume by ID (delete)
 --tar-bypass           | Use direct access for file:/ archives (send)
 --passcmd=_'command'_  | Read passphrase from output of a wallet/auth app
 --upgrade-format       | Upgrade older Wyng archive to current format. (arch-check)
@@ -549,6 +552,13 @@ use with large volumes.
 The special delimeter used to separate the _volname_ (archive volume name) and the _path_ is ':|:'
 which means this option cannot be used to `send` directly to volume names in the archive which
 contain that character sequence.
+
+
+`--session-strict=on|off`
+
+For receive, verify, diff: If set to 'on' (the default) Wyng won't retrieve volumes from next-oldest session if the
+specified volumes don't have an exact match for the specified session.  When set to 'off'
+Wyng will try to retrieve the next-oldest version of the volume if one exists.
 
 
 `--local_from=_json file_`
@@ -785,6 +795,9 @@ root files in each 'a_*' directory are part of Wyng's defense against rollback a
 feel the need to manually reclaim space used in this dir then consider leaving the _archive.\*_
 files in place.
 
+* If data corruption in the archive is suspected, use `wyng arch-check` which will scan for errors and present you with options for recovery.
+
+* If a volume becomes damaged and unrecoverable it may be necessary to delete it by its volume ID by using `wyng delete --vid` instead of the volume name.
 
 ### Testing
 
