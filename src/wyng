@@ -3713,7 +3713,7 @@ def dedup_existing(aset):
 
 # Controls flow of monitor and send_volume procedures:
 
-def monitor_send(storage, aset, datavols, monitor_only, use_sesid=None):
+def monitor_send(storage, aset, datavols, monitor_only, imports=[], use_sesid=None):
 
     options = aset.opts                ; dest = aset.dest
     status1 = not options.unattended   ; MB   = 1024**2     ; ms_start = time.monotonic()
@@ -3740,7 +3740,7 @@ def monitor_send(storage, aset, datavols, monitor_only, use_sesid=None):
     print(f"\nPreparing snapshots in '{storage.path}'...")
     incrementals, send_alls, unchanged_vols, other_vols \
         = storage.prep_snapshots(storage, aset, datavols, monitor_only,
-                                 import_others=options.import_other_from)
+                                 import_others=[] if monitor_only else imports)
     storage.update_vol_list({x.name: x.vid for x in aset.vols.values()})
 
     if monitor_only:   send_alls.clear()
@@ -4859,7 +4859,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20240608"
+prog_version          = "0.8 beta"      ; prog_date = "20240609"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
@@ -5094,9 +5094,11 @@ if options.action   == "monitor":
 
 
 elif options.action == "send":
-    sid = None
+    sid = None    ; import_others = options.import_other_from[:]
     for storage, vols in storagesets.items():
-        sid = monitor_send(storage, aset, vols or selected_vols, monitor_only=False, use_sesid=sid)
+        sid = monitor_send(storage, aset, vols or selected_vols, monitor_only=False, use_sesid=sid,
+                           imports=import_others)
+        import_others.clear()
 
 
 elif options.action == "prune":
