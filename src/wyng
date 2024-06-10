@@ -2880,11 +2880,7 @@ def fetch_file_blobs(recv_list, recv_dir, dest, ext="", skip0=False, skip_exists
 # create a fresh snap2 so 'update_delta_digest' can compare it to the older snap1
 # and then rotate snap2 -> snap1.
 
-def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, import_others=[]):
-
-    other_vols = {x: os.path.abspath(y)
-                  for x,y in map(lambda a: a.split(":|:", maxsplit=1), import_others)} \
-                 if not monitor_only else {}
+def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, other_vols={}):
     incr_vols, complete_vols, unchanged_vols = [], [], []   ; lvols = storage.lvols
 
     for datavol in datavols + list(other_vols.keys()):
@@ -2963,11 +2959,7 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, import_others=[
     return incr_vols, complete_vols, unchanged_vols, other_vols
 
 
-def prepare_snapshots_reflink(storage, aset, datavols, monitor_only, import_others=[]):
-
-    other_vols = {x: os.path.abspath(y)
-                  for x,y in map(lambda a: a.split(":|:", maxsplit=1), import_others)} \
-                 if not monitor_only else {}
+def prepare_snapshots_reflink(storage, aset, datavols, monitor_only, other_vols={}):
     incr_vols, complete_vols, unchanged_vols = [], [], []   ; lvols = storage.lvols
 
     for datavol in datavols + list(other_vols.keys()):
@@ -3713,7 +3705,7 @@ def dedup_existing(aset):
 
 # Controls flow of monitor and send_volume procedures:
 
-def monitor_send(storage, aset, datavols, monitor_only, imports=[], use_sesid=None):
+def monitor_send(storage, aset, datavols, monitor_only, imports={}, use_sesid=None):
 
     options = aset.opts                ; dest = aset.dest
     status1 = not options.unattended   ; MB   = 1024**2     ; ms_start = time.monotonic()
@@ -3739,8 +3731,7 @@ def monitor_send(storage, aset, datavols, monitor_only, imports=[], use_sesid=No
 
     print(f"\nPreparing snapshots in '{storage.path}'...")
     incrementals, send_alls, unchanged_vols, other_vols \
-        = storage.prep_snapshots(storage, aset, datavols, monitor_only,
-                                 import_others=[] if monitor_only else imports)
+        = storage.prep_snapshots(storage, aset, datavols, monitor_only, other_vols=imports)
     storage.update_vol_list({x.name: x.vid for x in aset.vols.values()})
 
     if monitor_only:   send_alls.clear()
@@ -3812,6 +3803,7 @@ def monitor_send(storage, aset, datavols, monitor_only, imports=[], use_sesid=No
             sent, svsize, sbcount, ddbytes, stime = \
                 send_volume(storage, vol, curtime, ses_tags, send_all=datavol in send_alls)
             dest.free -= int(sbcount + (sbcount * 0.05))
+            if vol.aliastype == "import_other":   del(imports[datavol])
 
         else:
             storage.lvols[vol.name].rotate_snapshots(rotate=False)
@@ -4859,7 +4851,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20240609"
+prog_version          = "0.8 beta"      ; prog_date = "20240610"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
@@ -5094,11 +5086,15 @@ if options.action   == "monitor":
 
 
 elif options.action == "send":
-    sid = None    ; import_others = options.import_other_from[:]
+    sid = None
+    other_vols = {x: os.path.abspath(y)
+                  for x,y in map(lambda a: a.split(":|:", maxsplit=1), options.import_other_from)}
+
     for storage, vols in storagesets.items():
         sid = monitor_send(storage, aset, vols or selected_vols, monitor_only=False, use_sesid=sid,
-                           imports=import_others)
-        import_others.clear()
+                           imports=other_vols)
+
+    if other_vols:   error_cache.extend(list(other_vols))
 
 
 elif options.action == "prune":
