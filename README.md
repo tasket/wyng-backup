@@ -26,7 +26,7 @@ untrusted data in guest filesystems to bolster container-based security.
 
 ### Status
 
-Public release with a range of features including:
+Public beta with a range of features including:
 
  - Incremental backups of Linux logical volumes from Btrfs, XFS and Thin-provisioned LVM
 
@@ -42,7 +42,7 @@ Public release with a range of features including:
 
  - Marking and selecting archived snapshots with user-defined tags
 
-Release candidate 1 major enhancements:
+Version 0.8 major enhancements:
 
  - Btrfs and XFS reflink support
 
@@ -751,20 +751,7 @@ its possible to do so with the following:
 
 ### Troubleshooting notes
 
-* Since v0.4alpha3, Wyng may appear at first to not recognize older alpha archives.
-This is because Wyng no longer adds '/wyng.backup040/default' to the `--dest` path. To access the
-archives simply add those two dirs to the end of your `--dest` URLs.  Alternately, you can rename
-those subdirs to a single dir of your choosing.
-
-* Archives from older v0.3 versions of Wyng must be upgraded before they can be used with
-later versions.  Run `wyng arch-check --upgrade-format` to perform the upgrade, which will
-convert an archive in-place after creating a backup of the metadata as 'wyng_metadata_bak.tbz'
-in your current directory in case something goes wrong during the procedure.  A full manual
-backup of the archive is also recommended before running this procedure (see tip to efficiently
-'backup the backup' under the Testing section).  Also note that 'upgraded' archives continue
-to use the old hashing and compression settings and will remain unencrypted;  you may want to
-consider setting aside the old archive and create a new encrypted archive for your backups
-going forward.
+* If you encounter an error during send/backup that the Btrfs path is "not a subvolume" its probably due to the `--local` path or pool ending in a dir not a subvolume. If you can't adjust the local path to end at an existing subvol, then a dir can be easily converted using `btfs subvol create` and `mv` commands. See the 'misc' project folder for an example dir-to-subvol conversion script.
 
 * A major change in v0.8 is that for `send` and `monitor` Wyng will no longer assume you want to
 act on all known volumes if you don't specify any volumes.  You must now use `-a` or `--all`, which
