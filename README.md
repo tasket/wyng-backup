@@ -487,7 +487,7 @@ multiple volumes that have a lot of the same content and/or you are backing-up o
 Internet link.
 
 
-`--autoprune=(off | on | min | full)`
+`--autoprune=(off | on | full)`
 
 Autoprune may be used with either the `prune` or `send` commands and will cause Wyng to
 automatically remove older backup sessions according to date criteria. When used with `send`
@@ -499,8 +499,7 @@ Selectable modes are:
 
 __off__ is the current default.
 
-__on__ removes more sessions than _min_ as space is needed, while trying to retain any/all older sessions
-whenever available storage space allows.
+__on__ removes _some_ sessions, as space is needed on the destination.
 
 __full__ removes all sessions that are due to expire according to above criteria.
 

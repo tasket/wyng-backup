@@ -1455,12 +1455,12 @@ class LocalStorage:
         # remove snapshot at wrong path
         if exists(badpath := self.path.rstrip("/")+os.path.basename(dest.rstrip("/"))):
             do_exec([[CP.env, "-u", "LC_ALL",
-                      CP.btrfs, "subvolume", "delete", badpath]], check=False)
+                      CP.btrfs, "subvolume", "delete", "-c", badpath]], check=False)
 
         if exists(dest):
             if delete:   gen = self._get_btrfs_generation(dest)
             do_exec([[CP.env, "-u", "LC_ALL",
-                      CP.btrfs, "subvolume", "delete", dest]])
+                      CP.btrfs, "subvolume", "delete", "-c", dest]])
         if not delete:
             do_exec([[CP.env, "-u", "LC_ALL",
                       CP.btrfs, "subvolume", "snapshot", "-r", svpath, dest]])
@@ -1473,9 +1473,10 @@ class LocalStorage:
     def _get_btrfs_generation(self, path):
         base = "/"+os.path.basename(path.rstrip("/"))
         res = SPr.check_output([CP.env, "-u", "LC_ALL", CP.btrfs, "subvolume", "list", path], text=True)
-        res = [x for x in res.splitlines() if x.strip().endswith(base)][0]
+        res = [x for x in res.splitlines() if x.strip().endswith(base)]
         if debug:   print("*generation", res)
-        return int(res.split()[3])
+        rln = res[0].split()    ; assert len(res) == 1 and rln[2] == "gen"
+        return int(rln[3])
 
     # Reserve or release lvm thinpool metadata snapshot.
     # action must be "reserve" or "release".
@@ -1702,9 +1703,14 @@ class ReflinkVolume(LocalVolume):
         else:
             return "false"
 
-    def is_paired(self, mapfile, sestag):
+    def paired_state(self, mapfile, sestag):
         if not self.name.endswith(self.snap_ext):   raise ValueError("Not a snapshot.")
-        return self.exists() and exists(mapfile) and self.gettime() == os.stat(mapfile).st_mtime_ns
+        if not self.exists() or not exists(mapfile) or self.gettime() != os.stat(mapfile).st_mtime_ns:
+            return "N"
+        elif os.stat(mapfile).st_blocks != 0:
+            return "D"
+        else:
+            return "Y"
         #Enh: also evaluate sestag
 
     def convert_pathname(self, path):
@@ -1819,11 +1825,16 @@ class LvmVolume(LocalVolume):
         else:
             return "true"
 
-    def is_paired(self, mapfile, sestag):
+    def paired_state(self, mapfile, sestag):
         if not self.name.endswith(self.snap_ext):   raise ValueError("Not a snapshot.")
 
-        return self.exists() and exists(mapfile) and self.gettime() == os.stat(mapfile).st_mtime_ns \
-               and sestag in self.tags.split(",")
+        if not self.exists() or not exists(mapfile) or self.gettime() =! os.stat(mapfile).st_mtime_ns \
+        or sestag not in self.tags.split(","):
+            return "N"
+        elif os.stat(mapfile).st_blocks != 0:
+            return "D"
+        else:
+            return "Y"
 
     def check_pathname(path):
         if res := super.check_pathname(path):
@@ -4298,7 +4309,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
 
         # possibly use snapshot as baseline for receive
         if returned_home and options.use_snapshot and save_storage.pooltype in ("rlnk","tlvm") \
-        and (snap_lv := save_storage.lvols[l_vol.snap1]).is_paired(vol.mapfile(), vol.last):
+        and (snap_lv := save_storage.lvols[l_vol.snap1]).paired_state(vol.mapfile(), vol.last)=="Y":
             assert l_vol.path == save_path
             sparse_write = use_snapshot = True    ; sparse = False
             l_vol.delete(force=True)
@@ -4857,7 +4868,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20240619"
+prog_version          = "0.8 beta"      ; prog_date = "20240825"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
