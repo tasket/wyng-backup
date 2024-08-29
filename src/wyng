@@ -1450,13 +1450,14 @@ class LocalStorage:
     def _btrfs_subvol_snapshot(self, delete=False):
         if delete and not self.can_snapshot:   return None, None
 
-        svpath = self.path    ; dest = self.snappath    ; gen = 0
+        svpath = self.path    ; dest = self.snappath    ; gen = 0    ; sv_start = time.monotonic()
 
         # remove snapshot at wrong path
         if exists(badpath := self.path.rstrip("/")+os.path.basename(dest.rstrip("/"))):
             do_exec([[CP.env, "-u", "LC_ALL",
                       CP.btrfs, "subvolume", "delete", "-c", badpath]], check=False)
 
+        if debug:   print(f"\nSubvol snapshot: '{dest}' {exists(dest)} del={delete}", flush=True)
         if exists(dest):
             if delete:   gen = self._get_btrfs_generation(dest)
             do_exec([[CP.env, "-u", "LC_ALL",
@@ -1467,7 +1468,7 @@ class LocalStorage:
             gen = self._get_btrfs_generation(dest)
             # possibly check /sys/fs/btrfs/uuid#/exclusive_operation
 
-            if debug:   print("Created subvol snapshot at", dest)
+            if debug:   print("Created subvol (sec):", time.monotonic() - sv_start, flush=True)
         return gen, dest
 
     def _get_btrfs_generation(self, path):
@@ -1483,6 +1484,8 @@ class LocalStorage:
     def _lvm_meta_snapshot(self, action, pool=None):
         vgname   = self.vgname.replace("-","--")
         poolname = (pool or self.lvpool).replace("-","--")
+
+        if debug:   print(f"TLVM meta snapshot: {vgname}/{poolname} {action}", flush=True)
         do_exec([[CP.dmsetup,"message", vgname+"-"+poolname+"-tpool",
                 "0", action+"_metadata_snap"]], check= action=="reserve")
 
@@ -1598,6 +1601,9 @@ class LocalVolume:
 
     def rotate_snapshots(self, rotate=True, timestamp_path=None, addtags=[]):
         assert not self.name.endswith(self.snap_ext)
+        if debug:
+            print("Rotate Snapshots", self.name, rotate, timestamp_path, addtags, flush=True)
+
         lvols = self.storage.lvols
         if rotate:
             if lvols[self.snap2].exists():
@@ -1658,11 +1664,14 @@ class ReflinkVolume(LocalVolume):
     def delete(self, sync=True, check=False, force=False):
         assert force or self.name.endswith(self.snap_ext)
         self.unlock()
-        if self.exists():   os.remove(self.path)
+        if self.exists():
+            if debug:   print("Del vol", self.name, flush=True)
+            os.remove(self.path)
 
     def create(self, size=None, snapshotfrom=None, ro=True, addtags=[]):
         assert self.storage.online and self.storage.fstype in self.storage.rltypes
         if self.exists():   raise ValueError(f"Volume {self.name} already exists.")
+        if debug:   print("Create vol", self.name, "from", snapshotfrom, flush=True)
 
         subdir, fname  = os.path.split(self.name)
         os.makedirs(self.pdir+subdir, exist_ok=True)
@@ -1769,6 +1778,7 @@ class LvmVolume(LocalVolume):
                             raise CalledProcessError("lvremove failed "+str(retcode))
                         del(procs[ii])
 
+            if debug:   print("Del vol", self.name, flush=True)
             cmds = [CP.sh, "-c", CP.lvm + " lvchange -p rw " + self.path + " ; "
                  +  CP.lvm + " lvremove -f " + self.path]
             if not (sync or clean):   cmds = [CP.ionice, "-c3"] + cmds
@@ -1784,6 +1794,7 @@ class LvmVolume(LocalVolume):
     def create(self, size=None, snapshotfrom=None, ro=True, addtags=[]):
         vg = self.storage.path    ; rwmode = ["-pr"+("w" if not ro else "")]
         if self.exists():   raise ValueError(f"Volume {self.name} already exists.")
+        if debug:   print("Create vol", self.name, "from", snapshotfrom, flush=True)
         if snapshotfrom:
             do_exec([[CP.lvm, "lvcreate", "-kn", "-ay"] + rwmode + addtags + [
                         "-s", vg+"/"+snapshotfrom, "-n", self.name]])
@@ -1828,7 +1839,7 @@ class LvmVolume(LocalVolume):
     def paired_state(self, mapfile, sestag):
         if not self.name.endswith(self.snap_ext):   raise ValueError("Not a snapshot.")
 
-        if not self.exists() or not exists(mapfile) or self.gettime() =! os.stat(mapfile).st_mtime_ns \
+        if not self.exists() or not exists(mapfile) or self.gettime() != os.stat(mapfile).st_mtime_ns \
         or sestag not in self.tags.split(","):
             return "N"
         elif os.stat(mapfile).st_blocks != 0:
@@ -3073,6 +3084,8 @@ def get_lvm_deltas(storage, aset, datavols):
             for datavol in datavols:
                 lv = lvols[datavol]
                 if lv.pool_lv != apool:   continue
+                if debug:   print("Get tlvm deltas for", datavol, flush=True)
+
                 cmds = [[CP.thin_delta, "--metadata-snap",
                                         "--thin1=" + lvols[lv.snap1].thin_id,
                                         "--thin2=" + lvols[lv.snap2].thin_id,
@@ -3218,6 +3231,7 @@ def get_reflink_deltas(storage, aset, datavols):
 
         if vol.name not in datavols:   continue
         assert len(devs) == 1
+        if debug:   print("Get rlnk deltas for", vol.name, flush=True)
 
         # Save output from first volume to a named pipe. 'getctl' means run it async; below we
         # will add it to the sort/uniq pipeline via 'otherctl'. This prevents tmp files
@@ -4868,7 +4882,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20240825"
+prog_version          = "0.8 beta"      ; prog_date = "20240827"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
