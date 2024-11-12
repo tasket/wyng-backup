@@ -131,9 +131,7 @@ class ArchiveSet:
             if debug:   print("metadata cipher =", ci_types[1])
 
             # access a key agent, if available for this UUID and archive URL
-            agent_name = "wyng-agent-" + str(os.getuid()) + hashlib.blake2b(
-                           bytes(self.dest.spec, encoding="UTF-8"), digest_size=20).hexdigest()
-            agentkeys  = agent_get(agent_name, pass_agent)
+            agentkeys  = agent_get(dest.agent_name, pass_agent)
 
             # get passphrase if we got no agentkeys
             if not passphrase and not agentkeys:   passphrase = get_passphrase(cmd=opts.passcmd)
@@ -182,7 +180,7 @@ class ArchiveSet:
         self.compress    = compressors[self.compression][2]
         self.decompress  = compressors[self.compression][0].decompress
         self.subdir      = "/a_"+hashlib.blake2b(
-                           bytes(str(os.getuid())+self.uuid+self.dest.spec, encoding="UTF-8"),
+                           bytes(str(os.getuid())+self.uuid + dest.spec, encoding="UTF-8"),
                            digest_size=20).hexdigest()
 
         # init data crypto
@@ -197,7 +195,7 @@ class ArchiveSet:
 
             # persist keys to allow future invocations w/o passphrase input
             if pass_agent > 0 and not agentkeys:
-                agent_make(agent_name, pass_agent, [datacrypto.key, mcrypto.key])
+                agent_make(dest.agent_name, pass_agent, [datacrypto.key, mcrypto.key])
 
         if mcrypto:
             # sync counters and set working salt file
@@ -942,6 +940,7 @@ def agent_make(agname, duration, keys):
     pwrite = p.stdin.write   ; pwrite(min(duration,60).to_bytes(1,"big"))
     for k in keys:   pwrite(len(k).to_bytes(1,"big"))   ; pwrite(k)   ; pwrite(Destination.magic)
     p.poll(); p.stdin.flush(); p.stdin.close()
+    time.sleep(0.2)
     return p
 
 
@@ -1910,8 +1909,9 @@ def clear_array(ar):
 def arch_init(aset):
 
     if not zstd:   print("Package python3-zstd is not installed.")
-
     opts = aset.opts    ; data_ci = opts.encrypt or "xchacha20-dgr"
+    agent_get(aset.dest.agent_name, -1)  # cancel old auth
+
     # Fix: duplicates code in aset... move to aset class.
     if data_ci in (x[0] for x in DataCryptography.crypto_codes.values() if x[2]):
         aset.ci_mode, ci_t = [(x,y) for x,y in DataCryptography.crypto_codes.items()
@@ -2382,6 +2382,8 @@ class Destination:
         self.archive_ini_hash = "none"
         self.free   = self.dtmp     =  None      ; self.last_chunkdir    = ""
         self.online = self.writable =  False
+        self.agent_name = "wyng-agent-" + str(os.getuid()) + hashlib.blake2b(
+                            bytes(self.spec, encoding="UTF-8"), digest_size=20).hexdigest()
 
         self.run_map = {"file":       [CP.sh],
                         "ssh":        [CP.ssh] + self.ssh_opts + ["ssh://"+self.sys],
@@ -4312,7 +4314,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
         if save_path:
             save_storage = None       ; returned_home = False
             save_type,_,_,_ = LocalStorage.parse_local_path(ldir := os.path.dirname(save_path))
-            if save_type not in (None,"block device"):
+            if save_type:
                 save_storage = LocalStorage(ldir, auuid=aset.uuid,
                                             arch_vols=storage.arch_vols.copy())
         else:
@@ -4388,7 +4390,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
 
     # Collect session manifests
     diff_ses = []
-    if use_snapshot and save_storage:
+    if use_snapshot and save_storage and save_storage.online:
         # sessions after selected, except if last ses (then we're already done)
         if select_ses == vol.last:
             save_storage.setperms(save_path, ses_obj.permissions)
@@ -4582,7 +4584,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
 
     if save_path:
         volf.flush()    ; os.fsync(volf.fileno())    ; volf.close()
-        if save_storage:
+        if save_storage and save_storage.online:
             save_storage.setperms(save_path, ses_obj.permissions)
             if is_num(ses_obj.localtime):   save_storage.settime(save_path, int(ses_obj.localtime))
         if returned_home and save_storage.pooltype in ("rlnk","tlvm") \
@@ -4882,7 +4884,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20240827"
+prog_version          = "0.8 wip"       ; prog_date = "20241111"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
