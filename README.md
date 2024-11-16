@@ -175,9 +175,10 @@ at '/mnt/pool1/appvms/personal.img'.
 
 #### receive
 
-Retrieves a volume instance (using the latest session ID
+Retrieves volumes (using the latest session ID
 if `--session` isn't specified) from the archive and saves it to either the `--local`
-storage or the path specified with `--save-to`.
+storage or the path specified with `--save-to` (the latter allows receiving only
+one volume at a time).
 If `--session` is used, only one date-time is accepted. The volume name is required.
 
 ```
@@ -343,7 +344,7 @@ the volume data if present.
 --dest=_URL_           | Location of backup archive.
 --local=_vg/pool_  _...or..._    | Storage pool containing local volumes.
 --local=_/absolute/path_    | 
---authmin=_N_          | Remember authentication for N minutes (default: 2)
+--authmin=_N_          | Remember authentication for N minutes (default: 5)
 --all, -a              | Select all volumes (most cmds); Or clean all snapshots (delete).
 --volex=_volname_      | Exclude volumes (send, monitor, list, prune).
 --dedup, -d            | Use deduplication for send (see notes).
@@ -367,7 +368,7 @@ the volume data if present.
 
 | _Option_                      | _Description_
 |-------------------------------|--------------
---save-to=_path_       | Save volume to _path_ (receive).
+--save-to=_path_       | Save a volume to _path_ (receive).
 --local_from=_json file_ | Specify local:[volumes] sets instead of --local.
 --import-other-from    | Import volume data from a non-snapshot capable path during `send`
 --session-strict=_on|off_ | Don't retrieve volume from next-oldest session if no exact session match
@@ -746,7 +747,12 @@ its possible to do so with the following:
      mv destpath-updating destpath
 ```
 
+> Note that since the resulting copy of the archive is identical, including internal UUIDs, it should only be kept for an emergency such as when the original archive is no longer available or becomes unusable. Switching back and forth between the original and copy for regular archival operations is not supported.
+
 * The above `rsync` command can also efficiently update a duplicate archive, since it can delete files that are no longer present in the origin archive (`cp` cannot do this). However, note that there is risk of absentmindedly corrupting the duplicate archive if the update process ever ends in an error – this includes when your system is running `rsync` and it just crashes, thus displaying no error; all errors/interruptions must be handled. By renaming the archive with a suffix like '-updating', the above commands provide some precautionary "oops!" information, a reminder that your update had an error ...and to re-run it to make it right. This risk could be eliminated if Wyng were able to perform the duplicating itself; for plans on adding such a feature, see [this](https://github.com/tasket/wyng-backup/issues/199) issue.
+
+* Wyng archives should be stored on Unix-like filesystems that were formatted with default or close-to default metadata settings (i.e. _inode_ capacity has not been manually reduced). Any format providing a 16KB (or lower) data per inode ratio should work fine regardless of the Wyng chunksize being used.
+
 
 ### Troubleshooting notes
 

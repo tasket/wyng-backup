@@ -4931,7 +4931,7 @@ parser_defs = [
  [["action"],         {"choices": local_actions+dest_actions, "help": "Wyng Commands"}],
  [["volumes"],        {"nargs": "*"}],
  [["--unattended", "-u"], {"action": "store_true", "help": "Non-interactive, supress prompts"}],
- [["--authmin"],      {"default": "5", "help": "Minutes to remember authentication (default=2)"}],
+ [["--authmin"],      {"default": "5", "help": "Minutes to remember authentication (default=5)"}],
  [["--all-before"],   {"dest": "allbefore", "action": "store_true",
                        "help": "Select all sessions before --session date-time."}],
  [["--all", "-a"],    {"action": "store_true", "help": "Select all known volumes"}],
