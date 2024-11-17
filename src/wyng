@@ -4884,7 +4884,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 wip"       ; prog_date = "20241111"
+prog_version          = "0.8 beta"      ; prog_date = "20241115"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
@@ -5014,8 +5014,6 @@ if options.save_to and options.action != "receive":
 if not (options.volumes or options.all or options.import_other_from or options.local_from) \
 and options.action not in ("arch-init","arch-check","arch-deduplicate","list","delete"):
     x_it(1, f"Volume name(s) or --all required for {options.action}.")
-if options.import_other_from and options.action != "send":
-    x_it(1, "Option --import-other-from may only be used with send.")
 if options.action not in ("send", "arch-deduplicate"):   options.dedup = False
 if options.action == "arch-deduplicate":   options.dedup = True
 meta_reduce = options.meta_reduce.split(":")

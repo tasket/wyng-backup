@@ -724,6 +724,19 @@ on each thin pool used with `wyng send` or `wyng monitor`; see the man page
 section _[Manually manage free metadata space of a thin pool LV](https://www.linux.org/docs/man7/lvmthin.html)_ for guidance on using
 the `lvextend --poolmetadatasize` command.
 
+* Btrfs users: In general it is a good idea to use disk images on a Btrfs filesystem that is
+relatively recent and well-maintained to ensure that fragmentation does not cause
+noticeable slowdowns.  The simplest way to maintain a responsive filesystem is to
+defragment image files monthly or weekly as it is a single command and typically takes
+only a few minutes (there is no need to dismount the images).  For example:
+
+```
+sudo btrfs filesystem defragment -r -t 256K /var/lib/qubes
+```
+
+> Note that while the 'autodefrag' mount option can be used as an alternative, the overall performance will be reduced due to the smaller fragments and constant effect of write-amplification.
+
+
 * To reduce the size of incremental backups it may be helpful to remove cache
 files, if they exist in your source volume(s). Typically, the greatest cache space
 consumption comes from web browsers, so
