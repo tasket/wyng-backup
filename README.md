@@ -705,7 +705,8 @@ Subsequently, the steps to verify total archive authenticity would be to simply 
 `wyng arch-check --dest <URL>` (using Wyng's built-in authenticated encryption), or else using custom
 authentication based on GPG, for instance:
 ```
-gpg --verify archive.ini.sig laptop1.backup/archive.ini && wyng arch-check --dest <URL>
+cd /mnt/backups
+gpg --verify laptop1.sig laptop1.backup/archive.ini && wyng arch-check --dest=file:/mnt/backups/laptop1.backup
 ```
 Note that custom signature files should _not_ be stored within the archive directory.
 
@@ -731,16 +732,21 @@ defragment image files monthly or weekly as it is a single command and typically
 only a few minutes (there is no need to dismount the images).  For example:
 
 ```
-sudo btrfs filesystem defragment -r -t 256K /var/lib/qubes
+      sudo btrfs filesystem defragment -r -t 256K /var/lib/qubes
 ```
 
 > Note that while the 'autodefrag' mount option can be used as an alternative, the overall performance will be reduced due to the smaller fragments and constant effect of write-amplification.
 
+> Btrfs deduplicators like `bees` or `duperemove` can quickly increase fragmentation
+> (i.e. undo the effects of _defragment_) if not used carefully. The `duperemove` docs
+> indicate that choosing a larger block size will limit fragmentation, making it
+> preferable to _bees_. The block `-b` value should be matched to the one used 
+> for `defragment -t`.
 
 * To reduce the size of incremental backups it may be helpful to remove cache
 files, if they exist in your source volume(s). Typically, the greatest cache space
 consumption comes from web browsers, so
-volumes holding paths like /home/user/.cache can impacted by this, depending
+volumes holding paths like /home/user/.cache can be impacted by this, depending
 on the amount and type of browser use associated with the volume. Three possible
 approaches are to clear caches on browser exit, delete /home/user/.cache dirs on
 system/container shutdown (this reasonably assumes cached data is expendable),
@@ -755,9 +761,9 @@ Deleting them can prevent unnecessary consumption of disk space.
 * If you wish to make a "backup of the backup", i.e. duplicate an archive,
 its possible to do so with the following:
 ```
-     mv destpath destpath-updating
-     rsync -a --hard-links --delete sourcepath destpath-updating
-     mv destpath-updating destpath
+      mv destpath destpath-updating
+      rsync -a --hard-links --delete sourcepath destpath-updating
+      mv destpath-updating destpath
 ```
 
 > Note that since the resulting copy of the archive is identical, including internal UUIDs, it should only be kept for an emergency such as when the original archive is no longer available or becomes unusable. Switching back and forth between the original and copy for regular archival operations is not supported.
