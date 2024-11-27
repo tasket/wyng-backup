@@ -54,7 +54,7 @@ class ArchiveSet:
 
     attr_ints   = {"format_ver","chunksize","mci_count","dataci_count"}
 
-    def __init__(self, top, dest, opts, ext="", allvols=False, children=2,
+    def __init__(self, top, dest, opts, ext="", allvols=False, children=2, show=False,
                  pass_agent=0, passphrase=None, prior_auth=None):
         self.time_start      = time_start
         self.monotonic_start = monotonic_start
@@ -128,7 +128,7 @@ class ArchiveSet:
         # parse metadata crypto mode and instantiate it
         if ci != "00" and not mcrypto:
             ci_types = DataCryptography.crypto_codes[ci]
-            if debug:   print("metadata cipher =", ci_types[1])
+            if debug:   print(f"\n{self.confname} metadata cipher = {ci_types[1]}")
 
             # access a key agent, if available for this UUID and archive URL
             agentkeys  = agent_get(dest.agent_name, pass_agent)
@@ -156,7 +156,7 @@ class ArchiveSet:
             raise e
 
         # read attributes from archive.ini
-        if debug:   print(gzip.decompress(buf).decode("UTF-8"))
+        if show:   print(gzip.decompress(buf).decode("UTF-8"))
         cp.read_string(gzip.decompress(buf).decode("UTF-8"))
         for key, value in cp["var"].items():
             setattr(self, key, int(value) if key in self.attr_ints else value)
@@ -214,13 +214,13 @@ class ArchiveSet:
         # load volume metadata objects
         if children:
             # initial load, depth 1
-            self.load_volumes(1)
+            self.load_volumes(1, show=show)
 
             if children > 1:
                 # load volume objects fully
-                self.load_volumes(children)
+                self.load_volumes(children, show=show)
 
-    def load_volumes(self, children, vids=[], handle=False):
+    def load_volumes(self, children, vids=[], handle=False, show=False):
 
         errors = []    ; vids = vids or list(self.conf["volumes"].keys())
         recv_list = [(x+"/volinfo", ArchiveVolume.max_volinfosz)
@@ -246,7 +246,7 @@ class ArchiveSet:
             #loadses = allvols or self.in_process or options.from_arch or options.dedup or
             try:
                 vol  = ArchiveVolume(self, vid, hashval, pjoin(self.path,vid),
-                                name=vname, children=children)
+                                name=vname, children=children, show=show)
             except Exception as e:
                 errors.append((vid, e))
                 if not handle:   raise e
@@ -387,7 +387,7 @@ class ArchiveVolume:
     __slots__ = ("vid","name","hashval","archive","path","alias","aliastype","sessions","sesnames",
                  "_seslist","last","meta_checked","tags","desc","changed_bytes")
 
-    def __init__(self, archive, vid, hashval, path, name=None, children=2):
+    def __init__(self, archive, vid, hashval, path, name=None, children=2, show=False):
         self.vid       = vid                       ; self.tags    = {}
         self.archive   = archive                   ; self.path    = path
         self.hashval   = hashval                   ; self.changed_bytes = 0
@@ -398,7 +398,7 @@ class ArchiveVolume:
         self.sessions  = {}                        ; self.sesnames= []
 
         Ses = ArchiveSession
-        if debug:  print("\n", vid, "-", name)
+        if show:  print("\n", vid, "-", name)
         if path and not exists(path):   os.makedirs(path)
         if path and hashval:
             with open(pjoin(path,"volinfo"), "rb") as f:
@@ -409,13 +409,13 @@ class ArchiveVolume:
             if not hmac.compare_digest(hashval, archive.b64hash(buf)):
                 raise ValueError("Volume %s hash %s, expected %s" \
                                  % (vid, archive.b64hash(buf), hashval))
-            if debug:   print(archive.decompress(buf).decode("UTF-8"))
+            if show:   print(archive.decompress(buf).decode("UTF-8"))
             with io.StringIO(archive.decompress(buf).decode("UTF-8")) as f:
                 for ln in f:
                     vname, value = ln.split("=", maxsplit=1)
                     vname = vname.strip()    ; value = value.strip()
                     if vname.startswith("S_"):
-                        self.sessions[vname] = Ses(self, vname, value, "")
+                        self.sessions[vname] = Ses(self, vname, value, "", show=show)
                     else:
                         setattr(self, vname, value)
         if not self.name: raise ValueError("Vol name missing")
@@ -623,7 +623,7 @@ class ArchiveSession:
               + sum(map(len, attr_str+attr_int)) + len(attr_str+attr_int)*(max_field+10)
     __slots__ = attr_str + attr_int + attr_misc
 
-    def __init__(self, volume, name, hashval, path="", addtags=[]):
+    def __init__(self, volume, name, hashval, path="", addtags=[], show=False):
         self.volume   = volume;    self.archive = arch = volume.archive
         self.name     = name
         self.path     = path
@@ -647,7 +647,7 @@ class ArchiveSession:
                 if fsize > self.max_infosz:   raise ValueError("info too large")
                 buf = sf.read(fsize)
             if arch.mcrypto:   buf = arch.mcrypto.decrypt(buf)
-            if debug:   print(self.volume.vid, self.name); print(arch.decompress(buf).decode("UTF-8"))
+            if show:   print(self.volume.vid, self.name); print(arch.decompress(buf).decode("UTF-8"))
             if not hmac.compare_digest(hashval, arch.b64hash(buf)):
                 raise ValueError("%s Session %s hash %s, expected %s" \
                                  % (volume.vid, name, arch.b64hash(buf), hashval))
@@ -2211,6 +2211,8 @@ def get_configs(opts):
     if True:
         dest.detect_state(opts.dedup)
 
+    if debug:   print("\nSSH & VM opts:", dest.ssh_opts, "\n", dest.qubes_opts, "\n")
+
     # Check online status for certain commands.
     if not dest.online and (opts.remap  \
     or opts.action not in local_actions) and not (opts.action == "delete" and opts.clean):
@@ -2239,13 +2241,15 @@ def get_configs(opts):
 
 def get_configs_remote(dest, base_dir, opts):
 
+    show = debug and opts.action.lower() == "list"
+
     recv_list = [(ArchiveSet.confname,  ArchiveSet.max_conf_sz),
                  (ArchiveSet.saltname, DataCryptography.max_keyfile_sz),
                  ("salt.bak", DataCryptography.max_keyfile_sz)]
     fetch_file_blobs(recv_list, tmpdir, dest, skip0=True)
 
     # Instantiate ArchiveSet to authenticate archive.ini
-    aset = ArchiveSet(tmpdir, dest, opts, children=0, pass_agent=int(opts.authmin))
+    aset = ArchiveSet(tmpdir, dest, opts, children=0, pass_agent=int(opts.authmin), show=debug)
     if aset.format_ver == 2:
         if opts.action == "arch-check" and opts.upgrade_format:
             os.mkdir(v2dir := tmpdir+"/:oldv2:")
@@ -2304,7 +2308,8 @@ def get_configs_remote(dest, base_dir, opts):
         depth = 1
     else:
         depth = 2
-    return ArchiveSet(arch_dir, dest, opts, children=depth, allvols=True, prior_auth=aset)
+    return ArchiveSet(arch_dir, dest, opts, children=depth, allvols=True,
+                      prior_auth=aset, show=show)
 
 
 # Returns either a single LocalStorage obj from --local, or a dict of them
@@ -2353,11 +2358,11 @@ class Destination:
     url_types   = ("ssh", "file", "qubes-ssh", "qubes")
 
     ssh_opts    = ["-x", "-T", "-e", "none", "-o", "ControlPath=~/.ssh/ctrl-%C",
-                         "-o", "ControlMaster=auto", "-o", "ControlPersist=120",
-                         "-o", "ServerAliveInterval=60", "-o", "ConnectTimeout=60",
-                         "-o", "Compression=no"]
+                   "-o", "ControlMaster=auto", "-o", "ControlPersist=240",
+                   "-o", "ServerAliveInterval=60", "-o", "ServerAliveCountMax=3",
+                   "-o", "ConnectTimeout=60", "-o", "Compression=no"]
 
-    qubes_opts  = ["--no-color-stderr", "--no-color-output"]
+    qubes_opts  = ["--no-color-stderr", "--no-color-output", '--nogui', '--no-filter-escape-chars']
 
     magic       = b"\xff\x11\x15"
 
@@ -2462,6 +2467,8 @@ class Destination:
 
     def detect_state(self, dedup):
 
+        if debug:   print("\nDest detect:")
+
         if self.dtype == "qubes-ssh":
             # fix: possibly remove dargs and use dest.run()
             dargs = self.run_map["qubes"][:-1] + [self.sys.split(":")[0]]
@@ -2473,12 +2480,13 @@ class Destination:
         cmd  = [r"mkdir -p '"+self.path+r"' && cd '"+self.path+"'"
 
                 # send helper program to remote dest
+                +(r" && python3 --version && uname -a && df -PTi ." if debug else "")
                 +r"  && mkdir -p -m 777 " + tmpprefix
                 +r"  && tdir=$(mktemp -d " + tmpprefix +"tmp"+ ("X"*tmpdigits) + r") && echo $tdir"
                 +r"  && cat >$tdir/dest_helper.py"
 
                 # check free space and archive.ini status on remote
-                +r"  && echo -n 'wyng_check_free ' && df -P . | tail -1"
+                +r"  && echo -n 'wyng_check_free ' && df -PT . | tail -1"
                 +r"  && echo -n 'wyng_archive_ini '"
                 +r"  && { if [ -e archive.ini ]; then sha256sum archive.ini; else echo none; fi }"
 
@@ -2498,10 +2506,11 @@ class Destination:
 
         if online:
             for ln in open(tmpdir+"/dest-state.log","r"):
+                if debug:   print(ln, end="")
                 if ln.startswith("wyng_archive_ini"):
                     self.archive_ini_hash = ln.split()[1]
                 elif ln.startswith("wyng_check_free"):
-                    parts = ln.split()    ; self.free = int(parts[4]) * 1024
+                    parts = ln.split()    ; self.free = int(parts[5]) * 1024
                 elif ln.startswith("wyng_writable"):
                     self.writable = True
                 elif ln.startswith(tmpprefix):
@@ -2541,18 +2550,19 @@ def x_it(ec, text=None):
     if text:   sys.stderr.write(text+"\n")
     sys.exit(ec)
 
-def helper_send(volid=None, ses=None):
+def helper_send(volid=None, ses=None, debug=False):
     mkdirs = os.makedirs    ; hlink = os.link    ; dirname = os.path.dirname
     print(volid, ses)    ; assert volid.startswith("Vol_") and ses.startswith("S_")
 
     with tarfile.open(mode="r|", fileobj=sys.stdin.buffer) as tarf:
         extract = tarf.extract    ; substitutions = {}    ; dirlist = set()
-        for member in tarf:   destpath = member.name    ; break
+        for member in tarf:   print(member.type, destpath := member.name)    ; break
         os.chdir(destpath)
         for i in os.scandir(volid):
             if i.path.endswith("-tmp") and not i.path.endswith(ses+"-tmp"):
-                shutil.rmtree(i.path, ignore_errors=True)
+                print("rmtree", i.path)   ; shutil.rmtree(i.path, ignore_errors=True)
         for member in tarf:
+            if debug:   print(member.type, member.name, member.size, flush=True)
             if not member.islnk():
                 extract(member, set_attrs=False)
             else:
@@ -2646,8 +2656,8 @@ def helper_merge_finalize():
     print("wyng_check_free", shutil.disk_usage(".").free, flush=True)
 
 ## MAIN ##
-cmd = sys.argv[1]   ; msync = "--sync" in sys.argv   ; magic  = b"\xff\x11\x15"
-tmpdir = os.path.dirname(os.path.abspath(sys.argv[0]))  ; misc_procs = []
+cmd = sys.argv[1]   ; debug = "--debug" in sys.argv   ; msync = "--sync" in sys.argv
+tmpdir = os.path.dirname(os.path.abspath(sys.argv[0]))  ; misc_procs = []; magic  = b"\xff\x11\x15"
 exists = os.path.exists    ; replace = os.replace    ; remove = os.remove
 if cmd in ("receive","dedup") and exists(tmpdir+"/dest.lst.gz"):
     lstf = gzip.open(tmpdir+"/dest.lst.gz", "rt")
@@ -2674,7 +2684,7 @@ if cmd == "merge":
 elif cmd == "receive":
     helper_receive(lstf if lstf else sys.stdin)
 elif cmd == "send":
-    helper_send(volid=sys.argv[2], ses=sys.argv[3])
+    helper_send(volid=sys.argv[2], ses=sys.argv[3], debug=debug)
 elif cmd == "dedup":
     ddcount = 0    ; substitutions = {}
     for line in lstf:
@@ -3375,6 +3385,10 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
         tar_info.size = fileobj.write(etag) + fileobj.write(buf)   ; fileobj.seek(0)
         tarf_addfile(tarinfo=tar_info, fileobj=fileobj)
 
+    def send_chunk_remote_al(tar_info, etag, buf):
+        print(" ", tar_info.name, flush=True)
+        send_chunk_remote(tar_info, etag, buf)   ; signal.alarm(30)
+
     if vol.aliastype == "import_other":
         # Use a plain file or blockdev as a source volume
         volpath = vol.alias                     ; send_all    = True
@@ -3441,19 +3455,24 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
         send_chunk = send_chunk_local
         pdirname   = os.path.dirname   ; makedirs  = os.makedirs
     else:
-        send_chunk = send_chunk_remote
+        send_chunk = send_chunk_remote_al if debug else send_chunk_remote
+        if debug:   catch_signals(["ALRM","INT"], iflag=True)    ; signal.alarm(30)
 
     # Use tar to stream files to destination
     untar_cmd = ["exec >>"+dest.dtmp+"/send.log 2>&1"
                  + " && python3 "+dest.dtmp+"/dest_helper.py send "+vol.vid+" "+bksession
                  + (" --sync" if options.maxsync else "")]
-    untar = SPr.Popen(dest.run_args(untar_cmd), stdin=SPr.PIPE, stdout=SPr.DEVNULL)
+    if debug:   print("\nDest run:\n", untar_cmd, end=" ")
+    untar = SPr.Popen(dest.run_args(untar_cmd), stdin=SPr.PIPE,
+                      stdout=SPr.DEVNULL, stderr=SPr.DEVNULL)
     tarf = tarfile.open(mode="w|", fileobj=untar.stdin)
     tarf_addfile = tar_add_pass if benchmark else tarf.addfile
     tarf_add     = tar_add_pass if benchmark else tarf.add
     TarInfo  = tarfile.TarInfo         ; LNKTYPE = tarfile.LNKTYPE
     tar_info = TarInfo(destpath)       ; tar_info.type  = tarfile.DIRTYPE
     tarf_addfile(tarinfo=tar_info)     ; stream_started = True
+    if options.delay:   time.sleep(int(options.delay)) ####
+    if debug:   print("Status:", untar.poll())
 
 
     # Open source volume and its delta bitmap as r, session manifest as w.
@@ -3554,6 +3573,9 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
                         hashtree[i].extend(bhashb)   ; chtree[i].append(idxcount)   ; idxcount += 1
                         ddataf_write(ses_index.to_bytes(ses_w,"big") + addr.to_bytes(ch_w,"big"))
 
+                if untar.poll() is not None:
+                    x_it(1, "untar exited with code: " + repr(untar.poll()))
+
                 if tar_info.type == LNKTYPE:
                     tar_info.linkname = "%s/%s/%s/x%s" % \
                         (ddses.volume.vid,
@@ -3627,7 +3649,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
         vol.init_deltamap()
         storage.lvols[vol.name].rotate_snapshots(rotate=True, timestamp_path=vol.mapfile(),
                                                  addtags=["--addtag="+vol.last])
-    catch_signals(**signormal)
+    signal.alarm(0)    ; catch_signals(**signormal)
 
     runtime  = time.monotonic() - testtime
     t_m, t_s = divmod(runtime, 60); t_p = (f"{int(t_m)}m" if t_m else "") + f"{ceil(t_s)}s"
@@ -4832,9 +4854,14 @@ def catch_signals(sel=["INT","TERM","QUIT","ABRT","ALRM","TSTP","USR1","USR2"], 
     while not sel and signals_caught:   os.kill(os.getpid(), signals_caught.pop(0))
 
 
+class WTimeoutError(Exception):
+    def __init__(self, *args):    super().__init__(*args)
+    def __del__(self):            os._exit(1)
+
+
 def handle_signal(signum, frame):
     if signum == signal.SIGINT:   x_it(8)
-    if signum == signal.SIGALRM:  raise TimeoutError("SIGALRM")
+    if signum == signal.SIGALRM:  raise WTimeoutError("Timeout")
     if signum not in signals_caught:   signals_caught.append(signum)
     sys.stderr.write(" *** Caught signal "+str(signum))
 
@@ -4884,7 +4911,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20241115"
+prog_version          = "0.8 wip"       ; prog_date = "20241125"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
@@ -4980,6 +5007,7 @@ parser_defs = [
  [["--tar-bypass"],   {"action": "store_true", "help": "Bypass tar for file: archives (send)"}],
  [["--opt-ssh"],      {"action": "append", "default": [], "help": "Override ssh options"}],
  [["--opt-qubes"],    {"action": "append", "default": [], "help": "Override qvm-run options"}],
+ [["--delay"],      {"default": "", "help": ""}],
  [["--debug"],        {"action": "store_true", "help": "Debug mode"}],
  [["--quiet"],        {"action": "store_true"}],
  [["--verbose"],      {"action": "count", "default": 0}],
@@ -4994,10 +5022,13 @@ options.action= options.action.lower()
 # Set stdout to devnull if --quiet is specified
 debug = options.debug    #; assert not (options.quiet and (options.verbose or debug))
 verbose = options.verbose or debug
-if debug:   options.verbose = True; options.quiet = False
+if debug:
+    print("Python", sys.version, "\n", os.uname(), "\n", options, "\n")
+    options.verbose = True; options.quiet = False
 if options.quiet and options.action not in ("list","version"):
     options.unattended = True
     sys.stdout = open(os.devnull, "w")
+
 signormal = {"sel": ["INT"], "iflag": True} if not debug else {"sel": None}
 catch_signals(**signormal)
 
