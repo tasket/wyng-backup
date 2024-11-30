@@ -2552,12 +2552,16 @@ def x_it(ec, text=None):
 
 def helper_send(volid=None, ses=None, debug=False):
     mkdirs = os.makedirs    ; hlink = os.link    ; dirname = os.path.dirname
-    print(volid, ses)    ; assert volid.startswith("Vol_") and ses.startswith("S_")
+    print(volid, ses, flush=True)    ; assert volid.startswith("Vol_") and ses.startswith("S_")
 
+    print("ONE",flush=True) ####
+    destpath = sys.stdin.buffer.readline().decode("UTF-8").strip()
+    print("*", destpath, flush=True)   ; open(tmpdir+"/"+volid, "w").close()
+    os.chdir(destpath)
     with tarfile.open(mode="r|", fileobj=sys.stdin.buffer) as tarf:
+        print("TWO",flush=True) ####
         extract = tarf.extract    ; substitutions = {}    ; dirlist = set()
-        for member in tarf:   print(member.type, destpath := member.name)    ; break
-        os.chdir(destpath)
+        ##for member in tarf:   print(member.type, destpath := member.name)    ; break
         for i in os.scandir(volid):
             if i.path.endswith("-tmp") and not i.path.endswith(ses+"-tmp"):
                 print("rmtree", i.path)   ; shutil.rmtree(i.path, ignore_errors=True)
@@ -3384,10 +3388,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
         fileobj = BytesIO()
         tar_info.size = fileobj.write(etag) + fileobj.write(buf)   ; fileobj.seek(0)
         tarf_addfile(tarinfo=tar_info, fileobj=fileobj)
-
-    def send_chunk_remote_al(tar_info, etag, buf):
-        print(" ", tar_info.name, flush=True)
-        send_chunk_remote(tar_info, etag, buf)   ; signal.alarm(30)
+        signal.alarm(30) ####
 
     if vol.aliastype == "import_other":
         # Use a plain file or blockdev as a source volume
@@ -3455,23 +3456,30 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
         send_chunk = send_chunk_local
         pdirname   = os.path.dirname   ; makedirs  = os.makedirs
     else:
-        send_chunk = send_chunk_remote_al if debug else send_chunk_remote
-        if debug:   catch_signals(["ALRM","INT"], iflag=True)    ; signal.alarm(30)
+        send_chunk = send_chunk_remote
+        catch_signals(["ALRM","INT"], iflag=True)    ; signal.alarm(30) ####
 
     # Use tar to stream files to destination
-    untar_cmd = ["exec >>"+dest.dtmp+"/send.log 2>&1"
-                 + " && python3 "+dest.dtmp+"/dest_helper.py send "+vol.vid+" "+bksession
+    ##untar_cmd = ["exec >>"+dest.dtmp+"/send.log 2>&1"
+    untar_cmd = ["python3 "+dest.dtmp+"/dest_helper.py send "+vol.vid+" "+bksession
                  + (" --sync" if options.maxsync else "")]
     if debug:   print("\nDest run:\n", untar_cmd, end=" ")
-    untar = SPr.Popen(dest.run_args(untar_cmd), stdin=SPr.PIPE,
-                      stdout=SPr.DEVNULL, stderr=SPr.DEVNULL)
+    untar = SPr.Popen(dest.run_args(untar_cmd), stdin=SPr.PIPE, stdout=SPr.DEVNULL,
+                      stderr=open(tmpdir+"/send.log","w") if debug else SPr.DEVNULL)
+    untar.stdin.write((destpath+"\n").encode("UTF-8")); untar.stdin.flush()
     tarf = tarfile.open(mode="w|", fileobj=untar.stdin)
     tarf_addfile = tar_add_pass if benchmark else tarf.addfile
     tarf_add     = tar_add_pass if benchmark else tarf.add
     TarInfo  = tarfile.TarInfo         ; LNKTYPE = tarfile.LNKTYPE
-    tar_info = TarInfo(destpath)       ; tar_info.type  = tarfile.DIRTYPE
-    tarf_addfile(tarinfo=tar_info)     ; stream_started = True
-    if options.delay:   time.sleep(int(options.delay)) ####
+    ##tar_info = TarInfo(destpath)       ; tar_info.type  = tarfile.DIRTYPE
+    ##tarf_addfile(tarinfo=tar_info)
+    stream_started = True
+    if options.delay: ####
+        time.sleep(float(options.delay)) ####
+        abcd=rf"while [ ! -e {dest.dtmp}/{vol.vid} ]; do sleep 1; echo sleep; done"
+        if debug:   print("(wait)", abcd, end="", flush=True)
+        dest.run([abcd]); print(" OK")
+
     if debug:   print("Status:", untar.poll())
 
 
@@ -3574,6 +3582,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
                         ddataf_write(ses_index.to_bytes(ses_w,"big") + addr.to_bytes(ch_w,"big"))
 
                 if untar.poll() is not None:
+                    err_out(untar.stderr.peek().decode("UTF-8"))
                     x_it(1, "untar exited with code: " + repr(untar.poll()))
 
                 if tar_info.type == LNKTYPE:
@@ -4459,8 +4468,8 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
             ["cd " + vol.vid
              +" && python3 "+dest.dtmp+"/dest_helper.py receive"
             ], destcd=dest.path)
-    getvol   = SPr.Popen(cmd, stdout=SPr.PIPE, stderr=open(tmpdir+"/receive.log","w"),
-                                     stdin =SPr.PIPE if sparse else SPr.DEVNULL)
+    getvol   = SPr.Popen(cmd, stdout=SPr.PIPE, stdin=SPr.PIPE if sparse else SPr.DEVNULL,
+                         stderr=open(tmpdir+"/receive.log","w") if debug else SPr.DEVNULL)
     gv_stdin = io.TextIOWrapper(getvol.stdin, encoding="utf-8") if sparse else None
 
     # Open manifest then receive, check and save data
@@ -4911,7 +4920,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 wip"       ; prog_date = "20241125"
+prog_version          = "0.8 wip"       ; prog_date = "20241129"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
@@ -5022,8 +5031,9 @@ options.action= options.action.lower()
 # Set stdout to devnull if --quiet is specified
 debug = options.debug    #; assert not (options.quiet and (options.verbose or debug))
 verbose = options.verbose or debug
-if debug:
-    print("Python", sys.version, "\n", os.uname(), "\n", options, "\n")
+if debug and not options.json:
+    print("Python", sys.version, "\n", os.uname())
+    print("\n", vars(options) | {"passcmd":""}, "\n")
     options.verbose = True; options.quiet = False
 if options.quiet and options.action not in ("list","version"):
     options.unattended = True
