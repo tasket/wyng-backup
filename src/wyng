@@ -2555,13 +2555,12 @@ def helper_send(volid=None, ses=None, debug=False):
     print(volid, ses, flush=True)    ; assert volid.startswith("Vol_") and ses.startswith("S_")
 
     print("ONE",flush=True) ####
-    destpath = sys.stdin.buffer.readline().decode("UTF-8").strip()
-    print("*", destpath, flush=True)   ; open(tmpdir+"/"+volid, "w").close()
-    os.chdir(destpath)
+    c, destpath = sys.stdin.buffer.readline().decode("UTF-8").strip().split(maxsplit=1)
+    assert c == "cd" and destpath    ; open(tmpdir+"/"+volid, "w").close()
+    os.chdir(destpath)    ; print(c, destpath, flush=True)
     with tarfile.open(mode="r|", fileobj=sys.stdin.buffer) as tarf:
         print("TWO",flush=True) ####
         extract = tarf.extract    ; substitutions = {}    ; dirlist = set()
-        ##for member in tarf:   print(member.type, destpath := member.name)    ; break
         for i in os.scandir(volid):
             if i.path.endswith("-tmp") and not i.path.endswith(ses+"-tmp"):
                 print("rmtree", i.path)   ; shutil.rmtree(i.path, ignore_errors=True)
@@ -3460,19 +3459,16 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
         catch_signals(["ALRM","INT"], iflag=True)    ; signal.alarm(30) ####
 
     # Use tar to stream files to destination
-    ##untar_cmd = ["exec >>"+dest.dtmp+"/send.log 2>&1"
     untar_cmd = ["python3 "+dest.dtmp+"/dest_helper.py send "+vol.vid+" "+bksession
                  + (" --sync" if options.maxsync else "")]
     if debug:   print("\nDest run:\n", untar_cmd, end=" ")
     untar = SPr.Popen(dest.run_args(untar_cmd), stdin=SPr.PIPE, stdout=SPr.DEVNULL,
                       stderr=open(tmpdir+"/send.log","w") if debug else SPr.DEVNULL)
-    untar.stdin.write((destpath+"\n").encode("UTF-8")); untar.stdin.flush()
+    untar.stdin.write(f"cd {destpath}\n".encode("UTF-8")); untar.stdin.flush()
     tarf = tarfile.open(mode="w|", fileobj=untar.stdin)
     tarf_addfile = tar_add_pass if benchmark else tarf.addfile
     tarf_add     = tar_add_pass if benchmark else tarf.add
     TarInfo  = tarfile.TarInfo         ; LNKTYPE = tarfile.LNKTYPE
-    ##tar_info = TarInfo(destpath)       ; tar_info.type  = tarfile.DIRTYPE
-    ##tarf_addfile(tarinfo=tar_info)
     stream_started = True
     if options.delay: ####
         time.sleep(float(options.delay)) ####
@@ -4920,7 +4916,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 wip"       ; prog_date = "20241129"
+prog_version          = "0.8 wip"       ; prog_date = "20241130"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
