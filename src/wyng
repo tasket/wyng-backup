@@ -2358,8 +2358,8 @@ class Destination:
     url_types   = ("ssh", "file", "qubes-ssh", "qubes")
 
     ssh_opts    = ["-x", "-T", "-e", "none", "-o", "ControlPath=~/.ssh/ctrl-%C",
-                   "-o", "ControlMaster=auto", "-o", "ControlPersist=240",
-                   "-o", "ServerAliveInterval=60", "-o", "ServerAliveCountMax=3",
+                   "-o", "ControlMaster=auto", "-o", "ControlPersist=300",
+                   "-o", "ServerAliveInterval=120",
                    "-o", "ConnectTimeout=60", "-o", "Compression=no"]
 
     qubes_opts  = ["--no-color-stderr", "--no-color-output", '--nogui', '--no-filter-escape-chars']
@@ -2546,26 +2546,26 @@ def catch_signals(sel=["INT","TERM","QUIT","ABRT","ALRM","TSTP","USR1"], iflag=F
 def handle_signal(sig, frame):
     if sig == signal.SIGALRM:   raise IOError("Timeout ALRM")
 
+def err_out(t):   sys.stderr.write(t+"\n"); sys.stderr.flush()
+
 def x_it(ec, text=None):
-    if text:   sys.stderr.write(text+"\n")
+    if text:   err_out(text)
     sys.exit(ec)
 
 def helper_send(volid=None, ses=None, debug=False):
     mkdirs = os.makedirs    ; hlink = os.link    ; dirname = os.path.dirname
-    print(volid, ses, flush=True)    ; assert volid.startswith("Vol_") and ses.startswith("S_")
+    if debug:   err_out(f"{os.path.abspath(os.curdir)}\n{volid} {ses}")
+    assert volid.startswith("Vol_") and ses.startswith("S_")
+    open(tmpdir+"/start_"+volid, "w").close()
 
-    print("ONE",flush=True) ####
-    c, destpath = sys.stdin.buffer.readline().decode("UTF-8").strip().split(maxsplit=1)
-    assert c == "cd" and destpath    ; open(tmpdir+"/"+volid, "w").close()
-    os.chdir(destpath)    ; print(c, destpath, flush=True)
     with tarfile.open(mode="r|", fileobj=sys.stdin.buffer) as tarf:
-        print("TWO",flush=True) ####
+        if debug:   err_out("Got tarfile")
         extract = tarf.extract    ; substitutions = {}    ; dirlist = set()
-        for i in os.scandir(volid):
-            if i.path.endswith("-tmp") and not i.path.endswith(ses+"-tmp"):
-                print("rmtree", i.path)   ; shutil.rmtree(i.path, ignore_errors=True)
+        #for i in os.scandir(volid):
+        #    if i.path.endswith("-tmp") and not i.path.endswith(ses+"-tmp"):
+        #        err_out("rmtree " + i.path)   ; shutil.rmtree(i.path, ignore_errors=True)
         for member in tarf:
-            if debug:   print(member.type, member.name, member.size, flush=True)
+            if debug:   err_out(f"{member.type} {member.name} {member.size}")
             if not member.islnk():
                 extract(member, set_attrs=False)
             else:
@@ -2575,7 +2575,7 @@ def helper_send(volid=None, ses=None, debug=False):
                 try:
                     hlink(source, dest)
                 except OSError as err:
-                    print(err)    ; print("Substitution:", source, dest)
+                    if debug:   err_out(repr(err))   ; err_out(f"Substitution: {source} {dest}")
                     shutil.copyfile(source, dest)    ; substitutions[src_orig] = dest
             tarf.members = []
     fssync(".", force=True)
@@ -3459,22 +3459,22 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
         catch_signals(["ALRM","INT"], iflag=True)    ; signal.alarm(30) ####
 
     # Use tar to stream files to destination
-    untar_cmd = ["python3 "+dest.dtmp+"/dest_helper.py send "+vol.vid+" "+bksession
-                 + (" --sync" if options.maxsync else "")]
-    if debug:   print("\nDest run:\n", untar_cmd, end=" ")
-    untar = SPr.Popen(dest.run_args(untar_cmd), stdin=SPr.PIPE, stdout=SPr.DEVNULL,
+    cmd = ["python3 "+dest.dtmp+"/dest_helper.py send "+vol.vid+" "+bksession
+           + (" --sync" if options.maxsync else "") + (" --debug" if debug else "")]
+    if debug:   print("\nDest run:\n", cmd, end=" ")
+    untar = SPr.Popen(dest.run_args(cmd, destcd=dest.path), stdin=SPr.PIPE, stdout=SPr.DEVNULL,
                       stderr=open(tmpdir+"/send.log","w") if debug else SPr.DEVNULL)
-    untar.stdin.write(f"cd {destpath}\n".encode("UTF-8")); untar.stdin.flush()
     tarf = tarfile.open(mode="w|", fileobj=untar.stdin)
     tarf_addfile = tar_add_pass if benchmark else tarf.addfile
     tarf_add     = tar_add_pass if benchmark else tarf.add
     TarInfo  = tarfile.TarInfo         ; LNKTYPE = tarfile.LNKTYPE
     stream_started = True
+    time.sleep(0.5)
     if options.delay: ####
         time.sleep(float(options.delay)) ####
-        abcd=rf"while [ ! -e {dest.dtmp}/{vol.vid} ]; do sleep 1; echo sleep; done"
-        if debug:   print("(wait)", abcd, end="", flush=True)
-        dest.run([abcd]); print(" OK")
+        cmd = r"for i in {1..120}; do [ -e "+dest.dtmp+"/start_"+vol.vid+" ] || sleep 1; done"
+        if debug:   print("(wait)", cmd, end="", flush=True)
+        dest.run([cmd]); print(" Delay OK")
 
     if debug:   print("Status:", untar.poll())
 
@@ -3578,7 +3578,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
                         ddataf_write(ses_index.to_bytes(ses_w,"big") + addr.to_bytes(ch_w,"big"))
 
                 if untar.poll() is not None:
-                    err_out(untar.stderr.peek().decode("UTF-8"))
+                    err_out(untar.stderr.decode("UTF-8"))
                     x_it(1, "untar exited with code: " + repr(untar.poll()))
 
                 if tar_info.type == LNKTYPE:
@@ -4866,7 +4866,10 @@ class WTimeoutError(Exception):
 
 def handle_signal(signum, frame):
     if signum == signal.SIGINT:   x_it(8)
-    if signum == signal.SIGALRM:  raise WTimeoutError("Timeout")
+    if signum == signal.SIGALRM:
+        if debug and exists(tmpdir+"/send.log"):
+            print(x for x in open(tmpdir+"/send.log","r"))
+        raise WTimeoutError("Timeout")
     if signum not in signals_caught:   signals_caught.append(signum)
     sys.stderr.write(" *** Caught signal "+str(signum))
 
@@ -4916,7 +4919,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 wip"       ; prog_date = "20241130"
+prog_version          = "0.8 wip"       ; prog_date = "20241204"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
