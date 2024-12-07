@@ -1685,6 +1685,7 @@ class ReflinkVolume(LocalVolume):
         if ro:   rel_chmod(self.path, "-", 0o222)
 
         self.storage.lvols[self.name] = self
+        return self
 
     def update(self):
         return self
@@ -1803,6 +1804,7 @@ class LvmVolume(LocalVolume):
                       + addtags + ["--thin", "-n", self.name, vg+"/"+self.storage.lvpool]])
 
         self.storage.lvols[self.name] = self
+        return self
 
     def update(self):
         self.storage.update_lvm_list(vol=self)
@@ -3387,7 +3389,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
         fileobj = BytesIO()
         tar_info.size = fileobj.write(etag) + fileobj.write(buf)   ; fileobj.seek(0)
         tarf_addfile(tarinfo=tar_info, fileobj=fileobj)
-        signal.alarm(30) ####
+        signal.alarm(600) ####
 
     if vol.aliastype == "import_other":
         # Use a plain file or blockdev as a source volume
@@ -3400,7 +3402,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
         vol_ts  = lvol.gettime()
 
     dest        = (aset := vol.archive).dest    ; pjoin       = os.path.join
-    options     = aset.opts                     ; status1     = not options.unattended
+    options     = aset.opts                     ; status1     = not options.unattended or verbose
     chunksize   = aset.chunksize                ; dedup       = False
     chdigits    = max_address.bit_length()//4   ; chformat    = "x%0"+str(chdigits)+"x"
     bksession   = "S_"+curtime                  ; sdir        = pjoin(vol.vid, bksession)
@@ -3409,7 +3411,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
     compress = compressors[aset.compression][2] ; compresslevel = int(aset.compr_level)
 
     if not status1:   print("  [", end="")
-    progress, MB = 0, 2**20
+    progress, MB = 0, 2**20    ; spinner = status_spinner()
     testtime = time.monotonic()
     def tar_add_pass(*args, **kwargs):   pass
 
@@ -3456,7 +3458,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
         pdirname   = os.path.dirname   ; makedirs  = os.makedirs
     else:
         send_chunk = send_chunk_remote
-        catch_signals(["ALRM","INT"], iflag=True)    ; signal.alarm(30) ####
+        catch_signals(["ALRM","INT"], iflag=True)    ; signal.alarm(120) ####
 
     # Use tar to stream files to destination
     cmd = ["python3 "+dest.dtmp+"/dest_helper.py send "+vol.vid+" "+bksession
@@ -3467,15 +3469,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
     tarf = tarfile.open(mode="w|", fileobj=untar.stdin)
     tarf_addfile = tar_add_pass if benchmark else tarf.addfile
     tarf_add     = tar_add_pass if benchmark else tarf.add
-    TarInfo  = tarfile.TarInfo         ; LNKTYPE = tarfile.LNKTYPE
-    stream_started = True
-    time.sleep(0.5)
-    if options.delay: ####
-        time.sleep(float(options.delay)) ####
-        cmd = r"for i in {1..120}; do [ -e "+dest.dtmp+"/start_"+vol.vid+" ] || sleep 1; done"
-        if debug:   print("(wait)", cmd, end="", flush=True)
-        dest.run([cmd]); print(" Delay OK")
-
+    TarInfo  = tarfile.TarInfo    ; LNKTYPE = tarfile.LNKTYPE    ; stream_started = True
     if debug:   print("Status:", untar.poll())
 
 
@@ -3536,12 +3530,17 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
                     # Show progress.
                     if status1:
                         percent = int(addr/volsize*1000)
-                        print(f"\r{bcount/MB: 7.1f}MB"[:10] + f" | {(percent//10):0d}%"[:7],
-                              end="", flush=True)
+                        print(f"\r{bcount/MB: 7.1f}MB"[:10], next(spinner),
+                              f"{(percent//10):0d}%"[:7], end="", flush=True)
                     elif (addr/volsize)*100 > progress:
                         print("|", end="", flush=True)   ; progress += 5
 
                     counter = 0
+
+                elif status1 and chunk % checkpt == 0:
+                    percent = int(addr/volsize*1000)
+                    print(f"\r{bcount/MB: 7.1f}MB"[:10], next(spinner),
+                          f"{(percent//10):0d}%"[:7], end="", flush=True)
 
                 # Compress & write only non-empty chunks
                 if buf == zeros:
@@ -3767,8 +3766,8 @@ def dedup_existing(aset):
 
 def monitor_send(storage, aset, datavols, monitor_only, imports={}, use_sesid=None):
 
-    options = aset.opts                ; dest = aset.dest
-    status1 = not options.unattended   ; MB   = 1024**2     ; ms_start = time.monotonic()
+    options, dest = aset.opts, aset.dest    ; status1 = not options.unattended or verbose
+    ms_start = time.monotonic()    ; MB   = 1024**2
     curtime = use_sesid or time.strftime("%Y%m%d-%H%M%S", time.localtime(time_start))
 
     if options.autoprune.lower() == "full":
@@ -4250,6 +4249,78 @@ def merge_sessions(volume, sources, target, clear_sources=False):
 
     os.remove("merge.lst.gz")
     for ses in sources:  shutil.rmtree(volume.path+"/"+ses, ignore_errors=True)
+
+
+def estimate_send(storage, vol):
+
+    dest        = (aset := vol.archive).dest
+    options     = aset.opts
+    chunksize   = aset.chunksize                ; bcount = 0    ; MB = 2**20
+    prior_size  = vol.volsize()
+    chdigits    = max_address.bit_length()//4   ; chformat      = "x%0"+str(chdigits)+"x"
+    compress = compressors[aset.compression][2] ; compresslevel = int(aset.compr_level)
+    testtime = time.monotonic()                 ; spinner = status_spinner()
+    snap2    = storage.lvols[vol.name].snap2    ; lvol    = storage.lvols[snap2]
+
+    if not lvol.exists():
+        if options.unattended or not options.force \
+        or ask_input("OK to create new snapshot? ").lower() not in "yY":
+            x_it(1, "No snapshot.")
+        print("Creating snapshot of", vol.name)
+        lvol = storage.lvols[snap2].create(snapshotfrom=vol.name, ro=True)
+
+    volpath = lvol.path
+    volsize  = lvol.getsize()
+
+    if len(vol.sessions):
+        # Generate a full manifest to detect unchanged chunks that are flagged in the delta bmap.
+        fullmanifest = open(merge_manifests(vol, vsize=prior_size), "r")
+        fullmanifest_readline = fullmanifest.readline
+    else:
+        raise ValueError()
+    fman_hash     = fman_fname = ""
+
+    # Open source volume and its delta bitmap as r, session manifest as w.
+    with open(volpath,"rb", buffering=chunksize) as vf:
+
+        vf_read = vf.read   ; BytesIO = io.BytesIO
+        gethash = aset.getdatahash             ; b64enc  = base64.urlsafe_b64encode
+        b2int   = int.from_bytes               ; islice  = itertools.islice
+        compare_digest = hmac.compare_digest   ; zeros   = bytes(chunksize)
+
+        # Cycle over range of chunk addresses.
+        for chunk, addr in enumerate(range( 0, volsize, chunksize)):
+
+            destfile = chformat % addr
+
+            try:
+                fman_hash, fman_fname = fullmanifest_readline().split()
+            except ValueError: # EOF
+                fullmanifest.close()   ; os.remove(fullmanifest.name)
+                fullmanifest = None    ; fman_hash = ""
+            else:
+                if fman_fname != destfile:
+                    raise ValueError("expected manifest addr %s, got %s"
+                                    % (destfile, fman_fname))
+
+            # Fetch chunk as buf
+            buf = vf_read(chunksize)
+
+            if chunk % 1024 == 0:
+                percent = int(addr/volsize*1000)
+                print(f"\r{bcount/MB: 7.1f}MB"[:10], next(spinner),
+                        f"{(percent//10):0d}%"[:7], end="", flush=True)
+
+            # Compress & write only non-empty chunks
+            if buf == zeros: continue
+
+            # Compress chunk and hash it
+            buf    = compress(buf, compresslevel)
+            b64hash = b64enc(gethash(buf)).decode("ascii")
+
+            if not compare_digest(fman_hash, b64hash):   bcount += len(buf)
+
+    print("\nEst. difference of local volume vs archive:", bcount, "bytes")
 
 
 # Receive volume from archive. If no save_path specified, then verify only.
@@ -4879,6 +4950,11 @@ def ask_input(text):
     return input()
 
 
+def status_spinner():
+    while True:
+        for ii in "\\|/–":   yield ii
+
+
 # Exit with simple message
 def x_it(code, text=None):
     if text:   err_out(text)
@@ -4919,7 +4995,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 wip"       ; prog_date = "20241204"
+prog_version          = "0.8 wip"       ; prog_date = "20241205"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
@@ -5016,6 +5092,7 @@ parser_defs = [
  [["--opt-ssh"],      {"action": "append", "default": [], "help": "Override ssh options"}],
  [["--opt-qubes"],    {"action": "append", "default": [], "help": "Override qvm-run options"}],
  [["--delay"],      {"default": "", "help": ""}],
+ [["--no-remote"],    {"action": "store_true", "help": ""}],
  [["--debug"],        {"action": "store_true", "help": "Debug mode"}],
  [["--quiet"],        {"action": "store_true"}],
  [["--verbose"],      {"action": "count", "default": 0}],
@@ -5228,8 +5305,11 @@ elif options.action == "diff":
             error_cache.extend(vols)   ; continue
 
         for dv in dvlist:
-            count = receive_volume(storage, aset.vols[dv], save_path="", diff=True)
-            if count is None:   error_cache.append(dv)
+            if options.no_remote:
+                estimate_send(storage, aset.vols[dv])
+            else:
+                count = receive_volume(storage, aset.vols[dv], save_path="", diff=True)
+                if count is None:   error_cache.append(dv)
 
 
 elif options.action == "list":
