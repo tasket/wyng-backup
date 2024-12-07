@@ -4293,15 +4293,16 @@ def estimate_send(storage, vol):
 
             destfile = chformat % addr
 
-            try:
-                fman_hash, fman_fname = fullmanifest_readline().split()
-            except ValueError: # EOF
-                fullmanifest.close()   ; os.remove(fullmanifest.name)
-                fullmanifest = None    ; fman_hash = ""
-            else:
-                if fman_fname != destfile:
-                    raise ValueError("expected manifest addr %s, got %s"
-                                    % (destfile, fman_fname))
+            if fullmanifest:
+                try:
+                    fman_hash, fman_fname = fullmanifest_readline().split()
+                except ValueError: # EOF
+                    fullmanifest.close()   ; os.remove(fullmanifest.name)
+                    fullmanifest = None    ; fman_hash = ""
+                else:
+                    if fman_fname != destfile:
+                        raise ValueError("expected manifest addr %s, got %s"
+                                        % (destfile, fman_fname))
 
             # Fetch chunk as buf
             buf = vf_read(chunksize)
@@ -4995,7 +4996,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 wip"       ; prog_date = "20241205"
+prog_version          = "0.8 wip"       ; prog_date = "20241206"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
