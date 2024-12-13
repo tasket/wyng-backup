@@ -380,6 +380,7 @@ the volume data if present.
 --tar-bypass           | Use direct access for file:/ archives (send)
 --passcmd=_'command'_  | Read passphrase from output of a wallet/auth app
 --upgrade-format       | Upgrade older Wyng archive to current format. (arch-check)
+--dry-run              | Make `send` session a dry run, see estimate of changed data.
 --remap                | Remap volume to current archive during `send` or `diff`.
 --json                 | Output volume: session info in json format (list).
 --force                | Not used with most commands.
@@ -486,6 +487,13 @@ The trade-off for deduplicating is longer startup time for Wyng, in addition to 
 memory and CPU resources during backups. Using `--dedup` works best if you are backing-up
 multiple volumes that have a lot of the same content and/or you are backing-up over a slow
 Internet link.
+
+
+`--dry-run`
+
+Have `send` perform a dry run, where no data is saved to the archive. This is useful for testing and also getting an estimate of the amount of data that will be transmitted during a normal `send`. If a volume that had lost its snapshot or delta map is included in a dry run, its map will be re-created automatically saving time on the next `send`.
+
+Since it affects the amount of data transmitted, including the `--dedup` option in the dry run is recommended if you intend to make the actual backup with `--dedup`.
 
 
 `--autoprune=(off | on | full)`
