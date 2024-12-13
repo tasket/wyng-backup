@@ -3558,6 +3558,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
                     counter = 0    ; signal.alarm(600)
 
                 elif status1 and chunk % checkpt == 0:
+                    signal.alarm(600)
                     percent = int(addr/volsize*1000)
                     print(f"\r{bcount/MB: 9.1f}MB"[:12], next(spinner),
                           f"{(percent//10):0d}%"[:7], end="", flush=True)
@@ -4945,7 +4946,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 wip"       ; prog_date = "20241211"
+prog_version          = "0.8 wip"       ; prog_date = "20241212"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
