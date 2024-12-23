@@ -2291,8 +2291,8 @@ def get_configs_remote(dest, base_dir, opts):
                 or any((x != y for s in aset.conf
                   for x, y in zipln(dict(cache_aset.conf[s]).items(), dict(aset.conf[s]).items())
                   if x[0] not in ("mci_count","dataci_count","updated_at"))):
-                    raise ValueError(f"Cached metadata is newer, from {cache_aset.path}\n"
-                                     f"{cache_aset.updated_at} vs. {aset.updated_at}\n")
+                      raise ValueError(f"Cached metadata is newer, from {cache_aset.path}\n"
+                                       f"{cache_aset.updated_at} vs. {aset.updated_at}\n")
                 elif aset.mcrypto:
                     # difference was only in counters, so advance them and continue
                     aset.mcrypto.set_counter(cache_aset.mci_count)
@@ -2732,16 +2732,19 @@ sys.stderr.write("--==--\n")
 
 
 # Run system commands with pipes, without shell:
+#
 # 'commands' is a list of lists, each element a command line.
 # If multiple command lines, then they are piped together.
 # 'out' redirects the last command output to a file; append mode can be
 # selected by beginning 'out' path with '>>'. 'inlines' can be a list-like collection of strings
 # to be used as input instead of 'infile'.
 # List of commands may include 'None' instead of a child list; these will be ignored.
+#
 # 'getctl' returns a tuple(control_execs <generator>, close <func>, (inf, outf, errf))
 # without waiting. The generator allows communicate() and checks to occur in tandem with other
 # commands. The context may be fed into another do_exec invocation via 'otherctl', which will
-# automatically process the separate pipe chains in tandem.
+# automatically process the separate pipe chains in tandem. This allows separate but related chains
+# to feed outputs to an aggregating process using extra file descriptors or named pipes.
 
 def do_exec(commands, cwd=None, check=True, out="", infile="", inlines=[], text=False,
             pipefail=False, timeout=None, getctl=False, otherctl=None):
@@ -2803,10 +2806,13 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", inlines=[], text=
             else:
                 yield err
 
+    # Closure: Advance our exec iterator, possibly alongside an otherctl iterator
     def control_execs():
         for ii in zipln(_iterate_execs(), otherctl[0]() if otherctl else []):
             yield ii
 
+    # Closure: Recursively complete each exec pipe chain, first other then this one.
+    # Check result codes and raise error or combine with other results as needed.
     def close():
         other_rcs = otherctl[1]() if otherctl else [] # close other
         rclist = [0] + list(filter(bool if pipefail else str, ( x.returncode for x in procs )))
@@ -2854,7 +2860,7 @@ def compare_files(arch, pathlist=[], volumes=[], sessions=[], clear=True, manife
             infile=cmp_list, out=tmpdir+"/compare-hashes.local")
     dest.run(["xargs sha256sum"],
              destcd=dest.path, infile=cmp_list, out=tmpdir+"/compare-hashes.dest")
-    # maybe switch cmp to diff/sha256sum if they are safe enough to read untrusted input
+
     files  = [tmpdir+"/compare-hashes.local", tmpdir+"/compare-hashes.dest"]
     result = do_exec([[CP.cmp] + files], check=False) > 0
 
@@ -4946,7 +4952,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 wip"       ; prog_date = "20241212"
+prog_version          = "0.8 beta"      ; prog_date = "20241221"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
