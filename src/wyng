@@ -660,6 +660,7 @@ class ArchiveSession:
                     setattr(self, vname, 
                         int(value) if vname in self.attr_int else value)
 
+            assert self.volsize <= max_address + 1
             self.saved = self.loaded = True
 
         for tag in addtags:   self.tag_add(tag)
@@ -1397,6 +1398,10 @@ class LocalStorage:
         else:
             return False
 
+    def getsize(self, path):
+        with open(path, "rb") as f:
+            return f.seek(0,2)
+
     def metadata_lock(self, lvpool=None):
         mark = 0    ; spath = self.path
         if self.pooltype == "tlvm":
@@ -1622,6 +1627,9 @@ class LocalVolume:
     def settime(self, t):
         self.storage.settime(self.path, t)
 
+    def getsize(self):
+        return self.storage.getsize(self.path)
+
     def exists(self):
         return exists(self.path)
 
@@ -1699,8 +1707,8 @@ class ReflinkVolume(LocalVolume):
         if not self.exists():   raise FileNotFoundError(self.path)
         with open(self.path, "r+b") as vf:   vf.truncate(size); vf.flush()
 
-    def getsize(self):
-        return os.path.getsize(self.path)
+    ## def getsize(self):
+    ##     return os.path.getsize(self.path)
 
     def getperms(self):
         return self.storage.getperms(self.path)
@@ -1824,8 +1832,8 @@ class LvmVolume(LocalVolume):
         if not self.exists():   raise FileNotFoundError(self.path)
         do_exec([[CP.lvm, "lvresize", "-L", str(size)+"b", "-f", self.path]])
 
-    def getsize(self):
-        return int(re.sub("[^0-9]", "", self.lv_size))
+    ## def getsize(self):
+    ##     return int(re.sub("[^0-9]", "", self.lv_size))
 
     def getperms(self):
         return self.lv_attr[1]
@@ -2948,7 +2956,12 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, other_vols={}):
     for datavol in datavols + list(other_vols.keys()):
 
         if not exists(vpath := other_vols.get(datavol) or pjoin(storage.path, datavol)):
-            err_out("Warning: Local '%s' does not exist!" % vpath)
+            err_out("  Warning: Local '%s' does not exist!" % vpath)
+            if datavol in other_vols:   del(other_vols[datavol])
+            continue
+
+        if storage.getsize(vpath) > max_address + 1:
+            err_out("  Skipping '%s', size is larger than maximum (%d)" % (vpath, max_address+1))
             if datavol in other_vols:   del(other_vols[datavol])
             continue
 
@@ -3027,10 +3040,14 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only, other_vols=
     for datavol in datavols + list(other_vols.keys()):
 
         if not exists(vpath := other_vols.get(datavol) or pjoin(storage.path, datavol)):
-            err_out("Warning: Local '%s' does not exist!" % vpath)
+            err_out("  Warning: Local '%s' does not exist!" % vpath)
             if datavol in other_vols:   del(other_vols[datavol])
             continue
 
+        if storage.getsize(vpath) > max_address + 1:
+            err_out("  Skipping '%s', size is larger than maximum (%d)" % (vpath, max_address+1))
+            if datavol in other_vols:   del(other_vols[datavol])
+            continue
 
         if datavol not in aset.vols and not monitor_only:
             add_volume(aset, datavol, aset.opts.voldesc)
@@ -3420,7 +3437,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
         # Use a plain file or blockdev as a source volume
         volpath = vol.alias                     ; send_all    = True
         vol_ts  = os.stat(volpath).st_mtime_ns  ; volperms    = storage.getperms(volpath)
-        with open(volpath, "rb") as f:   volsize = f.seek(0,2)
+        volsize = storage.getsize(volpath)
     else:
         lvol    = storage.lvols[storage.lvols[vol.name].snap2]    ; volpath = lvol.path
         volsize = lvol.getsize()                ; volperms    = storage.lvols[vol.name].getperms()
@@ -3694,7 +3711,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
 
 # Build deduplication hash index and list
 
-def init_dedup_index(aset, listfile=""):
+def init_dedup_index(aset, listfile="", extra_vols=0):
 
     ctime      = time.perf_counter()    ; makelist = bool(listfile)
     addrsplit  = -address_split[1]
@@ -3712,11 +3729,11 @@ def init_dedup_index(aset, listfile=""):
         aset.dedupsessions += vol.sessions.values()
         vol.decode_manifests(vol.sesnames)
     aset.dedupsessions.sort(key=lambda x: x.name, reverse=True)
-    ddsessions = aset.dedupsessions[:2**(ses_w*8)-(len(aset.vols))-1]
+    ddsessions = aset.dedupsessions[:2**(ses_w*8)-(len(aset.vols)-extra_vols)-1]
 
     ddataf  = open(tmpdir+"/hashindex.dat","w+b")
     ddataf_read = ddataf.read    ; ddataf_seek = ddataf.seek    ; b2int  = int.from_bytes
-    ddataf_write= ddataf.write   ; bfromhex = bytes().fromhex   ; b64dec = base64.urlsafe_b64decode
+    ddataf_write= ddataf.write   ; bfromhex    = bytes.fromhex  ; b64dec = base64.urlsafe_b64decode
     if makelist:   dedupf = gzip.open(tmpdir+"/"+listfile, "wt")
 
     count = 0
@@ -3757,9 +3774,9 @@ def init_dedup_index(aset, listfile=""):
     if not debug:  return
     print("\nIndexed in %.1f seconds." % (time.perf_counter()-ctime))
     vsz, rss = map(int, os.popen("ps -up"+str(os.getpid())).readlines()[-1].split()[4:6])
-    print("\nMemory use: Max %dMB, index count: %d" %
+    print("\nMemory use: Max %dMB, index count: %d, sessions: %d" %
         (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * resource.getpagesize() // 1024//1024,
-         count)
+         count, len(ddsessions))
         )
     print("Current: vsize %d, rsize %d" % (vsz/1000,rss/1000))
 
@@ -3872,7 +3889,7 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={},
         if datavol in send_alls+list(other_vols) or updated:
             if options.dedup and not aset.dedupindex:
                 if status1:   print("I/", end="\r", flush=True)
-                init_dedup_index(aset)
+                init_dedup_index(aset, extra_vols=len(other_vols))
 
         if datavol in send_alls+list(other_vols) or updated or options.send_unchanged:
 
@@ -4952,7 +4969,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20241221"
+prog_version          = "0.8 beta"      ; prog_date = "20241230"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
