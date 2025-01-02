@@ -418,7 +418,7 @@ class ArchiveVolume:
                         self.sessions[vname] = Ses(self, vname, value, "", show=show)
                     else:
                         setattr(self, vname, value)
-        if not self.name: raise ValueError("Vol name missing")
+        if (res := ArchiveVolume.volname_check(self.name)):   raise ValueError(res)
         self.alias = self.name
 
         if children > 1:
@@ -4969,7 +4969,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20241230"
+prog_version          = "0.8 beta"      ; prog_date = "20241231"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
