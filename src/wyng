@@ -3,7 +3,7 @@
 
 
 ###  Wyng – The Logical Volume Backup Tool
-###  Copyright Christopher Laprise 2018-2024 / tasket@protonmail.com
+###  Copyright Christopher Laprise 2018-2025 / tasket@protonmail.com
 ###  Licensed under GNU General Public License v3. See file 'LICENSE'.
 ###  Permission to redistribute under similar naming "Wyng", "wyng backup", etc.
 ###  is granted only for un-modified code (GPLv3 S.7-c).
@@ -380,6 +380,7 @@ class ArchiveSet:
 
 class ArchiveVolume:
 
+    vid_chk       = re.compile("^Vol_[0-9a-fA-F]+$")
     max_sessions  = 16384    ; volname_len = 4000    ; sesname_sz = 17
     max_volinfosz = (ArchiveSet.mhash_sz + sesname_sz + 10) * max_sessions \
                   + volname_len * 4 + ArchiveSet.comment_len * 4 + 10
@@ -418,7 +419,13 @@ class ArchiveVolume:
                         self.sessions[vname] = Ses(self, vname, value, "", show=show)
                     else:
                         setattr(self, vname, value)
-        if (res := ArchiveVolume.volname_check(self.name)):   raise ValueError(res)
+
+            if (res := ArchiveVolume.volname_check(self.name)):   raise ValueError(res)
+            if not self.vid_chk.match(vid):   raise ValueError("Bad vid: "+repr(vid))
+            if self.desc and not all(map(str.isprintable, self.desc)) \
+            or len(self.desc) > ArchiveSet.comment_len:
+                raise ValueError("Bad desc: "+repr(self.desc))
+
         self.alias = self.name
 
         if children > 1:
@@ -489,7 +496,7 @@ class ArchiveVolume:
             return f"Volume path/name length must be 1 - {ArchiveVolume.volname_len}."
         if not vname.isprintable():
             return "Non-printable characters not allowed in volume names."
-        if any([x in (".","..") for x in vname.strip().split("/")]):
+        if any([x in (".","..") for x in vname.strip().split("/")]) or vname.strip()[0] == "/":
             return "Bad volume name."
         return ""
 
@@ -616,6 +623,7 @@ class ArchiveSession:
     attr_int  = ("volsize","sequence")
     attr_misc = ("tags","volume","archive","name","path","saved","loaded","toggle",
                  "uuid","hashval","meta_checked","just_fetched")
+    name_chk  = re.compile(r"^S_[0-9]{8}-[0-9]{6}$")
     sesname_sz= ArchiveVolume.sesname_sz    ; tag_len = 25    ; max_tags = 5    ; max_field = 64
     max_permsz= 32 * 4 * 2 + 5  # user & group names in utf-8 plus mode
     max_infosz= (tag_len * 4 + ArchiveSet.comment_len * 4 + 10) * max_tags + max_permsz \
@@ -632,7 +640,7 @@ class ArchiveSession:
         self.meta_checked = False
         self.just_fetched = False
         # persisted:
-        self.localtime= 0
+        self.localtime= None ####
         self.volsize  = None
         self.sequence = None
         self.previous = "None"
@@ -660,7 +668,9 @@ class ArchiveSession:
                     setattr(self, vname, 
                         int(value) if vname in self.attr_int else value)
 
-            assert self.volsize <= max_address + 1
+            assert self.volsize <= max_address + 1 and all(map(str.isdigit, self.localtime))
+            assert self.name_chk.match(self.name)
+            # Enh: validation check for permissions
             self.saved = self.loaded = True
 
         for tag in addtags:   self.tag_add(tag)
@@ -677,11 +687,13 @@ class ArchiveSession:
 
         if re.match(r".*[,=\^]", tag_id) or any(map(str.isspace, tag_id)) \
         or not tag_id.isprintable():
-            errs.append("Error: [^control], [space], and ',^=' not allowed in tag ID.\n")
+            errs.append("Error: [^control], [space], and ',^=' not allowed in tag ID.")
         if not comment.isprintable():
-            errs.append("Error: [^control] not allowed in tag comment.\n")
-        if tag_id == "all":   errs.append("Error: tag 'all' is reserved.\n")
-        sys.stderr.write("".join(errs))
+            errs.append("Error: [^control] not allowed in tag comment.")
+        if len(comment) > ArchiveSet.comment_len:
+            errs.append("Error: Oversize tag comment.")
+        if tag_id == "all":   errs.append("Error: tag 'all' is reserved.")
+        if errs:   err_out("\n".join(errs))
 
         return tuple() if errs else (tag_id, comment)
 
@@ -859,7 +871,7 @@ def upgrade_from_v2(aset):
 
 
 def agent_helper_write(path):
-    agent_program = r'''#  Copyright Christopher Laprise 2018-2024
+    agent_program = r'''#  Copyright Christopher Laprise 2018-2025
 #  Licensed under GNU General Public License v3. See wyng-backup/LICENSE file.
 import os, sys, signal, time
 
@@ -2553,7 +2565,7 @@ class Destination:
 
     def write_helper_program(path):
 
-        dest_program = r'''#  Copyright Christopher Laprise 2018-2024
+        dest_program = r'''#  Copyright Christopher Laprise 2018-2025
 #  Licensed under GNU General Public License v3. See wyng-backup/LICENSE file.
 import os, sys, time, signal, shutil, subprocess as SPr, gzip, tarfile
 
@@ -3546,7 +3558,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
             for chunk, addr in enumerate(range( addr, volsize if send_all
                         else min(volsize, addr+len(minibmap)*8*chunksize), chunksize)):
 
-                destfile = chformat % addr
+                destfile = chformat % addr    ; signal.alarm(600)
 
                 if fullmanifest:
                     try:
@@ -3578,10 +3590,9 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
                     elif (addr/volsize)*100 > progress:
                         print("|", end="", flush=True)   ; progress += 5
 
-                    counter = 0    ; signal.alarm(600)
+                    counter = 0
 
                 elif status1 and chunk % checkpt == 0:
-                    signal.alarm(600)
                     percent = int(addr/volsize*1000)
                     print(f"\r{bcount/MB: 9.1f}MB"[:12], next(spinner),
                           f"{(percent//10):0d}%"[:7], end="", flush=True)
@@ -4969,7 +4980,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20241231"
+prog_version          = "0.8 wip"       ; prog_date = "20250101"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
