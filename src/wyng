@@ -640,7 +640,7 @@ class ArchiveSession:
         self.meta_checked = False
         self.just_fetched = False
         # persisted:
-        self.localtime= None ####
+        self.localtime= None
         self.volsize  = None
         self.sequence = None
         self.previous = "None"
@@ -668,7 +668,8 @@ class ArchiveSession:
                     setattr(self, vname, 
                         int(value) if vname in self.attr_int else value)
 
-            assert self.volsize <= max_address + 1 and all(map(str.isdigit, self.localtime))
+            assert self.volsize <= max_address + 1
+            assert self.localtime.isdigit() or name_chk.match("S_"+self.localtime)
             assert self.name_chk.match(self.name)
             # Enh: validation check for permissions
             self.saved = self.loaded = True
@@ -3441,7 +3442,6 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
         fileobj = BytesIO()
         tar_info.size = fileobj.write(etag) + fileobj.write(buf)   ; fileobj.seek(0)
         tarf_addfile(tarinfo=tar_info, fileobj=fileobj)
-        signal.alarm(600)
 
     def tar_add_pass(*args, **kwargs):   pass
 
@@ -3546,7 +3546,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
         while addr < volsize:
             if len(bmap_list):
                 # At boundary inside list, so use islice to jump ahead here.
-                if fullmanifest:  list(islice(fullmanifest, zdlen))
+                if fullmanifest:  next(islice(fullmanifest, zdlen, zdlen), None)
                 addr += chunksize*zdlen
                 minibmap = bmap_list.pop(0)
             elif not send_all:
@@ -4669,7 +4669,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
         volf.flush()    ; os.fsync(volf.fileno())    ; volf.close()
         if save_storage and save_storage.online:
             save_storage.setperms(save_path, ses_obj.permissions)
-            if is_num(ses_obj.localtime):   save_storage.settime(save_path, int(ses_obj.localtime))
+            save_storage.settime(save_path, ses_obj.gettime())
         if returned_home and save_storage.pooltype in ("rlnk","tlvm") \
         and select_ses == sessions[-1]:
             if debug:   print(f"Pairing snapshot.")
@@ -4916,7 +4916,7 @@ def catch_signals(sel=["INT","TERM","QUIT","ABRT","ALRM","TSTP","USR1","USR2"], 
 
 
 class WTimeoutError(Exception):
-    def __init__(self, *args):    super().__init__(*args)
+    def __init__(self, *args):    super().__init__(*args); err_out("\n")
     def __del__(self):            os._exit(1)
 
 
@@ -4980,7 +4980,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 wip"       ; prog_date = "20250101"
+prog_version          = "0.8 beta"      ; prog_date = "20250102"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
