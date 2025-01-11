@@ -2008,6 +2008,10 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
         x_it(1, "Cannot upgrade.")
 
     if options.change_uuid:
+        if not (options.force or attended and
+                ask_input("\nChange archive UUID to a new random value;"
+                          "\nAre you sure? (y/N): ").lower() in {"y","yes"}):
+            x_it(0)
         print("Old UUID:", oldid := aset.uuid)
         while (newid := str(uuid.uuid4())) == oldid: time.sleep(0.2)
         print("New UUID:", newid)    ; aset.uuid = newid
@@ -2288,7 +2292,7 @@ def get_configs_remote(dest, base_dir, opts):
         if opts.action == "arch-check" and opts.upgrade_format:
             os.mkdir(v2dir := tmpdir+"/:oldv2:")
             os.replace(aset.path+"/"+aset.confname, v2dir+"/"+aset.confname)
-            arch_check(None, OldArchiveSet_V2(v2dir, dest), upgrade=True); x_it(0, "")
+            arch_check(None, OldArchiveSet_V2(v2dir, dest), upgrade=True); x_it(0)
         else:
             x_it(1, "Error:  Old V2 format. "
                     "To upgrade this archive run 'wyng arch-check --upgrade-format'.")
@@ -4762,7 +4766,7 @@ def delete_volume(storage, aset, dv=None, vid=None):
               f"for volume '{dv or vid}'")
 
         ans = ask_input("Are you sure? [y/N]: ")
-        if ans.lower() not in {"y","yes"}:   x_it(0,"")
+        if ans.lower() not in {"y","yes"}:   x_it(0)
 
     if vid in aset.conf["volumes"]:
         print(f"\nDeleting volume '{dv or vid}' from archive.")
@@ -4930,8 +4934,8 @@ def handle_signal(signum, frame):
     sys.stderr.write(" *** Caught signal "+str(signum))
 
 
-def ask_input(text):
-    sys.stderr.write(text)
+def ask_input(text=None):
+    if text:   sys.stderr.write(text)
     return input()
 
 
@@ -4980,7 +4984,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20250102"
+prog_version          = "0.8 beta"      ; prog_date = "20250107"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
@@ -5106,7 +5110,7 @@ catch_signals(**signormal)
 print("%s %s release %s" % (prog_name.capitalize(), prog_version, prog_date), flush=True)
 
 # Check consistency of arguments
-if options.action == "version":   x_it(0,"")
+if options.action == "version":   x_it(0)
 if options.local_from and options.action not in ("send","monitor","receive","diff"):
     x_it(1, "local-from cannot be used with "+options.action)
 if options.action in write_actions+("arch-init","monitor") and not admin_permission:
@@ -5239,7 +5243,7 @@ elif options.action == "prune":
         print("This operation will delete session(s) from the archive;")
         ans = ask_input("Are you sure? [y/N]: ").strip()
         if ans.lower() not in {"y","yes"}:
-            x_it(0,"")
+            x_it(0)
 
     for dv in dvs:
         if options.session:
@@ -5320,7 +5324,7 @@ elif options.action == "delete":
         if not options.unattended and not options.force:
             ans = ask_input("Are you sure? [y/N]: ")
             if ans.lower() not in {"y","yes"}:
-                x_it(0,"")
+                x_it(0)
         elif not options.force:
             x_it(1, "Ignoring clean/purge without --force.")
 
