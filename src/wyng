@@ -3878,7 +3878,9 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={},
         incrementals = storage.acquire_deltas(storage, aset, incrementals)
         print("", flush=True)
 
-    if not monitor_only:
+    if monitor_only:
+        print(f"\nMonitor at {curtime}:")
+    else:
         cmpvols = [x for x in aset.vols.values()
                          if x.name in incrementals + send_alls and x.sessions]
         cmpses  = [v.sessions[v.sesnames[-1]] for v in cmpvols]
@@ -3886,9 +3888,10 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={},
             x_it(1, "Error: Local and archive metadata differ.")
 
         print(f"\nSending backup session {curtime}:" if not benchmark
-              else "\nDry run (not sending):", flush=True)
-        hl = "—" * (min(max([len(aset.vols[v].name) for v in incrementals+send_alls]+[22]), 60)+20)
-        print(hl)
+              else "\nDry run (not sending):")
+
+    hl = "—" * (min(max([len(aset.vols[v].name) for v in incrementals+send_alls]+[22]), 60)+20)
+    print(hl, flush=True)
 
     totalvsize = totalbcount = 0
     for datavol in list(other_vols.keys()) + sorted(incrementals + send_alls + unchanged_vols):
@@ -3898,6 +3901,8 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={},
 
         if datavol in incrementals:
             updated, svsize, vperms = storage.process_deltas(storage, aset, datavol, monitor_only)
+        elif monitor_only:
+            print("  no snapshot")
 
         if monitor_only:   continue
 
