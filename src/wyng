@@ -1720,9 +1720,6 @@ class ReflinkVolume(LocalVolume):
         if not self.exists():   raise FileNotFoundError(self.path)
         with open(self.path, "r+b") as vf:   vf.truncate(size); vf.flush()
 
-    ## def getsize(self):
-    ##     return os.path.getsize(self.path)
-
     def getperms(self):
         return self.storage.getperms(self.path)
 
@@ -1844,9 +1841,6 @@ class LvmVolume(LocalVolume):
     def resize(self, size):
         if not self.exists():   raise FileNotFoundError(self.path)
         do_exec([[CP.lvm, "lvresize", "-L", str(size)+"b", "-f", self.path]])
-
-    ## def getsize(self):
-    ##     return int(re.sub("[^0-9]", "", self.lv_size))
 
     def getperms(self):
         return self.lv_attr[1]
@@ -4394,6 +4388,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
     addrsplit   = -address_split[1]                  ; rc = l_vol  = volf = None
     lchunk_addr, last_chunkx = vol.last_chunk_addr(volsize)
     assert vol.aliastype in (None, "rename")
+    print()
 
     # Prepare save volume
     if not (diff or verify_only):
@@ -4454,14 +4449,18 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
 
     elif diff:
         l_vol = storage.lvols[vol.alias]     ; snap1vol = l_vol.snap1
+        paired = storage.lvols[snap1vol].paired_state(vol.mapfile(), vol.last)
         if not l_vol.exists():
             err_out("Local volume must exist for diff.")
             return None
         if remap:
             pass # raise NotImplementedError()
         else:
-            if storage.lvols[snap1vol].exists():
+            if paired == "Y":
                 l_vol = storage.lvols[snap1vol]
+            elif paired == "D":
+                l_vol = storage.lvols[snap1vol]
+                print("Snapshot is type delta:")
             else:
                 print("Snapshot not available; Comparing with source volume instead.")
 
@@ -4476,7 +4475,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
         volfno    = volf.fileno() ; fcntl.lockf(volf, fcntl.LOCK_EX|fcntl.LOCK_NB)
 
     if verify_only != 2:
-        print("\nReceiving" if save_path else "\nVerifying", f"volume '{vol.name}'",select_ses[2:])
+        print("Receiving" if save_path else "Verifying", f"volume '{vol.name}'",select_ses[2:])
         if save_path:    print("Saving to %s '%s'" % (save_type, save_path))
         if not verbose:   print("[", end="")
 
@@ -4989,7 +4988,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20250107"
+prog_version          = "0.8 beta"      ; prog_date = "20250113"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
