@@ -416,7 +416,7 @@ class ArchiveVolume:
                     vname, value = ln.split("=", maxsplit=1)
                     vname = vname.strip()    ; value = value.strip()
                     if vname.startswith("S_"):
-                        self.sessions[vname] = Ses(self, vname, value, "", show=show)
+                        self.sessions[vname] = Ses(self, vname, value, "")
                     else:
                         setattr(self, vname, value)
 
@@ -434,7 +434,7 @@ class ArchiveVolume:
         if exists(pjoin(path,"volchanged")):
             self.changed_bytes = int(open(pjoin(path,"volchanged"),"r").readlines()[0].strip())
 
-    def load_sessions(self, sesids=[], handle=False, mfdecode=False, force=False):
+    def load_sessions(self, sesids=[], handle=False, mfdecode=False, force=False, show=False):
 
         sessions, path, vid, vname = self.sessions, self.path, self.vid, self.name
         Ses = ArchiveSession    ; sesids = sesids or list(sessions.keys())    ; errors = []
@@ -447,7 +447,7 @@ class ArchiveVolume:
         for sname in sesids or sessions:
             if not (s := sessions[sname]).loaded:
                 try:
-                    s = sessions[sname] = Ses(self, sname, s.hashval, path+"/"+sname)
+                    s = sessions[sname] = Ses(self, sname, s.hashval, path+"/"+sname, show=show)
                 except Exception as e:
                     #err_out(f"{self.vid} - {sname}\n{repr(e)}")
                     errors.append((sname, e))
@@ -3889,7 +3889,8 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={},
 
     totalvsize = totalbcount = 0
     for datavol in list(other_vols.keys()) + sorted(incrementals + send_alls + unchanged_vols):
-        vol = aset.vols[datavol]    ; updated = sent = False    ; svsize = sbcount = stime = 0
+        vol = aset.vols[datavol]
+        updated = sent = False    ; svsize = sbcount = stime = ddbytes = 0
         print(f"Volume '{datavol}'\n" if not status1 else
               f"            |     | {datavol}\r", flush=True, end="")
 
@@ -4988,7 +4989,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20250113"
+prog_version          = "0.8 beta"      ; prog_date = "20250116"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
@@ -5000,17 +5001,6 @@ signal_handlers  = {}    ; signals_caught = []    ; error_cache = []
 
 if sys.hexversion < 0x3080000:
     x_it(1, "Python ver. 3.8 or greater required.")
-
-# Allow only one instance at a time
-lockpath = "/var/lock/"+prog_name
-try:
-    os.makedirs(os.path.dirname(lockpath), exist_ok=True)
-    lockf = open(lockpath, "w")
-    fcntl.lockf(lockf, fcntl.LOCK_EX|fcntl.LOCK_NB)
-except PermissionError:
-    x_it(1, "ERROR: No writing permission on %s.  Please run %s as root." % (lockpath,prog_name))
-except IOError:
-    x_it(1, "I/O ERROR obtaining lock on "+lockpath)
 
 cpu_flags = [x for x in open("/proc/cpuinfo") if x.startswith("flags")] [0].split()[1:]
 
@@ -5131,6 +5121,17 @@ if meta_reduce[0] not in ("off","on","extra") \
 or len(meta_reduce) != 2 or not is_num(meta_reduce[1]):
     x_it(1, "Malformed --meta-reduce argument.")
 options.unattended = options.unattended or not sys.stdin.isatty()
+
+# Allow only one instance at a time
+lockpath = "/var/lock/"+prog_name
+try:
+    os.makedirs(os.path.dirname(lockpath), exist_ok=True)
+    lockf = open(lockpath, "w")
+    fcntl.lockf(lockf, fcntl.LOCK_EX|fcntl.LOCK_NB)
+except PermissionError:
+    x_it(1, "ERROR: No writing permission on %s." % (lockpath,prog_name))
+except IOError:
+    x_it(1, "I/O ERROR obtaining lock on "+lockpath)
 
 
 ## General Configuration ##
