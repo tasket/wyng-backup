@@ -2418,7 +2418,7 @@ class Destination:
         self.path   = os.path.normpath(dparts.path)
         self.archive_ini_hash = "none"
         self.free   = self.dtmp     =  None      ; self.last_chunkdir    = ""
-        self.online = self.writable =  False
+        self.online = False    ; self.writable = self.hlinks =  True
         self.agent_name = "wyng-agent-" + str(os.getuid()) + hashlib.blake2b(
                             bytes(self.spec, encoding="UTF-8"), digest_size=20).hexdigest()
 
@@ -2508,7 +2508,7 @@ class Destination:
             cmd = dargs + [shell_prefix + "mkdir -p /tmp/wyngrpc"]
             do_exec([cmd])
 
-        tmpprefix = "/tmp/wyngrpc/"    ; tmpdigits = 12
+        tmpprefix = "/tmp/wyngrpc/"    ; tmpdigits = 12    ; NL = "\n"
         cmd  = [r"mkdir -p '"+self.path+r"' && cd '"+self.path+"'"
 
                 # send helper program to remote dest
@@ -2518,40 +2518,44 @@ class Destination:
                 +r"  && cat >$tdir/dest_helper.py"
 
                 # check free space and archive.ini status on remote
-                +r"  && echo -n 'wyng_check_free ' && df -PT . | tail -1"
-                +r"  && echo -n 'wyng_archive_ini '"
+                +NL+ r"set +e && echo wyng_online"
+                +NL+ r"echo -n 'wyng_check_free ' && df -PT . | tail -1"
+                +NL+ r"echo -n 'wyng_archive_ini '"
                 +r"  && { if [ -e archive.ini ]; then sha256sum archive.ini; else echo none; fi }"
 
                 # test write access and hardlinks
-                +r"  && touch archive.dat && echo 'wyng_writable'"
-                +(r" && ln -f archive.dat .hardlink" if dedup else "")
+                +NL+ r"touch archive.dat || echo 'wyng_not_writable'"
+                +NL+ r"ln -f archive.dat .hardlink || echo wyng_no_hlink"
                 ]
         try:
-            online = \
-                not do_exec([self.run_args(cmd),
-                            # sanitize remote output:
-                            [CP.cat,"-v"],  [CP.tail,"--bytes=2000"]],
-                            pipefail=True,
-                            out=tmpdir+"/dest-state.log", infile=tmpdir+"/rpc/dest_helper.py")
+            do_exec([self.run_args(cmd),
+                    # sanitize remote output:
+                    [CP.cat,"-v"],  [CP.tail,"--bytes=2000"]],
+                    pipefail=True,
+                    out=tmpdir+"/dest-state.log", infile=tmpdir+"/rpc/dest_helper.py")
         except SPr.CalledProcessError as e:
-            online = False    ; err_out(repr(e))
+            err_out(repr(e))
 
-        if online:
-            for ln in open(tmpdir+"/dest-state.log","r"):
-                if debug:   print(ln, end="")
-                if ln.startswith("wyng_archive_ini"):
-                    self.archive_ini_hash = ln.split()[1]
-                elif ln.startswith("wyng_check_free"):
-                    parts = ln.split()    ; self.free = int(parts[5]) * 1024
-                elif ln.startswith("wyng_writable"):
-                    self.writable = True
-                elif ln.startswith(tmpprefix):
-                    self.dtmp = ln.strip()
+        for ln in open(tmpdir+"/dest-state.log","r"):
+            if debug:   print(ln, end="")
+            if ln.startswith("wyng_online"):
+                self.online = True
+            elif ln.startswith("wyng_archive_ini"):
+                self.archive_ini_hash = ln.split()[1]
+            elif ln.startswith("wyng_check_free"):
+                parts = ln.split()    ; self.free = int(parts[5]) * 1024
+            elif ln.startswith("wyng_not_writable"):
+                self.writable = False
+            elif ln.startswith("wyng_no_hlink"):
+                self.hlinks   = False
+            elif ln.startswith(tmpprefix):
+                self.dtmp = ln.strip()
 
-            if not self.dtmp or len(self.dtmp) != len(tmpprefix)+tmpdigits+3 \
-            or not set(self.dtmp[5:]) <= set(string.ascii_letters + string.digits + "/"):
-                raise ValueError("Missing or malformed tmp dir: "+repr(self.dtmp))
-        else:
+        if self.online and not self.dtmp or len(self.dtmp) != len(tmpprefix)+tmpdigits+3 \
+        or not set(self.dtmp[5:]) <= set(string.ascii_letters + string.digits + "/"):
+            raise ValueError("Missing or malformed tmp dir: "+repr(self.dtmp))
+
+        if not self.online:
             for log in ("/dest-state.log", "/err.log"):
                 if exists(tmpdir+log):
                     do_exec([ [CP.cat, "-v", tmpdir+log],  [CP.tail, "--bytes=1000"],
@@ -2559,7 +2563,7 @@ class Destination:
                               out=tmpdir+log+"-out", check=False)
                     err_out(open(tmpdir+log+"-out", "r").read())
 
-        self.online = self.free is not None
+        #self.online = self.free is not None
 
 
     def write_helper_program(path):
@@ -4389,7 +4393,6 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
     addrsplit   = -address_split[1]                  ; rc = l_vol  = volf = None
     lchunk_addr, last_chunkx = vol.last_chunk_addr(volsize)
     assert vol.aliastype in (None, "rename")
-    print()
 
     # Prepare save volume
     if not (diff or verify_only):
@@ -4476,7 +4479,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
         volfno    = volf.fileno() ; fcntl.lockf(volf, fcntl.LOCK_EX|fcntl.LOCK_NB)
 
     if verify_only != 2:
-        print("Receiving" if save_path else "Verifying", f"volume '{vol.name}'",select_ses[2:])
+        print("\nReceiving" if save_path else "\nVerifying", f"volume '{vol.name}'",select_ses[2:])
         if save_path:    print("Saving to %s '%s'" % (save_type, save_path))
         if not verbose:   print("[", end="")
 
@@ -4989,7 +4992,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20250116"
+prog_version          = "0.8 beta"      ; prog_date = "20250117"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
