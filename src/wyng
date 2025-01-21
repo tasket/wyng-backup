@@ -2239,15 +2239,15 @@ def get_configs(opts):
 
     dest_url, local_url = opts.dest, opts.local
     dest = Destination(dest_url, user_ssh_opts=opts.opt_ssh, user_qubes_opts=opts.opt_qubes)
-
-    if True:
-        dest.detect_state(opts.dedup)
+    dest.detect_state(opts.dedup, ro=opts.action not in write_actions)
 
     if debug:   print("\nSSH & VM opts:", dest.ssh_opts, "\n", dest.qubes_opts, "\n")
 
     # Check online status for certain commands.
     if not dest.online and (opts.remap  \
     or opts.action not in local_actions) and not (opts.action == "delete" and opts.clean):
+        if not dest.dir_exists and opts.action not in write_actions:
+            x_it(5, f"Path '{dest.path}' does not exist.")
         x_it(5, "Destination not ready to receive commands.")
     if not dest.writable and opts.action in write_actions \
     and not (opts.action == "delete" and opts.clean):
@@ -2396,7 +2396,7 @@ class Destination:
 
     qubes_opts  = ["--no-color-stderr", "--no-color-output", '--nogui', '--no-filter-escape-chars']
 
-    magic       = b"\xff\x11\x15"
+    tmpprefix   = "/tmp/wyngrpc/"    ; magic  = b"\xff\x11\x15"
 
     def __init__(self, dest_url, user_ssh_opts=[], user_qubes_opts=[]):
 
@@ -2418,7 +2418,7 @@ class Destination:
         self.path   = os.path.normpath(dparts.path)
         self.archive_ini_hash = "none"
         self.free   = self.dtmp     =  None      ; self.last_chunkdir    = ""
-        self.online = False    ; self.writable = self.hlinks =  True
+        self.online = self.writable = self.hlinks = self.dir_exists = False
         self.agent_name = "wyng-agent-" + str(os.getuid()) + hashlib.blake2b(
                             bytes(self.spec, encoding="UTF-8"), digest_size=20).hexdigest()
 
@@ -2432,11 +2432,10 @@ class Destination:
 
 
     def remove_dtmp(self):
-        if self.online:
-            tmpprefix = "/tmp/wyngrpc/"
-            self.run([f"rm -rf {tmpprefix}tmp*"], timeout=10)
+        if self.online and self.dtmp:
+            self.run([f"rm -rf {self.dtmp}"], timeout=10, check=False)
             if self.dtype == "qubes-ssh":
-                self.run([f"rm -rf {tmpprefix}tmp*"], direct=True)
+                self.run([f"rm -rf {self.tmpprefix}tmp*"], direct=True, check=False)
 
     def get_free(self, fpath):
         for ln in open(fpath,"r"):
@@ -2462,7 +2461,7 @@ class Destination:
 
     def run_args(self, commands, trap=False, dest_type=None, destcd=None, lc="C"):
 
-        dest_type = dest_type or self.dtype    ; tmpprefix = "/tmp/wyngrpc/"
+        dest_type = dest_type or self.dtype    ; tmpprefix = self.tmpprefix
         trapcmd   = "trap '' INT TERM QUIT ABRT ALRM TSTP USR1\n" if trap else ""
         # shunt commands to local tmp file
         with tempfile.NamedTemporaryFile(dir=tmpdir+"/rpc", delete=False) as tmpf:
@@ -2497,7 +2496,7 @@ class Destination:
         return self.run_map[dest_type] + add_cmd
 
 
-    def detect_state(self, dedup):
+    def detect_state(self, dedup, ro=True):
 
         if debug:   print("\nDest detect:")
 
@@ -2508,12 +2507,13 @@ class Destination:
             cmd = dargs + [shell_prefix + "mkdir -p /tmp/wyngrpc"]
             do_exec([cmd])
 
-        tmpprefix = "/tmp/wyngrpc/"    ; tmpdigits = 12    ; NL = "\n"
-        cmd  = [r"mkdir -p '"+self.path+r"' && cd '"+self.path+"'"
+        tmpprefix = self.tmpprefix    ; tmpdigits = 12    ; NL = "\n"    ; error = None
+        cmd  = [(rf"mkdir -p '{self.path}'"+NL if not ro else "")
+                +rf"cd '{self.path}' && echo wyng_dir_exists"
+                +(r" && python3 --version && uname -a && df -PTi ." if debug else "")
 
                 # send helper program to remote dest
-                +(r" && python3 --version && uname -a && df -PTi ." if debug else "")
-                +r"  && mkdir -p -m 777 " + tmpprefix
+                +r"  mkdir -p -m 777 " + tmpprefix
                 +r"  && tdir=$(mktemp -d " + tmpprefix +"tmp"+ ("X"*tmpdigits) + r") && echo $tdir"
                 +r"  && cat >$tdir/dest_helper.py"
 
@@ -2524,8 +2524,8 @@ class Destination:
                 +r"  && { if [ -e archive.ini ]; then sha256sum archive.ini; else echo none; fi }"
 
                 # test write access and hardlinks
-                +NL+ r"touch archive.dat || echo 'wyng_not_writable'"
-                +NL+ r"ln -f archive.dat .hardlink || echo wyng_no_hlink"
+                +(NL+ r"touch archive.dat && echo 'wyng_writable'"
+                + NL+ r"ln -f archive.dat .hardlink && echo wyng_hlink" if not ro else "")
                 ]
         try:
             do_exec([self.run_args(cmd),
@@ -2534,28 +2534,10 @@ class Destination:
                     pipefail=True,
                     out=tmpdir+"/dest-state.log", infile=tmpdir+"/rpc/dest_helper.py")
         except SPr.CalledProcessError as e:
-            err_out(repr(e))
+            error = e
+            if debug:   err_out(repr(e))
 
-        for ln in open(tmpdir+"/dest-state.log","r"):
-            if debug:   print(ln, end="")
-            if ln.startswith("wyng_online"):
-                self.online = True
-            elif ln.startswith("wyng_archive_ini"):
-                self.archive_ini_hash = ln.split()[1]
-            elif ln.startswith("wyng_check_free"):
-                parts = ln.split()    ; self.free = int(parts[5]) * 1024
-            elif ln.startswith("wyng_not_writable"):
-                self.writable = False
-            elif ln.startswith("wyng_no_hlink"):
-                self.hlinks   = False
-            elif ln.startswith(tmpprefix):
-                self.dtmp = ln.strip()
-
-        if self.online and not self.dtmp or len(self.dtmp) != len(tmpprefix)+tmpdigits+3 \
-        or not set(self.dtmp[5:]) <= set(string.ascii_letters + string.digits + "/"):
-            raise ValueError("Missing or malformed tmp dir: "+repr(self.dtmp))
-
-        if not self.online:
+        if error and debug:
             for log in ("/dest-state.log", "/err.log"):
                 if exists(tmpdir+log):
                     do_exec([ [CP.cat, "-v", tmpdir+log],  [CP.tail, "--bytes=1000"],
@@ -2563,7 +2545,26 @@ class Destination:
                               out=tmpdir+log+"-out", check=False)
                     err_out(open(tmpdir+log+"-out", "r").read())
 
-        #self.online = self.free is not None
+        for ln in open(tmpdir+"/dest-state.log","r"):
+            if debug:   print(ln, end="")
+            if ln.startswith("wyng_online"):
+                self.online = True
+            elif ln.startswith("wyng_dir_exists"):
+                self.dir_exists = True
+            elif ln.startswith("wyng_archive_ini"):
+                self.archive_ini_hash = ln.split()[1]
+            elif ln.startswith("wyng_check_free"):
+                parts = ln.split()    ; self.free = int(parts[5]) * 1024
+            elif ln.startswith("wyng_writable"):
+                self.writable = True
+            elif ln.startswith("wyng_hlink"):
+                self.hlinks   = True
+            elif ln.startswith(tmpprefix):
+                self.dtmp = ln.strip()
+
+        if self.online and not self.dtmp or len(self.dtmp) != len(tmpprefix)+tmpdigits+3 \
+        or not set(self.dtmp[5:]) <= set(string.ascii_letters + string.digits + "/"):
+            self.dtmp, self.online = None, False
 
 
     def write_helper_program(path):
@@ -5021,8 +5022,8 @@ pjoin           = os.path.join     ; exists = os.path.exists   ; zipln = itertoo
 ## Parse Arguments & Etc Config ##
 
 local_actions   = ("monitor","version")
-write_actions   = ("add","send","prune","delete","rename","arch-deduplicate")
-dest_actions    = ("list","receive","verify","diff","arch-check","arch-init") + write_actions
+write_actions   = ("add","send","prune","delete","rename","arch-deduplicate","arch-init")
+dest_actions    = ("list","receive","verify","diff","arch-check") + write_actions
 
 parser_defs = [
  [["action"],         {"choices": local_actions+dest_actions, "help": "Wyng Commands"}],
