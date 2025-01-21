@@ -2126,7 +2126,7 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
         print(" data:")
         for sesname in reversed(vol.sesnames):
             if options.session and ((options.session.lower() == "newest" \
-            and sesname != vol.sesnames[-1]) or "S_"+options.session < sesname):
+            and sesname != vol.sesnames[-1]) or "S_"+options.session != sesname):
                 continue # Enh: use seq
 
             print(" ", sesname[2:], end=" :", flush=True)
@@ -2534,16 +2534,14 @@ class Destination:
                     pipefail=True,
                     out=tmpdir+"/dest-state.log", infile=tmpdir+"/rpc/dest_helper.py")
         except SPr.CalledProcessError as e:
-            error = e
-            if debug:   err_out(repr(e))
-
-        if error and debug:
-            for log in ("/dest-state.log", "/err.log"):
-                if exists(tmpdir+log):
-                    do_exec([ [CP.cat, "-v", tmpdir+log],  [CP.tail, "--bytes=1000"],
-                              [CP.grep, "-vFx", " --+--"] ],
-                              out=tmpdir+log+"-out", check=False)
-                    err_out(open(tmpdir+log+"-out", "r").read())
+            if debug:
+                err_out(repr(e))
+                for log in ("/dest-state.log", "/err.log"):
+                    if exists(tmpdir+log):
+                        do_exec([ [CP.cat, "-v", tmpdir+log],  [CP.tail, "--bytes=1000"],
+                                [CP.grep, "-vFx", " --+--"] ],
+                                out=tmpdir+log+"-out", check=False)
+                        err_out(open(tmpdir+log+"-out", "r").read())
 
         for ln in open(tmpdir+"/dest-state.log","r"):
             if debug:   print(ln, end="")
@@ -2987,7 +2985,8 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, other_vols={}):
         vol   = aset.vols[datavol]    ; mapfile = vol.mapfile()
         if vol.aliastype == "import_other":   continue
         if datavol in other_vols:
-            print("  Queuing full scan of import '%s'" % datavol)
+            if not (datavol.startswith("wyng-") and datavol.endswith("-metadata")):
+                print("  Queuing full scan of import '%s'" % datavol)
             vol.alias, vol.aliastype = other_vols[datavol], "import_other"
             continue
 
@@ -3071,7 +3070,8 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only, other_vols=
         vol   = aset.vols[datavol]    ; mapfile = vol.mapfile()
         if vol.aliastype == "import_other":   continue
         if datavol in other_vols:
-            print("  Queuing full scan of import '%s'" % datavol)
+            if not (datavol.startswith("wyng-") and datavol.endswith("-metadata")):
+                print("  Queuing full scan of import '%s'" % datavol)
             vol.alias, vol.aliastype = other_vols[datavol], "import_other"
             continue
 
@@ -3304,7 +3304,7 @@ def get_reflink_deltas(storage, aset, datavols):
         # will add it to the sort/uniq pipeline via 'otherctl'. This prevents tmp files
         # being created, which would be very large due to high granularity of fiemap data.
         os.mkfifo(dpath+"-p")
-        p11context = do_exec(cmds[0], timeout=60, getctl=True)
+        p11context = do_exec(cmds[0], getctl=True)
         #Enh: maybe use dev+inode as fname
 
         # Pipe output from second volume to 'sort' and include pipe from first
@@ -3313,7 +3313,7 @@ def get_reflink_deltas(storage, aset, datavols):
                                [CP.uniq, "-u", "-f1"],
                                [CP.gzip, "-2"]
                               ],
-                                 out=dpath, timeout=60, otherctl=p11context
+                                 out=dpath, otherctl=p11context
                             )
         os.remove(dpath+"-p")
 
@@ -3798,6 +3798,7 @@ def init_dedup_index(aset, listfile="", extra_vols=0):
 # Deduplicate data already in archive
 
 def dedup_existing(aset):
+    if not dest.hlinks:   x_it(1, "Hardlinks not supported on dest.")
 
     print("\nBuilding deduplication index...", end="", flush=True)
     init_dedup_index(aset, "dedup.lst.gz")
@@ -3909,7 +3910,10 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={},
         if datavol in send_alls+list(other_vols) or updated:
             if options.dedup and not aset.dedupindex:
                 if status1:   print("I/", end="\r", flush=True)
-                init_dedup_index(aset, extra_vols=len(other_vols))
+                if not dest.hlinks:
+                    err_out("Hardlinks not supported on dest.")
+                else:
+                    init_dedup_index(aset, extra_vols=len(other_vols))
 
         if datavol in send_alls+list(other_vols) or updated or options.send_unchanged:
 
@@ -4993,7 +4997,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20250117"
+prog_version          = "0.8 beta"      ; prog_date = "20250119"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
@@ -5111,7 +5115,7 @@ print("%s %s release %s" % (prog_name.capitalize(), prog_version, prog_date), fl
 if options.action == "version":   x_it(0)
 if options.local_from and options.action not in ("send","monitor","receive","diff"):
     x_it(1, "local-from cannot be used with "+options.action)
-if options.action in write_actions+("arch-init","monitor") and not admin_permission:
+if options.action in write_actions+("monitor",) and not admin_permission:
     x_it(1, f"Must be root/admin user for {options.action}.")
 if options.save_to and options.action != "receive":
     x_it(1, "Receive required for save-to option.")
@@ -5174,21 +5178,26 @@ storage, storagesets = get_configs_storage(aset, require_local=not options.save_
 # Functions supported here must not internally use global variable inputs that are unique to
 # a runtime invocation (i.e. the 'options' objects), or they must test such variables
 # in conjunction with aset.in_process.
-if aset.in_process and dest.online  \
-    and options.action not in ("delete","list"):
+if aset.in_process and dest.online:
+    print("** Prior operation in progress:", " ".join(aset.in_process[0:2]))
 
-    if (options.action == "delete" and aset.in_process[1] == options.volumes[0]) \
-        or (options.clean and options.force):
+if aset.in_process and dest.online and options.action in write_actions:
+
+    ipskip = False
+    if options.action == "delete" and aset.in_process[1] == options.volumes[0]:
         # user is currently deleting the in_process volume or using --clean --force
-        aset.set_in_process(None)
+        if options.clean and options.force:
+            ipskip = True
+        else:
+            aset.set_in_process(None)
     elif aset.in_process:
         open(aset.path+"/in_process_retry","w").close()
     elif exists(aset.path+"/in_process_retry"):
         x_it(1, "Interrupted process already retried; Exiting.")
 
-    if aset.in_process and aset.in_process[0] in ("delete","merge") \
+    if not ipskip and aset.in_process and aset.in_process[0] in ("delete","merge") \
     and aset.in_process[1].startswith("Vol_"):
-        print("Completing prior operation in progress:", " ".join(aset.in_process[0:2]))
+        print("Completing prior operation in progress.")
 
         if aset.in_process[0] == "delete":
             delete_volume(storage, aset, vid=aset.in_process[1])
