@@ -1405,7 +1405,7 @@ class LocalStorage:
         return f"{stat.S_IMODE(vstat.st_mode)}:{user}:{group}"
 
     def settime(self, path, t):
-        if t > 0 and os.path.isfile(path):
+        if t > 0 and exists(path):
             os.utime(path, ns=(t,t))
             return True
         else:
@@ -3038,7 +3038,7 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, other_vols={}):
             complete_vols.append(datavol)
         else:
             print("  Skipping '%s'; No paired snapshot." % datavol)
-            error_cache.append(datavol)    ; continue
+            continue
 
         # Make fresh snap2vol
         lvols[snap2].delete()
@@ -3242,15 +3242,14 @@ def update_delta_digest_lvm(storage, aset, datavol, monitor_only):
         if not debug:   os.remove(tmpdir+"/delta."+datavol)
 
     catch_signals()
-    changed = changed or dnewchunks+dfreedblocks+anynew+vol.map_used() > 0
+    changed = changed or dnewchunks+dfreedblocks+anynew > 0
     if monitor_only:
-        t1   = lvols[snap2vol].gettime()
-        tags = ["--addtag="+vol.last, "--addtag=delta-"+str(t1)]
+        tags = ["--addtag="+vol.last, "--addtag=delta-"+str(lvols[snap2vol].gettime())]
         t2   = lvols[datavol].rotate_snapshots(rotate=changed, timestamp_path=vol.mapfile(),
                                                addtags=tags)
-        assert t1 == t2
+        assert t2 == lvols[snap1vol].gettime()
         print(("\r  %d ch, %d dis" % (dnewchunks, dfreedblocks//chunksize))
-                if changed else "\r  No changes   ")
+                if changed else "\r  no change    ")
 
     if dnewchunks:   vol.changed_bytes_add(dnewchunks*chunksize, save=True)
     catch_signals(**signormal)
@@ -3391,11 +3390,11 @@ def update_delta_digest_reflink(storage, aset, datavol, monitor_only):
         if not debug:   os.remove(tmpdir+"/delta."+vol.vid)
 
     catch_signals()
-    changed = changed or dnewblocks+dfreedblocks+vol.map_used() > 0
+    changed = changed or dnewblocks+dfreedblocks > 0
     if monitor_only:
         t = lvols[datavol].rotate_snapshots(rotate=changed, timestamp_path=vol.mapfile())
         print(("\r  %d ch, %d dis" % (dnewblocks, dfreedblocks//chunksize))
-                if changed else "\r  No changes   ")
+                if changed else "\r  no change    ")
 
     if dnewblocks:   vol.changed_bytes_add(dnewblocks * bsize, save=True)
     catch_signals(**signormal)
@@ -4997,7 +4996,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20250119"
+prog_version          = "0.8 beta"      ; prog_date = "20250121"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
