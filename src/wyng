@@ -1986,7 +1986,7 @@ def arch_init(aset):
 
     aset.save_conf()    ; fssync(aset.path, force=True, sync=True)
     update_dest(aset, pathlist=([aset.saltname, "salt.bak"]
-                                if aset.datacrypto else []) + [aset.confname])
+                                if aset.datacrypto else []) + [aset.confname], sync=True)
 
 
 # Check/verify an entire archive
@@ -2246,9 +2246,9 @@ def get_configs(opts):
     # Check online status for certain commands.
     if not dest.online and (opts.remap  \
     or opts.action not in local_actions) and not (opts.action == "delete" and opts.clean):
-        if not dest.dir_exists and opts.action not in write_actions:
-            x_it(5, f"Path '{dest.path}' does not exist.")
         x_it(5, "Destination not ready to receive commands.")
+    if not dest.dir_exists: # and opts.action not in write_actions:
+        x_it(5, f"Path '{dest.path}' not found.")
     if not dest.writable and opts.action in write_actions \
     and not (opts.action == "delete" and opts.clean):
         x_it(5, "Destination not writable.")
@@ -2507,25 +2507,25 @@ class Destination:
             cmd = dargs + [shell_prefix + "mkdir -p /tmp/wyngrpc"]
             do_exec([cmd])
 
-        tmpprefix = self.tmpprefix    ; tmpdigits = 12    ; NL = "\n"    ; error = None
-        cmd  = [(rf"mkdir -p '{self.path}'"+NL if not ro else "")
-                +rf"cd '{self.path}' && echo wyng_dir_exists"
-                +(r" && python3 --version && uname -a && df -PTi ." if debug else "")
+        tmpprefix = self.tmpprefix    ; tmpdigits = 12   ; NL = "\n"   ; error = None ; run = False
+        cmd  = [r"echo wyng_run" + (rf" && mkdir -p '{self.path}'" if not ro else "")
+                +rf" && cd '{self.path}' && printf '\nwyng_dir_exists\n'"
+                +(r" && exec 2>&1 && python3 --version && uname -a && df -PTi ." if debug else "")
 
                 # send helper program to remote dest
-                +r"  mkdir -p -m 777 " + tmpprefix
-                +r"  && tdir=$(mktemp -d " + tmpprefix +"tmp"+ ("X"*tmpdigits) + r") && echo $tdir"
-                +r"  && cat >$tdir/dest_helper.py"
+                +NL+ r"mkdir -p -m 777 " + tmpprefix
+                +r"  && tdir=$(mktemp -d " + tmpprefix +"tmp"+ ("X"*tmpdigits) + r")"
+                +r"  && echo && echo $tdir && cat >$tdir/dest_helper.py"
 
                 # check free space and archive.ini status on remote
-                +NL+ r"set +e && echo wyng_online"
-                +NL+ r"echo -n 'wyng_check_free ' && df -PT . | tail -1"
-                +NL+ r"echo -n 'wyng_archive_ini '"
+                +NL+ r"set +e && printf '\nwyng_online\n'"
+                +NL+ r"printf '\nwyng_check_free ' && df -PT . | tail -1"
+                +NL+ r"printf '\nwyng_archive_ini '"
                 +r"  && { if [ -e archive.ini ]; then sha256sum archive.ini; else echo none; fi }"
 
                 # test write access and hardlinks
-                +(NL+ r"touch archive.dat && echo 'wyng_writable'"
-                + NL+ r"ln -f archive.dat .hardlink && echo wyng_hlink" if not ro else "")
+                +(NL+ r"touch archive.dat && printf '\nwyng_writable\n'"
+                + NL+ r"ln -f archive.dat .hardlink && printf '\nwyng_hlink\n'" if not ro else "")
                 ]
         try:
             do_exec([self.run_args(cmd),
@@ -2534,25 +2534,27 @@ class Destination:
                     pipefail=True,
                     out=tmpdir+"/dest-state.log", infile=tmpdir+"/rpc/dest_helper.py")
         except SPr.CalledProcessError as e:
-            if debug:
-                err_out(repr(e))
-                for log in ("/dest-state.log", "/err.log"):
-                    if exists(tmpdir+log):
-                        do_exec([ [CP.cat, "-v", tmpdir+log],  [CP.tail, "--bytes=1000"],
-                                [CP.grep, "-vFx", " --+--"] ],
-                                out=tmpdir+log+"-out", check=False)
-                        err_out(open(tmpdir+log+"-out", "r").read())
+            for log in ("/dest-state.log", "/err.log"):
+                if exists(tmpdir+log):
+                    do_exec([ [CP.cat, "-v", tmpdir+log],  [CP.tail, "--bytes=1000"],
+                            [CP.grep, "-vFx", " --+--"] ],
+                            out=tmpdir+log+"-out", check=False)
+                    err_out(open(tmpdir+log+"-out", "r").read())
+            if debug:   print(cmd); err_out(repr(e))
 
         for ln in open(tmpdir+"/dest-state.log","r"):
             if debug:   print(ln, end="")
-            if ln.startswith("wyng_online"):
+            if ln.startswith("wyng_run"):
+                run = True
+            elif ln.startswith("wyng_online"):
                 self.online = True
             elif ln.startswith("wyng_dir_exists"):
                 self.dir_exists = True
-            elif ln.startswith("wyng_archive_ini"):
-                self.archive_ini_hash = ln.split()[1]
+            elif ln.startswith("wyng_archive_ini") and len(parts := ln.split()) > 1:
+                self.archive_ini_hash = parts[1]
             elif ln.startswith("wyng_check_free"):
-                parts = ln.split()    ; self.free = int(parts[5]) * 1024
+                if len(parts := ln.split()) > 5 and is_num(parts[5]):
+                    self.free = int(parts[5]) * 1024
             elif ln.startswith("wyng_writable"):
                 self.writable = True
             elif ln.startswith("wyng_hlink"):
@@ -2560,8 +2562,10 @@ class Destination:
             elif ln.startswith(tmpprefix):
                 self.dtmp = ln.strip()
 
-        if self.online and not self.dtmp or len(self.dtmp) != len(tmpprefix)+tmpdigits+3 \
-        or not set(self.dtmp[5:]) <= set(string.ascii_letters + string.digits + "/"):
+        if not run:   err_out("Dest not accessible.")
+        if self.online and (not self.dtmp or len(self.dtmp) != len(tmpprefix)+tmpdigits+3 \
+        or not set(self.dtmp[5:]) <= set(string.ascii_letters + string.digits + "/")):
+            err_out("Malformed or missing tmp path on dest.")
             self.dtmp, self.online = None, False
 
 
@@ -2891,7 +2895,7 @@ def compare_files(arch, pathlist=[], volumes=[], sessions=[], clear=True, manife
 
 ## Enh: Create aset functions to supply meta filenames for objects
 
-def update_dest(arch, pathlist=[], volumes=[], sessions=[], ext="", delete=False):
+def update_dest(arch, pathlist=[], volumes=[], sessions=[], ext="", delete=False, sync=False):
     lcd = arch.path    ; dest = arch.dest
 
     update_list = [x.volume.vid+"/"+x.name+"/manifest.z" for x in sessions] \
@@ -2908,6 +2912,7 @@ def update_dest(arch, pathlist=[], volumes=[], sessions=[], ext="", delete=False
                             destcd=dest.path)
             ], inlines=[x+ext for x in update_list],
             cwd=lcd)
+    if sync:   dest.run(["sync"])
 
 
 def fetch_file_blobs(recv_list, recv_dir, dest, ext="", skip0=False, skip_exists=False,
@@ -4986,7 +4991,7 @@ def cleanup():
         err_out("Cleanup error: "+repr(e))
 
     if error_cache:
-        err_out("Error on volumes: " + ", ".join(sorted(set(error_cache))))
+        err_out("\nError on volumes: " + ", ".join(sorted(set(error_cache))))
         os._exit(2)
 
 
@@ -4996,7 +5001,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20250121"
+prog_version          = "0.8 wip"       ; prog_date = "20250126"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
