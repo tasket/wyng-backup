@@ -2508,7 +2508,7 @@ class Destination:
             do_exec([cmd])
 
         tmpprefix = self.tmpprefix    ; tmpdigits = 12   ; NL = "\n"   ; error = None ; run = False
-        cmd  = [r"echo wyng_run" + (rf" && mkdir -p '{self.path}'" if not ro else "")
+        cmd  = [r"printf '\nwyng_run\n'" + (rf" && mkdir -p '{self.path}'" if not ro else "")
                 +rf" && cd '{self.path}' && printf '\nwyng_dir_exists\n'"
                 +(r" && exec 2>&1 && python3 --version && uname -a && df -PTi ." if debug else "")
 
@@ -5001,7 +5001,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 wip"       ; prog_date = "20250126"
+prog_version          = "0.8 beta"      ; prog_date = "20250127"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
