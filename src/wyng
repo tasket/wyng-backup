@@ -1299,7 +1299,7 @@ class LocalStorage:
         self.clean     = clean       ; self.sync    = sync       ; self.arch_vols = arch_vols
         self.lvols, self.vgs_all = {}, {}
         self.users, self.groups  = {}, {}
-        self.path = self.pooltype = self.fstype = self.lvpool = None
+        self.path = self.pooltype = self.fstype = self.lvpool = self.block_size = None
         self.online = self.can_snapshot = False
 
         loctype, locvol, locpool, pathxvg = LocalStorage.parse_local_path(localpath)
@@ -1326,9 +1326,8 @@ class LocalStorage:
             if fs == "btrfs":
                 if os.stat(self.path).st_ino == 256:
                     self.snappath = self.path+"wyng_snapshot_tmp/"   ; self.can_snapshot = True
-                self.block_size = 4096
             elif fs == "xfs":
-                self.snappath = ""   ; self.can_snapshot = True    ; self.block_size = 4096
+                self.snappath = ""   ; self.can_snapshot = True
 
             if self.can_snapshot:
                 self.acquire_deltas = get_reflink_deltas
@@ -2080,6 +2079,18 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
     if storage.path and exists(storage.path):
         remove_local_snapshots(storage, aset)
 
+    # Handle --all.  Select only newest single session if vol list not given (implied --all)
+    # causing the data check to exclude vols not in that session.
+    if options.all:   vol_list = sorted(set(aset.vols.keys()) - set(options.volex))
+    all_selected, selses = bool(vol_list), options.session
+
+    if selses == "newest":
+        if not all_selected and (res := sorted(x.last for x in aset.vols.values() if x.sessions)):
+            selses = res[-1][2:]
+        else:
+            selses = None
+    if selses and verbose:   print(f"Session {selses} selected.")
+
     vol_list = vol_list or sorted(set(aset.vols.keys()) - set(options.volex))
     vol_dirs = {x.name for x in os.scandir(aset.path) \
                        if x.is_dir() and x.name.startswith("Vol_")}
@@ -2093,10 +2104,11 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
             print("Stray dirs deleted.")
 
     # Check volume contents at various levels (dirs, metadata, content)
-    for volname in vol_list if dest.online else []:
-        if volname not in aset.vols:   continue
+    for volname, vol in ((vn,v) for vn,v in aset.vols.items() if vn in vol_list and dest.online):
 
-        vol = aset.vols[volname]
+        if selses and "S_"+selses not in vol.sessions and not all_selected:
+            continue
+
         if not startup or debug:   print(f"\nVolume '{volname}'", flush=True)
 
         # Remove session tmp dirs
@@ -2123,11 +2135,12 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
             #### FIX: implement deepclean
 
         # Check hashes of each session individually
-        print(" data:")
+        print(" data:")    ; newest = options.session in {"newest"}
         for sesname in reversed(vol.sesnames):
-            if options.session and ((options.session.lower() == "newest" \
-            and sesname != vol.sesnames[-1]) or "S_"+options.session != sesname):
-                continue # Enh: use seq
+
+            if (selses and "S_"+selses != sesname) \
+            or (newest and not selses and sesname != vol.last):
+                continue
 
             print(" ", sesname[2:], end=" :", flush=True)
             bcount = receive_volume(storage, vol, select_ses=sesname[2:], ses_strict=True,
@@ -2510,7 +2523,7 @@ class Destination:
         tmpprefix = self.tmpprefix    ; tmpdigits = 12   ; NL = "\n"   ; error = None ; run = False
         cmd  = [r"printf '\nwyng_run\n'" + (rf" && mkdir -p '{self.path}'" if not ro else "")
                 +rf" && cd '{self.path}' && printf '\nwyng_dir_exists\n'"
-                +(r" && exec 2>&1 && python3 --version && uname -a && df -PTi ." if debug else "")
+                +(r" && exec 2>&1 && python3 --version && uname -a" if debug else "")
 
                 # send helper program to remote dest
                 +NL+ r"mkdir -p -m 777 " + tmpprefix
@@ -2912,7 +2925,7 @@ def update_dest(arch, pathlist=[], volumes=[], sessions=[], ext="", delete=False
                             destcd=dest.path)
             ], inlines=[x+ext for x in update_list],
             cwd=lcd)
-    if sync:   dest.run(["sync"])
+    if sync:   dest.run(["sync"], check=False)
 
 
 def fetch_file_blobs(recv_list, recv_dir, dest, ext="", skip0=False, skip_exists=False,
@@ -3145,7 +3158,6 @@ def get_lvm_deltas(storage, aset, datavols):
     #Enh: construct 'poolset' as vg,pool pairs; change vgname handling to track 'apool'
     vgname   = storage.vgname.replace("-","--")    ; lvols = storage.lvols
     poolset  = set(lvols[x].pool_lv for x in datavols)
-    assert aset.chunksize % storage.block_size == 0
 
     # Reserve a metadata snapshot for the LVM thin pool; required for a live pool.
     catch_signals()
@@ -3189,7 +3201,7 @@ def update_delta_digest_lvm(storage, aset, datavol, monitor_only):
     snap1size   = lvols[snap1vol].getsize()  ; snap2size  = lvols[snap2vol].getsize()
     volperms    = vol.sessions[vol.last].permissions
     assert len(vol.sessions) and exists(vol.mapfile())
-    assert storage.block_size == 512
+    assert storage.block_size == 512 and aset.chunksize % storage.block_size == 0
 
     # Get xml parser and initialize vars
     dtree       = xml.etree.ElementTree.parse(gzip.open(tmpdir+"/delta."+datavol,"r")).getroot()
@@ -3243,7 +3255,7 @@ def update_delta_digest_lvm(storage, aset, datavol, monitor_only):
             dnewchunks += (bmap_size - markall_pos) * 8
 
         del(bmap_mm, dtree)
-        if dnewchunks+dfreedblocks:   bmapf.flush()    ; os.fsync(bmapf.fileno())
+        if dnewchunks+dfreedblocks:   bmapf.flush()
         if not debug:   os.remove(tmpdir+"/delta."+datavol)
 
     catch_signals()
@@ -3263,12 +3275,18 @@ def update_delta_digest_lvm(storage, aset, datavol, monitor_only):
 
 def get_reflink_deltas(storage, aset, datavols):
 
-    assert aset.chunksize % storage.block_size == 0
-    blksz = str(storage.block_size)
-    generation, stpath = storage.metadata_lock()    ; lvols = storage.lvols
+    # Get filesystem block size
+    open(storage.path+"/.tmp.wyng","wb").close()
+    res = SPr.check_output([CP.filefrag, "-v", storage.path+"/.tmp.wyng"], text=True)
+    r1  = [x for x in res.splitlines() if x.startswith("File size") and x.endswith("bytes)")]
+    storage.block_size = int(r1[0].split()[-2])    ; os.remove(storage.path+"/.tmp.wyng")
+    if debug:   print("Block size:", storage.block_size)
+    assert aset.chunksize and aset.chunksize % storage.block_size == 0
+
+    generation, stpath = storage.metadata_lock()
 
     for vol in (aset.vols[x] for x in datavols[:]):
-        lv = lvols[vol.name]                        ; cmds, devs = [], set()
+        lv = storage.lvols[vol.name]                ; cmds, devs = [], set()
         dpath = tmpdir+"/delta."+vol.vid
 
         # Create a pair of piped command sets for diffing metadata of the two snapshots:
@@ -3278,26 +3296,26 @@ def get_reflink_deltas(storage, aset, datavols):
                 datavols.remove(vol.name);   break
 
             # filefrag output: file extent ranges, their 'physical' block ranges, extent length.
-            # sort -m will merge this output from two vols.
+            # sort will merge this output from two vols.
             # uniq -u will filter-out exact extent/phys/len matches between the two vols.
             # The result will be a list of extent ranges that have changed.
 
             devs.add(os.stat(stpath+snapname).st_dev)
             cmds.append([
-              [CP.filefrag, "-vs", "-b"+blksz, stpath+snapname],
+              [CP.filefrag, "-v", stpath+snapname],
               # BEGIN defines the expected filefrag header layout (PAT);
-              # a non-matching line (00..wyng_input) is printed if 0 extents found.
+              # a non-matching line (00..wyng) is printed if 0 extents found.
               # END exits with code 2 if no end line (extents found) was found or HEADER != PAT;
               # printed fields are arranged to complement 'uniq' as it can only skip fields and
               # then must compare the rest of the line.  gsub removes punctuation.
               # 'outp' is used to redirect output for only one side (other side goes to stdout).
               [CP.awk, r'BEGIN {PAT="^\\s*ext:\\s+logical_offset:\\s+physical_offset:\\s+length:"}'
-                       r' NR==1, $0 ~ PAT {if ($0 ~ /\s0 extents found$/) {ZXT="Y";'
-                       r' print "00 0 1 0 0 0 wyng_input"' +outp+ r'} HEADER=$0; next}'
-                       r' END {if (!(ZXT=="Y" || HEADER ~ PAT && $0 ~ /extents? found$/)) exit 2}'
+                       r' NR<4 && $0 ~ PAT {HDR="Y"}'
                        r' /^\s*[0-9]+:/ {gsub(/\.|:/, " ", $0);'
-                                        r' print '+side+r', $2, $6, $3, $4, $5, $NF'+outp+r'}']
-             ]
+                                        r' print '+side+', $2, $6, $3, $4, $5, $NF'+outp+r'}'
+                       r' END {if ($0 ~ /\s0 extents found$/) {print "00 0 1 0 0 0 wyng"'+outp+r'}'
+                              r' else if (!(HDR=="Y" && $0 ~ /extents? found$/)) exit 2}'
+             ]]
             )
 
         if vol.name not in datavols:   continue
@@ -3386,12 +3404,11 @@ def update_delta_digest_reflink(storage, aset, datavol, monitor_only):
             for pos in range(markall_pos, bmap_size):  bmap_mm[pos] = 0xff
             dnewblocks += (bmap_size - markall_pos) * 8 * (chunksize // bsize)
 
-        if dnewblocks or dfreedblocks:   bmapf.flush()    ; os.fsync(bmapf.fileno())
-
         #estimate = sum((x.count("1") for x in map(bin, filter(None, memoryview(bmap_mm))))) \
                  #* chunksize if vol.map_used() else 0 ####
         #print(f"Estimate: {estimate}, New {dnewblocks*bsize}, Freed {dfreedblocks*bsize}" ) ####
         del(bmap_mm)
+        if dnewblocks+dfreedblocks:   bmapf.flush()
         if not debug:   os.remove(tmpdir+"/delta."+vol.vid)
 
     catch_signals()
@@ -4333,23 +4350,13 @@ def merge_sessions(volume, sources, target, clear_sources=False):
 def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
                    diff=False, verify_only=0):
 
-    def diff_compare(dbuf,z):
-        if dbuf != volf.read(chunksize):
-            if remap:
-                volsegment = addr // chunksize 
-                bmap_pos = volsegment // 8
-                bmap_mm[bmap_pos] |= 1 << (volsegment % 8)
-            return len(dbuf)
-        else:
-            return 0
-
     def punch_zero_hole(fn, loc):
         if not punch_hole(fn, loc, chunksize):
             volf_seek(loc)   ; volf_write(zeros)
 
 
     dest        = (aset := vol.archive).dest      ; options      = aset.opts
-    attended    = not options.unattended          ; debug, remap = options.debug, False
+    attended    = not options.unattended          ; debug        = options.debug
     verbose     = (options.verbose or attended) and verify_only != 2    ; MB = 2**20
     sparse      = options.sparse                  ; sparse_write = options.sparse_write or sparse
     chunksize   = aset.chunksize                  ; use_snapshot = False
@@ -4393,10 +4400,6 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
     else:
         # default to last session
         select_ses = sessions[-1]
-
-    if diff and remap and select_ses != sessions[-1]:
-        err_out("Cannot use prior session for remap.")
-        return None
 
     ses_obj     = vol.sessions[select_ses]           ; volsize     = ses_obj.volsize
     addrsplit   = -address_split[1]                  ; rc = l_vol  = volf = None
@@ -4466,20 +4469,18 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
         if not l_vol.exists():
             err_out("Local volume must exist for diff.")
             return None
-        if remap:
-            pass # raise NotImplementedError()
-        else:
-            if paired == "Y":
-                l_vol = storage.lvols[snap1vol]
-            elif paired == "D":
-                l_vol = storage.lvols[snap1vol]
-                print("Snapshot is type delta:")
-            else:
-                print("Snapshot not available; Comparing with source volume instead.")
 
-            if volsize != l_vol.getsize():
-                err_out("Volume sizes differ:\n  Archive = %d \n  Local   = %d"
-                        % (volsize, l_vol.getsize()))   ; return None
+        if paired == "Y":
+            l_vol = storage.lvols[snap1vol]
+        elif paired == "D":
+            l_vol = storage.lvols[snap1vol]
+            print("Snapshot is type delta:")
+        else:
+            print("Snapshot not available; Comparing with source volume instead.")
+
+        if volsize != l_vol.getsize():
+            err_out("Volume sizes differ:\n  Archive = %d \n  Local   = %d"
+                    % (volsize, l_vol.getsize()))   ; return None
 
         volf  = open(l_vol.path, "r+b")
 
@@ -4568,8 +4569,8 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
                 if sparse_write and volf_read(chunksize) != zeros:
                     punch_zero_hole(volfno, addr)    ; diff_count += chunksize
             elif diff:
-                volf_seek(addr)    ; diff_count += diff_compare(zeros,True)
-                if diff_count and not remap:   break
+                volf_seek(addr)    ; diff_count += len(buf) if buf != volf.read(chunksize) else 0
+                if diff_count:   break
 
             continue
 
@@ -4662,8 +4663,8 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
             else:
                 volf_write(buf)
         elif diff:
-            volf_seek(addr)    ; diff_count += diff_compare(buf,False)
-            if diff_count and not remap:   break
+            volf_seek(addr)    ; diff_count += len(buf) if buf != volf.read(chunksize) else 0
+            if diff_count:   break
 
     if debug:   print("\nEND receive stream.")
     if gv_stdin:   gv_stdin.close()
@@ -4674,10 +4675,11 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
         err_out("Warn: No magic.")
     getvol.kill()
 
-    if ((not sparse and verify_only != 2 and not use_snapshot and not diff) \
-    or (diff and remap)) and addr != lchunk_addr:
+    if ((not sparse and verify_only != 2 and not use_snapshot and not diff)) \
+    and addr != lchunk_addr:
         err_out("Last chunk at %d does not match volume %d." % (addr, lchunk_addr))
-        return None
+        #return None
+        diff_count += chunksize
 
     if verbose:   print("\r[" + "|"*20, end="")
     print("] 100% " if verify_only != 2 else "", ": OK " if not diff_count or save_path else " ",
@@ -4700,10 +4702,15 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
             save_storage.lvols[l_vol.snap2].create(snapshotfrom=vol.alias, addtags=tags)
             l_vol = l_vol.update()    ; save_storage.lvols[l_vol.snap2].update()
             l_vol.rotate_snapshots(timestamp_path=vol.mapfile())
-    if remap:
-        bmapf.close()
-        if diff_count > 0 and options.action != "send":
+
+    elif diff and options.remap:
+        if diff_count > 0:
+            os.remove(vol.mapfile())
+            for ii in (l_vol.snap1, l_vol.snap2):
+                storage.lvols[ii].delete()
             print("\nNext 'send' will bring this volume into sync.")
+            return None
+
     elif diff and diff_count:
         return None
 
@@ -4909,6 +4916,14 @@ def show_mem_stats():
     print("  Current: vsize %d, rsize %d" % (vsz/1000,rss/1000))
 
 
+def get_mem_stat(field):
+    with open("/proc/meminfo") as f:
+        for ln in f:
+            if ln.startswith(field+":"):
+                return int(ln.split()[1]) # kbytes
+    raise ValueError("Field not found.")
+
+
 def is_num(val):
     try:
         float(val)
@@ -5001,7 +5016,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20250127"
+prog_version          = "0.8 wip"       ; prog_date = "20250203"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
