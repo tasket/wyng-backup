@@ -836,10 +836,10 @@ Unix commands or support a compatible FUSE protocol such as sshfs(sftp) or s3.
 
 <a href="https://liberapay.com/tasket/donate"><img alt="Donate using Liberapay" src="media/lp_donate.svg" height=54></a>
 
+<a href="https://ko-fi.com/tasket"><img src="media/ko-fi.png" height=57></a> <a href="https://ko-fi.com/tasket">Ko-Fi donate</a>
+
 <a href="https://www.buymeacoffee.com/tasket"><img src="media/buymeacoffee_57.png" height=57></a> <a href="https://www.buymeacoffee.com/tasket">Buy me a coffee!</a>
 
-<a href="https://www.patreon.com/tasket"><img alt="Donate with Patreon" src="media/become_a_patron_button.png" height=50></a>
 
 If you like this project, monetary contributions are welcome and can
-be made through [Liberapay](https://liberapay.com/tasket/donate) or [Buymeacoffee](https://www.buymeacoffee.com/tasket) 
-or [Patreon](https://www.patreon.com/tasket).
+be made through [Liberapay](https://liberapay.com/tasket/donate) or [Ko-Fi](https://ko-fi.com/tasket) or [Buymeacoffee](https://www.buymeacoffee.com/tasket).
