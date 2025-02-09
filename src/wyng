@@ -22,7 +22,7 @@
 
 import sys, signal, os, stat, shutil, subprocess as SPr, time, datetime
 import re, mmap, bz2, zlib, gzip, tarfile, io, fcntl, tempfile
-import argparse, configparser, hashlib, hmac, functools, uuid
+import argparse, configparser, copy, hashlib, hmac, functools, uuid
 import getpass, base64, platform, resource, itertools, string, struct
 import xml.etree.ElementTree, json, ctypes, ctypes.util, atexit
 from array import array   ; from urllib.parse import urlparse   ; from math import ceil
@@ -59,7 +59,7 @@ class ArchiveSet:
         self.time_start      = time_start
         self.monotonic_start = monotonic_start
         self.dest        = dest
-        self.opts        = opts
+        self.opts        = copy.deepcopy(opts)
         self.path        = top
         self.confpath    = pjoin(self.path, self.confname)
         self.saltpath    = pjoin(self.path, self.saltname)
@@ -1288,11 +1288,12 @@ class LocalStorage:
     except:
         fallocate = None    ; print("fallocate() function not available.")
 
-    def __init__(self, localpath, auuid=None, arch_vols={}, clean=False, sync=False,
+    def __init__(self, localpath, opts, auuid=None, arch_vols={}, clean=False, sync=False,
                  require_online=False):
 
         self.stypes  = { "tlvm":  LvmVolume, "rlnk": ReflinkVolume, "file": FileVolume }
         self.rltypes = { "btrfs", "xfs" }
+        self.opts    = copy.deepcopy(opts)
 
         assert len(auuid) > 8
         self.gc_procs  = []          ; self.locked  = False      ; self.auuid     = auuid
@@ -2363,9 +2364,9 @@ def get_configs_remote(dest, base_dir, opts):
 
 # alias is used for receiving to a local vol name different from the archive vol name
 
-def get_configs_storage(aset, require_local=True):
+def get_configs_storage(aset, opts, require_local=True):
     storage, storagesets, vol_set = None, {}, set()
-    fromlist    = aset.opts.local_from      ; local_url = aset.opts.local
+    fromlist    = opts.local_from      ; local_url = opts.local
     arch_vols   = {x.name: x.vid for x in aset.vols.values()}
 
     if fromlist and exists(fromlist):
@@ -2386,12 +2387,12 @@ def get_configs_storage(aset, require_local=True):
                 if vname in vol_set:   x_it(1, f"Duplicate volume name: {vname}")
                 vol_set.add(vname)
 
-            storagesets[LocalStorage(url, require_online=require_local,
+            storagesets[LocalStorage(url, opts, require_online=require_local,
                                      arch_vols=arch_vols, auuid=aset.uuid)] \
                         = [x[0] for x in vols]
 
     else:
-        storage = LocalStorage(local_url or None, require_online=require_local,
+        storage = LocalStorage(local_url or None, opts, require_online=require_local,
                                 arch_vols=arch_vols, auuid=aset.uuid)
         storagesets[storage] = []
 
@@ -2984,6 +2985,7 @@ def fetch_file_blobs(recv_list, recv_dir, dest, ext="", skip0=False, skip_exists
 
 def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, other_vols={}):
     incr_vols, complete_vols, unchanged_vols = [], [], []   ; lvols = storage.lvols
+    opts = storage.opts
 
     for datavol in datavols + list(other_vols.keys()):
 
@@ -2998,7 +3000,7 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, other_vols={}):
             continue
 
         if datavol not in aset.vols and not monitor_only:
-            add_volume(aset, datavol, aset.opts.voldesc)
+            add_volume(aset, datavol, opts.voldesc)
 
         vol   = aset.vols[datavol]    ; mapfile = vol.mapfile()
         if vol.aliastype == "import_other":   continue
@@ -3012,7 +3014,7 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, other_vols={}):
         l_vol = lvols[datavol]   ; snap1, snap2 = l_vol.snap1, l_vol.snap2
 
         if lvols[snap1].is_arch_member() == "false":
-            if aset.opts.remap:
+            if opts.remap:
                 l_vol.delete    ; print("  Removed mis-matched snapshot", datavol)
             else:
                 print("  Skipping %s; snapshot is from a different archive. Use --remap to clear it."
@@ -3050,7 +3052,7 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, other_vols={}):
         # but snap1 and/or deltamap are still missing after above checks.
         # In this case 'send' can determine any differences w prior backups.
         if vol.sessions and exists(mapfile) and lvols[snap1].exists():
-            incr_vols.append(datavol)
+            if datavol not in unchanged_vols:   incr_vols.append(datavol)
         elif not monitor_only:
             print("  Queuing full scan of '%s'" % datavol)
             complete_vols.append(datavol)
@@ -3069,6 +3071,7 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, other_vols={}):
 
 def prepare_snapshots_reflink(storage, aset, datavols, monitor_only, other_vols={}):
     incr_vols, complete_vols, unchanged_vols = [], [], []   ; lvols = storage.lvols
+    opts = storage.opts
 
     for datavol in datavols + list(other_vols.keys()):
 
@@ -3083,7 +3086,7 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only, other_vols=
             continue
 
         if datavol not in aset.vols and not monitor_only:
-            add_volume(aset, datavol, aset.opts.voldesc)
+            add_volume(aset, datavol, opts.voldesc)
 
         vol   = aset.vols[datavol]    ; mapfile = vol.mapfile()
         if vol.aliastype == "import_other":   continue
@@ -3100,11 +3103,6 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only, other_vols=
         # by comparing timestamps; a match means remap is unnecessary.
         if len(vol.sessions):
             lastses = vol.sessions[vol.last]
-
-            if lvols[snap1].exists() and lvols[snap1].gettime() == lvols[datavol].gettime() \
-            and lvols[snap1].getsize() == lvols[datavol].getsize() \
-            and exists(mapfile) and vol.map_used() == 0 and not options.send_unchanged:
-                unchanged_vols.append(datavol)   ; continue
 
             if not exists(mapfile) and lvols[snap1].exists() \
             and lastses.gettime() == lvols[snap1].gettime()  \
@@ -3127,6 +3125,11 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only, other_vols=
                 lvols[snap1].delete()
                 print("  Removed mis-matched snapshot for '%s'" % datavol)
 
+            if lvols[snap1].exists() and lvols[snap1].gettime() == l_vol.gettime() \
+            and lvols[snap1].getsize() == l_vol.getsize() \
+            and l_vol.getperms() == vol.sessions[vol.last].permissions and exists(mapfile):
+                unchanged_vols.append(datavol)
+
         elif monitor_only:
             print("  Skipping '%s'; No data." % datavol)    ; continue
 
@@ -3134,7 +3137,7 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only, other_vols=
         # but snap1 and/or deltamap are still missing after above checks.
         # In this case 'send' can determine any differences w prior backups.
         if vol.sessions and exists(mapfile) and lvols[snap1].exists():
-            incr_vols.append(datavol)
+            if datavol not in unchanged_vols:   incr_vols.append(datavol)
         elif not monitor_only:
             print("  Queuing full scan of '%s'" % datavol)
             complete_vols.append(datavol)
@@ -3486,6 +3489,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
     bksession   = "S_"+curtime                  ; sdir        = pjoin(vol.vid, bksession)
     prior_size  = vol.volsize()                 ; prior_ses   = vol.last
     old_mapfile = vol.mapfile()                 ; addrsplit   = -address_split[1]
+    scan_data   = send_all or vol.map_used() > 0
     compress = compressors[aset.compression][2] ; compresslevel = int(aset.compr_level)
 
     if not status1:   print("  [", end="")
@@ -3551,7 +3555,6 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
     else:
         tarf_addfile = tarf_add = tar_add_pass    ; stream_started = False
 
-
     # Open source volume and its delta bitmap as r, session manifest as w.
     with open(volpath,"rb", buffering=chunksize) as vf,    \
          open(sdir+"-tmp/manifest.tmp", "wt") as hashf,            \
@@ -3565,7 +3568,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
         # Feed delta bmap to inner loop in pieces segmented by large zero delimeter.
         # This allows skipping most areas when changes are few.
         zdelim  = bytes(64)    ; zdlen = len(zdelim)*8      ; minibmap = None   ; bmap_list = []
-        addr    = counter = percent = bcount = ddbytes = 0  ; checkpt = 512     ; bmsz = zdlen*50
+        addr    = counter = percent = bcount = ddbytes = 0  ; checkpt = 512     ; bmsz = zdlen*300
 
         while addr < volsize:
             if len(bmap_list):
@@ -3574,6 +3577,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
                 addr += chunksize*zdlen
                 minibmap = bmap_list.pop(0)
             elif not send_all:
+                if not scan_data:   break
                 # Get more: split(zdelim) shows where large unmodified zones exist.
                 bmap_list.extend(bmapf.read(bmsz).split(zdelim))
                 minibmap = bmap_list.pop(0)
@@ -3921,6 +3925,7 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={},
         print(f"Volume '{datavol}'\n" if not status1 else
               f"            |     | {datavol}\r", flush=True, end="")
 
+        # Process delta metadata (update_delta_digest())
         if datavol in incrementals:
             updated, svsize, vperms = storage.process_deltas(storage, aset, datavol, monitor_only)
         elif monitor_only:
@@ -3928,15 +3933,13 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={},
 
         if monitor_only:   continue
 
-        if datavol in send_alls+list(other_vols) or updated:
-            if options.dedup and not aset.dedupindex:
+        if datavol in send_alls+list(other_vols) or updated or options.send_unchanged:
+            if options.dedup and not aset.dedupindex and datavol not in unchanged_vols:
                 if status1:   print("I/", end="\r", flush=True)
                 if not dest.hlinks:
                     err_out("Hardlinks not supported on dest.")
                 else:
                     init_dedup_index(aset, extra_vols=len(other_vols))
-
-        if datavol in send_alls+list(other_vols) or updated or options.send_unchanged:
 
             # Enh: include send_alls and other_vols in changed bytes tally
             if vol.changed_bytes > dest.free:
@@ -3947,6 +3950,7 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={},
                     error_cache.append(datavol)
                     continue
 
+            # Send Volume
             sent, svsize, sbcount, ddbytes, stime = \
                 send_volume(storage, vol, curtime, ses_tags, send_all=datavol in send_alls,
                             benchmark=benchmark)
@@ -4418,7 +4422,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
             save_storage = None       ; returned_home = False
             save_type,_,_,_ = LocalStorage.parse_local_path(ldir := os.path.dirname(save_path))
             if save_type:
-                save_storage = LocalStorage(ldir, auuid=aset.uuid,
+                save_storage = LocalStorage(ldir, options, auuid=aset.uuid,
                                             arch_vols=storage.arch_vols.copy())
         else:
             if not storage.online:   x_it(1, "Local storage is offline!")
@@ -5016,7 +5020,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 wip"       ; prog_date = "20250203"
+prog_version          = "0.8 wip"       ; prog_date = "20250206"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
@@ -5190,7 +5194,7 @@ hash_funcs       = {"hmac-sha256": None,
 # Create ArchiveSet, LocalStorage and Destination objects with get_configs().
 # Passphrase input happens here; no stdin before this point!
 aset        = get_configs(options)    ; dest = aset.dest
-storage, storagesets = get_configs_storage(aset, require_local=not options.save_to and
+storage, storagesets = get_configs_storage(aset, options, require_local=not options.save_to and
                                            options.action in ("monitor","send","receive","diff"))
 
 # Handle unfinished in_process:
