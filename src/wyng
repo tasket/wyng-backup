@@ -3066,6 +3066,7 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, other_vols={}):
         if monitor_only:   tagopts.append("--addtag=delta")
         lvols[snap2].create(snapshotfrom=datavol, ro=True, addtags=tagopts)
 
+    assert not unchanged_vols
     return incr_vols, complete_vols, unchanged_vols, other_vols
 
 
@@ -3098,6 +3099,7 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only, other_vols=
 
         # 'mapfile' is the deltamap file, snap1 holds vol state between send/monitor ops
         l_vol = lvols[datavol]   ; snap1, snap2 = l_vol.snap1, l_vol.snap2
+        lvols[snap2].delete()
 
         # Make deltamap or initial snapshot if necessary. Try to recover paired state
         # by comparing timestamps; a match means remap is unnecessary.
@@ -3128,7 +3130,9 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only, other_vols=
             if lvols[snap1].exists() and lvols[snap1].gettime() == l_vol.gettime() \
             and lvols[snap1].getsize() == l_vol.getsize() \
             and l_vol.getperms() == vol.sessions[vol.last].permissions and exists(mapfile):
-                unchanged_vols.append(datavol)
+                # No changes forthcoming.  This vol will not have a 'snap2' created for it
+                # and won't be scanned for deltas or have snapshot rotation.
+                unchanged_vols.append(datavol)    ; continue
 
         elif monitor_only:
             print("  Skipping '%s'; No data." % datavol)    ; continue
@@ -3146,7 +3150,6 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only, other_vols=
             error_cache.append(datavol)    ; continue
 
         # Make fresh snap2vol
-        lvols[snap2].delete()
         lvols[snap2].create(snapshotfrom=datavol, ro=True)
 
     return incr_vols, complete_vols, unchanged_vols, other_vols
@@ -3472,16 +3475,6 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
 
     def tar_add_pass(*args, **kwargs):   pass
 
-    if vol.aliastype == "import_other":
-        # Use a plain file or blockdev as a source volume
-        volpath = vol.alias                     ; send_all    = True
-        vol_ts  = os.stat(volpath).st_mtime_ns  ; volperms    = storage.getperms(volpath)
-        volsize = storage.getsize(volpath)
-    else:
-        lvol    = storage.lvols[storage.lvols[vol.name].snap2]    ; volpath = lvol.path
-        volsize = lvol.getsize()                ; volperms    = storage.lvols[vol.name].getperms()
-        vol_ts  = lvol.gettime()
-
     dest        = (aset := vol.archive).dest    ; pjoin       = os.path.join
     options     = aset.opts                     ; status1     = not options.unattended or verbose
     chunksize   = aset.chunksize                ; dedup       = newmap = False
@@ -3489,8 +3482,19 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
     bksession   = "S_"+curtime                  ; sdir        = pjoin(vol.vid, bksession)
     prior_size  = vol.volsize()                 ; prior_ses   = vol.last
     old_mapfile = vol.mapfile()                 ; addrsplit   = -address_split[1]
-    scan_data   = send_all or vol.map_used() > 0
+    lvols       = storage.lvols
     compress = compressors[aset.compression][2] ; compresslevel = int(aset.compr_level)
+
+    if vol.aliastype == "import_other":
+        # Use a plain file or blockdev as a source volume
+        volpath = vol.alias                     ; send_all = scan_data = True
+        vol_ts  = os.stat(volpath).st_mtime_ns  ; volperms = storage.getperms(volpath)
+        volsize = storage.getsize(volpath)
+    else:
+        scan_data = send_all or vol.map_used() > 0
+        l_vol   = lvols[lvols[vol.name].snap2] if scan_data else lvols[vol.name]
+        volperms= lvols[vol.name].getperms()
+        volpath = l_vol.path    ; volsize = l_vol.getsize()    ; vol_ts  = l_vol.gettime()
 
     if not status1:   print("  [", end="")
     progress, MB = 0, 2**20    ; spinner = status_spinner()
@@ -3556,9 +3560,9 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
         tarf_addfile = tarf_add = tar_add_pass    ; stream_started = False
 
     # Open source volume and its delta bitmap as r, session manifest as w.
-    with open(volpath,"rb", buffering=chunksize) as vf,    \
-         open(sdir+"-tmp/manifest.tmp", "wt") as hashf,            \
-         open("/dev/zero" if send_all else old_mapfile,"rb") as bmapf:
+    with open(volpath,"rb", buffering=chunksize) if scan_data else NulIO() as vf, \
+         open(sdir+"-tmp/manifest.tmp", "wt") as hashf, \
+         open(old_mapfile,"rb") if not send_all else NulIO() as bmapf:
 
         vf_seek = vf.seek; vf_read = vf.read   ; BytesIO = io.BytesIO
         gethash = aset.getdatahash             ; b64enc  = base64.urlsafe_b64encode
@@ -3728,7 +3732,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
             # If vol lost mapping, create new map in dry-run mode to prevent re-scan
             vol.init_deltamap()    ; update_delta_digest_mf(vol, ses.path+"/manifest.tmp")
 
-        storage.lvols[vol.name].rotate_snapshots(rotate=sent or newmap,
+        storage.lvols[vol.name].rotate_snapshots(rotate=lvols[lvols[vol.name].snap2].exists(),
                     timestamp_path=vol.mapfile(),
                     addtags=["--addtag="+vol.last] + (["--addtag=delta"] if newmap else []))
 
@@ -4046,7 +4050,7 @@ def prune_sessions(vol, times):
         print(" No selections in this date-time range.")
         return
 
-    print(autoprune(vol, apmode=options.autoprune, include=set(to_prune)))
+    return autoprune(vol, apmode=options.autoprune, include=set(to_prune))
 
 
 # Parameters / vars for autoprune:
@@ -4944,6 +4948,10 @@ def os_kill(pid, sig=signal.SIGTERM):
         pass
 
 
+class NulIO(io.BytesIO):
+    def __enter__(self):   self.close(); return self
+
+
 def catch_signals(sel=["INT","TERM","QUIT","ABRT","ALRM","TSTP","USR1","USR2"], iflag=False):
     # Remove existing handlers
     for sig in list(signal_handlers):   signal.signal(sig, signal_handlers.pop(sig))
@@ -5020,7 +5028,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 wip"       ; prog_date = "20250206"
+prog_version          = "0.8 wip"       ; prog_date = "20250209"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
