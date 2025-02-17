@@ -1891,11 +1891,14 @@ def rel_chmod(fpath, op, mask):
 def get_passphrase(prompt="Enter passphrase: ", verify=False, cmd=None):
     if cmd:
         try:
-            return bytearray(SPr.check_output(CP.env + " -u LC_ALL " + cmd,
+            b = bytearray(SPr.check_output(CP.env + " -u LC_ALL " + cmd,
                                               shell=True, text=False).rstrip(b"\n"))
         except SPr.CalledProcessError as e:
             # Handle as error code so pw output does not get logged
             x_it(e.returncode, "Error running passcmd: "+cmd)
+
+        if len(b) < 10:    clear_array(b)    ; x_it(3,"Passphrase must be 10 or more characters.")
+        return b
 
     def getpassinput(prompt):
         if attended:
@@ -1940,7 +1943,7 @@ def arch_init(aset):
             # Security Enh: Possibly use mmap+mlock to store passphrase/key values,
             #               and wipe them from RAM after use.
             passphrase      = get_passphrase(prompt="Enter new encryption passphrase: ",
-                                             verify=True)
+                                             verify=True, cmd=opts.passcmd)
             aset.datacrypto = DataCryptography()
             aset.mcrypto    = DataCryptography()
             aset.mcrypto.load(ci_t[1], aset.saltpath, slot=1,
@@ -2262,7 +2265,7 @@ def get_configs(opts):
     or opts.action not in local_actions) and not (opts.action == "delete" and opts.clean):
         x_it(5, "Destination not ready to receive commands.")
     if not dest.dir_exists: # and opts.action not in write_actions:
-        x_it(5, f"Path '{dest.path}' not found.")
+        x_it(6, f"Path '{dest.path}' not found.")
     if not dest.writable and opts.action in write_actions \
     and not (opts.action == "delete" and opts.clean):
         x_it(5, "Destination not writable.")
@@ -4827,8 +4830,8 @@ def show_list(aset, selected_vols):
     if aset.dest.archive_ini_hash == "none":   print("(CACHED)")
     if options.json:
         try:
-            print(json.dumps({"wversion": prog_version, "wdate": prog_date,
-              "uuid": aset.uuid, "updated_at": aset.updated_at,
+            print(json.dumps({"wversion": prog_version, "fver": aset.format_ver,
+              "wdate": prog_date, "uuid": aset.uuid, "updated_at": aset.updated_at,
               "encrypted": bool(aset.mcrypto and aset.datacrypto), "is_auth": bool(aset.mcrypto),
               "pooltype": storage.pooltype, "url": aset.dest.spec,
               "volumes": {v.name: {"vid": v.vid, "desc": v.desc,
@@ -5028,7 +5031,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 wip"       ; prog_date = "20250209"
+prog_version          = "0.8 beta"      ; prog_date = "20250215"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
