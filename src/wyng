@@ -3991,7 +3991,6 @@ def prune_sessions(vol, times):
     options = vol.archive.opts    ; allbefore = options.allbefore
     sesnames = vol.sesnames       ; t1, t2    = "", ""                ; to_prune  = []
 
-    print(vol.name, end=" -", flush=True)
     if len(sesnames) < 2:    print(" No extra sessions to prune.")    ; return
     if options.allbefore and len(times) != 1:  x_it(1, "Option --all-before requires one session.")
     for ii in range(len(times)):
@@ -5031,7 +5030,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20250215"
+prog_version          = "0.8 beta"      ; prog_date = "20250220"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
@@ -5288,7 +5287,7 @@ elif options.action == "send":
 
 elif options.action == "prune":
     if options.autoprune.lower() == "off" and not options.session:
-        x_it(1, "Must specify --autoprune or --session for prune.")
+        x_it(1, "Specify --autoprune or --session for prune.")
     dvs = selected_vols
 
     if not options.unattended and len(dvs):
@@ -5297,11 +5296,13 @@ elif options.action == "prune":
         if ans.lower() not in {"y","yes"}:
             x_it(0)
 
+    print()
     for dv in dvs:
+        print(dv, end=" -", flush=True)
         if options.session:
-            prune_sessions(aset.vols[dv], options.session.split(",", maxsplit=1))
+            print(prune_sessions(aset.vols[dv], options.session.split(",", maxsplit=1)))
         elif options.autoprune.lower() in ("on","full"):
-            autoprune(aset.vols[dv], apmode=options.autoprune)
+            print(autoprune(aset.vols[dv], apmode=options.autoprune))
 
 
 elif options.action == "receive":
