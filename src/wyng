@@ -424,6 +424,8 @@ class ArchiveVolume:
                     vname = vname.strip()    ; value = value.strip()
                     if vname.startswith("S_"):
                         self.sessions[vname] = Ses(self, vname, value, "")
+                    elif vname not in {"name","desc"}:
+                        if debug:   err_out("Bad vol attr name: "+vname)
                     else:
                         setattr(self, vname, value)
 
@@ -666,17 +668,20 @@ class ArchiveSession:
                 raise ValueError("%s Session %s hash %s, expected %s" \
                                  % (volume.vid, name, arch.b64hash(buf), hashval))
             with io.StringIO(arch.decompress(buf).decode("UTF-8")) as sf:
+                attrlist = self.attr_str + self.attr_int
                 for ln in sf:
                     vname, value = map(str.strip, ln.split("=", maxsplit=1))
                     if vname == "tag":
                         self.tag_add(ArchiveSession.tag_parse(value))
                         continue
-
-                    setattr(self, vname, 
-                        int(value) if vname in self.attr_int else value)
+                    elif vname not in attrlist:
+                        if debug:   err_out("Bad ses attr name: "+vname)
+                    else:
+                        setattr(self, vname,
+                                int(value) if vname in self.attr_int else value)
 
             assert self.volsize <= max_address + 1
-            assert self.localtime.isdigit() or name_chk.match("S_"+self.localtime)
+            assert self.localtime.isdigit() or self.name_chk.match("S_" + self.localtime)
             assert self.name_chk.match(self.name)
             # Enh: validation check for permissions
             self.saved = self.loaded = True
@@ -2264,7 +2269,8 @@ def parse_options(args, pdefs, etcconf=None):
     if options.save_to and options.action != "receive":
         x_it(1, "Receive required for save-to option.")
     if not (options.volumes or options.all or options.import_other_from or options.local_from) \
-    and options.action not in ("arch-init","arch-check","arch-deduplicate","list","delete"):
+    and options.action not in ("arch-init","arch-check","arch-deduplicate",
+                               "list","delete","version"):
         x_it(1, f"Volume name(s) or --all required for {options.action}.")
     if options.action not in ("send", "diff", "arch-deduplicate"):   options.dedup = False
     if options.action == "arch-deduplicate":   options.dedup = True
@@ -3981,11 +3987,11 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={},
             # Enh: include send_alls and other_vols in changed bytes tally
             if vol.changed_bytes > dest.free:
                 autoprune(vol, needed_space=vol.changed_bytes, apmode=options.autoprune)
-                if vol.changed_bytes > dest.free:
-                    print(" %d additional bytes needed." % (vol.changed_bytes-dest.free))
-                    print("Insufficient space on destination %d; Skipping." % dest.free)
-                    error_cache.append(datavol)
-                    continue
+                # if vol.changed_bytes > dest.free:
+                #     print(" %d additional bytes needed." % (vol.changed_bytes-dest.free))
+                #     print("Insufficient space on destination %d; Skipping." % dest.free)
+                #     error_cache.append(datavol)
+                #     continue
 
             # Send Volume
             sent, svsize, sbcount, ddbytes, stime = \
@@ -4407,6 +4413,10 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
     decrypt     = aset.datacrypto.decrypt if aset.datacrypto else None
     compare_digest = hmac.compare_digest          ; b64enc    = base64.urlsafe_b64encode
     gethash     = aset.getdatahash
+
+    if not (storage.online or verify_only or options.save_to):
+        err_out("Please specify a valid --local storage.")   ; error_cache.append(vol.name)
+        return None
 
     if diff or verify_only:
         save_path = ""
@@ -4923,7 +4933,7 @@ def show_list(aset, selected_vols):
             month = sname[2:8]    ; ses = vol.sessions[sname] if sname else None
             if options.unattended or options.verbose:
                 # plain listing
-                print(sname[2:])
+                print(sname[2:], f"({ses.volsize} bytes)" if ses and options.verbose else "")
                 if ses and options.verbose:
                     for tag in sorted(ses.tags.items()):
                         print(" tag:", tag[0]+(", "+tag[1] if tag[1] else ""))
@@ -5060,7 +5070,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20250228"
+prog_version          = "0.8 beta"      ; prog_date = "20250302"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
