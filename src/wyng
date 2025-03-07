@@ -159,8 +159,8 @@ class ArchiveSet:
         # read attributes from archive.ini
         if show:   print(gzip.decompress(buf).decode("UTF-8"))
         cp.read_string(gzip.decompress(buf).decode("UTF-8"))
-        for key in self.attr_ints:   setattr(self, key, int(cp["var"][key]))
-        for key in self.attr_str:    setattr(self, key, cp["var"][key])
+        for key in self.attr_ints & set(cp["var"]):   setattr(self, key, int(cp["var"][key]))
+        for key in self.attr_str & set(cp["var"]):    setattr(self, key, cp["var"][key])
         self.in_process  = [ ln for ln in cp["in_process"].values() ]
 
         # consistency checks:
@@ -2463,11 +2463,9 @@ class Destination:
         or (dtype == "qubes-ssh" and not all(dparts.netloc.partition(":"))) :
             x_it(1,"Error: Malformed --dest specification.")
 
-        self.spec   = dest_url
-        self.sys    = dparts.netloc
-        self.path   = os.path.normpath(dparts.path)
-        self.archive_ini_hash = "none"
-        self.free   = self.dtmp     =  None      ; self.last_chunkdir    = ""
+        self.spec   = dest_url                        ; self.sys = dparts.netloc
+        self.path   = os.path.normpath(dparts.path)   ; self.archive_ini_hash = "none"
+        self.free   = self.dtmp     =  None           ; self.last_chunkdir    = "\x00\x00"
         self.online = self.writable = self.hlinks = self.dir_exists = False
         self.agent_name = "wyng-agent-" + str(os.getuid()) + hashlib.blake2b(
                             bytes(self.spec, encoding="UTF-8"), digest_size=20).hexdigest()
@@ -2984,7 +2982,7 @@ def fetch_file_blobs(recv_list, recv_dir, dest, ext="", skip0=False, skip_exists
     recvp.stdin.flush()    ; rc = recvp.poll()    ; recvp.stdin.close()
 
     for fname, fsz in list(recv_list):
-        if debug:   print("Fetch", fname, len(untrusted_buf))
+        if debug:   print("Fetch", fname)
         if rc is not None:   raise RuntimeError("Process terminated early. rc="+repr(rc))
         fpath = recv_dir+"/"+fname+ext
         if exists(fpath):   os.remove(fpath)
@@ -3495,19 +3493,13 @@ def update_delta_digest_mf(volume, manifest, mapsize=None):
 
 def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False):
 
-    def send_chunk_local(tar_info, buf):
-        # Encrypt the data chunk
-        if crypto:   etag, buf = encrypt(buf, bhashb)
-
+    def send_chunk_local(tar_info, etag, buf):
         chunkdir = pdirname(_fp := pjoin(destpath, tar_info.name))
         if not _fp.startswith(dest.last_chunkdir):
             makedirs(chunkdir, exist_ok=True)    ; dest.last_chunkdir = chunkdir
         with open(_fp, "wb") as cf:   cf.write(etag); cf.write(buf)
 
-    def send_chunk_remote(tar_info, buf):
-        # Encrypt the data chunk
-        if crypto:   etag, buf = encrypt(buf, bhashb)
-
+    def send_chunk_remote(tar_info, etag, buf):
         fileobj = BytesIO()
         tar_info.size = fileobj.write(etag) + fileobj.write(buf)   ; fileobj.seek(0)
         tarf_addfile(tarinfo=tar_info, fileobj=fileobj)
@@ -3703,6 +3695,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
                         ddataf_write(ses_index.to_bytes(ses_w,"big") + addr.to_bytes(ch_w,"big"))
 
                 if tar_info.type == LNKTYPE:
+                    # Send link only (dedup)
                     tar_info.linkname = "%s/%s/%s/x%s" % \
                         (ddses.volume.vid,
                             ddses.name+"-tmp" if ddses is ses else ddses.name,
@@ -3713,7 +3706,11 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
 
                 else:
                     # Send data chunk to the archive
-                    send_chunk(tar_info, buf)
+
+                    # Encrypt the data chunk
+                    if crypto:   etag, buf = encrypt(buf, bhashb)
+
+                    send_chunk(tar_info, etag, buf)
                     bcount += len(buf)    ; counter += 1
 
                 if stream_started:   tarf.members = []
@@ -5070,7 +5067,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20250302"
+prog_version          = "0.8 beta"      ; prog_date = "20250305"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
