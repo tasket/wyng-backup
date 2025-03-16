@@ -3399,11 +3399,13 @@ def update_delta_digest_reflink(storage, aset, datavol, monitor_only):
     snap1vol    = l_vol.snap1                ; snap2vol   = l_vol.snap2
     snap1size   = lvols[snap1vol].getsize()  ; snap2size  = lvols[snap2vol].getsize()
     volperms    = vol.sessions[vol.last].permissions
+    vol_ts      = vol.sessions[vol.last].gettime()
     assert len(vol.sessions) and exists(vol.mapfile())
 
     # Check for volume perms & size changes;
     # Chunks from 'markall_pos' onward will be marked for backup.
-    changed = snap2size != vol.volsize() or storage.lvols[datavol].getperms() != volperms
+    changed = snap2size != vol.volsize() or l_vol.getperms() != volperms \
+              or lvols[snap2vol].gettime() != vol_ts
     next_chunk_addr  = vol.last_chunk_addr()[0] + chunksize
     markall_pos = (next_chunk_addr//chunksize//8) if snap2size-1 >= next_chunk_addr else None
     bsize = storage.block_size
@@ -3491,7 +3493,7 @@ def update_delta_digest_mf(volume, manifest, mapsize=None):
 # Returns (bool, int, int, int) representing whether a session was sent, the current volume size,
 # the number of bytes sent and the runtime in seconds.
 
-def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False):
+def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, benchmark=False):
 
     def send_chunk_local(tar_info, etag, buf):
         chunkdir = pdirname(_fp := pjoin(destpath, tar_info.name))
@@ -3511,21 +3513,24 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
     chunksize   = aset.chunksize                ; dedup       = newmap = False
     chdigits    = max_address.bit_length()//4   ; chformat    = "x%0"+str(chdigits)+"x"
     bksession   = "S_"+curtime                  ; sdir        = pjoin(vol.vid, bksession)
-    prior_size  = vol.volsize()                 ; prior_ses   = vol.last
+    prior_size  = vol.volsize()                 ; prior_ses   = vol.sessions[vol.last]
     old_mapfile = vol.mapfile()                 ; addrsplit   = -address_split[1]
     lvols       = storage.lvols
     compress = compressors[aset.compression][2] ; compresslevel = int(aset.compr_level)
 
     if vol.aliastype == "import_other":
         # Use a plain file or blockdev as a source volume
-        volpath = vol.alias                     ; send_all = scan_data = True
+        volpath = vol.alias                     ; send_all = changed = True
         vol_ts  = os.stat(volpath).st_mtime_ns  ; volperms = storage.getperms(volpath)
         volsize = storage.getsize(volpath)
     else:
-        scan_data = send_all or vol.map_used() > 0
-        l_vol   = lvols[lvols[vol.name].snap2] if scan_data else lvols[vol.name]
-        volperms= lvols[vol.name].getperms()
-        volpath = l_vol.path    ; volsize = l_vol.getsize()    ; vol_ts  = l_vol.gettime()
+        if changed:
+            l_vol = lvols[lvols[vol.name].snap2]; vol_ts   = l_vol.gettime()
+            volsize = l_vol.getsize()
+        else:
+            l_vol = lvols[vol.name]             ; vol_ts   = prior_ses.gettime()
+            volsize = prior_size
+        volpath = l_vol.path    ; volperms = lvols[vol.name].getperms()
 
     if not status1:   print("  [", end="")
     progress, MB = 0, 2**20    ; spinner = status_spinner()
@@ -3591,7 +3596,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
         tarf_addfile = tarf_add = tar_add_pass    ; stream_started = False
 
     # Open source volume and its delta bitmap as r, session manifest as w.
-    with open(volpath,"rb", buffering=chunksize) if scan_data else NulIO() as vf, \
+    with open(volpath,"rb", buffering=chunksize) if changed else NulIO() as vf, \
          open(sdir+"-tmp/manifest.tmp", "wt") as hashf, \
          open(old_mapfile,"rb") if not send_all else NulIO() as bmapf:
 
@@ -3612,7 +3617,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, benchmark=False
                 addr += chunksize*zdlen
                 minibmap = bmap_list.pop(0)
             elif not send_all:
-                if not scan_data:   break
+                if not changed:   break
                 # Get more: split(zdelim) shows where large unmodified zones exist.
                 bmap_list.extend(bmapf.read(bmsz).split(zdelim))
                 minibmap = bmap_list.pop(0)
@@ -3993,7 +3998,7 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={},
             # Send Volume
             sent, svsize, sbcount, ddbytes, stime = \
                 send_volume(storage, vol, curtime, ses_tags, send_all=datavol in send_alls,
-                            benchmark=benchmark)
+                            changed=datavol not in unchanged_vols, benchmark=benchmark)
             dest.free -= int(sbcount + (sbcount * 0.05))
             if vol.aliastype == "import_other":   del(imports[datavol])
 
@@ -4002,7 +4007,7 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={},
             svsize = vol.volsize()
 
         p1, p2 = ("\r", " |  -" if not sent else "") if status1 else ("", "")
-        print(p1 if sbcount or ddbytes else p1+"  no change"+p2, flush=True)
+        print(p1 if sbcount or ddbytes or updated else p1+"  no change"+p2, flush=True)
         totalvsize += svsize    ; totalbcount += sbcount
 
     if not monitor_only and (volct:= sum(map(len,(incrementals,send_alls,unchanged_vols,other_vols)))):
@@ -5045,8 +5050,9 @@ def cleanup():
 
     try:
         if not debug:
-            if dest:   dest.remove_dtmp()
-            if aset:   shutil.rmtree(aset.big_tmpdir, ignore_errors=True)
+            if aset:
+                aset.dest.remove_dtmp()
+                shutil.rmtree(aset.big_tmpdir, ignore_errors=True)
             if tmpdir and exists(tmpdir):   shutil.rmtree(tmpdir, ignore_errors=True)
 
         if cachedir and meta_reduce in ("on","extra"):
@@ -5067,12 +5073,12 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20250305"
+prog_version          = "0.8 beta"      ; prog_date = "20250311"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
 meta_reduce = meta_min = vardir = cachedir = tmpdir = None
-aset = dest = storage = None
+aset = storage = storagesets = None
 time_start, monotonic_start = time.time(), time.monotonic()
 signal_handlers  = {}    ; signals_caught = []    ; error_cache = []
 
@@ -5222,7 +5228,7 @@ hash_funcs  = {"hmac-sha256": None,
 
 # Create ArchiveSet, LocalStorage and Destination objects with get_configs().
 # Passphrase input happens here; no stdin before this point!
-aset        = get_configs(options)    ; dest = aset.dest
+aset        = get_configs(options)
 storage, storagesets = get_configs_storage(aset, options, require_local=not options.save_to and
                                            options.action in ("monitor","send","receive","diff"))
 
@@ -5230,10 +5236,10 @@ storage, storagesets = get_configs_storage(aset, options, require_local=not opti
 # Functions supported here must not internally use global variable inputs that are unique to
 # a runtime invocation (i.e. the 'options' objects), or they must test such variables
 # in conjunction with aset.in_process.
-if aset.in_process and dest.online:
+if aset.in_process and aset.dest.online:
     print("** Prior operation in progress:", " ".join(aset.in_process[0:2]))
 
-if aset.in_process and dest.online and options.action in write_actions:
+if aset.in_process and aset.dest.online and options.action in write_actions:
 
     ipskip = False
     if options.action == "delete" and aset.in_process[1] == options.volumes[0]:
@@ -5270,7 +5276,7 @@ if aset.in_process and dest.online and options.action in write_actions:
 # Display archive update time as local time
 arch_time = ts_to_datetime(float(aset.updated_at))
 print("Encrypted" if (aset.mcrypto and aset.datacrypto) else "Un-encrypted",
-      f"archive '{dest.spec}'",
+      f"archive '{aset.dest.spec}'",
       "\nLast updated %s (%s)" % (arch_time[:-6], arch_time[-6:]), flush=True)
 
 

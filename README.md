@@ -119,6 +119,7 @@ wyng send --dest=file:/mnt/drive1/mylaptop.backup --local=volgrp1/pool1 root-vol
 
 This command sends two volumes 'root-volume' and 'home-volume' from the LVM thin pool 'volgrp1/pool1' to the destination archive.
 
+<br/>
 ## Operation
 
 Run Wyng using the following commands and arguments in the form of:
@@ -151,6 +152,8 @@ Run Wyng using the following commands and arguments in the form of:
 | **add** _volume_name [*]_       | Adds a volume name without session data to the archive.
 | **arch-check** _[volume_name] [*]_    | Thorough check of archive data & metadata
 
+<br/>
+### Command details
 
 #### send
 
@@ -207,9 +210,7 @@ code if the received data does not pass integrity checks.
 
 #### prune
 
-Quickly reclaims space on a backup drive by removing
-any prior backup session you specify; it does this
-without re-writing data blocks or compromising volume integrity.
+Reclaim space on a backup drive by removing prior backup session(s) you specify.
 
 To use, supply a single exact date-time in _YYYYMMDD-HHMMSS_ format to remove a
 specific session, or two date-times representing a range:
@@ -224,6 +225,8 @@ to prune all sessions prior to that time.
 
 The `--keep` option can accept a single date-time or a tag in the form `^tagID`.
 Matching sessions will be excluded from pruning and autopruning.
+
+Also see `--autoprune` option below which works with `prune` and `send` commands.
 
 
 #### delete
@@ -335,7 +338,7 @@ Adds new, empty volume name(s) to the archive.  On subsequent `send -a`, Wyng wi
 the volume data if present.
 
 
----
+<br/>
 
 ### Parameters / Options summary
 
@@ -393,7 +396,7 @@ the volume data if present.
 
 ### Option Details
 
-`--dest=URL`
+#### `--dest=URL`
 
 This option tells Wyng where to access the archive and has the same meaning for all read or write
 commands. It accepts one of the following forms:
@@ -406,7 +409,7 @@ commands. It accepts one of the following forms:
 |__qubes-ssh:__//vm-name:me@example.com[:port][/path]  | SSH server via a Qubes VM
 
 
-`--local`
+#### `--local`
 
 The location of local storage where logical volumes, disk images, etc. reside.  This serves as
 the _source_ for `send` commands, and as the place where `receive` restores/saves volumes.
@@ -417,8 +420,8 @@ end at a subvolume).  Required for commands `send`, `monitor` and `diff` (and `r
 not using `--saveto`).
 
 
-`--session=<date-time>[,<date-time>]` OR
-`--session=^<tag>[,^<tag>]`
+#### `--session=<date-time>[,<date-time>]` OR
+#### `--session=^<tag>[,^<tag>]`
 
 Session allows you to specify a single date-time or tag spec for the`receive`, `verify`, `diff`,
 and `arch-check` commands. Using a tag selects the last session having that tag. When specifying
@@ -431,7 +434,7 @@ instance of the tag (when the tag is the first spec) or the last instance (when 
 second range spec). Also, date-times and tags may be used together in a range spec.
 
 
-`--volex=<volume1> [--volex=<volume2> *]`
+#### `--volex=<volume1> [--volex=<volume2> *]`
 
 Exclude one or more volumes from processing. May be used with commands that operate on multiple
 volumes in a single invocation, such as `send`.  volex is useful in cases where a volume is
@@ -442,7 +445,7 @@ be excluded from prune, monitor, etc.
 specify multiple volumes.
 
 
-`--sparse-write`
+#### `--sparse-write`
 
 Used with `receive`, the sparse-write mode tells Wyng not to create a brand-new local volume and
 results in the data being sparsely written into the existing volume instead. This is useful if
@@ -452,7 +455,7 @@ best used when the backup/archive storage is local (i.e. fast USB drive or simil
 want the added CPU usage of full `--sparse` mode.
 
 
-`--sparse`
+#### `--sparse`
 
 The sparse mode can be used with the `receive` command to intelligently retrieve and overwrite
 an existing
@@ -464,20 +467,20 @@ you want to restore/revert a large volume with a containing a limited number of 
 over a low-bandwidth connection.
 
 
-`--use-snapshot` _(experimental)_
+#### `--use-snapshot` _(experimental)_
 
 A faster-than-sparse option that uses a snapshot as the baseline for the
 `receive`, if one is available.  Use with `--sparse` if you want Wyng to fall back to
 sparse mode when snapshots are not already present.
 
 
-`--tar-bypass` _(experimental)_
+#### `--tar-bypass` _(experimental)_
 
 Use direct access for file:/ archives during `send`.  This can reduce sending times by
 up to 20%.
 
 
-`--dedup`, `-d`
+#### `--dedup`, `-d`
 
 When used with the `send` command, data chunks from the new backup will be sent only if
 they don't already exist somewhere in the archive. Otherwise, a link will be used saving
@@ -489,14 +492,14 @@ multiple volumes that have a lot of the same content and/or you are backing-up o
 Internet link.
 
 
-`--dry-run`
+#### `--dry-run`
 
 Have `send` perform a dry run, where no data is saved to the archive. This is useful for testing and also getting an estimate of the amount of data that will be transmitted during a normal `send`. If a volume that had lost its snapshot or delta map is included in a dry run, its map will be re-created automatically saving time on the next `send`.
 
 Since it affects the amount of data transmitted, including the `--dedup` option in the dry run is recommended if you intend to make the actual backup with `--dedup`.
 
 
-`--autoprune=(off | on | full)`
+#### `--autoprune=(off | on | full)`
 
 Autoprune may be used with either the `prune` or `send` commands and will cause Wyng to
 automatically remove older backup sessions according to date criteria. When used with `send`
@@ -512,7 +515,7 @@ __on__ removes _some_ sessions, as space is needed on the destination.
 
 __full__ removes all sessions that are due to expire according to above criteria.
 
-`--apdays=A:B:C:D`
+#### `--apdays=A:B:C:D`
 
 Adjust autoprune with the following four parameters:
 
@@ -526,14 +529,14 @@ An example:  `--apdays=365:31:1:2` will cause autoprune to remove all sessions t
 than 365 days, and sessions older than 31 days will be thinned-out while preserving
 (roughly on average) two sessions per day.
 
-`--tag=<tagname[,description]>`
+#### `--tag=<tagname[,description]>`
 
 With `send`, attach a tag name of your choosing to the new backup session/snapshot; this may be
 repeated on the command line to add multiple tags. Specifying an empty '' or '@' tag will cause Wyng to ask for one or more tags to be manually input; this also causes `list` to display tag
 information when listing sessions.
 
-`--authmin=<minutes>`  
-`--passcmd=<command>`
+#### `--authmin=<minutes>`
+#### `--passcmd=<command>`
 
 These two options help automate Wyng authentication, and may be used together or separately.
 
@@ -548,7 +551,7 @@ Wyng then reads instead of prompting for passphrase input.  If a prior auth from
 `--authmin` is active, this option is ignored and the command will not be executed.
 
 
-`--import-other-from=volname:|:path`
+#### `--import-other-from=volname:|:path`
 
 Enables `send`ing a volume from a path that is not a supported snapshot storage type.  This may
 be any regular file or a block device which is seek-able.
@@ -562,14 +565,14 @@ which means this option cannot be used to `send` directly to volume names in the
 contain that character sequence.
 
 
-`--session-strict=on|off`
+#### `--session-strict=on|off`
 
 For receive, verify, diff: If set to 'on' (the default) Wyng won't retrieve volumes from next-oldest session if the
 specified volumes don't have an exact match for the specified session.  When set to 'off'
 Wyng will try to retrieve the next-oldest version of the volume if one exists.
 
 
-`--local_from=_json file_`
+#### `--local_from=_json file_`
 
 Specify both local storage and volume names for `send` or `receive` as sets, instead
 of using --local and volume names on the command line.  The json file must take the form
@@ -581,7 +584,7 @@ must all be unique across different sources as they are stored in the same archi
 they indicate a request to actually _rename_ the target volume to the alias.
 
 
-`--meta-reduce=mode:minutes`
+#### `--meta-reduce=mode:minutes`
 
 Control the degree to which locally cached session metadata is retained or removed when
 Wyng exits. This can effect a noticeable reduction in the space that Wyng uses in /var
@@ -597,7 +600,7 @@ will cause it to be removed immediately when Wyng exits.
 The default setting is _'on:3000'_.
 
 
-`--compression`
+#### `--compression`
 
 Accepts the forms `type` or `type:level`. The three types available are `zstd` (zstandard),
 plus `zlib` and `bz2` (bzip2). Note that Wyng will only default
@@ -605,12 +608,12 @@ to `zstd` when the 'python3-zstd' package is installed; otherwise it will fall b
 capable `zlib`. (default=zstd:3)
 
 
-`--hashtype`
+#### `--hashtype`
 
 Accepts a value of either _'blake2b'_ or _'hmac-sha256'_ (default).  The digest size is 256 bits.
 
 
-`--chunk-factor`
+#### `--chunk-factor`
 
 Sets the pre-compression data chunk size used within the destination archive.
 Accepted range is an integer exponent from '1' to '6', resulting in a chunk size of 64kB for
@@ -619,13 +622,13 @@ space efficiency and performance balance, a factor of '2' or greater is suggeste
 that will store volumes larger than about 100GB. (default=2)
 
 
-`--encrypt`
+#### `--encrypt`
 
 Selects the encryption cipher/mode.  The available modes are:
 
 - `xchacha20-dgr` — Using HMAC-SHA256(rnd||hash) function.  This is the default.
 - `xchacha20-msr` — Using HMAC-SHA256(rnd||msg) function.
-- `xchacha20-ct` — Counter based; fast with certain safety trade-offs (see issue [158](https://github.com/tasket/wyng-backup/issues/158)).
+- `xchacha20-ct` — Counter based; fast like _*-dgr_ with different safety trade-offs (see issue [158](https://github.com/tasket/wyng-backup/issues/158)).
 - `off` — Turns off Wyng's authentication and encryption.
 
 
@@ -655,7 +658,7 @@ volex = misc/caches.img
 
 ### Verifying Code
 
-* Wyng code can be cryptographically verified using either `gpg` directly or via `git`:
+Wyng code can be cryptographically verified using either `gpg` directly or via `git`:
 
 ```sh
 # Import Key
@@ -743,16 +746,18 @@ only a few minutes (there is no need to dismount the images).  For example:
       sudo btrfs filesystem defragment -r -t 256K /var/lib/qubes
 ```
 
-> Note that while the 'autodefrag' mount option can be used as an alternative, the overall performance will be reduced due to the smaller fragments and constant effect of write-amplification.
+<ul>
+Note that while the 'autodefrag' mount option can be used as an alternative, the overall performance will be reduced due to the smaller fragments and constant effect of write-amplification.</ul>
 
-> Btrfs deduplicators like `bees` or `duperemove` can quickly increase fragmentation
-> (i.e. undo the effects of _defragment_) if not used carefully. The `duperemove` docs
-> indicate that choosing a larger block size will limit fragmentation, making it
-> preferable to _bees_. The block `-b` value should be matched to the one used 
-> for `defragment -t`.
+<ul>
+Btrfs deduplicators like `bees` or `duperemove` can quickly increase fragmentation
+(i.e. undo the effects of _defragment_) if not used carefully. The `duperemove` docs
+indicate that choosing a larger block size will limit fragmentation, making it
+preferable to _bees_. The block `-b` value should be matched to the one used 
+for `defragment -t`.</ul>
 
-* To reduce the size of incremental backups it may be helpful to remove cache
-files, if they exist in your source volume(s). Typically, the greatest cache space
+* To reduce the size of incremental backups it may be helpful to remove or isolate cache
+files, if they exist in your source volumes. Typically, the greatest cache space
 consumption comes from web browsers, so
 volumes holding paths like /home/user/.cache can be impacted by this, depending
 on the amount and type of browser use associated with the volume. Three possible
@@ -761,10 +766,9 @@ system/container shutdown (this reasonably assumes cached data is expendable),
 or to mount .cache on a separate volume that is not configured for backup.
 
 * If you've changed your local path without first running `wyng delete --clean` to
-remove snapshots, there may be unwanted snapshots remaining under your old volume group
-or local directory.  LVM snapshots can be found with the patterns `*.tick` and `*.tock` with
-the tag "wyng";  Btrfs/XFS snapshots can be found with `sn*.wyng?`.
-Deleting them can prevent unnecessary consumption of disk space.
+remove snapshots, there may be orphaned snapshots remaining under your old volume group
+or local directory. Deleting them can prevent unnecessary consumption of disk space.  LVM snapshots can be found with the patterns `'*.tick'` and `'*.tock'` with
+the tag "wyng".  Btrfs/XFS snapshots can be found with `'sn*.wyng?'`.
 
 * If you wish to make a "backup of the backup", i.e. duplicate an archive,
 its possible to do so with the following:
@@ -774,11 +778,12 @@ its possible to do so with the following:
       mv destpath-updating destpath
 ```
 
-> Note that since the resulting copy of the archive is identical, including internal UUIDs, it should only be kept for an emergency such as when the original archive is no longer available or becomes unusable. Switching back and forth between the original and copy for regular archival operations is not supported.
+<ul>
+Note that since the resulting copy of the archive is identical, including internal UUIDs, it should only be kept for an emergency such as when the original archive is no longer available or becomes unusable. Switching back and forth between the original and copy for regular archival operations is not supported.</ul>
 
 * The above `rsync` command can also efficiently update a duplicate archive, since it can delete files that are no longer present in the origin archive (`cp` cannot do this). However, note that there is risk of absentmindedly corrupting the duplicate archive if the update process ever ends in an error – this includes when your system is running `rsync` and it just crashes, thus displaying no error; all errors/interruptions must be handled. By renaming the archive with a suffix like '-updating', the above commands provide some precautionary "oops!" information, a reminder that your update had an error ...and to re-run it to make it right. This risk could be eliminated if Wyng were able to perform the duplicating itself; for plans on adding such a feature, see [this](https://github.com/tasket/wyng-backup/issues/199) issue.
 
-* Wyng archives should be stored on Unix-like filesystems that were formatted with default or close-to default metadata settings (i.e. _inode_ capacity has not been manually reduced). Any format providing a 16KB (or lower) data per inode ratio should work fine regardless of the Wyng chunksize being used.
+* Wyng archives should be stored on Unix-like filesystems that were formatted with default or close-to default metadata settings (i.e. _inode_ capacity has not been manually reduced). Any format providing a 16KB:1 (or lower) data-to-inode ratio should work fine regardless of the Wyng chunksize being used.
 
 
 ### Troubleshooting notes
