@@ -2353,35 +2353,43 @@ def get_configs_remote(dest, base_dir, opts):
             err_out(repr(e)+"\nCached archive.ini didn't load.")
             shutil.rmtree(arch_dir)
         else:
+            if debug:   err_out(repr(cache_aset.header) +"\n"+repr(aset.header))
             if cache_aset.header != aset.header:
-                reason = "Cache and remote ini headers differ."
-                if bool(aset.mcrypto) != bool(cache_aset.mcrypto):
-                    reason += "\nEncryption status change!"
-                raise ValueError(reason)
+                raise ValueError("Cache and remote archive headers differ.")
+
+            elif cache_aset.mcrypto and not aset.mcrypto:
+                raise ValueError("Encrypted cache, not present on remote!")
+
             elif cache_aset.updated_at > aset.updated_at:
-                reason = (f"Cached metadata is newer, from {cache_aset.path}\n"
-                          f"{cache_aset.updated_at} vs. {aset.updated_at}")
-                if opts.force_allow_rollback:
-                    err_out(reason + "\nAllowing rollback: Caution!")
-                    if aset.mcrypto:
-                        aset.mcrypto.set_counter(cache_aset.mci_count)
-                        aset.datacrypto.set_counter(cache_aset.dataci_count)
-                        aset.save_ini()    ; update_dest(aset, pathlist=[aset.confname])
-                    del(cache_aset)    ; shutil.rmtree(arch_dir+"-old", ignore_errors=True)
-                    os.replace(arch_dir, arch_dir+"-old")
+                # Cache ts is newer, check if contents are different and handle rollback
+                if any((x != y for s in aset.conf
+                 for x, y in zipln(dict(cache_aset.conf[s]).items(), dict(aset.conf[s]).items())
+                 if x[0] not in ("mci_count","dataci_count","updated_at"))):
 
-                else:
-                    raise ValueError(reason)
+                    reason = (f"Cached metadata is newer, from {cache_aset.path}\n"
+                              f"{cache_aset.updated_at} vs. {aset.updated_at}")
+                    if opts.force_allow_rollback:
+                        err_out(reason + "\nAllowing rollback: Caution!")
+                        if aset.mcrypto:
+                            # advance counters
+                            aset.mcrypto.set_counter(cache_aset.mci_count)
+                            aset.datacrypto.set_counter(cache_aset.dataci_count)
+                            aset.save_ini()    ; update_dest(aset, pathlist=[aset.confname])
+                        del(cache_aset)    ; shutil.rmtree(arch_dir+"-old", ignore_errors=True)
+                        os.replace(arch_dir, arch_dir+"-old")
+                    else:
+                        raise ValueError(reason)
 
-                # Enh: Test-load the cache fully and/or fetch remote, but use largest counter#s
-                # Fix: Check for .tmp versions and use local copy if all other fields match;
-                # this allows recovery from interruption during send (archive.ini cadence).
-            elif cache_aset.updated_at == aset.updated_at:
-                err_out("Cached archive.ini differs with dest but timestamp matches.")
-            else:
+                # Fix: Check for .tmp versions
+            elif cache_aset.updated_at < aset.updated_at:
                 if verbose:   err_out("Updating metadata cache.")
                 shutil.rmtree(arch_dir+"-old", ignore_errors=True)
                 os.replace(arch_dir, arch_dir+"-old")
+
+            else:
+                if debug:
+                    aset.conf.write(sys.stderr)    ; cache_aset.conf.write(sys.stderr)
+                raise ValueError("\nUnhandled cache divergence.")
 
     if not exists(ini):
         os.makedirs(arch_dir, exist_ok=True)
@@ -5078,7 +5086,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20250317"
+prog_version          = "0.8 beta"      ; prog_date = "20250318"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 

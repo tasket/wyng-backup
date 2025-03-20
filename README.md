@@ -374,7 +374,7 @@ the volume data if present.
 --save-to=_path_       | Save a volume to _path_ (receive).
 --local_from=_json file_ | Specify local:[volumes] sets instead of --local.
 --import-other-from    | Import volume data from a non-snapshot capable path during `send`
---session-strict=_on|off_ | Don't retrieve volume from next-oldest session if no exact session match
+--session-strict=_on_ | Don't retrieve volume from next-oldest session if no exact session match
 --encrypt=_cipher_     | Set encryption mode or _'off'_ (default: _'xchacha20-dgr'_)
 --compression          | (arch-init) Set compression type:level.
 --hashtype             | (arch-init) Set data hash algorithm: _hmac-sha256_ or _blake2b_.
@@ -383,10 +383,14 @@ the volume data if present.
 --tar-bypass           | Use direct access for file:/ archives (send)
 --passcmd=_'command'_  | Read passphrase from output of a wallet/auth app
 --upgrade-format       | Upgrade older Wyng archive to current format. (arch-check)
+--change-uuid          | Change the archive UUID to a new random value. (arch-check)
 --dry-run              | Make `send` session a dry run, see estimate of changed data.
 --remap                | Remap volume to current archive during `send` or `diff`.
 --json                 | Output volume: session info in json format (list).
 --force                | Not used with most commands.
+--force-allow-rollback | Accept archive if it was reverted to an earlier state.
+--opt-ssh              | Override internal _ssh_ options.
+--opt-qubes            | Override internal _qvm-run_ options.
 --meta-reduce=_mode:N_ | Reduce or extend local metadata caching.
 --meta-dir=_path_      | Use a different metadata dir than the default.
 --debug                | Debug mode
@@ -806,20 +810,21 @@ to nail down the precisely desired range by observing the output of
 * Wyng locally stores information about backups in two ways:  Snapshots alongside your local
 source volumes, and metadata under _/var/lib/wyng_.  It is safe to _delete_
 Wyng snapshots without risking the integrity of backups (although `send` will become slower).
-However, as with all CoW snapshot based backup tools, you should never attempt to directly mount,
-alter or otherwise utilize a Wyng snapshot
+However, as with all CoW snapshot based backup tools, you should never attempt to directly mount, alter or otherwise utilize a Wyng snapshot
 as this could (very likely) result in future backup sessions being corrupt (this is why Wyng
 snapshots are stored as read-only).  If you think you have somehow altered a Wyng snapshot, you
 should consider it corrupt and immediately delete it before the next `send`.
 If you're in a pinch and need to use the data in a Wyng snapshot, you should first make your own
 copy or snapshot of the Wyng snapshot using `cp --reflink` or `lvcreate -s` and use that instead.
 
+* Error _"Cached metadata is newer"_ indicates that something has reverted the archive to an earlier state.  This could be due to a rollback attack, but could also be the result of your own actions such as keeping multiple copies of the same archive and alternately mounting them at the same location (in which case giving each copy a slightly different dir name can avert this error".  Use the `--force-allow-rollback` option if you need to recover from this error and use the older archive as is.
+
 * Metadata cached under _/var/lib/wyng_ may also be manually deleted.  However, the _archive.\*_
 root files in each 'a_*' directory are part of Wyng's defense against rollback attacks, so if you
 feel the need to manually reclaim space used in this dir then consider leaving the _archive.\*_
 files in place.
 
-* If data corruption in the archive is suspected, use `wyng arch-check` which will scan for errors and present you with options for recovery.
+* If data corruption in the archive is suspected, use `wyng arch-check` which will scan for errors and show options for recovery.
 
 * If a volume becomes damaged and unrecoverable it may be necessary to delete it by its volume ID by using `wyng delete --vid` instead of the volume name.
 
