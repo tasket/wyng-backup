@@ -2040,7 +2040,7 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
         # Enh: Offer to reconstruct volinfo from available session data
         if v_errs:
             err_out(f"\n{vid} cannot be recovered.")
-            continue
+            return
 
         # try sessions
         vol = [x for x in aset.vols.values() if x.vid == vid][0]
@@ -2088,6 +2088,8 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
                         for s in removed:
                             shutil.rmtree(f"{vol.path}/{s}", ignore_errors=True)
                         x_it(0, "Done.")
+            return
+
         else:
             print(f"{vol.vid}: OK", end="\r")
 
@@ -4798,7 +4800,7 @@ def rename_volume(storage, aset, oldname, newname):
     if verbose:   print("Archive volume renamed.")
 
     # move snapshots to new pathname
-    if not storage.online:
+    if not storage or not storage.online:
         print("Note: A valid --local location was not specified; no local snapshots"
               " will be renamed which may result in a slow rescan on the next 'send'.\n")
         return
@@ -4836,7 +4838,7 @@ def add_volume(aset, datavol, desc):
 def delete_volume(storage, aset, dv=None, vid=None):
     assert not (dv and vid)   ; inproc = aset.in_process and aset.in_process[0] == "delete"
 
-    if not storage.online:
+    if not storage or not storage.online:
         print("Note: A valid --local location was not specified; no volume snapshots"
               " will be removed.\n")
 
@@ -4869,7 +4871,7 @@ def delete_volume(storage, aset, dv=None, vid=None):
     if dvid.startswith("Vol_") and inproc:
         aset.dest.run(["rm -rf '%s'" % dvid], destcd=aset.dest.path)
 
-    if storage.online and dv:
+    if storage and storage.online and dv:
         storage.new_vol_entry(dv, dvid)
         for lvol_name in (storage.lvols[dv].snap1, storage.lvols[dv].snap2):
             storage.lvols[lvol_name].delete()
@@ -4881,6 +4883,7 @@ def delete_volume(storage, aset, dv=None, vid=None):
 
 def show_list(aset, selected_vols):
 
+    options = aset.opts
     if aset.dest.archive_ini_hash == "none":   print("(CACHED)")
     if options.json:
         try:
@@ -5086,7 +5089,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20250318"
+prog_version          = "0.8 wip"       ; prog_date = "20250319"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
@@ -5256,7 +5259,8 @@ if aset.in_process and aset.dest.online:
 if aset.in_process and aset.dest.online and options.action in write_actions:
 
     ipskip = False
-    if options.action == "delete" and aset.in_process[1] == options.volumes[0]:
+    if options.action == "delete" and (aset.in_process[1] in [options.vid]) \
+    or (options.volumes and aset.in_process[1] == aset.vols[options.volumes[0]].vid):
         # user is currently deleting the in_process volume or using --clean --force
         if options.clean and options.force:
             ipskip = True
@@ -5278,7 +5282,7 @@ if aset.in_process and aset.dest.online and options.action in write_actions:
             vname = [x.name for x in aset.vols.values() if x.vid == aset.in_process[1]][0]
             merge_sessions(aset.vols[vname], aset.in_process[4].split(":|"),
                         aset.in_process[3], clear_sources=bool(aset.in_process[2]))
-    else:
+    elif aset.in_process:
         raise ValueError("Bad in_process descriptor: "+repr(aset.in_process[0]))
 
         aset.stop()

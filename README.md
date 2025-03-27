@@ -760,6 +760,8 @@ indicate that choosing a larger block size will limit fragmentation, making it
 preferable to _bees_. The block `-b` value should be matched to the one used 
 for `defragment -t`.</ul>
 
+* Receive/restore and deduplication:  Wyng `receive` can prevent data duplication when there is an existing volume to over-write; in sparse mode it will compare existing data on disk with incoming data from the archive and avoid writing to areas that match.  The `--use-snapshot` option has a similar space-saving effect and may be combined with the _sparse_ options.  However, Wyng cannot tell if any other volumes on the system are related to the volumes being received, and it won't automatically use them as a starting point to reduce consumption of disk space; to attain the 'dedup' effect when restoring its up to you to create snapshots from related volumes at your respective receive paths/LVs before running `wyng --sparse receive`.
+
 * To reduce the size of incremental backups it may be helpful to remove or isolate cache
 files, if they exist in your source volumes. Typically, the greatest cache space
 consumption comes from web browsers, so
@@ -774,18 +776,19 @@ remove snapshots, there may be orphaned snapshots remaining under your old volum
 or local directory. Deleting them can prevent unnecessary consumption of disk space.  LVM snapshots can be found with the patterns `'*.tick'` and `'*.tock'` with
 the tag "wyng".  Btrfs/XFS snapshots can be found with `'sn*.wyng?'`.
 
-* If you wish to make a "backup of the backup", i.e. duplicate an archive,
-its possible to do so with the following:
+* Keeping a [duplicate](https://github.com/tasket/wyng-backup/issues/199) archive or "a backup of the backup" is possible with the following:
 ```
-      mv destpath destpath-updating
-      rsync -a --hard-links --delete sourcepath destpath-updating
-      mv destpath-updating destpath
+      mv destpath destpath-incomplete
+      rsync -uaHW --delete --no-compress sourcepath/. destpath-incomplete
+      mv destpath-incomplete destpath
 ```
 
 <ul>
-Note that since the resulting copy of the archive is identical, including internal UUIDs, it should only be kept for an emergency such as when the original archive is no longer available or becomes unusable. Switching back and forth between the original and copy for regular archival operations is not supported.</ul>
+The simple rsync example above can become bogged-down with unnecessary transfers because it doesn't take into account when pruning shifts data into different paths.  A script that addresses this performance pitfall is available <a href="https://gist.github.com/tasket/08f38279d8702c7defcb62cb4afdae7a">here</a>.</ul>
+<ul>
+Note that since a duplicate archive is identical, including internal UUIDs, it should only be kept for an emergency such as when the original archive is no longer available or becomes unusable. Switching back and forth between the original and duplicate for regular archival operations is not supported.</ul>
 
-* The above `rsync` command can also efficiently update a duplicate archive, since it can delete files that are no longer present in the origin archive (`cp` cannot do this). However, note that there is risk of absentmindedly corrupting the duplicate archive if the update process ever ends in an error – this includes when your system is running `rsync` and it just crashes, thus displaying no error; all errors/interruptions must be handled. By renaming the archive with a suffix like '-updating', the above commands provide some precautionary "oops!" information, a reminder that your update had an error ...and to re-run it to make it right. This risk could be eliminated if Wyng were able to perform the duplicating itself; for plans on adding such a feature, see [this](https://github.com/tasket/wyng-backup/issues/199) issue.
+* _Sending to multiple archives:_ If you have created separate archives (not duplicates as described in the last section) and want to backup one or more volumes to both archives, Wyng can do this seamlessly from non-LVM storage systems such as Btrfs.  With LVM, the --remap option would have to be used each time you switch archives; this slows Wyng down to the pace of a regular incremental backup program, so keeping a duplicate archive using rsync or similar may be preferable.  However, this issue doesn't affect sending different sets of volumes to different archives, only when a specific volume is sent to more than one archive.
 
 * Wyng archives should be stored on Unix-like filesystems that were formatted with default or close-to default metadata settings (i.e. _inode_ capacity has not been manually reduced). Any format providing a 16KB:1 (or lower) data-to-inode ratio should work fine regardless of the Wyng chunksize being used.
 
