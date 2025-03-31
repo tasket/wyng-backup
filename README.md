@@ -1,6 +1,6 @@
 _<h1 align="center">Wyng</h1>_
 <p align="center">
-Fast incremental backups for logical volumes and disk images.
+Faster incremental backups for logical volumes and disk images.
 </p>
 
 ### Introduction
@@ -50,7 +50,7 @@ Version 0.8 major enhancements:
 
  - Full data & metadata integrity checking
 
- - Fast differential receive based on available snapshots
+ - Fast differential receive based on local snapshots
 
  - Overall faster operation
 
@@ -167,9 +167,7 @@ wyng send my_big_volume --local=vg/pool --dest=file:/mnt/drive1/mylaptop.backup
 
 ```
 
-A `send` operation may refuse to backup a volume if there is not enough space on the
-destination. One way to avoid this situation is to specify `--autoprune=on` which
-will cause Wyng to remove older backup sessions from the archive when space is needed.
+`send` supports automatic pruning of older backup sessions to recover disk space before the new data is sent; set `--autoprune` option to _on_ or _full_ to use this feature.
 
 Volume names for non-LVM storage may include subdirectories, making them relative paths in
 the same manner as file paths in `tar`.
@@ -730,6 +728,8 @@ to verifying everything within an archive.)
 
 
 ### Tips & Caveats
+
+* Qubes users: If you're using Wyng to backup Qubes VMs, you probably want to use the Wyng wrapper made especially for Qubes, [wyng-util-qubes](https://github.com/tasket/wyng-util-qubes), which makes saving & restoring VM settings along with data easy!
 
 * LVM users: Wyng has an internal snapshot manager which creates snapshots of volumes
 in addition to any snapshots you may already have on your local storage system.
