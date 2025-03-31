@@ -496,7 +496,7 @@ class ArchiveVolume:
 
     def rename_saved(self, ext=".tmp"):
         assert ext and exists(pjoin(self.path,"volinfo")+ext)
-        for rpath in (pjoin(self.path,"volinfo"), pjoin(self.path,"vi.dat")):
+        for rpath in (pjoin(self.path,"volinfo"), pjoin(self.path,"sessions")):
             if exists(rpath+ext):   os.replace(rpath+ext, rpath)
         self.archive.rename_saved(ext)
 
@@ -4383,7 +4383,7 @@ def merge_sessions(volume, sources, target, clear_sources=False):
         aset.stop()
         aset = ArchiveSet(aset.path, aset.dest, aset.opts, prior_auth=aset)
         aset.set_in_process(None)
-        for f in ("merge.lst.gz", "volinfo.tmp", "vi.dat.tmp", target+"/info.tmp"):
+        for f in ("merge.lst.gz", "volinfo.tmp", "sessions.tmp", target+"/info.tmp"):
             if exists(f):  os.remove(f)
         dest.run([f"cd {volume.vid}  &&  rm -rf merge merge.lst.gz"],
                  destcd=dest.path, check=False)
@@ -5089,7 +5089,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 wip"       ; prog_date = "20250319"
+prog_version          = "0.8 beta"      ; prog_date = "20250321"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
