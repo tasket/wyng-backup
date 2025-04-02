@@ -3761,7 +3761,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
             raise RuntimeError("tar transport failure code %d" % retcode)
 
         os.link(ses.path+"/manifest.tmp", ses.path+"/manifest")
-        if ses.volsize != prior_size and len(vol.sessions) > 1:
+        if len(vol.sessions) > 1 and (ses.volsize // chunksize) != (prior_size // chunksize):
             check_manifest_sequence(vol, vol.sesnames)
 
         # Finalize on VM/remote
@@ -5089,7 +5089,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20250321"
+prog_version          = "0.8 beta"      ; prog_date = "20250324"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
