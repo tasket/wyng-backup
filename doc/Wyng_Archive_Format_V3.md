@@ -1,7 +1,7 @@
 Wyng Archive Format V3
 ======================
 
-Document version 0.9.6, date 2023-08-03  
+Document version 0.9.7, date 2025-03-28  
 Author:  Christopher Laprise,  tasket@protonmail.com  
 
 Home URLs:  
@@ -62,11 +62,9 @@ are session subdirs named 'S\_YYYYMMDD-HHMMSS' (date-time) which have subdirs na
 9 most-significant digits (MSD) of the hexadecimal address ranges in the volume.  Within the address
 MSD dirs are the data chunk files.
 
-Metadata files within an archive are also hierarchical, with _archive.ini_ forming the root which
-holds global variables and a volume list pointing to volume dirs and hash values to validate each
-volume's _volinfo_ file.  Similarly, each _volinfo_ has a list pointing to the volume's session
+Metadata files within an archive are also hierarchical, with _archive.ini_ forming the root which holds global variables and a volume list pointing to volume dirs and hash values to validate each volume's _volinfo_ file.  Similarly, each _volinfo_ has a list pointing to the volume's session
 subdirs along with the hash values to validate session _info_ files.  And each session's _info_
-file contains a hash to validate the session's _manifest.z_ file.
+file contains a hash to validate the session's _manifest.z_ file.  Each volume may also have a file named _session_, a json list of session names showing their actual sequencing unaffected by local time zone.
 
 Finally, _manifest.z_ contains a simple list of the volume data chunks contained in that session,
 referencing each chunk's address within the volume and its hash value (or '0' for all-zero chunks).
