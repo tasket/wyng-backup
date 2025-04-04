@@ -2211,7 +2211,7 @@ def remove_local_snapshots(storage, archive, del_all=False, purge=None):
     purge_other = purge == "other"    ; del_all = purge == "full"
     assert not (purge_other and not archive)
 
-    if not storage.arch_vols:
+    if not storage.arch_vols and archive:
         storage.update_vol_list({x.name: x.vid for x in archive.vols.values()})
 
     # Remove LVM snapshots
@@ -3180,12 +3180,12 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only, other_vols=
                 lvols[snap1].delete()
                 print("  Removed mis-matched snapshot for '%s'" % datavol)
 
-            if lvols[snap1].exists() and lvols[snap1].gettime() == l_vol.gettime() \
-            and lvols[snap1].getsize() == l_vol.getsize() \
-            and l_vol.getperms() == vol.sessions[vol.last].permissions and exists(mapfile):
-                # No changes forthcoming.  This vol will not have a 'snap2' created for it
-                # and won't be scanned for deltas or have snapshot rotation.
-                unchanged_vols.append(datavol)    ; continue
+            # if lvols[snap1].exists() and lvols[snap1].gettime() == l_vol.gettime() \
+            # and lvols[snap1].getsize() == l_vol.getsize() \
+            # and l_vol.getperms() == vol.sessions[vol.last].permissions and exists(mapfile):
+            #     # No changes forthcoming.  This vol will not have a 'snap2' created for it
+            #     # and won't be scanned for deltas or have snapshot rotation.
+            #     unchanged_vols.append(datavol)    ; continue
 
         elif monitor_only:
             print("  Skipping '%s'; No data." % datavol)    ; continue
@@ -5089,7 +5089,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20250324"
+prog_version          = "0.8 beta"      ; prog_date = "20250403"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
@@ -5416,8 +5416,10 @@ elif options.action == "delete":
     if options.clean or options.purge:
         if options.volumes:
             x_it(1, "Cannot delete volumes with clean/purge.")
+        elif not storage or not storage.online:
+            x_it(1, "Local storage required for clean/purge.")
 
-        print(f"Remove local Wyng snapshots from path '{cachedir}'.")
+        print(f"Remove local Wyng snapshots from path '{storage.path}'.")
         if not options.unattended and not options.force:
             ans = ask_input("Are you sure? [y/N]: ")
             if ans.lower() not in {"y","yes"}:
