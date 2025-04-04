@@ -4887,14 +4887,14 @@ def show_list(aset, selected_vols):
     if aset.dest.archive_ini_hash == "none":   print("(CACHED)")
     if options.json:
         try:
-            print(json.dumps({"wversion": prog_version, "fver": aset.format_ver,
+            print(); print(json.dumps({"wversion": prog_version, "fver": aset.format_ver,
               "wdate": prog_date, "uuid": aset.uuid, "updated_at": aset.updated_at,
               "encrypted": bool(aset.mcrypto and aset.datacrypto), "is_auth": bool(aset.mcrypto),
               "pooltype": storage.pooltype, "url": aset.dest.spec,
               "volumes": {v.name: {"vid": v.vid, "desc": v.desc,
                 "sessions": {s.name: {"volsize": s.volsize, "sequence": s.sequence,
                   "tags": {x:y for x,y in s.tags.items()}}
-              for s in v.sessions.values()} } for v in aset.vols.values() }}, indent=1)
+              for s in v.sessions.values()} } for v in aset.vols.values() }})
             )
         except BrokenPipeError:
             pass
@@ -5089,7 +5089,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20250403"
+prog_version          = "0.8 beta"      ; prog_date = "20250404"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
