@@ -4611,7 +4611,8 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
             ], destcd=dest.path)
     getvol   = SPr.Popen(cmd, stdout=SPr.PIPE, stdin=SPr.PIPE if sparse else SPr.DEVNULL,
                          stderr=open(tmpdir+"/receive.log","w") if debug else SPr.DEVNULL)
-    gv_stdin = io.TextIOWrapper(getvol.stdin, encoding="utf-8") if sparse else None
+    gv_stdin = io.TextIOWrapper(getvol.stdin.raw, encoding="utf-8", write_through=True) \
+                if sparse else None
 
     # Open manifest then receive, check and save data
     addr = -1    ; bcount = diff_count = progress = 0    ; buf = b''    ; magic = dest.magic
@@ -4630,22 +4631,22 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
 
         # Process zeros quickly
         if cksum == "0":
-            buf = zeros
             if save_path:
                 volf_seek(addr)
                 if sparse_write and volf_read(chunksize) != zeros:
                     punch_zero_hole(volfno, addr)    ; diff_count += chunksize
             elif diff:
-                volf_seek(addr)    ; diff_count += len(buf) if buf != volf.read(chunksize) else 0
+                volf_seek(addr)   ; diff_count += chunksize if volf.read(chunksize) != zeros else 0
                 if diff_count:   break
 
             continue
 
         # Request chunks on-demand if local chunk doesn't match cksum
         if sparse and save_path:
-            volf_seek(addr)
-            if b64enc(gethash(compress(volf_read(chunksize),
-                                       compresslevel))).decode("ascii") == cksum:
+            volf_seek(addr)    ; localbuf = volf_read(chunksize)
+            if localbuf == zeros:
+                print("%s/%s/%s" % (ses, faddr[1:addrsplit], faddr), flush=True, file=gv_stdin)
+            elif b64enc(gethash(compress(localbuf, compresslevel))).decode("ascii") == cksum:
                 continue
             else:
                 print("%s/%s/%s" % (ses, faddr[1:addrsplit], faddr), flush=True, file=gv_stdin)
@@ -4965,7 +4966,7 @@ def show_list(aset, selected_vols, depth=3, json_out=None):
                 rows, extra = divmod(size := len(slist), c := cols)   ; rows += bool(extra)
                 if extra and rows < 3 and (cols - extra) > 1:   c -= (cols - extra) // 2
                 for r in range(rows):
-                    print("  ".join(slist[x*rows+r][2:] for x in range(c) if x*rows+r < size))
+                    print("", "  ".join(slist[x*rows+r][2:] for x in range(c) if x*rows+r < size))
 
                 # start new month list
                 print()    ; lmonth = month    ; slist = [sname]
@@ -5089,7 +5090,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20250404"
+prog_version          = "0.8 wip"       ; prog_date = "20250405"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
