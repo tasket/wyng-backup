@@ -2147,9 +2147,9 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
             if exists(vol.mapfile(pos)):   os.remove(vol.mapfile(pos))
 
         # Check all combined manifests are correct
-        print("  Checking indexes,", end="", flush=True) ; mset = []
+        print("  Checking indexes,", end="", flush=True)
         for ses in vol.sesnames:
-            mset.append(ses)    ; check_manifest_sequence(vol, mset)
+            check_manifest_sequence(vol, [ses], full=ses == vol.sesnames[0])
             #### FIX: implement deepclean
 
         # Check hashes of each session individually
@@ -2180,26 +2180,31 @@ def check_session_seq(vol, seslist=None, seq=None):
 
     return not err
 
-def check_manifest_sequence(vol, sesnames, addcol=False):
-    volsize = vol.sessions[sesnames[-1]].volsize    ; aset = vol.archive    ; addr = 0
-    sesname_sz = vol.sesname_sz
-    manifest = merge_manifests(vol, msessions=sesnames, addcol=addcol)
+def check_manifest_sequence(vol, sesnames, full=False, addcol=False):
+    volsize   = vol.sessions[sesnames[-1]].volsize    ; aset = vol.archive    ; addr = 0
+    chunksize = aset.chunksize    ; sesname_sz = vol.sesname_sz
+    manifest  = merge_manifests(vol, msessions=sesnames, addcol=addcol) \
+               if len(sesnames) > 1 or addcol else vol.sessions[sesnames[-1]].path+"/manifest"
     with open(manifest, "r") as mrgf:
-        for addr in range(0, volsize, aset.chunksize):
-            ln = mrgf.readline().strip()
-            if not ln:   break
-            ln1, ln2 = ln.split(maxsplit=1)
+        for ln in mrgf:
+            ln1, ln2 = ln.strip().split(maxsplit=1)
             if addcol:   ln2, ses = ln2.split()
             if ln1 != "0":
                 assert len(ln1) == aset.mhash_sz    ; h1 = base64.urlsafe_b64decode(ln1)
             assert len(ln2) == sesname_sz      ; a1 = int("0"+ln2, 16)
-            if addr != a1:
-                print(ln); raise ValueError("Manifest seq error. Expected %d got %d." % (addr, a1))
+            assert a1 <= volsize and a1 % chunksize == 0
+            if full:
+                if addr != a1:
+                    raise ValueError("Manifest seq error. Expected %d got %d." % (addr, a1))
+                addr += chunksize
+            else:
+                assert a1 >= addr
+                addr = a1 + chunksize
 
-    if addr != vol.last_chunk_addr(volsize)[0]:
+    if full and addr < vol.last_chunk_addr(volsize)[0]:
         raise ValueError("Manifest range stopped short at", addr)
 
-    os.remove(manifest)
+    if not manifest.startswith(vol.path):   os.remove(manifest)
 
 
 # Remove Wyng snapshots and metadata from local system
@@ -3762,7 +3767,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
 
         os.link(ses.path+"/manifest.tmp", ses.path+"/manifest")
         if len(vol.sessions) > 1 and (ses.volsize // chunksize) != (prior_size // chunksize):
-            check_manifest_sequence(vol, vol.sesnames)
+            check_manifest_sequence(vol, vol.sesnames, full=True)
 
         # Finalize on VM/remote
         catch_signals()
@@ -4004,11 +4009,6 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={},
             # Enh: include send_alls and other_vols in changed bytes tally
             if vol.changed_bytes > dest.free:
                 autoprune(vol, needed_space=vol.changed_bytes, apmode=options.autoprune)
-                # if vol.changed_bytes > dest.free:
-                #     print(" %d additional bytes needed." % (vol.changed_bytes-dest.free))
-                #     print("Insufficient space on destination %d; Skipping." % dest.free)
-                #     error_cache.append(datavol)
-                #     continue
 
             # Send Volume
             sent, svsize, sbcount, ddbytes, stime = \
@@ -4881,21 +4881,21 @@ def delete_volume(storage, aset, dv=None, vid=None):
     x_it(int(not inproc))
 
 
-def show_list(aset, selected_vols):
+def show_list(aset, selected_vols, depth=3, json_out=None):
 
     options = aset.opts
     if aset.dest.archive_ini_hash == "none":   print("(CACHED)")
-    if options.json:
+    if json_out:
         try:
-            print(); print(json.dumps({"wversion": prog_version, "fver": aset.format_ver,
+            print("",file=json_out); json.dump({"wversion": prog_version, "fver": aset.format_ver,
               "wdate": prog_date, "uuid": aset.uuid, "updated_at": aset.updated_at,
               "encrypted": bool(aset.mcrypto and aset.datacrypto), "is_auth": bool(aset.mcrypto),
               "pooltype": storage.pooltype, "url": aset.dest.spec,
               "volumes": {v.name: {"vid": v.vid, "desc": v.desc,
                 "sessions": {s.name: {"volsize": s.volsize, "sequence": s.sequence,
-                  "tags": {x:y for x,y in s.tags.items()}}
-              for s in v.sessions.values()} } for v in aset.vols.values() }})
-            )
+                  "ts": s.gettime(), "tags": {x:y for x,y in s.tags.items()}} if depth > 2 else ""
+                  for s in v.sessions.values()} } for v in aset.vols.values() }},
+              json_out)
         except BrokenPipeError:
             pass
         return
@@ -5242,10 +5242,16 @@ hash_funcs  = {"hmac-sha256": None,
                "sha256"     : lambda x: hashlib.sha256(x).digest(),
                "blake2b"    : lambda x: hashlib.blake2b(x, digest_size=hash_bytes).digest()}
 
+try:
+    with open(cachedir+"/UUIDs", "r") as f:  uuids = json.load(f)
+except:
+    uuids = {}
+
 
 # Create ArchiveSet, LocalStorage and Destination objects with get_configs().
 # Passphrase input happens here; no stdin before this point!
 aset        = get_configs(options)
+uuids[aset.subdir]   = [aset.uuid, aset.dest.spec]
 storage, storagesets = get_configs_storage(aset, options, require_local=not options.save_to and
                                            options.action in ("monitor","send","receive","diff"))
 
@@ -5396,7 +5402,7 @@ elif options.action == "diff":
 
 
 elif options.action == "list":
-    show_list(aset, selected_vols)
+    show_list(aset, selected_vols, json_out=sys.stdout if options.json else None)
 
 
 elif options.action == "add":
@@ -5448,6 +5454,16 @@ elif options.action == "arch-check":
 
 elif options.action == "arch-deduplicate":
     dedup_existing(aset)
+
+
+# Save overview to cache
+if not exists(f:=cachedir+"/cached") or options.action in write_actions + ("arch-check",):
+    json.dump({x:y for x,y in uuids.items() if exists(f"{cachedir}/{x}/archive.ini")}, open(f,"w"))
+
+    if aset:
+        show_list(aset, None, depth=2, json_out=gzip.open(f:=aset.path+"/archive.cached", "wt"))
+        ts = os.stat(aset.confpath).st_mtime_ns    ; os.utime(f, ns=(ts,ts))
+
 
 
 ## END ##
