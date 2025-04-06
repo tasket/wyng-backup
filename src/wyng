@@ -184,9 +184,7 @@ class ArchiveSet:
             x_it(1, "This archive requires the 'python3-zstd' module, which is not installed.")
         self.compress    = compressors[self.compression][2]
         self.decompress  = compressors[self.compression][0].decompress
-        self.subdir      = "/a_"+hashlib.blake2b(
-                           bytes(str(os.getuid())+self.uuid + dest.spec, encoding="UTF-8"),
-                           digest_size=20).hexdigest()
+        self.subdir      = "/a_" + ArchiveSet.get_combo_id(os.getuid(), self.uuid, dest.spec)
 
         # init data crypto
         if mcrypto and datacrypto.key is None:
@@ -263,8 +261,9 @@ class ArchiveSet:
 
     def save_ini(self, ext="", init=False):
         c = self.conf['var']    ; mcrypto = self.mcrypto
-        c['updated_at']  = self.updated_at = \
-                            str(self.time_start - self.monotonic_start + time.monotonic())
+        if not self.in_process:
+            c['updated_at']  = self.updated_at = \
+                                str(self.time_start - self.monotonic_start + time.monotonic())
         if init:
             c['uuid']        = self.uuid
             c['format_ver']  = str(format_version)
@@ -294,6 +293,8 @@ class ArchiveSet:
             f.write(b''.join((self.confprefix, self.modeprefix,
                               self.ci_mode.encode("ASCII"), b"\n")))
             f.write(etag)    ; f.write(buf)
+
+        return [self.confname+ext]
 
     def rename_saved(self, ext=".tmp"):
         os.replace(self.confpath+ext, self.confpath)
@@ -383,6 +384,11 @@ class ArchiveSet:
             mbuf = mcrypto.decrypt(inmap) if mcrypto else bytes(inmap)
             assert hmac.compare_digest(digest, self.b64hash(mbuf))
             with open(destname,"wb") as f:   f.write(self.decompress(mbuf))
+
+    def get_combo_id(userid, uuid, url):
+        return hashlib.blake2b(
+                           bytes(str(userid) + uuid + url, encoding="UTF-8"),
+                           digest_size=20).hexdigest()
 
 
 class ArchiveVolume:
@@ -477,7 +483,7 @@ class ArchiveVolume:
 
     def save_volinfo(self, ext=""):
         os.makedirs(self.path, exist_ok=True)
-        arch = self.archive    ; fname = "volinfo"   ; etag = b''
+        arch = self.archive    ; vid = self.vid   ; fname = "volinfo"   ; etag = b''
         with io.StringIO() as f:
             print("name =", self.name, file=f)
             print("desc =", self.desc, file=f)
@@ -486,13 +492,15 @@ class ArchiveVolume:
 
             buf = arch.compress(f.getvalue().encode("UTF-8"), int(arch.compr_level))
             assert len(buf) <= self.max_volinfosz
-            arch.conf["volumes"][self.vid] = arch.b64hash(buf)
+            arch.conf["volumes"][vid] = arch.b64hash(buf)
 
         if arch.mcrypto:
             etag, buf = arch.mcrypto.encrypt(buf)
         with open(pjoin(self.path,fname+ext), "wb") as f:
             f.write(etag)  ; f.write(buf)
-        arch.save_ini(ext)
+        with open(pjoin(self.path,"sessions"+ext), "w") as f:
+            json.dump(self.sesnames, f)
+        return [pjoin(vid,fname+ext), pjoin(vid,"sessions"+ext)] + arch.save_ini(ext)
 
     def rename_saved(self, ext=".tmp"):
         assert ext and exists(pjoin(self.path,"volinfo")+ext)
@@ -734,13 +742,13 @@ class ArchiveSession:
             return int(time.mktime(time.strptime(self.localtime, "%Y%m%d-%H%M%S"))*1000000000)
 
     def save_info(self, ext=""):
-        assert self.path   ; saved_files = []
-        etag = b''   ; fname = "info"   ; arch = self.volume.archive
+        assert self.path   ; saved_files = []   ; arch = self.volume.archive
+        etag = b''   ; fname = "info"   ; relpath = os.path.relpath(self.path, arch.path)
 
         if os.path.getsize(self.path+"/manifest"+ext) == 0:
             self.manifesthash = "0"
         else:
-            saved_files.append(mfz := "manifest.z"+ext)
+            saved_files.append(pjoin(relpath, mfz := "manifest.z"+ext))
             self.manifesthash = arch.encode_file(self.path+"/manifest"+ext, fdest=self.path+"/"+mfz)
         with io.StringIO() as f:
             for attr in self.attr_str+self.attr_int:
@@ -756,8 +764,8 @@ class ArchiveSession:
         if arch.mcrypto:   etag, buf = arch.mcrypto.encrypt(buf)
         with open(pjoin(self.path,fname+ext), "wb") as f:
             f.write(etag)  ; f.write(buf)
-        saved_files.append(fname+ext)    ; self.saved = self.loaded = True
-        self.volume.save_volinfo(ext)
+        self.saved = self.loaded = True
+        saved_files.extend([pjoin(relpath,fname+ext)] + self.volume.save_volinfo(ext))
         return saved_files
 
     def rename_saved(self, ext=".tmp"):
@@ -814,7 +822,7 @@ class OldArchiveSet_V2:
                 s = self.sessions[sprev] = self.Ses(self, sprev, path+"/"+sprev)
                 sprev = s.previous    ; self.sesnames.insert(0, s.name)
                 if sprev == "None" and self.first != s.name:
-                    raise ValueError("PREVIOUS MISMATCH: %s/%s, EXPECTED %s" 
+                    raise ValueError("PREVIOUS MISMATCH: %s/%s, EXPECTED %s"
                                      % (self.name, s.name, self.first))
 
         class Ses:
@@ -833,7 +841,7 @@ class OldArchiveSet_V2:
                             self.tag_add(value.split(maxsplit=1))
                             continue
 
-                        setattr(self, vname, 
+                        setattr(self, vname,
                                 int(value) if vname in ("volsize","sequence") else value)
 
                     if not exists(pjoin(path,"manifest")):
@@ -2488,8 +2496,8 @@ class Destination:
         self.path   = os.path.normpath(dparts.path)   ; self.archive_ini_hash = "none"
         self.free   = self.dtmp     =  None           ; self.last_chunkdir    = "\x00\x00"
         self.online = self.writable = self.hlinks = self.dir_exists = False
-        self.agent_name = "wyng-agent-" + str(os.getuid()) + hashlib.blake2b(
-                            bytes(self.spec, encoding="UTF-8"), digest_size=20).hexdigest()
+        self.agent_name = "wyng-agent-" + str(os.getuid()) \
+                        + ArchiveSet.get_combo_id(os.getuid(), "", self.spec)
 
         self.run_map = {"file":       [CP.sh],
                         "ssh":        [CP.ssh] + self.ssh_opts + ["ssh://"+self.sys],
@@ -2716,8 +2724,7 @@ def helper_merge():
                 raise RuntimeError("Merge: Init could not complete; Aborting merge.")
         else:
             print("Merge: Initialization.")
-            replace("archive.ini", "../archive.ini")
-            for f in (target+"/info", "volinfo", "archive.ini"):
+            for f in (target+"/info", "volinfo", "../archive.ini"):
                 if not exists(f+".tmp"):  raise FileNotFoundError(f)
             for ex in ("","-init"):  shutil.rmtree("merge"+ex, ignore_errors=True)
             os.makedirs("merge-init")   ; replace(merge_target, "merge-init/"+merge_target)
@@ -2760,7 +2767,7 @@ def helper_merge_finalize():
             replace(m+target+"/manifest.z.tmp", m+merge_target+"/manifest.z")
         if not resume or not exists(target):         replace(m+merge_target, target)
         if not resume or exists("volinfo.tmp"):      replace("volinfo.tmp", "volinfo")
-        if not resume or exists("archive.ini.tmp"):  replace("archive.ini.tmp", "../archive.ini")
+        if not resume or exists("archive.ini.tmp"):  replace("../archive.ini.tmp", "../archive.ini")
         if not exists(target):   raise FileNotFoundError(target)
         fssync(".")
     except Exception as err:
@@ -3545,8 +3552,9 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
         vol_ts  = os.stat(volpath).st_mtime_ns  ; volperms = storage.getperms(volpath)
         volsize = storage.getsize(volpath)
     else:
+        l_vol   = lvols[lvols[vol.name].snap2]
         if changed:
-            l_vol  = lvols[lvols[vol.name].snap2]   ; volpath = l_vol.path
+            volpath = l_vol.path
             vol_ts = l_vol.gettime()      ; volsize = l_vol.getsize()
         else:
             vol_ts = vol.sessions[prior_ses].gettime()  ; volsize = prior_size
@@ -3748,9 +3756,8 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
     if (sent := stream_started):
         # Save session info
         if crypto:   aset.datacrypto.save_counter()
-        for fpath in (sdir+"-tmp/"+x for x in ses.save_info(ext=".tmp")):
-            tarf_add(fpath, arcname=fpath[:-4])
-        tarf_add(vol.vid+"/volinfo.tmp")   ; tarf_add(aset.confname+".tmp")
+        saved_files = ses.save_info(ext=".tmp")
+        for fpath in saved_files:    tarf_add(fpath, arcname=fpath)
 
         tarf.close()    ; untar.stdin.close()
         try:
@@ -3771,9 +3778,9 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
 
         # Finalize on VM/remote
         catch_signals()
-        dest.run(["mv -T "+sdir+"-tmp "+sdir
-                 +" && mv "+vol.vid+"/volinfo.tmp "+vol.vid+"/volinfo"
-                 +" && mv archive.ini.tmp archive.ini"
+
+        dest.run([" && ".join(f"mv {x} {x[:-4]}" for x in saved_files)
+                 +" && mv -T "+sdir+"-tmp "+sdir
                  +(" && ( nohup sync -f . 2&>/dev/null & )" if options.maxsync else "")
                  ], destcd=dest.path, trap=True)
 
@@ -3793,7 +3800,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
             # If vol lost mapping, create new map in dry-run mode to prevent re-scan
             vol.init_deltamap()    ; update_delta_digest_mf(vol, ses.path+"/manifest")
 
-        storage.lvols[vol.name].rotate_snapshots(rotate=lvols[lvols[vol.name].snap2].exists(),
+        storage.lvols[vol.name].rotate_snapshots(rotate=changed and l_vol.exists(),
                     timestamp_path=vol.mapfile(),
                     addtags=["--addtag="+vol.last] + (["--addtag=delta"] if newmap else []))
 
@@ -4285,7 +4292,9 @@ def merge_manifests(vol, msessions=None, mtarget=None, vsize=None, addcol=False,
 def merge_sessions(volume, sources, target, clear_sources=False):
 
     aset       = volume.archive    ; dest = aset.dest    ; resume = bool(aset.in_process)
+    opts       = aset.opts         ; vid  = volume.vid
     m_tmp      = tmpdir if volume.volsize() < 128000000000 else aset.big_tmpdir
+    if debug:   print(f"Merge {vid} '{volume.name}'\n", sources, "T", target)
 
     # Prepare manifests for efficient merge using fs mv/replace. The target is
     # included as a source, and oldest source is our target for mv. At the end
@@ -4350,7 +4359,7 @@ def merge_sessions(volume, sources, target, clear_sources=False):
 
     if not resume:
         # Set archive in_process state to "merge"
-        aset.set_in_process(["merge", volume.vid, str(clear_sources), target, sources],
+        aset.set_in_process(["merge", vid, str(clear_sources), target, sources],
                             tmp=False, todest=False)
 
     # Update & send new metadata and process lists to dest
@@ -4360,22 +4369,21 @@ def merge_sessions(volume, sources, target, clear_sources=False):
                 if exists((_f := volume.sessions[ses].path+"/manifest")):   os.remove(_f)
                 volume.delete_session(ses, remove=False)
 
-    cmds = []    ; dest_cmds = "cd " + volume.vid
+    lcmds, dest_cmds = [], ""
     if not resume:
         aset.set_in_process(None, tmp=True, todest=False)
-        sesfiles = volume.sessions[target].save_info(".tmp")
-        cmds += [CP.tar, "-cf", "-"] + [target+"/"+x for x in sesfiles] + ["../archive.ini",
-                 "../archive.ini.tmp", "volinfo.tmp", "merge.lst.gz"]
-        dest_cmds += " && tar -o -xf -"
+        files = volume.sessions[target].save_info(".tmp")
+        lcmds += [CP.tar, "-cf", "-"] + files + [vid+"/merge.lst.gz", "archive.ini"]
+        dest_cmds += "tar -o -xf -"
 
     # Start merge operation on dest
     catch_signals()
-    retcode = do_exec([cmds, dest.run_args([dest_cmds + " && python3 "
-                            + dest.dtmp+"/dest_helper.py merge "+merge_target
-                            + (" --resume" if resume else "")+(" --sync" if aset.opts.maxsync else "")
+    retcode = do_exec([lcmds, dest.run_args([dest_cmds + "\n cd "+vid
+                            +" && python3 "+dest.dtmp+"/dest_helper.py merge "+merge_target
+                            + (" --resume" if resume else "")+(" --sync" if opts.maxsync else "")
                             ], destcd=dest.path),
                        [CP.cat, "-v"], [CP.tail, "--bytes=2000"]
-                      ], cwd=volume.path, check=False, out=tmpdir+"/merge.log"
+                      ], cwd=aset.path, check=False, pipefail=True, out=tmpdir+"/merge.log"
                      )
 
     if retcode == 50:
@@ -4383,9 +4391,9 @@ def merge_sessions(volume, sources, target, clear_sources=False):
         aset.stop()
         aset = ArchiveSet(aset.path, aset.dest, aset.opts, prior_auth=aset)
         aset.set_in_process(None)
-        for f in ("merge.lst.gz", "volinfo.tmp", "sessions.tmp", target+"/info.tmp"):
+        for f in ("merge.lst.gz", "volinfo.tmp", target+"/info.tmp"):
             if exists(f):  os.remove(f)
-        dest.run([f"cd {volume.vid}  &&  rm -rf merge merge.lst.gz"],
+        dest.run([f"cd {vid}  &&  rm -rf merge merge.lst.gz"],
                  destcd=dest.path, check=False)
         x_it(1, "Error: Merge could not initialize!")
     elif retcode != 0:
@@ -5090,7 +5098,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 wip"       ; prog_date = "20250405"
+prog_version          = "0.8 wip"       ; prog_date = "20250406"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
