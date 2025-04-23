@@ -9,7 +9,7 @@ if ! [ $(id -u) = 0 ]; then
   exit 1
 fi
 
-dir=$1
+dir=$(realpath "$1")
 echo $dir
 if [ -z "$dir" ]; then
   echo Please specify a directory to convert.
@@ -21,6 +21,11 @@ if ! [ -d ${dir} ]; then
   exit 1
 fi
 
+if [ $(stat --printf %i ${dir}) = 256 ]; then
+  echo Path is already a subvolume.
+  exit 10
+fi
+
 echo
 echo Convert \"$dir\" to a Btrfs subvolume
 read -p "ARE YOU SURE? (Y/N): " ans
@@ -28,11 +33,6 @@ case $ans in
   [Yy] ) echo Starting... ;;
      * ) exit 1;;
 esac
-
-if [ $(stat --printf %i ${dir}) = 256 ]; then
-  echo Path is already a subvolume.
-  exit 1
-fi
 
 tsuffix=$(date +%s)
 btrfs subvolume create "$dir"-$tsuffix
