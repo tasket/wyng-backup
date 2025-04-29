@@ -3080,7 +3080,7 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, other_vols={}):
 
         if lvols[snap1].is_arch_member() == "false":
             if opts.remap:
-                l_vol.delete    ; print("  Removed mis-matched snapshot", datavol)
+                l_vol.delete()    ; print("  Removed mis-matched snapshot", datavol)
             else:
                 print("  Skipping %s; snapshot is from a different archive. Use --remap to clear it."
                       % datavol)   ; error_cache.append(datavol)
@@ -3099,10 +3099,8 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, other_vols={}):
             if not lvols[snap1].exists() or not exists(mapfile)    \
             or os.stat(mapfile).st_mtime_ns != lvols[snap1].gettime() \
             or vol.last not in s1tags:
-
                 # Handle inadvertant mapfile snapshot mis-match
                 lvols[snap1].delete()
-                print("  Removed mis-matched snapshot for '%s'" % datavol)
 
             if not lvols[snap1].exists() and lvols[snap2].exists() \
             and vol.last in lvols[snap2].tags.split(",") and exists(mapfile)  \
@@ -3190,7 +3188,6 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only, other_vols=
                 and os.stat(mapfile).st_blocks == 0):
                 # Handle inadvertant mapfile snapshot mis-match
                 lvols[snap1].delete()
-                print("  Removed mis-matched snapshot for '%s'" % datavol)
 
             # if lvols[snap1].exists() and lvols[snap1].gettime() == l_vol.gettime() \
             # and lvols[snap1].getsize() == l_vol.getsize() \
@@ -3363,7 +3360,7 @@ def get_reflink_deltas(storage, aset, datavols):
         # Create a pair of piped command sets for diffing metadata of the two snapshots:
         for side, snapname, outp in (("11", lv.snap1, ' > "'+dpath+'-p"'), ("22", lv.snap2, "")):
             if not exists(stpath+snapname):
-                err_out("'%s' snapshot not found (different subvolume?); Skipping..." % fpath)
+                err_out("'%s' snapshot not found (different subvolume?); Skipping..." % vol.name)
                 datavols.remove(vol.name);   break
 
             # filefrag output: file extent ranges, their 'physical' block ranges, extent length.
@@ -3541,7 +3538,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
     chunksize   = aset.chunksize                ; dedup       = newmap = False
     chdigits    = max_address.bit_length()//4   ; chformat    = "x%0"+str(chdigits)+"x"
     bksession   = "S_"+curtime                  ; sdir        = pjoin(vol.vid, bksession)
-    prior_size  = vol.volsize()                 ; prior_ses   = vol.last
+    prior_size  = vol.volsize()
     old_mapfile = vol.mapfile()                 ; addrsplit   = -address_split[1]
     lvols       = storage.lvols
     compress = compressors[aset.compression][2] ; compresslevel = int(aset.compr_level)
@@ -3557,7 +3554,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
             volpath = l_vol.path
             vol_ts = l_vol.gettime()      ; volsize = l_vol.getsize()
         else:
-            vol_ts = vol.sessions[prior_ses].gettime()  ; volsize = prior_size
+            vol_ts = vol.sessions[vol.last].gettime()  ; volsize = prior_size
         volperms = lvols[vol.name].getperms()
 
     if not status1:   print("  [", end="")
@@ -3896,7 +3893,6 @@ def init_dedup_index(aset, listfile="", extra_vols=0):
 
 def dedup_existing(aset):
     dest = aset.dest
-    if not dest.hlinks:   x_it(1, "Hardlinks not supported on dest.")
 
     print("\nBuilding deduplication index...", end="", flush=True)
     init_dedup_index(aset, "dedup.lst.gz")
@@ -3917,7 +3913,7 @@ def dedup_existing(aset):
 
 # Controls flow of monitor and send_volume procedures:
 
-def monitor_send(storage, aset, datavols, monitor_only, imports={},
+def monitor_send(storage, aset, datavols, monitor_only, imports={}, ses_tags={},
                  use_sesid=None, benchmark=False):
 
     options, dest = aset.opts, aset.dest    ; status1 = not options.unattended or verbose
@@ -3933,7 +3929,7 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={},
         if not storage.online:   reason = "Local path not found."
         err_out(f"\nError: {reason}\nOffline volumes: " + ", ".join(datavols))
         error_cache.extend(datavols)
-        return curtime
+        return curtime, ses_tags
 
     # Try to rename aliased archive volume before sending
     for dv, vol in ((x, aset.vols[x]) for x in datavols[:] if x in aset.vols and not monitor_only):
@@ -3947,15 +3943,14 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={},
         = storage.prep_snapshots(storage, aset, datavols, monitor_only, other_vols=imports)
     storage.update_vol_list({x.name: x.vid for x in aset.vols.values()})
 
-    if monitor_only:   send_alls.clear()
+    if monitor_only:   send_alls.clear()   ; other_vols.clear()
 
     if len(incrementals)+len(send_alls)+len(other_vols) \
         +(len(unchanged_vols if options.send_unchanged else [])) == 0:
         x_it(0, "No new data.")
 
     # Process session tags
-    ses_tags = {}
-    if options.tag and not monitor_only:
+    if options.tag and not ses_tags and not monitor_only:
         for tag_opt in options.tag:
             if tag_opt in ("", "@"):   continue
             tag = ArchiveSession.tag_parse(tag_opt, delim=",")
@@ -4008,10 +4003,7 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={},
         if datavol in send_alls+list(other_vols) or updated or options.send_unchanged:
             if options.dedup and not aset.dedupindex and datavol not in unchanged_vols:
                 if status1:   print("I/", end="\r", flush=True)
-                if not dest.hlinks:
-                    err_out("Hardlinks not supported on dest.")
-                else:
-                    init_dedup_index(aset, extra_vols=len(other_vols))
+                init_dedup_index(aset, extra_vols=len(other_vols))
 
             # Enh: include send_alls and other_vols in changed bytes tally
             if vol.changed_bytes > dest.free:
@@ -4037,7 +4029,7 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={},
               % (volct, totalvsize/MB, totalbcount/MB, time.monotonic() - ms_start)
               )
 
-    return curtime
+    return curtime, ses_tags
 
 
 # Prune backup sessions from an archive. Basis is a non-overwriting dir tree
@@ -5098,7 +5090,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 wip"       ; prog_date = "20250406"
+prog_version          = "0.8 wip"       ; prog_date = "20250425"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
@@ -5333,13 +5325,17 @@ if options.action   == "monitor":
 
 
 elif options.action == "send":
-    sid = None
+    sid, ses_tags = None, {}
     other_vols = {x: os.path.abspath(y)
                   for x,y in map(lambda a: a.split(":|:", maxsplit=1), options.import_other_from)}
 
+    if options.dedup and not aset.dest.hlinks:
+        err_out("Hardlinks not supported on dest.")   ; options.dedup = aset.opts.dedup = False
+
     for storage, vols in storagesets.items():
-        sid = monitor_send(storage, aset, vols or selected_vols, monitor_only=False, use_sesid=sid,
-                           imports=other_vols, benchmark=options.dry_run)
+        sid, ses_tags = monitor_send(storage, aset, vols or selected_vols, monitor_only=False,
+                                     use_sesid=sid, ses_tags=ses_tags, imports=other_vols,
+                                     benchmark=options.dry_run)
 
     if other_vols:   error_cache.extend(list(other_vols))
 
@@ -5462,6 +5458,8 @@ elif options.action == "arch-check":
 
 
 elif options.action == "arch-deduplicate":
+    if not aset.dest.hlinks:
+        x_it(1, "Hardlinks not supported on dest.")
     dedup_existing(aset)
 
 
