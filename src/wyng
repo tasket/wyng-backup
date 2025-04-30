@@ -3950,13 +3950,13 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={}, ses_tags={},
         x_it(0, "No new data.")
 
     # Process session tags
-    if options.tag and not ses_tags and not monitor_only:
+    if (get_tags := options.tag and not ses_tags and not monitor_only):
         for tag_opt in options.tag:
             if tag_opt in ("", "@"):   continue
             tag = ArchiveSession.tag_parse(tag_opt, delim=",")
             if not tag:   raise ValueError("Invalid tag "+tag_opt)
             ses_tags.update((tag,))
-    if options.tag and not monitor_only and (options.tag == [""] or "@" in options.tag):
+    if get_tags and (options.tag == [""] or "@" in options.tag):
         print("Enter tag info as 'tagID[, tag description]'. Blank to end input.")
         while ans := ask_input("[%d]: " % (len(ses_tags)+1)).strip():
             tag = ArchiveSession.tag_parse(ans, delim=",")
@@ -5090,7 +5090,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 wip"       ; prog_date = "20250425"
+prog_version          = "0.8 beta"      ; prog_date = "20250428"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
