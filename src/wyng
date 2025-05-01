@@ -3080,7 +3080,7 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, other_vols={}):
 
         if lvols[snap1].is_arch_member() == "false":
             if opts.remap:
-                l_vol.delete()    ; print("  Removed mis-matched snapshot", datavol)
+                lvols[snap1].delete()    ; lvols[snap2].delete()
             else:
                 print("  Skipping %s; snapshot is from a different archive. Use --remap to clear it."
                       % datavol)   ; error_cache.append(datavol)
@@ -5090,7 +5090,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20250428"
+prog_version          = "0.8 beta"      ; prog_date = "20250430"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
