@@ -3103,9 +3103,10 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, other_vols={}):
                 lvols[snap1].delete()
 
             if not lvols[snap1].exists() and lvols[snap2].exists() \
-            and vol.last in lvols[snap2].tags.split(",") and exists(mapfile)  \
-            and os.stat(mapfile).st_mtime_ns == lvols[snap2].gettime():
-                lvols[snap2].rename(snap1)
+            and vol.last in lvols[snap2].tags.split(",") and "delta" not in lvols[snap2].tags \
+            and exists(mapfile) and vol.map_used() == 0 \
+            and vol.sessions[vol.last].gettime() == lvols[snap2].gettime():
+                l_vol.rotate_snapshots(rotate=True, timestamp_path=mapfile)
                 print("  Recovered interrupted snapshot rotation:", datavol)
  
         elif monitor_only:
@@ -4892,9 +4893,10 @@ def show_list(aset, selected_vols, depth=3, json_out=None):
               "wdate": prog_date, "uuid": aset.uuid, "updated_at": aset.updated_at,
               "encrypted": bool(aset.mcrypto and aset.datacrypto), "is_auth": bool(aset.mcrypto),
               "pooltype": storage.pooltype, "url": aset.dest.spec,
-              "volumes": {v.name: {"vid": v.vid, "desc": v.desc,
+              "volumes": {v.name: {"vid": v.vid, "desc": v.desc, "last": v.last,
+                "ts": v.sessions[v.last].gettime() if v.sessions else None,
                 "sessions": {s.name: {"volsize": s.volsize, "sequence": s.sequence,
-                  "ts": s.gettime(), "tags": {x:y for x,y in s.tags.items()}} if depth > 2 else ""
+                  "ts": s.gettime(), "tags": s.tags} if depth > 2 else ""
                   for s in v.sessions.values()} } for v in aset.vols.values() }},
               json_out)
         except BrokenPipeError:
@@ -5090,7 +5092,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20250430"
+prog_version          = "0.8 beta"      ; prog_date = "20250503"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
