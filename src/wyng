@@ -137,7 +137,8 @@ class ArchiveSet:
             # get passphrase if we got no agentkeys
             if not passphrase and not agentkeys:   passphrase = get_passphrase(cmd=opts.passcmd)
             if passphrase:
-                assert passphrase != bytes(len(passphrase))
+                if passphrase == bytes(len(passphrase)):
+                    raise ValueError("No authentication input.")
             elif not agentkeys:
                 raise ValueError("No authentication input.")
             passphrase_s1 = passphrase[:] if passphrase else None
@@ -212,7 +213,8 @@ class ArchiveSet:
             self.getdatahash = hash_funcs[self.hashtype]
 
         # Ensure fully encrypted or unencrypted
-        assert int(bool(self.mcrypto)) + int(bool(self.datacrypto)) != 1
+        if int(bool(self.mcrypto)) + int(bool(self.datacrypto)) == 1:
+            raise RuntimeError("Invalid encryption.")
 
         # load volume metadata objects
         if children:
@@ -380,9 +382,11 @@ class ArchiveSet:
         mcrypto = self.mcrypto         ; buf_start = mcrypto.buf_start if mcrypto else 0
 
         with  open(fname,"r+b") as inf,   mmap.mmap(inf.fileno(), 0) as inmap:
-            assert buf_start < len(inmap) <= max_sz + buf_start
+            if not (buf_start < len(inmap) <= max_sz + buf_start):
+                raise ValueError("Bad buffer size.")
             mbuf = mcrypto.decrypt(inmap) if mcrypto else bytes(inmap)
-            assert hmac.compare_digest(digest, self.b64hash(mbuf))
+            if not hmac.compare_digest(digest, self.b64hash(mbuf)):
+                raise ValueError("Hash does not match.")
             with open(destname,"wb") as f:   f.write(self.decompress(mbuf))
 
     def get_combo_id(userid, uuid, url):
@@ -688,9 +692,12 @@ class ArchiveSession:
                         setattr(self, vname,
                                 int(value) if vname in self.attr_int else value)
 
-            assert self.volsize <= max_address + 1
-            assert self.localtime.isdigit() or self.name_chk.match("S_" + self.localtime)
-            assert self.name_chk.match(self.name)
+            if self.volsize > max_address + 1:
+                raise ValueError("Bad volume size.")
+            if not (self.localtime.isdigit() or self.name_chk.match("S_" + self.localtime)):
+                raise ValueError("Bad localtime.")
+            if not self.name_chk.match(self.name):
+                raise ValueError("Bad name field.")
             # Enh: validation check for permissions
             self.saved = self.loaded = True
 
@@ -923,7 +930,8 @@ for s in (SIGINT,USR1,ALRM):   signal.signal(s, sighandler)   ; signal.siginterr
 signal.alarm(10)    ; do_mkpipe()    ; duration = min(inread(1)[0], 60) * 60
 bstart, mstart = gettimes()
 for slot in range(2):
-    KH.keys.append(bytearray(inread(inread(1)[0])))   ; assert inread(3) == magic
+    KH.keys.append(bytearray(inread(inread(1)[0])))
+    if inread(3) != magic:   raise ValueError("Bad magic.")
 
 while True:
     try:
@@ -1069,7 +1077,8 @@ class DataCryptography:
         if not issubclass(type(keyfile), io.IOBase):
             if init:
                 # initialize new salt file
-                assert slot == 1 and not exists(keyfile)
+                if not (slot == 1 and not exists(keyfile)):
+                    raise ValueError("Bad slot or keyfile.")
                 open(keyfile, "wb").close()    ; sf = self.keyfile = self.open_saltfile(keyfile)
                 for ii in range(4):
                     sf.seek(self.get_slot_offset(ii))
@@ -1089,7 +1098,8 @@ class DataCryptography:
             self.key = agentkeys[slot]
         else:
             self.key = self.derive_key(salt, passphrase, self.key_sz)
-        assert len(self.key) == self.key_sz and type(self.key) is bytearray
+        if not (len(self.key) == self.key_sz and type(self.key) is bytearray):
+            raise ValueError("Bad key.")
 
         if mknoncekey:
             # Derive subkey for generating nonces
@@ -1121,7 +1131,7 @@ class DataCryptography:
 
 
     def open_saltfile(self, fpath, verify=False):
-        assert self.slot == 1
+        if self.slot != 1:   raise ValueError("Bad slot.")
         sf = open(fpath, "r+b", buffering=0)
 
         if verify:
@@ -2198,15 +2208,21 @@ def check_manifest_sequence(vol, sesnames, full=False, addcol=False):
             ln1, ln2 = ln.strip().split(maxsplit=1)
             if addcol:   ln2, ses = ln2.split()
             if ln1 != "0":
-                assert len(ln1) == aset.mhash_sz    ; h1 = base64.urlsafe_b64decode(ln1)
-            assert len(ln2) == sesname_sz      ; a1 = int("0"+ln2, 16)
-            assert a1 <= volsize and a1 % chunksize == 0
+                if len(ln1) != aset.mhash_sz:
+                    raise ValueError(f"Bad hash size: {ln1}")
+                h1 = base64.urlsafe_b64decode(ln1)
+            if len(ln2) != sesname_sz:
+                raise ValueError(f"Bad size: {ln2}")
+            a1 = int("0"+ln2, 16)
+            if not (a1 <= volsize and a1 % chunksize == 0):
+                raise ValueError(f"Chunk addr out of bounds: {ln2}")
             if full:
                 if addr != a1:
-                    raise ValueError("Manifest seq error. Expected %d got %d." % (addr, a1))
+                    raise ValueError(f"Manifest seq error. Expected {addr} got {a1}.")
                 addr += chunksize
             else:
-                assert a1 >= addr
+                if not a1 >= addr:
+                    raise ValueError(f"Out of sequence: {a1}")
                 addr = a1 + chunksize
 
     if full and addr < vol.last_chunk_addr(volsize)[0]:
@@ -2671,7 +2687,8 @@ def x_it(ec, text=None):
 def helper_send(volid=None, ses=None, debug=False):
     mkdirs = os.makedirs    ; hlink = os.link    ; dirname = os.path.dirname
     if debug:   err_out(f"{os.path.abspath(os.curdir)}\n{volid} {ses}")
-    assert volid.startswith("Vol_") and ses.startswith("S_") and exists("archive.ini")
+    if not (volid.startswith("Vol_") and ses.startswith("S_") and exists("archive.ini")):
+        raise ValueError("Bad send args.")
     open(tmpdir+"/start_"+volid, "w").close()
 
     with tarfile.open(mode="r|", fileobj=sys.stdin.buffer) as tarf:
@@ -3014,9 +3031,9 @@ def fetch_file_blobs(recv_list, recv_dir, dest, ext="", skip0=False, skip_exists
         if rc is not None:   raise RuntimeError("Process terminated early. rc="+repr(rc))
         fpath = recv_dir+"/"+fname+ext
         if exists(fpath):   os.remove(fpath)
-        assert recvp.stdout.read(3) == magic
+        if recvp.stdout.read(3) != magic:   raise ValueError("Bad magic.")
         # Read chunk size
-        assert len(sizeb := recvp.stdout.read(4)) == 4
+        if len(sizeb := recvp.stdout.read(4)) != 4:   raise ValueError("Bad size field.")
         untrusted_size = int.from_bytes(sizeb,"big")
         if untrusted_size == 0 and skip0:   continue
         # Check for reasonable size to avoid overflow:
@@ -3038,7 +3055,7 @@ def fetch_file_blobs(recv_list, recv_dir, dest, ext="", skip0=False, skip_exists
         with open(fpath, "wb") as outf:   outf.write(untrusted_buf)
 
     rc  = recvp.poll()
-    assert recvp.stdout.read(3) == magic
+    if recvp.stdout.read(3) != magic:   raise ValueError("Bad magic.")
     recvp.kill()
     return recv_list
 
@@ -3333,7 +3350,8 @@ def update_delta_digest_lvm(storage, aset, datavol, monitor_only):
         tags = ["--addtag="+vol.last, "--addtag=delta-"+str(lvols[snap2vol].gettime())]
         t2   = lvols[datavol].rotate_snapshots(rotate=changed, timestamp_path=vol.mapfile(),
                                                addtags=tags)
-        assert t2 == lvols[snap1vol].gettime()
+        if t2 != lvols[snap1vol].gettime():
+            raise ValueError("Bad rotation timestamp.")
         print(("\r  %d ch, %d dis" % (dnewchunks, dfreedblocks//chunksize))
                 if changed else "\r  no change    ")
 
@@ -4653,7 +4671,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
                 print("%s/%s/%s" % (ses, faddr[1:addrsplit], faddr), flush=True, file=gv_stdin)
 
         # Read chunk size
-        assert getvol.stdout.read(3) == magic
+        if getvol.stdout.read(3) != magic:   raise ValueError("Bad magic.")
         untrusted_size = int.from_bytes(getvol.stdout.read(4),"big")
 
         # allow for slight expansion from compression algo
@@ -5092,7 +5110,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20250503"
+prog_version          = "0.8 beta"      ; prog_date = "20250505"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
