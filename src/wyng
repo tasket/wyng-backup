@@ -3944,9 +3944,9 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={}, ses_tags={},
 
     storage.check_support()
     if not storage.can_snapshot:
-        reason = "Local not a subvolume or no snapshot feature."
-        if not storage.online:   reason = "Local path not found."
-        err_out(f"\nError: {reason}\nOffline volumes: " + ", ".join(datavols))
+        reason = "Local not a subvolume or no snapshot feature"
+        if not storage.online:   reason = "Local path not found"
+        err_out(f"\nError, {reason}: ({storage.pooltype}) {storage.path}")
         error_cache.extend(datavols)
         return curtime, ses_tags
 
@@ -5110,7 +5110,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20250505"
+prog_version          = "0.8 beta"      ; prog_date = "20250509"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
