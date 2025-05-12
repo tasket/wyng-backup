@@ -100,7 +100,7 @@ or another place of your choosing.
 Archives can be created with `wyng arch-init`:
 
 ```
-wyng arch-init --dest=ssh://me@exmaple.com:/home/me/mylaptop.backup
+wyng arch-init --dest=ssh://me@example.com:/home/me/mylaptop.backup
 
 ...or...
 
@@ -164,7 +164,6 @@ already exists in the archive, incremental mode is automatically used.
 
 wyng send my_big_volume --local=vg/pool --dest=file:/mnt/drive1/mylaptop.backup
 
-
 ```
 
 `send` supports automatic pruning of older backup sessions to recover disk space before the new data is sent; set `--autoprune` option to _on_ or _full_ to use this feature.
@@ -185,7 +184,6 @@ If `--session` is used, only one date-time is accepted. The volume name is requi
 ```
 
 wyng receive vm-work-private --local=vg/pool --dest=file:/mnt/drive1/mylaptop.backup
-
 
 ```
 
@@ -469,7 +467,7 @@ you want to restore/revert a large volume with a containing a limited number of 
 over a low-bandwidth connection.
 
 
-#### `--use-snapshot` _(experimental)_
+#### `--use-snapshot`
 
 A faster-than-sparse option that uses a snapshot as the baseline for the
 `receive`, if one is available.  Use with `--sparse` if you want Wyng to fall back to
@@ -820,7 +818,7 @@ should consider it corrupt and immediately delete it before the next `send`.
 If you're in a pinch and need to use the data in a Wyng snapshot, you should first make your own
 copy or snapshot of the Wyng snapshot using `cp --reflink` or `lvcreate -s` and use that instead.
 
-* Error _"Cached metadata is newer"_ indicates that something has reverted the archive to an earlier state.  This could be due to a rollback attack, but could also be the result of your own actions such as keeping multiple copies of the same archive and alternately mounting them at the same location (in which case giving each copy a slightly different dir name can avert this error".  Use the `--force-allow-rollback` option if you need to recover from this error and use the older archive as is.
+* Error _"Cached metadata is newer"_ indicates that something has reverted the archive to an earlier state.  This could be due to a rollback attack, but could also be the result of your own actions such as keeping multiple copies of the same archive and alternately mounting them at the same location (in which case giving each copy a slightly different dir name can avert this error"; it could also be the result of a Wyng cache handling bug.  Use the `--force-allow-rollback` option if you need to recover from this error and use the older archive as is.
 
 * Metadata cached under _/var/lib/wyng_ may also be manually deleted.  However, the _archive.\*_
 root files in each 'a_*' directory are part of Wyng's defense against rollback attacks, so if you
@@ -833,11 +831,7 @@ files in place.
 
 ### Testing
 
-* Wyng v0.4alpha3 and later no longer create or require the `wyng.backup040/default`
-directory structure.  This means whatever you specify
-in `--dest` is all there is to the archive path.  It also means accessing an alpha1 or
-alpha2 archive will require you to either include those dirs explicitly in your --dest path
-or rename '../wyng.backup040/default' to something else you prefer to use.
+* The best way to test Wyng updates is to pull from a 'beta' branch or 'fixes' branch and start using the program for send and receive (backup and restore) as well as prune and diff operations (`wyng diff` verifies volumes with additional checking that the archive content is identical to the local copy, which is good for testing).  Usually 'wip' and 'experimental' usually should be avoided unless you have an issue for a bug and a fix has been posted in one of them.  Note that the '08beta' branch is being retired in preparation for the v0.8 full release; its not certain when '09beta' will be started.
 
 * Testing goals are basically stability, usability, security and efficiency. Compatibility
 is also a valued topic, where source systems are generally expected to be a fairly recent
