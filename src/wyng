@@ -43,6 +43,15 @@ except:
     Cryptodome = Cipher_ChaCha20 = Cipher_ChaCha20_Poly1305 = None
 
 
+class InputError(ValueError):   pass
+
+class OptionError(ValueError):   pass
+
+class SelectionError(ValueError):   pass
+
+class AuthenticationError(ValueError):   pass
+
+
 # ArchiveSet manages archive metadata incl. volumes and sessions
 
 class ArchiveSet:
@@ -154,7 +163,8 @@ class ArchiveSet:
             if mcrypto:   buf = mcrypto.decrypt(buf)
         except ValueError as e:
             if "MAC check failed" in e.args:
-                x_it(3, "Error: Could not decrypt/authenticate archive.\n")
+                err_out(repr(e))
+                raise AuthenticationError("\nError: Could not decrypt/authenticate archive.\n")
             raise e
 
         # read attributes from archive.ini
@@ -182,7 +192,8 @@ class ArchiveSet:
         self.gethash     = hash_funcs["blake2b"] if self.hashtype == "hmac-sha256" \
                            else hash_funcs[self.hashtype]
         if self.compression == "zstd" and "zstd" not in compressors:
-            x_it(1, "This archive requires the 'python3-zstd' module, which is not installed.")
+            raise SystemError("This archive requires the 'python3-zstd' module, "
+                              "which is not installed.")
         self.compress    = compressors[self.compression][2]
         self.decompress  = compressors[self.compression][0].decompress
         self.subdir      = "/a_" + ArchiveSet.get_combo_id(os.getuid(), self.uuid, dest.spec)
@@ -317,7 +328,8 @@ class ArchiveSet:
 
     def add_volume_meta(self, datavol, desc="", ext=""):
         errs = []
-        if len(self.conf["volumes"]) >= self.max_volumes:   x_it(1, "Too many volumes")
+        if len(self.conf["volumes"]) >= self.max_volumes:
+            raise ValueError("Too many volumes")
         if datavol in self.vols:
             print(datavol+" is already configured.")    ; return None
 
@@ -727,7 +739,7 @@ class ArchiveSession:
 
     def tag_add(self, tag):
         if len(self.tags) >= ArchiveSession.max_tags:
-            x_it(1, ArchiveSession.max_tags+" maximum tags.")
+            err_out(f"{ArchiveSession.max_tags} maximum tags.")   ; return False
         self.saved = False    ; voltags = self.volume.tags    ; tid = tag[0]
         if tid not in self.tags:   self.tags[tid] = tag[1]
         if tid in voltags:
@@ -1019,7 +1031,7 @@ class DataCryptography:
     def load(self, ci_type, keyfile, slot, passphrase, agentkeys=None, cadence=1, init=False):
 
         if tuple(time.gmtime(0))[:6] != (1970, 1, 1, 0, 0, 0):
-            x_it(1, "System time epoch is not 1970-01-01.")
+            raise SystemError("System time epoch is not 1970-01-01.")
         assert passphrase is None or type(passphrase) == bytearray
         assert type(cadence) is int and cadence > 0
 
@@ -1925,9 +1937,11 @@ def get_passphrase(prompt="Enter passphrase: ", verify=False, cmd=None):
                                               shell=True, text=False).rstrip(b"\n"))
         except SPr.CalledProcessError as e:
             # Handle as error code so pw output does not get logged
-            x_it(e.returncode, "Error running passcmd: "+cmd)
+            err_out(f"\nError code {e.returncode} running passcmd: "+cmd)
+            raise e
 
-        if len(b) < 10:    clear_array(b)    ; x_it(3,"Passphrase must be 10 or more characters.")
+        if len(b) < 10:
+            clear_array(b)    ; raise InputError("Passphrase must be 10 or more characters.")
         return b
 
     def getpassinput(prompt):
@@ -1942,12 +1956,12 @@ def get_passphrase(prompt="Enter passphrase: ", verify=False, cmd=None):
         passphrase  = bytearray(getpassinput(prompt), encoding="UTF-8")
         if not verify or len(passphrase) >= 10 or (debug and len(passphrase) > 0):   break
         err_out("Passphrase must be 10 or more characters.")   ; clear_array(passphrase)
-        if ii == 2 or not attended:   x_it(3, "Passphrase required.")
+        if ii == 2 or not attended:   raise InputError("Passphrase required.")
     if not attended or not verify:   return passphrase
     passphrase2 = bytearray(getpass.getpass("Re-enter passphrase: "), encoding="UTF-8")
     if passphrase != passphrase2:
         clear_array(passphrase)   ; clear_array(passphrase2)
-        x_it(3, "Entries do not match.")
+        raise InputError("Entries do not match.")
     clear_array(passphrase2)
     return passphrase
 
@@ -1981,13 +1995,13 @@ def arch_init(aset):
             aset.datacrypto.load(data_ci, aset.mcrypto.keyfile, slot=0,
                                      passphrase=passphrase)
     else:
-        x_it(1,"Error: Invalid cipher option.")
+        raise OptionError("Invalid cipher option.")
 
     print(); print(f"Encryption    : {data_ci}", "" if data_ci=="off" else f"({ci_t[1]})")
 
     if opts.hashtype:
         if opts.hashtype not in hash_funcs or opts.hashtype == "sha256":
-            x_it(1, "Hash function '"+opts.hashtype+"' is not available on this system.")
+            raise OptionError("Hash function '"+opts.hashtype+"' is not available on this system.")
 
     # Use hmac-sha256 as data hash if the mode supports it:
     aset.hashtype = "hmac-sha256" if aset.datacrypto and aset.datacrypto.mhashkey else "blake2b"
@@ -2001,7 +2015,7 @@ def arch_init(aset):
             compr_level = str(compressors[compression][1])
         compression = compression.strip()   ; compr_level = compr_level.strip()
         if compression not in compressors.keys() or not is_num(compr_level):
-            x_it(1, "Invalid compression spec.")
+            raise OptionError("Invalid compression spec.")
 
         aset.compression = compression      ; aset.compr_level = compr_level
         compressors[compression][2](b"test", int(compr_level))
@@ -2012,7 +2026,7 @@ def arch_init(aset):
         # accepts an exponent from 1 to 6
         chfactor = int(opts.chfactor)
         if not ( 0 < chfactor < 7 ):
-            x_it(1, "Requested chunk size not supported.")
+            raise OptionError("Requested chunk size not supported.")
         aset.chunksize = (aset.min_chunksize//2) * (2** chfactor)
         if aset.chunksize > 256 * 1024:
             print("Large chunk size set:", aset.chunksize)
@@ -2032,20 +2046,20 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
     if upgrade and aset.format_ver == 2 and sum(len(v.sessions) for v in aset.vols.values()):
         upgrade_from_v2(aset)    ; return
     elif upgrade:
-        x_it(1, "Cannot upgrade.")
+        raise OptionError("Cannot upgrade.")
 
     if options.change_uuid:
         if not (options.force or attended and
                 ask_input("\nChange archive UUID to a new random value;"
                           "\nAre you sure? (y/N): ").lower() in {"y","yes"}):
-            x_it(0)
+            return
         print("Old UUID:", oldid := aset.uuid)
         while (newid := str(uuid.uuid4())) == oldid: time.sleep(0.2)
         print("New UUID:", newid)    ; aset.uuid = newid
         catch_signals()    ; aset.save_ini(ext=".tmp")
         update_dest(aset, pathlist=[aset.confname], ext=".tmp")
         aset.rename_saved(ext=".tmp")
-        x_it(0, "UUID updated.")
+        print("UUID updated.")    ; return
 
     # Test volume metadata loading
     for vid in aset.conf["volumes"] if not startup and dest.online else []:
@@ -2057,8 +2071,7 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
 
         # Enh: Offer to reconstruct volinfo from available session data
         if v_errs:
-            err_out(f"\n{vid} cannot be recovered.")
-            return
+            raise ValueError(f"\n{vid} - Invalid volume metadata.")
 
         # try sessions
         vol = [x for x in aset.vols.values() if x.vid == vid][0]
@@ -2156,7 +2169,7 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
 
         if len(vol.sessions) > 1 and exists(vol.mapfile(-2)):   os.remove(vol.mapfile(-2))
 
-        if not check_session_seq(vol):   x_it(1, "Session out of sequence error.")
+        if not check_session_seq(vol):   raise ValueError("Session out of sequence error.")
         if startup:   continue
 
         # Remove stray volume dirs and other files
@@ -2294,21 +2307,21 @@ def parse_options(args, pdefs, etcconf=None):
 
     # Check consistency of arguments
     if options.local_from and options.action not in ("send","monitor","receive","diff"):
-        x_it(1, "local-from cannot be used with "+options.action)
+        raise OptionError("local-from cannot be used with "+options.action)
     if options.action in write_actions+("monitor",) and not admin_permission:
-        x_it(1, f"Must be root/admin user for {options.action}.")
+        raise OptionError(f"Must be root/admin user for {options.action}.")
     if options.save_to and options.action != "receive":
-        x_it(1, "Receive required for save-to option.")
+        raise OptionError("Receive required for save-to option.")
     if not (options.volumes or options.all or options.import_other_from or options.local_from) \
     and options.action not in ("arch-init","arch-check","arch-deduplicate",
                                "list","delete","version"):
-        x_it(1, f"Volume name(s) or --all required for {options.action}.")
+        raise OptionError(f"Volume name(s) or --all required for {options.action}.")
     if options.action not in ("send", "diff", "arch-deduplicate"):   options.dedup = False
     if options.action == "arch-deduplicate":   options.dedup = True
 
     if (mr := options.meta_reduce.split(":"))[0] not in ("off","on","extra") \
     or len(mr) != 2 or not is_num(mr[1]):
-        x_it(1, "Malformed --meta-reduce argument.")
+        raise OptionError("Malformed --meta-reduce argument.")
     options.unattended = options.unattended or not sys.stdin.isatty()
 
     return options
@@ -5096,12 +5109,16 @@ def cleanup():
             SPr.run([CP.find, cachedir, "(", "-name", "manifest", "-o", "-name", "manifest.tmp"]
                     + (["-o", "-name", "manifest.z"] if meta_reduce=="extra" else [])
                     + [")", "-cmin", "+"+str(meta_min), "-delete"])
+
+        if error_cache:
+            err_out("\nError on volumes: " + ", ".join(sorted(set(error_cache))))
+            if aset and aset.opts.local_from:
+                json.dump({"rc": 2, "volumes": sorted(set(error_cache))},
+                          open(aset.opts.local_from+".error", "w"))
+            os._exit(2)
+
     except Exception as e:
         err_out("Cleanup error: "+repr(e))
-
-    if error_cache:
-        err_out("\nError on volumes: " + ", ".join(sorted(set(error_cache))))
-        os._exit(2)
 
 
 
@@ -5110,7 +5127,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20250509"
+prog_version          = "0.8 wip"       ; prog_date = "20250515"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
