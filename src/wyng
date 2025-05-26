@@ -11,13 +11,14 @@
 
 # Return codes:
 # 1 - Fatal error
-# 2 - Error on specific volume(s)
-# 3 - Auth error
+# 2 - Non-fatal error (i.e. specific volumes)
+# 3 - Authentication error
 # 4 - Timeout
 # 5 - Destination not ready
 # 6 - Archive not found
 # 7 - Local storage not ready
 # 8 - Signal
+# 9 - User Input, Option or Selection error
 
 
 import sys, signal, os, stat, shutil, subprocess as SPr, time, datetime
@@ -147,9 +148,9 @@ class ArchiveSet:
             if not passphrase and not agentkeys:   passphrase = get_passphrase(cmd=opts.passcmd)
             if passphrase:
                 if passphrase == bytes(len(passphrase)):
-                    raise ValueError("No authentication input.")
+                    raise AuthenticationError("No authentication input.")
             elif not agentkeys:
-                raise ValueError("No authentication input.")
+                raise AuthenticationError("No authentication input.")
             passphrase_s1 = passphrase[:] if passphrase else None
 
             # create both crypto instances and load metadata key
@@ -163,8 +164,8 @@ class ArchiveSet:
             if mcrypto:   buf = mcrypto.decrypt(buf)
         except ValueError as e:
             if "MAC check failed" in e.args:
-                err_out(repr(e))
-                raise AuthenticationError("\nError: Could not decrypt/authenticate archive.\n")
+                if debug:   err_out(repr(e))
+                raise AuthenticationError("Could not decrypt/authenticate archive.")
             raise e
 
         # read attributes from archive.ini
@@ -4803,14 +4804,6 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
             l_vol = l_vol.update()    ; save_storage.lvols[l_vol.snap2].update()
             l_vol.rotate_snapshots(timestamp_path=vol.mapfile())
 
-    elif diff and options.remap:
-        if diff_count > 0:
-            os.remove(vol.mapfile())
-            for ii in (l_vol.snap1, l_vol.snap2):
-                storage.lvols[ii].delete()
-            print("\nNext 'send' will bring this volume into sync.")
-            return None
-
     elif diff and diff_count:
         return None
 
@@ -4912,6 +4905,46 @@ def delete_volume(storage, aset, dv=None, vid=None):
         print("(Skipping snapshot removal.)")
 
     x_it(int(not inproc))
+
+
+# Handle unfinished in_process:
+# Functions supported here must not internally use global variable inputs that are unique to
+# a runtime invocation (i.e. the 'options' objects), or they must test such variables
+# in conjunction with aset.in_process.
+
+def retry_in_process(aset):
+    ipskip = False    ; options = aset.options
+
+    if options.action == "delete" and (aset.in_process[1] in [options.vid]) \
+    or (options.volumes and aset.in_process[1] == aset.vols[options.volumes[0]].vid):
+        # user is currently deleting the in_process volume or using --clean --force
+        if options.clean and options.force:
+            ipskip = True
+        else:
+            aset.set_in_process(None)
+    elif aset.in_process:
+        open(aset.path+"/in_process_retry","w").close()
+    elif exists(aset.path+"/in_process_retry"):
+        raise RuntimeError("Interrupted process already retried.")
+
+    if not ipskip and aset.in_process and aset.in_process[0] in ("delete","merge") \
+    and aset.in_process[1].startswith("Vol_"):
+        print("Completing prior operation in progress.")
+
+        if aset.in_process[0] == "delete":
+            delete_volume(storage, aset, vid=aset.in_process[1])
+
+        elif aset.in_process[0] == "merge":
+            vname = [x.name for x in aset.vols.values() if x.vid == aset.in_process[1]][0]
+            merge_sessions(aset.vols[vname], aset.in_process[4].split(":|"),
+                        aset.in_process[3], clear_sources=bool(aset.in_process[2]))
+    elif aset.in_process:
+        raise ValueError("Bad in_process descriptor: "+repr(aset.in_process[0]))
+
+        aset.stop()
+        aset = ArchiveSet(aset.path, aset.dest, aset.opts, allvols=True, prior_auth=aset)
+        if compare_files(aset, pathlist=[aset.confname], volumes=[aset.vols[vname]]):
+            raise RuntimeError("Local and archive metadata differ.")
 
 
 def show_list(aset, selected_vols, depth=3, json_out=None):
@@ -5127,7 +5160,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 wip"       ; prog_date = "20250515"
+prog_version          = "0.8 wip"       ; prog_date = "20250524"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
@@ -5206,7 +5239,8 @@ parser_defs = [
  [["--force"],        {"action": "store_true", "help": "Force action"}],
  [["--force-allow-rollback"], {"action": "store_true", "help": "Allow rollback (caution)"}],
  [["--clean"],        {"action": "store_true", "help": "Delete orphan snapshots, metadata"}],
- [["--purge"],        {"choices": ["other","full"], "default": None, "help": "Delete valid snapshots"}],
+ [["--purge"],        {"choices": ["other","full"], "default": None,
+                       "help": "Delete valid snapshots"}],
  [["--maxsync"],      {"action": "store_true", "help": "Use more fs sync"}],
  [["--upgrade-format"], {"action": "store_true",
                        "help": "Upgrade archive to current spec (arch-check)"}],
@@ -5223,291 +5257,265 @@ parser_defs = [
                        "help": "Set volume description (add, rename, send)"}]
 ]
 
-options = parse_options(sys.argv[1:], parser_defs, "/etc/wyng/wyng.ini")
-
-# Set stdout to devnull if --quiet is specified
-debug = options.debug    #; assert not (options.quiet and (options.verbose or debug))
-verbose = options.verbose or debug
-if debug and not options.json:
-    print("Python", sys.version, "\n", os.uname())
-    print("\n", vars(options) | {"passcmd":""}, "\n")
-    options.verbose = True; options.quiet = False
-if options.quiet and options.action not in ("list","version"):
-    options.unattended = True
-    sys.stdout = open(os.devnull, "w")
-
-signormal = {"sel": ["INT"], "iflag": True} if not debug else {"sel": None}
-catch_signals(**signormal)
-
-print("%s %s release %s" % (prog_name.capitalize(), prog_version, prog_date), flush=True)
-if options.action == "version":   x_it(0)
-
-
-# Allow only one instance at a time
-lockpath = "/var/lock/"+prog_name
 try:
-    os.makedirs(os.path.dirname(lockpath), exist_ok=True)
-    lockf = open(lockpath, "w")
-    fcntl.lockf(lockf, fcntl.LOCK_EX|fcntl.LOCK_NB)
-except PermissionError:
-    x_it(1, "ERROR: No writing permission on %s." % (lockpath,prog_name))
-except IOError:
-    x_it(1, "I/O ERROR obtaining lock on "+lockpath)
+    options = parse_options(sys.argv[1:], parser_defs, "/etc/wyng/wyng.ini")
+
+    # Set stdout to devnull if --quiet is specified
+    debug = options.debug    #; assert not (options.quiet and (options.verbose or debug))
+    verbose = options.verbose or debug
+    if debug and not options.json:
+        print("Python", sys.version, "\n", os.uname())
+        print("\n", vars(options) | {"passcmd":""}, "\n")
+        options.verbose = True; options.quiet = False
+    if options.quiet and options.action not in ("list","version"):
+        options.unattended = True
+        sys.stdout = open(os.devnull, "w")
+
+    signormal = {"sel": ["INT"], "iflag": True} if not debug else {"sel": None}
+    catch_signals(**signormal)
+
+    print("%s %s release %s" % (prog_name.capitalize(), prog_version, prog_date), flush=True)
+    if options.action == "version":   x_it(0)
 
 
-## General Configuration ##
-
-# vardir  : holds data not directly related to an archive, such as nicknames for archive URLs.
-# cachedir: holds cached archive metadata.
-vardir      = "/var/lib/"+prog_name
-cachedir    = options.metadir or vardir
-tmpdir      = tempfile.mkdtemp(prefix=prog_name, dir="/tmp")
-meta_reduce, meta_min = options.meta_reduce.split(":")
-
-os.makedirs(vardir, exist_ok=True)
-shutil.rmtree("/tmp/"+prog_name+"-debug", ignore_errors=True)
-os.makedirs(tmpdir+"/rpc")
-
-Destination.write_helper_program(tmpdir+"/rpc")
-agent_helper_write(tmpdir)
-
-# Dict of compressors in the form: (library, default_compress_level, compress_func)
-compressors =    {"zlib":   (zlib, 4, zlib.compress),
-                  "bz2" :   (bz2,  9, bz2.compress)}
-if zstd:   compressors["zstd"] = (zstd, 3, lambda data, lvl: zstd.compress(data, lvl, 3))
-
-hash_funcs  = {"hmac-sha256": None,
-               "sha256"     : lambda x: hashlib.sha256(x).digest(),
-               "blake2b"    : lambda x: hashlib.blake2b(x, digest_size=hash_bytes).digest()}
-
-try:
-    with open(cachedir+"/UUIDs", "r") as f:  uuids = json.load(f)
-except:
-    uuids = {}
+    # Allow only one instance at a time
+    lockpath = "/var/lock/"+prog_name
+    try:
+        os.makedirs(os.path.dirname(lockpath), exist_ok=True)
+        lockf = open(lockpath, "w")
+        fcntl.lockf(lockf, fcntl.LOCK_EX|fcntl.LOCK_NB)
+    except PermissionError:
+        x_it(1, "ERROR: No writing permission on %s." % (lockpath,prog_name))
+    except IOError:
+        x_it(1, "I/O ERROR obtaining lock on "+lockpath)
 
 
-# Create ArchiveSet, LocalStorage and Destination objects with get_configs().
-# Passphrase input happens here; no stdin before this point!
-aset        = get_configs(options)
-uuids[aset.subdir]   = [aset.uuid, aset.dest.spec]
-storage, storagesets = get_configs_storage(aset, options, require_local=not options.save_to and
-                                           options.action in ("monitor","send","receive","diff"))
+    ## General Configuration ##
 
-# Handle unfinished in_process:
-# Functions supported here must not internally use global variable inputs that are unique to
-# a runtime invocation (i.e. the 'options' objects), or they must test such variables
-# in conjunction with aset.in_process.
-if aset.in_process and aset.dest.online:
-    print("** Prior operation in progress:", " ".join(aset.in_process[0:2]))
+    # vardir  : holds data not directly related to an archive, such as nicknames for archive URLs.
+    # cachedir: holds cached archive metadata.
+    vardir      = "/var/lib/"+prog_name
+    cachedir    = options.metadir or vardir
+    tmpdir      = tempfile.mkdtemp(prefix=prog_name, dir="/tmp")
+    meta_reduce, meta_min = options.meta_reduce.split(":")
 
-if aset.in_process and aset.dest.online and options.action in write_actions:
+    os.makedirs(vardir, exist_ok=True)
+    shutil.rmtree("/tmp/"+prog_name+"-debug", ignore_errors=True)
+    os.makedirs(tmpdir+"/rpc")
 
-    ipskip = False
-    if options.action == "delete" and (aset.in_process[1] in [options.vid]) \
-    or (options.volumes and aset.in_process[1] == aset.vols[options.volumes[0]].vid):
-        # user is currently deleting the in_process volume or using --clean --force
-        if options.clean and options.force:
-            ipskip = True
-        else:
-            aset.set_in_process(None)
-    elif aset.in_process:
-        open(aset.path+"/in_process_retry","w").close()
-    elif exists(aset.path+"/in_process_retry"):
-        x_it(1, "Interrupted process already retried; Exiting.")
-
-    if not ipskip and aset.in_process and aset.in_process[0] in ("delete","merge") \
-    and aset.in_process[1].startswith("Vol_"):
-        print("Completing prior operation in progress.")
-
-        if aset.in_process[0] == "delete":
-            delete_volume(storage, aset, vid=aset.in_process[1])
-
-        elif aset.in_process[0] == "merge":
-            vname = [x.name for x in aset.vols.values() if x.vid == aset.in_process[1]][0]
-            merge_sessions(aset.vols[vname], aset.in_process[4].split(":|"),
-                        aset.in_process[3], clear_sources=bool(aset.in_process[2]))
-    elif aset.in_process:
-        raise ValueError("Bad in_process descriptor: "+repr(aset.in_process[0]))
-
-        aset.stop()
-        aset = ArchiveSet(aset.path, aset.dest, aset.opts, allvols=True, prior_auth=aset)
-        if compare_files(aset, pathlist=[aset.confname], volumes=[aset.vols[vname]]):
-            x_it(1, "Error: Local and archive metadata differ.")
+    Destination.write_helper_program(tmpdir+"/rpc")
+    agent_helper_write(tmpdir)
 
 
-# Display archive update time as local time
-arch_time = ts_to_datetime(float(aset.updated_at))
-print("Encrypted" if (aset.mcrypto and aset.datacrypto) else "Un-encrypted",
-      f"archive '{aset.dest.spec}'",
-      "\nLast updated %s (%s)" % (arch_time[:-6], arch_time[-6:]), flush=True)
+    # Dict of compressors in the form: (library, default_compress_level, compress_func)
+    compressors =    {"zlib":   (zlib, 4, zlib.compress),
+                    "bz2" :   (bz2,  9, bz2.compress)}
+    if zstd:   compressors["zstd"] = (zstd, 3, lambda data, lvl: zstd.compress(data, lvl, 3))
+
+    hash_funcs  = {"hmac-sha256": None,
+                "sha256"     : lambda x: hashlib.sha256(x).digest(),
+                "blake2b"    : lambda x: hashlib.blake2b(x, digest_size=hash_bytes).digest()}
+
+    try:
+        with open(cachedir+"/UUIDs", "r") as f:  uuids = json.load(f)
+    except:
+        uuids = {}
 
 
-## Process Volume Selections ##
+    # Create ArchiveSet, LocalStorage and Destination objects with get_configs().
+    # Passphrase input happens here; no stdin before this point!
+    aset        = get_configs(options)
+    uuids[aset.subdir]   = [aset.uuid, aset.dest.spec]
+    storage, storagesets = get_configs_storage(aset, options, require_local=not options.save_to and
+                                            options.action in ("monitor","send","receive","diff"))
 
-exclude_vols  = set(options.volex or [])
-datavols      = sorted(set(aset.vols.keys()) - exclude_vols) if options.all else []
-selected_vols = sorted(set(options.volumes[:] + datavols))
-for v in selected_vols[:]:
-    if v not in aset.vols and options.action not in {"add","delete","rename","send","arch-check"}:
-        print(f"Volume '{v}' not found; Skipping.")
-        selected_vols.remove(v)
+    # Handle unfinished in_process
+    if aset.in_process and aset.dest.online:
+        print("** Prior operation in progress:", " ".join(aset.in_process[0:2]))
 
-
-## Process Commands ##
-
-if options.action   == "monitor":
-    for storage, vols in storagesets.items():
-        monitor_send(storage, aset, vols or selected_vols, monitor_only=True)
-    print()
+        if options.action in write_actions:   retry_in_process(aset)
 
 
-elif options.action == "send":
-    sid, ses_tags = None, {}
-    other_vols = {x: os.path.abspath(y)
-                  for x,y in map(lambda a: a.split(":|:", maxsplit=1), options.import_other_from)}
-
-    if options.dedup and not aset.dest.hlinks:
-        err_out("Hardlinks not supported on dest.")   ; options.dedup = aset.opts.dedup = False
-
-    for storage, vols in storagesets.items():
-        sid, ses_tags = monitor_send(storage, aset, vols or selected_vols, monitor_only=False,
-                                     use_sesid=sid, ses_tags=ses_tags, imports=other_vols,
-                                     benchmark=options.dry_run)
-
-    if other_vols:   error_cache.extend(list(other_vols))
+    # Display archive update time as local time
+    arch_time = ts_to_datetime(float(aset.updated_at))
+    print("Encrypted" if (aset.mcrypto and aset.datacrypto) else "Un-encrypted",
+        f"archive '{aset.dest.spec}'",
+        "\nLast updated %s (%s)" % (arch_time[:-6], arch_time[-6:]), flush=True)
 
 
-elif options.action == "prune":
-    if options.autoprune.lower() == "off" and not options.session:
-        x_it(1, "Specify --autoprune or --session for prune.")
-    dvs = selected_vols
+    ## Process Volume Selections ##
 
-    if not options.unattended and len(dvs):
-        print("This operation will delete session(s) from the archive;")
-        ans = ask_input("Are you sure? [y/N]: ").strip()
-        if ans.lower() not in {"y","yes"}:
-            x_it(0)
-
-    print()
-    for dv in dvs:
-        print(dv, end=" -", flush=True)
-        if options.session:
-            print(prune_sessions(aset.vols[dv], options.session.split(",", maxsplit=1)))
-        elif options.autoprune.lower() in ("on","full"):
-            print(autoprune(aset.vols[dv], apmode=options.autoprune))
+    exclude_vols  = set(options.volex or [])
+    datavols      = sorted(set(aset.vols.keys()) - exclude_vols) if options.all else []
+    selected_vols = sorted(set(options.volumes[:] + datavols))
+    for v in selected_vols[:]:
+        if v not in aset.vols and options.action not in {"add","delete","rename",
+                                                         "send","arch-check"}:
+            print(f"Volume '{v}' not found; Skipping.")
+            selected_vols.remove(v)
 
 
-elif options.action == "receive":
+    ## Process Commands ##
 
-    if len(selected_vols) != 1 and options.save_to:
-        x_it(1, "Specify one volume for receive --save-to.")
-    if options.session and len(options.session.split(",")) > 1:
-        x_it(1, "Specify only one session for receive.")
-
-    if not options.unattended and not options.force:
-        print("\nWarning:  Receiving to existing volumes will overwrite them!")
-        ans = ask_input("Are you sure? [y/N]: ")
-        if ans.lower() not in {"y","yes"}:   x_it(1)
-
-    for storage, vols in storagesets.items():
-        dvlist = vols or selected_vols
-        if not storage.online and vols:
-            err_out("\n Offline volumes: " + ", ".join(vols))
-            error_cache.extend(vols)   ; continue
-
-        for dv in dvlist:
-            count = receive_volume(storage, aset.vols[dv], select_ses=options.session or "",
-                                   ses_strict=options.session_strict=="on",
-                                   save_path=options.save_to or "")
-            if count is None:   error_cache.append(dv)
+    if options.action   == "monitor":
+        for storage, vols in storagesets.items():
+            monitor_send(storage, aset, vols or selected_vols, monitor_only=True)
+        print()
 
 
-elif options.action == "verify":
-    for dv in selected_vols:
-        count = receive_volume(storage, aset.vols[dv],
-                    select_ses="" if not options.session else options.session.split(",")[0],
-                    ses_strict=options.session_strict=="on",
-                    verify_only=1, save_path="")
-        if count is None:   error_cache.append(dv)
+    elif options.action == "send":
+        sid, ses_tags = None, {}
+        other_vols = {x: os.path.abspath(y)
+                    for x,y in map(lambda a: a.split(":|:",maxsplit=1), options.import_other_from)}
+
+        if options.dedup and not aset.dest.hlinks:
+            err_out("Hardlinks not supported on dest.")   ; options.dedup = aset.opts.dedup = False
+
+        for storage, vols in storagesets.items():
+            sid, ses_tags = monitor_send(storage, aset, vols or selected_vols, monitor_only=False,
+                                        use_sesid=sid, ses_tags=ses_tags, imports=other_vols,
+                                        benchmark=options.dry_run)
+
+        if other_vols:   error_cache.extend(list(other_vols))
 
 
-elif options.action == "diff":
-    for storage, vols in storagesets.items():
-        dvlist = vols or selected_vols
-        if not storage.online and vols:
-            err_out("\n Offline volumes: " + ", ".join(vols))
-            error_cache.extend(vols)   ; continue
+    elif options.action == "prune":
+        if options.autoprune.lower() == "off" and not options.session:
+            x_it(1, "Specify --autoprune or --session for prune.")
+        dvs = selected_vols
 
-        for dv in dvlist:
-            count = receive_volume(storage, aset.vols[dv], save_path="", diff=True)
-            if count is None:   error_cache.append(dv)
-
-
-elif options.action == "list":
-    show_list(aset, selected_vols, json_out=sys.stdout if options.json else None)
-
-
-elif options.action == "add":
-    if len(options.volumes) < 1:
-        x_it(1, "Volume name(s) required for add.")
-
-    for dv in options.volumes:
-        if dv not in aset.vols:   add_volume(aset, dv, options.voldesc)
-
-
-elif options.action == "rename":
-    if len(options.volumes) != 2:  x_it(1,"Rename requires two volume names.")
-    rename_volume(storage, aset, options.volumes[0], options.volumes[1])
-
-
-elif options.action == "delete":
-    if options.clean or options.purge:
-        if options.volumes:
-            x_it(1, "Cannot delete volumes with clean/purge.")
-        elif not storage or not storage.online:
-            x_it(1, "Local storage required for clean/purge.")
-
-        print(f"Remove local Wyng snapshots from path '{storage.path}'.")
-        if not options.unattended and not options.force:
-            ans = ask_input("Are you sure? [y/N]: ")
+        if not options.unattended and len(dvs):
+            print("This operation will delete session(s) from the archive;")
+            ans = ask_input("Are you sure? [y/N]: ").strip()
             if ans.lower() not in {"y","yes"}:
                 x_it(0)
-        elif not options.force:
-            x_it(1, "Ignoring clean/purge without --force.")
 
-        if options.all:   meta_reduce, meta_min = "extra", 0
-        remove_local_snapshots(storage, None if options.all else aset, purge=options.purge)
-
-    elif len(options.volumes) + bool(options.vid) != 1:
-        x_it(1, "Specify one volume to delete.")
-
-    else:
-        delete_volume(storage, aset, **{"vid": options.vid} if options.vid
-                                  else { "dv": options.volumes[0]})
+        print()
+        for dv in dvs:
+            print(dv, end=" -", flush=True)
+            if options.session:
+                print(prune_sessions(aset.vols[dv], options.session.split(",", maxsplit=1)))
+            elif options.autoprune.lower() in ("on","full"):
+                print(autoprune(aset.vols[dv], apmode=options.autoprune))
 
 
-elif options.action == "arch-init":
-    pass
+    elif options.action == "receive":
+
+        if len(selected_vols) != 1 and options.save_to:
+            x_it(1, "Specify one volume for receive --save-to.")
+        if options.session and len(options.session.split(",")) > 1:
+            x_it(1, "Specify only one session for receive.")
+
+        if not options.unattended and not options.force:
+            print("\nWarning:  Receiving to existing volumes will overwrite them!")
+            ans = ask_input("Are you sure? [y/N]: ")
+            if ans.lower() not in {"y","yes"}:   x_it(1)
+
+        for storage, vols in storagesets.items():
+            dvlist = vols or selected_vols
+            if not storage.online and vols:
+                err_out("\n Offline volumes: " + ", ".join(vols))
+                error_cache.extend(vols)   ; continue
+
+            for dv in dvlist:
+                count = receive_volume(storage, aset.vols[dv], select_ses=options.session or "",
+                                    ses_strict=options.session_strict=="on",
+                                    save_path=options.save_to or "")
+                if count is None:   error_cache.append(dv)
 
 
-elif options.action == "arch-check":
-    arch_check(storage, aset, selected_vols)
+    elif options.action == "verify":
+        for dv in selected_vols:
+            count = receive_volume(storage, aset.vols[dv],
+                        select_ses="" if not options.session else options.session.split(",")[0],
+                        ses_strict=options.session_strict=="on",
+                        verify_only=1, save_path="")
+            if count is None:   error_cache.append(dv)
 
 
-elif options.action == "arch-deduplicate":
-    if not aset.dest.hlinks:
-        x_it(1, "Hardlinks not supported on dest.")
-    dedup_existing(aset)
+    elif options.action == "diff":
+        for storage, vols in storagesets.items():
+            dvlist = vols or selected_vols
+            if not storage.online and vols:
+                err_out("\n Offline volumes: " + ", ".join(vols))
+                error_cache.extend(vols)   ; continue
+
+            for dv in dvlist:
+                count = receive_volume(storage, aset.vols[dv], save_path="", diff=True)
+                if count is None:   error_cache.append(dv)
 
 
-# Save overview to cache
-if not exists(f:=cachedir+"/cached") or options.action in write_actions + ("arch-check",):
-    json.dump({x:y for x,y in uuids.items() if exists(f"{cachedir}/{x}/archive.ini")}, open(f,"w"))
+    elif options.action == "list":
+        show_list(aset, selected_vols, json_out=sys.stdout if options.json else None)
 
-    if aset:
-        show_list(aset, None, depth=2, json_out=gzip.open(f:=aset.path+"/archive.cached", "wt"))
-        ts = os.stat(aset.confpath).st_mtime_ns    ; os.utime(f, ns=(ts,ts))
 
+    elif options.action == "add":
+        if len(options.volumes) < 1:
+            x_it(1, "Volume name(s) required for add.")
+
+        for dv in options.volumes:
+            if dv not in aset.vols:   add_volume(aset, dv, options.voldesc)
+
+
+    elif options.action == "rename":
+        if len(options.volumes) != 2:  x_it(1,"Rename requires two volume names.")
+        rename_volume(storage, aset, options.volumes[0], options.volumes[1])
+
+
+    elif options.action == "delete":
+        if options.clean or options.purge:
+            if options.volumes:
+                x_it(1, "Cannot delete volumes with clean/purge.")
+            elif not storage or not storage.online:
+                x_it(1, "Local storage required for clean/purge.")
+
+            print(f"Remove local Wyng snapshots from path '{storage.path}'.")
+            if not options.unattended and not options.force:
+                ans = ask_input("Are you sure? [y/N]: ")
+                if ans.lower() not in {"y","yes"}:
+                    x_it(0)
+            elif not options.force:
+                x_it(1, "Ignoring clean/purge without --force.")
+
+            if options.all:   meta_reduce, meta_min = "extra", 0
+            remove_local_snapshots(storage, None if options.all else aset, purge=options.purge)
+
+        elif len(options.volumes) + bool(options.vid) != 1:
+            x_it(1, "Specify one volume to delete.")
+
+        else:
+            delete_volume(storage, aset, **{"vid": options.vid} if options.vid
+                                    else { "dv": options.volumes[0]})
+
+
+    elif options.action == "arch-init":
+        pass
+
+
+    elif options.action == "arch-check":
+        arch_check(storage, aset, selected_vols)
+
+
+    elif options.action == "arch-deduplicate":
+        if not aset.dest.hlinks:
+            x_it(1, "Hardlinks not supported on dest.")
+        dedup_existing(aset)
+
+
+    # Save overview to cache
+    if not exists(f:=cachedir+"/cached") or options.action in write_actions + ("arch-check",):
+        json.dump({x:y for x,y in uuids.items()
+                       if exists(f"{cachedir}/{x}/archive.ini")}, open(f,"w"))
+
+        if aset:
+            show_list(aset, None, depth=2, json_out=gzip.open(f:=aset.path+"/archive.cached","wt"))
+            ts = os.stat(aset.confpath).st_mtime_ns    ; os.utime(f, ns=(ts,ts))
+
+
+except (InputError, SelectionError, OptionError, AuthenticationError) as e:
+    #if debug:   raise e
+    x_it(3 if type(e) is AuthenticationError else 9,
+         f"\n{e.__class__.__name__}: {e}\n")
 
 
 ## END ##
