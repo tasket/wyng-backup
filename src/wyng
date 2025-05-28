@@ -2287,7 +2287,7 @@ def remove_local_snapshots(storage, archive, del_all=False, purge=None):
 def parse_options(args, pdefs, etcconf=None):
     parser_defs_d = {x[0]: y for x, y in pdefs}
     conf_block = ("debug","force","save-to","session","unattended","volume-desc","tag","all",
-                  "all-before","local-from","import-other-from","upgrade-format",
+                  "all-before","vols-from","import-other-from","upgrade-format",
                   "skip-corrupt-chunks")
 
     if etcconf and exists(etcconf):
@@ -2307,13 +2307,13 @@ def parse_options(args, pdefs, etcconf=None):
     options = parser.parse_args(args)   ; options.action = options.action.lower()
 
     # Check consistency of arguments
-    if options.local_from and options.action not in ("send","monitor","receive","diff"):
-        raise OptionError("local-from cannot be used with "+options.action)
+    if options.vols_from and options.action not in ("send","monitor","receive","verify","diff"):
+        raise OptionError("vols-from cannot be used with "+options.action)
     if options.action in write_actions+("monitor",) and not admin_permission:
         raise OptionError(f"Must be root/admin user for {options.action}.")
     if options.save_to and options.action != "receive":
         raise OptionError("Receive required for save-to option.")
-    if not (options.volumes or options.all or options.import_other_from or options.local_from) \
+    if not (options.volumes or options.all or options.import_other_from or options.vols_from) \
     and options.action not in ("arch-init","arch-check","arch-deduplicate",
                                "list","delete","version"):
         raise OptionError(f"Volume name(s) or --all required for {options.action}.")
@@ -2454,14 +2454,14 @@ def get_configs_remote(dest, base_dir, opts):
 
 
 # Returns either a single LocalStorage obj from --local, or a dict of them
-# with associated list of vol name, alias pairs defined in --local-from json file:
+# with associated list of vol name, alias pairs defined in --vols-from json file:
 # s = {"vg1/pool1": [("vol1",""), ("vol-xyz","xyz-alias")], ...}
 
 # alias is used for receiving to a local vol name different from the archive vol name
 
 def get_configs_storage(aset, opts, require_local=True):
     storage, storagesets, vol_set = None, {}, set()
-    fromlist    = opts.local_from      ; local_url = opts.local
+    fromlist    = opts.vols_from    ; local_url = opts.local
     arch_vols   = {x.name: x.vid for x in aset.vols.values()}
 
     if fromlist and exists(fromlist):
@@ -5145,9 +5145,9 @@ def cleanup():
 
         if error_cache:
             err_out("\nError on volumes: " + ", ".join(sorted(set(error_cache))))
-            if aset and aset.opts.local_from:
+            if aset and aset.opts.vols_from:
                 json.dump({"rc": 2, "volumes": sorted(set(error_cache))},
-                          open(aset.opts.local_from+".error", "w"))
+                          open(aset.opts.vols_from+".error", "w"))
             os._exit(2)
 
     except Exception as e:
@@ -5160,7 +5160,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 wip"       ; prog_date = "20250524"
+prog_version          = "0.8 wip"       ; prog_date = "20250527"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
@@ -5225,7 +5225,8 @@ parser_defs = [
  [["--send-unchanged"], {"action": "store_true", "help": "Record unchanged volumes (send)"}],
  [["--dest"],         {"default": "", "help": "URL to archive"}],
  [["--local"],        {"default": "", "help": "Init: LVM vg/pool containing source volumes"}],
- [["--local-from"],   {"help": "Specify multiple --local volume sets from text file (send)"}],
+ [["--vols-from","--local-from"], {"dest": "vols_from",
+                       "help": "Specify multiple volume sets grouped by local storage"}],
  [["--encrypt"],      {"help": "Encryption mode"}],
  [["--compression"],  {"default": "", "help": "Init: compression type:level"}],
  [["--hashtype"],     {"default": "", "help": "Init: hash function type"}],
@@ -5425,12 +5426,15 @@ try:
 
 
     elif options.action == "verify":
-        for dv in selected_vols:
-            count = receive_volume(storage, aset.vols[dv],
-                        select_ses="" if not options.session else options.session.split(",")[0],
-                        ses_strict=options.session_strict=="on",
-                        verify_only=1, save_path="")
-            if count is None:   error_cache.append(dv)
+        for storage, vols in storagesets.items():
+            dvlist = vols or selected_vols
+            for dv in dvlist:
+                count = receive_volume(storage, aset.vols[dv],
+                            select_ses="" if not options.session
+                                          else options.session.split(",")[0],
+                            ses_strict=options.session_strict=="on",
+                            verify_only=1, save_path="")
+                if count is None:   error_cache.append(dv)
 
 
     elif options.action == "diff":
