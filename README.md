@@ -368,7 +368,7 @@ the volume data if present.
 | _Option_                      | _Description_
 |-------------------------------|--------------
 --save-to=_path_       | Save a volume to _path_ (receive).
---local_from=_json file_ | Specify local:[volumes] sets instead of --local.
+--vols-from=_json file_ | Specify local:[volumes] sets instead of --local.
 --import-other-from    | Import volume data from a non-snapshot capable path during `send`
 --session-strict=_on_ | Don't retrieve volume from next-oldest session if no exact session match
 --encrypt=_cipher_     | Set encryption mode or _'off'_ (default: _'xchacha20-dgr'_)
@@ -572,9 +572,9 @@ specified volumes don't have an exact match for the specified session.  When set
 Wyng will try to retrieve the next-oldest version of the volume if one exists.
 
 
-#### `--local_from=_json file_`
+#### `--vols-from=_json file_`
 
-Specify both local storage and volume names for `send` or `receive` as sets, instead
+Specify both local storage and volume names for `send`, `receive` or `verify` as sets, instead
 of using --local and volume names on the command line.  The json file must take the form
 of `{local-a: [[volname1, alias1], [volnameN, aliasN], ...], ...]}`.  This allows multiple
 local storage sources to be sent/received in a single session.
@@ -582,6 +582,8 @@ local storage sources to be sent/received in a single session.
 _Alias_ can be _'null'_ for no alias or any valid name. However, the volume names (or aliases)
 must all be unique across different sources as they are stored in the same archive.  Aliases define which local volume name into which an archive volume will be received, or when sending
 they indicate a request to actually _rename_ the target volume to the alias.
+
+_Local_ may also be _'null'_ if the command/action does not require it (ex. `verify`).
 
 
 #### `--meta-reduce=mode:minutes`

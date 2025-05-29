@@ -52,6 +52,8 @@ class SelectionError(ValueError):   pass
 
 class AuthenticationError(ValueError):   pass
 
+class StorageError(ValueError):   pass
+
 
 # ArchiveSet manages archive metadata incl. volumes and sessions
 
@@ -2341,24 +2343,24 @@ def get_configs(opts):
     # Check online status for certain commands.
     if not dest.online and (opts.remap  \
     or opts.action not in local_actions) and not (opts.action == "delete" and opts.clean):
-        x_it(5, "Destination not ready to receive commands.")
+        raise StorageError(5, "Destination not ready to receive commands.")
     if not dest.dir_exists: # and opts.action not in write_actions:
-        x_it(6, f"Path '{dest.path}' not found.")
+        raise StorageError(6, f"Path '{dest.path}' not found.")
     if not dest.writable and opts.action in write_actions \
     and not (opts.action == "delete" and opts.clean):
-        x_it(5, "Destination not writable.")
+        raise StorageError(5, "Destination not writable.")
     if dest.archive_ini_hash == "none" and opts.action not in local_actions+("arch-init",):
-        x_it(6,"Archive not found at '%s'" % dest.spec)
+        raise StorageError(6, f"Archive not found at '{dest.spec}'")
 
     if opts.action in ("arch-init",):
         if dest.archive_ini_hash != "none":
-            x_it(1, "Archive already exists: "+dest.spec)
+            raise StorageError(5, "Archive already exists: "+dest.spec)
         arch_init(ArchiveSet(tmpdir, dest, opts))
-        x_it(0, "Done.")
+        return None
 
     aset = get_configs_remote(dest, cachedir, opts)    ; os.utime(aset.path)
     if aset.updated_at is None:
-        x_it(6, "Archive not found.")
+        raise StorageError(6, "Archive not found.")
     aset.apdays = opts.apdays
 
     return aset
@@ -2469,7 +2471,7 @@ def get_configs_storage(aset, opts, require_local=True):
         try:
             locallists = json.load(open(fromlist, "r"))
         except json.decoder.JSONDecodeError as e:
-            x_it(1, "Empty/malformed json file")
+            raise SelectionError("Empty/malformed json file")
 
         for url, vols in locallists.items():
             if not vols:   err_out("Empty vol list for "+url)   ; continue
@@ -2479,7 +2481,7 @@ def get_configs_storage(aset, opts, require_local=True):
                 if alias and vname in aset.vols:
                     aset.vols[vname].alias = alias    ; aset.vols[vname].aliastype = "rename"
                 # Test for volname uniqueness
-                if vname in vol_set:   x_it(1, f"Duplicate volume name: {vname}")
+                if vname in vol_set:   raise SelectionError(f"Duplicate volume name: {vname}")
                 vol_set.add(vname)
 
             storagesets[LocalStorage(url, opts, require_online=require_local,
@@ -2512,15 +2514,15 @@ class Destination:
         # parse and validate dest spec
         self.ssh_opts   = user_ssh_opts or self.ssh_opts
         self.qubes_opts = user_qubes_opts or self.qubes_opts
-        if not dest_url:                 x_it(1,"Error: Missing dest specification.")
-        if not dest_url.isprintable():   x_it(1,"Error: [^control] not allowed in dest.")
+        if not dest_url:                raise OptionError("Missing dest specification.")
+        if not dest_url.isprintable():  raise InputError("[^control] char not allowed in dest.")
         dparts      = urlparse(dest_url)    ; self.dtype = dtype = dparts.scheme
         if dtype not in self.url_types:
-            x_it(1,"'%s' not an accepted dest type." % dtype)
+            raise OptionError("'%s' not an accepted dest type." % dtype)
         if (dtype == "file" and (dparts.netloc or not dparts.path)) \
         or (dtype in ("ssh","qubes","qubes-ssh") and not dparts.netloc) \
         or (dtype == "qubes-ssh" and not all(dparts.netloc.partition(":"))) :
-            x_it(1,"Error: Malformed --dest specification.")
+            raise OptionError("Malformed --dest specification.")
 
         self.spec   = dest_url                        ; self.sys = dparts.netloc
         self.path   = os.path.normpath(dparts.path)   ; self.archive_ini_hash = "none"
@@ -3445,7 +3447,7 @@ def get_reflink_deltas(storage, aset, datavols):
     # This could be extended with a fallback mode that checks _get_btrfs_generation() directly
     # while doing one snap pair at a time to increase chances of success.
     if storage.metadata_unlock()[0] != generation:
-        x_it(7, "fs gen ids differ.")
+        raise StorageError(7, "fs generation ids differ.")
 
     return datavols
 
@@ -3980,7 +3982,7 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={}, ses_tags={},
 
     if len(incrementals)+len(send_alls)+len(other_vols) \
         +(len(unchanged_vols if options.send_unchanged else [])) == 0:
-        x_it(0, "No new data.")
+        print("No new data.")    ; return curtime, ses_tags
 
     # Process session tags
     if (get_tags := options.tag and not ses_tags and not monitor_only):
@@ -5160,7 +5162,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 wip"       ; prog_date = "20250527"
+prog_version          = "0.8 beta"      ; prog_date = "20250529"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
@@ -5520,6 +5522,9 @@ except (InputError, SelectionError, OptionError, AuthenticationError) as e:
     #if debug:   raise e
     x_it(3 if type(e) is AuthenticationError else 9,
          f"\n{e.__class__.__name__}: {e}\n")
+
+except StorageError as e:
+    x_it(e.args[0], f"\n{e.__class__.__name__}: {e.args[-1]}\n")
 
 
 ## END ##
