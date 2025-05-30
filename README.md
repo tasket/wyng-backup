@@ -638,7 +638,7 @@ Selects the encryption cipher/mode.  The available modes are:
 
 ### Configuration files
 
-Wyng will look in _'/etc/wyng/wyng.ini'_ for option defaults.  For options that are flags with
+Wyng will look in _'/etc/wyng/wyng.ini'_ or the file specified via `--config` for option defaults.  For options that are flags with
 no value like `--dedup`, use a _1_ or _0_ to indicate _enable_ or _disable_ (yes or no).
 For options allowing multiple entries per command line, in the .ini use multiple lines with the
 2nd item onward indented by at least one space.
@@ -656,6 +656,8 @@ volex = misc/caches.img
   misc/deprecated_apps.img
   windows10_recovery.vmdk
 ```
+
+Note that some options like `debug`, `force` and `config` are ignored in the ini file; they must be used from the command line.
 
 
 ### Verifying Code

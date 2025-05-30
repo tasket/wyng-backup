@@ -2286,15 +2286,17 @@ def remove_local_snapshots(storage, archive, del_all=False, purge=None):
 
 # Parse args and global conf file
 
-def parse_options(args, pdefs, etcconf=None):
-    parser_defs_d = {x[0]: y for x, y in pdefs}
-    conf_block = ("debug","force","save-to","session","unattended","volume-desc","tag","all",
-                  "all-before","vols-from","import-other-from","upgrade-format",
-                  "skip-corrupt-chunks")
+def parse_options(args, pdefs, altconf=""):
+    conffile = altconf or wyng_conf
+    conf_block = {"config","debug","force","save-to","session","unattended","volume-desc","tag",
+                  "all","all-before","vols-from","import-other-from","upgrade-format",
+                  "skip-corrupt-chunks"}
 
-    if etcconf and exists(etcconf):
+    if exists(conffile) and (altconf or
+            not any(map(lambda x: x.startswith("--config"), args))):
         confp = configparser.ConfigParser()    ; confp.optionxform = lambda option: option
-        confp["var-global-default"] = {}       ; confp.read_file(open(etcconf, "r"))
+        confp["var-global-default"] = {}       ; confp.read_file(open(conffile, "r"))
+        parser_defs_d = {x[0]: y for x, y in pdefs}
         for k, v in confp["var-global-default"].items():
             if (kopt := "--"+k) in parser_defs_d and k not in conf_block:
                 if parser_defs_d[kopt].get("action") == "append":
@@ -2307,6 +2309,9 @@ def parse_options(args, pdefs, etcconf=None):
     parser = argparse.ArgumentParser(description="")
     for x, y in pdefs:  parser.add_argument(*x, **y)
     options = parser.parse_args(args)   ; options.action = options.action.lower()
+
+    if options.config and not altconf:
+        return parse_options(args, pdefs, altconf=options.config)
 
     # Check consistency of arguments
     if options.vols_from and options.action not in ("send","monitor","receive","verify","diff"):
@@ -5162,7 +5167,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20250529"
+prog_version          = "0.8 wip"       ; prog_date = "20250530"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
@@ -5190,6 +5195,7 @@ pjoin           = os.path.join     ; exists = os.path.exists   ; zipln = itertoo
 
 ## Parse Arguments & Etc Config ##
 
+wyng_conf       = "/etc/wyng/wyng.ini"
 local_actions   = ("monitor","version")
 write_actions   = ("add","send","prune","delete","rename","arch-deduplicate","arch-init")
 dest_actions    = ("list","receive","verify","diff","arch-check") + write_actions
@@ -5236,6 +5242,7 @@ parser_defs = [
                        "help": "Init: set chunk size to N*64kB"}],
  [["--vid"],          {"help": "Reference a volume by ID number (delete)"}],
  [["--passcmd"],      {"help": "Command to fetch auth passphrase"}],
+ [["--config"],       {"help": "Use alternate config .ini file"}],
  [["--meta-dir"],     {"dest": "metadir", "default": "", "help": "Use alternate metadata path"}],
  [["--meta-reduce"],  {"default": "on:3000", "help": "Metadata retention policy (see doc)"}],
  [["--json"],         {"action": "store_true", "help": "Output as json format (list)"}],
@@ -5261,7 +5268,7 @@ parser_defs = [
 ]
 
 try:
-    options = parse_options(sys.argv[1:], parser_defs, "/etc/wyng/wyng.ini")
+    options = parse_options(sys.argv[1:], parser_defs)
 
     # Set stdout to devnull if --quiet is specified
     debug = options.debug    #; assert not (options.quiet and (options.verbose or debug))
