@@ -365,11 +365,13 @@ class ArchiveSet:
         if exists(vpath):    shutil.rmtree(vpath)
         return vid
 
-    def rename_volume_meta(self, datavol, newname, ext=""):
+    def rename_volume_meta(self, datavol, newname, desc="", ext=""):
         vol = self.vols[datavol]
         if newname in self.vols or ArchiveVolume.volname_check(newname):   return False
+        if len(desc.encode("UTF-8")) > self.comment_len or not desc.isprintable():
+            err_out("Description format error.")    ; return False
 
-        vol.name = newname
+        vol.name = newname          ; vol.desc = desc
         self.vols[newname] = vol    ; del(self.vols[datavol])
         vol.save_volinfo(ext)
         return True
@@ -2287,13 +2289,12 @@ def remove_local_snapshots(storage, archive, del_all=False, purge=None):
 # Parse args and global conf file
 
 def parse_options(args, pdefs, altconf=""):
-    conffile = altconf or wyng_conf
+    conffile = altconf or (wyng_conf if exists(wyng_conf) else "")
     conf_block = {"config","debug","force","save-to","session","unattended","volume-desc","tag",
                   "all","all-before","vols-from","import-other-from","upgrade-format",
                   "skip-corrupt-chunks"}
 
-    if exists(conffile) and (altconf or
-            not any(map(lambda x: x.startswith("--config"), args))):
+    if conffile and (altconf or not any(map(lambda x: x.startswith("--config"), args))):
         confp = configparser.ConfigParser()    ; confp.optionxform = lambda option: option
         confp["var-global-default"] = {}       ; confp.read_file(open(conffile, "r"))
         parser_defs_d = {x[0]: y for x, y in pdefs}
@@ -4823,7 +4824,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
 def rename_volume(storage, aset, oldname, newname):
 
     os.chdir(aset.path)    ; vol = aset.vols[oldname]
-    if not aset.rename_volume_meta(oldname, newname, ext=".tmp"):
+    if not aset.rename_volume_meta(oldname, newname, desc=aset.opts.voldesc, ext=".tmp"):
         x_it(1, "Error: Cannot rename '%s' to '%s'." % (oldname,newname))
 
     catch_signals()
@@ -5167,7 +5168,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 wip"       ; prog_date = "20250530"
+prog_version          = "0.8 wip"       ; prog_date = "20250601"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 

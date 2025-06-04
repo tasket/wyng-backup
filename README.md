@@ -94,17 +94,20 @@ without concern for python or Unix commands.
 
 Wyng is distributed as a single Python executable with no complex
 supporting modules or other program files; it can be placed in '/usr/local/bin'
-or another place of your choosing.
+or another place of your choosing:
 
+```
+sudo cp -a wyng-backup/src/wyng /usr/local/bin
+```
 
 Archives can be created with `wyng arch-init`:
 
 ```
-wyng arch-init --dest=ssh://me@example.com:/home/me/mylaptop.backup
+sudo wyng arch-init --dest=ssh://me@example.com:/home/me/mylaptop.backup
 
 ...or...
 
-wyng arch-init --dest=file:/mnt/drive2/mylaptop.backup
+sudo wyng arch-init --dest=file:/mnt/drive2/mylaptop.backup
 ```
 
 The examples above create a 'mylaptop.backup' directory on the destination.
@@ -114,7 +117,7 @@ and directory path.
 Next you can start making backups with `wyng send`:
 
 ```
-wyng send --dest=file:/mnt/drive1/mylaptop.backup --local=volgrp1/pool1 root-volume home-volume
+sudo wyng send --dest=file:/mnt/drive1/mylaptop.backup --local=volgrp1/pool1 root-volume home-volume
 ```
 
 This command sends two volumes 'root-volume' and 'home-volume' from the LVM thin pool 'volgrp1/pool1' to the destination archive.
@@ -153,6 +156,7 @@ Run Wyng using the following commands and arguments in the form of:
 | **arch-check** _[volume_name] [*]_    | Thorough check of archive data & metadata
 
 <br/>
+
 ### Command details
 
 #### send
@@ -375,6 +379,7 @@ the volume data if present.
 --compression          | (arch-init) Set compression type:level.
 --hashtype             | (arch-init) Set data hash algorithm: _hmac-sha256_ or _blake2b_.
 --chunk-factor         | (arch-init) Set archive chunk size.
+--volume-desc          | Set volume description (add, rename, send)
 --vid                  | Select volume by ID (delete)
 --tar-bypass           | Use direct access for file:/ archives (send)
 --passcmd=_'command'_  | Read passphrase from output of a wallet/auth app
@@ -389,6 +394,7 @@ the volume data if present.
 --opt-qubes            | Override internal _qvm-run_ options.
 --meta-reduce=_mode:N_ | Reduce or extend local metadata caching.
 --meta-dir=_path_      | Use a different metadata dir than the default.
+--config=_file_        | Use alternate config .ini file
 --debug                | Debug mode
 
 
