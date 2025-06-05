@@ -3228,17 +3228,16 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only, other_vols=
                 if lvols[snap1].gettime() != lastses.gettime():   lvols[snap1].delete()
 
             if not lvols[snap1].exists() or not exists(mapfile) \
-            or (os.stat(mapfile).st_mtime_ns != lvols[snap1].gettime()
-                and os.stat(mapfile).st_blocks == 0):
+            or os.stat(mapfile).st_mtime_ns != lvols[snap1].gettime():
                 # Handle inadvertant mapfile snapshot mis-match
                 lvols[snap1].delete()
 
-            # if lvols[snap1].exists() and lvols[snap1].gettime() == l_vol.gettime() \
-            # and lvols[snap1].getsize() == l_vol.getsize() \
-            # and l_vol.getperms() == vol.sessions[vol.last].permissions and exists(mapfile):
-            #     # No changes forthcoming.  This vol will not have a 'snap2' created for it
-            #     # and won't be scanned for deltas or have snapshot rotation.
-            #     unchanged_vols.append(datavol)    ; continue
+            if lvols[snap1].exists() and lvols[snap1].gettime() == l_vol.gettime() \
+            and lvols[snap1].getsize() == l_vol.getsize() \
+            and l_vol.getperms() == vol.sessions[vol.last].permissions and exists(mapfile):
+                # No changes forthcoming.  This vol will not have a 'snap2' created for it
+                # and won't be scanned for deltas or have snapshot rotation.
+                unchanged_vols.append(datavol)
 
         elif monitor_only:
             print("  Skipping '%s'; No data." % datavol)    ; continue
@@ -3597,9 +3596,9 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
         l_vol   = lvols[lvols[vol.name].snap2]
         if changed:
             volpath = l_vol.path
-            vol_ts = l_vol.gettime()      ; volsize = l_vol.getsize()
+            vol_ts  = l_vol.gettime()      ; volsize = l_vol.getsize()
         else:
-            vol_ts = vol.sessions[vol.last].gettime()  ; volsize = prior_size
+            vol_ts  = vol.sessions[vol.last].gettime()  ; volsize = prior_size
         volperms = lvols[vol.name].getperms()
 
     if not status1:   print("  [", end="")
@@ -3938,6 +3937,7 @@ def init_dedup_index(aset, listfile="", extra_vols=0):
 
 def dedup_existing(aset):
     dest = aset.dest
+    if not dest.hlinks:   x_it(1, "Hardlinks not supported on dest.")
 
     print("\nBuilding deduplication index...", end="", flush=True)
     init_dedup_index(aset, "dedup.lst.gz")
@@ -3963,7 +3963,11 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={}, ses_tags={},
 
     options, dest = aset.opts, aset.dest    ; status1 = not options.unattended or verbose
     ms_start = time.monotonic()    ; MB   = 1024**2
-    curtime = use_sesid or time.strftime("%Y%m%d-%H%M%S", time.localtime(time_start))
+    curtime  = use_sesid or time.strftime("%Y%m%d-%H%M%S", time.localtime(time_start))
+    dedup    = options.dedup and dest.hlinks
+
+    if options.dedup and not dest.hlinks:
+        err_out("Hardlinks not supported on dest.")
 
     if options.autoprune.lower() == "full":
         for vol in aset.vols.values():   autoprune(vol, apmode="full")
@@ -3989,10 +3993,6 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={}, ses_tags={},
     storage.update_vol_list({x.name: x.vid for x in aset.vols.values()})
 
     if monitor_only:   send_alls.clear()   ; other_vols.clear()
-
-    if len(incrementals)+len(send_alls)+len(other_vols) \
-        +(len(unchanged_vols if options.send_unchanged else [])) == 0:
-        print("No new data.")    ; return curtime, ses_tags
 
     # Process session tags
     if (get_tags := options.tag and not ses_tags and not monitor_only):
@@ -4040,13 +4040,16 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={}, ses_tags={},
         # Process delta metadata (update_delta_digest())
         if datavol in incrementals:
             updated, svsize, vperms = storage.process_deltas(storage, aset, datavol, monitor_only)
+            if monitor_only and not updated:   print("  no change")
         elif monitor_only:
-            print("  no snapshot")
+            print("  no change")
 
         if monitor_only:   continue
 
-        if datavol in send_alls+list(other_vols) or updated or options.send_unchanged:
-            if options.dedup and not aset.dedupindex and datavol not in unchanged_vols:
+        updated = updated or datavol not in unchanged_vols or bool(vol.map_used())
+
+        if updated or options.send_unchanged:
+            if dedup and not aset.dedupindex and not re.match(r"^wyng-.+-metadata$", datavol):
                 if status1:   print("I/", end="\r", flush=True)
                 init_dedup_index(aset, extra_vols=len(other_vols))
 
@@ -4057,7 +4060,7 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={}, ses_tags={},
             # Send Volume
             sent, svsize, sbcount, ddbytes, stime = \
                 send_volume(storage, vol, curtime, ses_tags, send_all=datavol in send_alls,
-                            changed=datavol not in unchanged_vols, benchmark=benchmark)
+                            changed=updated, benchmark=benchmark)
             dest.free -= int(sbcount + (sbcount * 0.05))
             if vol.aliastype == "import_other":   del(imports[datavol])
 
@@ -4069,7 +4072,8 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={}, ses_tags={},
         print(p1 if sbcount or ddbytes or updated else p1+"  no change"+p2, flush=True)
         totalvsize += svsize    ; totalbcount += sbcount
 
-    if not monitor_only and (volct:= sum(map(len,(incrementals,send_alls,unchanged_vols,other_vols)))):
+    if not monitor_only and (volct:= sum(map(len, (incrementals,send_alls,
+                                                   unchanged_vols,other_vols)))):
         print(hl, "\n%0d volumes, %0d——>%0d MB in %.1f seconds."
               % (volct, totalvsize/MB, totalbcount/MB, time.monotonic() - ms_start)
               )
@@ -5172,7 +5176,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 wip"       ; prog_date = "20250601"
+prog_version          = "0.8 wip"       ; prog_date = "20250602"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
