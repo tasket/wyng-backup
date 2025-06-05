@@ -144,6 +144,7 @@ class ArchiveSet:
             if debug:   print(f"\n{self.confname} metadata cipher = {ci_types[1]}")
 
             # access a key agent, if available for this UUID and archive URL
+            agent_helper_write(tmpdir)
             agentkeys  = agent_get(dest.agent_name, pass_agent)
 
             # get passphrase if we got no agentkeys
@@ -966,8 +967,9 @@ while True:
     except TimeoutError:
         print("timeout")    ; do_mkpipe()    ; continue
 '''
-    with open(f"{path}/{prog_name}_agent.py", "wb") as progf:
-        progf.write(bytes(agent_program, encoding="UTF-8"))
+    if not exists(pfile := f"{path}/{prog_name}_agent.py"):
+        with open(pfile, "wb") as progf:
+            progf.write(bytes(agent_program, encoding="UTF-8"))
 
 
 def agent_get(agname, duration):
@@ -2227,24 +2229,24 @@ def check_manifest_sequence(vol, sesnames, full=False, addcol=False):
             if addcol:   ln2, ses = ln2.split()
             if ln1 != "0":
                 if len(ln1) != aset.mhash_sz:
-                    raise ValueError(f"Bad hash size: {ln1}")
+                    raise ValueError(f"Bad hash size: {ln1}\n{manifest}")
                 h1 = base64.urlsafe_b64decode(ln1)
             if len(ln2) != sesname_sz:
-                raise ValueError(f"Bad size: {ln2}")
+                raise ValueError(f"Bad size: {ln2}\n{manifest}")
             a1 = int("0"+ln2, 16)
             if not (a1 <= volsize and a1 % chunksize == 0):
-                raise ValueError(f"Chunk addr out of bounds: {ln2}")
+                raise ValueError(f"Chunk addr out of bounds: {ln}\n{manifest}")
             if full:
                 if addr != a1:
-                    raise ValueError(f"Manifest seq error. Expected {addr} got {a1}.")
+                    raise ValueError(f"Seq error. Expected {addr} got {ln2}.\n{manifest}")
                 addr += chunksize
             else:
                 if not a1 >= addr:
-                    raise ValueError(f"Out of sequence: {a1}")
+                    raise ValueError(f"Out of sequence: {ln2}\n{manifest}")
                 addr = a1 + chunksize
 
     if full and addr < vol.last_chunk_addr(volsize)[0]:
-        raise ValueError("Manifest range stopped short at", addr)
+        raise ValueError(f"Range stopped short at {addr}\n{manifest}")
 
     if not manifest.startswith(vol.path):   os.remove(manifest)
 
@@ -2516,6 +2518,8 @@ class Destination:
     tmpprefix   = "/tmp/wyngrpc/"    ; magic  = b"\xff\x11\x15"
 
     def __init__(self, dest_url, user_ssh_opts=[], user_qubes_opts=[]):
+        os.makedirs(tmpdir+"/rpc", exist_ok=True)
+        self.write_helper_program(tmpdir+"/rpc")
 
         # parse and validate dest spec
         self.ssh_opts   = user_ssh_opts or self.ssh_opts
@@ -5296,7 +5300,7 @@ try:
         lockf = open(lockpath, "w")
         fcntl.lockf(lockf, fcntl.LOCK_EX|fcntl.LOCK_NB)
     except PermissionError:
-        x_it(1, "ERROR: No writing permission on %s." % (lockpath,prog_name))
+        x_it(1, "ERROR: No writing permission on "+lockpath)
     except IOError:
         x_it(1, "I/O ERROR obtaining lock on "+lockpath)
 
@@ -5312,20 +5316,16 @@ try:
 
     os.makedirs(vardir, exist_ok=True)
     shutil.rmtree("/tmp/"+prog_name+"-debug", ignore_errors=True)
-    os.makedirs(tmpdir+"/rpc")
-
-    Destination.write_helper_program(tmpdir+"/rpc")
-    agent_helper_write(tmpdir)
 
 
     # Dict of compressors in the form: (library, default_compress_level, compress_func)
     compressors =    {"zlib":   (zlib, 4, zlib.compress),
-                    "bz2" :   (bz2,  9, bz2.compress)}
+                      "bz2" :   (bz2,  9, bz2.compress)}
     if zstd:   compressors["zstd"] = (zstd, 3, lambda data, lvl: zstd.compress(data, lvl, 3))
 
     hash_funcs  = {"hmac-sha256": None,
-                "sha256"     : lambda x: hashlib.sha256(x).digest(),
-                "blake2b"    : lambda x: hashlib.blake2b(x, digest_size=hash_bytes).digest()}
+                   "sha256"     : lambda x: hashlib.sha256(x).digest(),
+                   "blake2b"    : lambda x: hashlib.blake2b(x, digest_size=hash_bytes).digest()}
 
     try:
         with open(cachedir+"/UUIDs", "r") as f:  uuids = json.load(f)
@@ -5349,9 +5349,8 @@ try:
 
     # Display archive update time as local time
     arch_time = ts_to_datetime(float(aset.updated_at))
-    print("Encrypted" if (aset.mcrypto and aset.datacrypto) else "Un-encrypted",
-        f"archive '{aset.dest.spec}'",
-        "\nLast updated %s (%s)" % (arch_time[:-6], arch_time[-6:]), flush=True)
+    print("Encrypted" if (aset.mcrypto and aset.datacrypto) else "Un-encrypted", "archive",
+          f"'{aset.dest.spec}'\nLast updated {arch_time[:-6]} ({arch_time[-6:]})", flush=True)
 
 
     ## Process Volume Selections ##
