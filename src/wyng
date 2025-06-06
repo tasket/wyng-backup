@@ -408,6 +408,7 @@ class ArchiveSet:
             with open(destname,"wb") as f:   f.write(self.decompress(mbuf))
 
     def get_combo_id(userid, uuid, url):
+        assert uuid or url
         return hashlib.blake2b(
                            bytes(str(userid) + uuid + url, encoding="UTF-8"),
                            digest_size=20).hexdigest()
@@ -1446,8 +1447,8 @@ class LocalStorage:
             if p != old.strip()[1]:
                 do_exec([[CP.lvm, "lvchange", path, "-p", "r"+p]])
 
-    def getperms(self, path):
-        vstat = os.stat(os.path.realpath(path))    ; uid, gid = vstat.st_uid, vstat.st_gid
+    def getperms(self, path, vstat=None):
+        vstat = vstat or os.stat(os.path.realpath(path))    ; uid, gid = vstat.st_uid, vstat.st_gid
         # use names in place of uid/gid numbers:
         user  = [x for x, num in self.users.items()  if num == uid][0]
         group = [x for x, num in self.groups.items() if num == gid][0]
@@ -1644,7 +1645,7 @@ class LocalStorage:
 
 class LocalVolume:
     maxname   = 255    ; maxpath = 4096 - maxname
-    __slots__ = ("storage","lockfile","pdir","path","name","vid","snap1","snap2","parent")
+    __slots__ = ("storage","lockfile","pdir","path","name","vid","snap1","snap2","parent","stat")
 
     def _my_init(self, storage, name, vid=None, parent=None):
         assert storage.online
@@ -1672,6 +1673,7 @@ class LocalVolume:
         lvols = self.storage.lvols
         if rotate:
             if lvols[self.snap2].exists():
+                lvols[self.snap1].delete(sync=True)
                 lvols[self.snap2].rename(self.snap1, addtags=addtags)
                 with open(self.pdir+self.snap1,"rb") as vf:   os.fsync(vf)
         else:
@@ -1685,12 +1687,6 @@ class LocalVolume:
 
     def setperms(self, perms):
         self.storage.setperms(self.path, perms)
-
-    def settime(self, t):
-        self.storage.settime(self.path, t)
-
-    def getsize(self):
-        return self.storage.getsize(self.path)
 
     def exists(self):
         return exists(self.path)
@@ -1706,16 +1702,38 @@ class LocalVolume:
 
 class FileVolume(LocalVolume):
 
+    snap_ext = (None, None)
+
     def __init__(self, storage, name, vid=None, parent=None):
         super()._my_init(storage, name, vid, parent=parent)
+        self.stat = None; self.update()
+
+    def update(self):
+        try:
+            self.stat = os.stat(self.path)
+        except:
+            self.stat = None
+        return self
+
+    def resize(self, size):
+        with open(self.path, "r+b") as vf:   vf.truncate(size); vf.flush()
+
+    def gettime(self):
+        return self.stat.st_mtime_ns
+
+    def getperms(self):
+        return self.storage.getperms(self.path, vstat=self.stat)
+
+    def getsize(self):
+        return self.stat.st_size
 
 
-class ReflinkVolume(LocalVolume):
+class ReflinkVolume(FileVolume):
 
     snap_ext = (".wyng1",".wyng2")
 
     def __init__(self, storage, name, vid=None, parent=None):
-        super()._my_init(storage, name, vid, parent=parent)
+        super().__init__(storage, name, vid, parent=parent)
 
         # assign snapshot names
         if not name.endswith(self.snap_ext):
@@ -1729,8 +1747,10 @@ class ReflinkVolume(LocalVolume):
 
         newvol = self.storage.lvols[new_name]
         if debug:   print("*rename", self.path, newvol.path)
-        if not newvol.exists():   newvol.create(size=0, ro=False)
+        subdir, fname  = os.path.split(newvol.name)
+        os.makedirs(newvol.pdir+subdir, exist_ok=True)
         self.unlock()    ; os.replace(self.path, newvol.path)
+        self.stat = None ; newvol.update()
 
     def delete(self, sync=True, check=False, force=False):
         assert force or self.name.endswith(self.snap_ext)
@@ -1738,6 +1758,7 @@ class ReflinkVolume(LocalVolume):
         if self.exists():
             if debug:   print("Del vol", self.name, flush=True)
             os.remove(self.path)
+        self.stat = None
 
     def create(self, size=None, snapshotfrom=None, ro=True, addtags=[]):
         assert self.storage.online and self.storage.fstype in self.storage.rltypes
@@ -1755,22 +1776,10 @@ class ReflinkVolume(LocalVolume):
             with open(self.path, "wb") as vf:  vf.truncate(size); vf.flush()
 
         if ro:   rel_chmod(self.path, "-", 0o222)
+        self.update()
 
         self.storage.lvols[self.name] = self
         return self
-
-    def update(self):
-        return self
-
-    def gettime(self):
-        return os.stat(self.path).st_mtime_ns
-
-    def resize(self, size):
-        if not self.exists():   raise FileNotFoundError(self.path)
-        with open(self.path, "r+b") as vf:   vf.truncate(size); vf.flush()
-
-    def getperms(self):
-        return self.storage.getperms(self.path)
 
     def is_arch_member(self):
         if not self.name.startswith("sn") or not self.name.endswith(self.snap_ext) \
@@ -1790,9 +1799,6 @@ class ReflinkVolume(LocalVolume):
         else:
             return "Y"
         #Enh: also evaluate sestag
-
-    def convert_pathname(self, path):
-        raise NotImplementedError()
 
 
 class LvmVolume(LocalVolume):
