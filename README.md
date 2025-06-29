@@ -402,7 +402,7 @@ the volume data if present.
 
 ### Option Details
 
-#### `--dest=URL`
+#### `--dest=<URL>`
 
 This option tells Wyng where to access the archive and has the same meaning for all read or write
 commands. It accepts one of the following forms:
@@ -415,7 +415,7 @@ commands. It accepts one of the following forms:
 |__qubes-ssh:__//vm-name:me@example.com[:port][/path]  | SSH server via a Qubes VM
 
 
-#### `--local`
+#### `--local=<path | volgroup/pool>`
 
 The location of local storage where logical volumes, disk images, etc. reside.  This serves as
 the _source_ for `send` commands, and as the place where `receive` restores/saves volumes.
@@ -469,8 +469,7 @@ local volume so that only the differences between local and archived volumes wil
 from the archive and written to the local volume. This results in reduced network
 usage at the expense of some extra CPU usage on the local machine, and also uses
 less local disk space when snapshots are a factor.  The best situation for sparse mode is when
-you want to restore/revert a large volume with a containing a limited number of changes
-over a low-bandwidth connection.
+you want to restore over a low-bandwidth connection a locally-existing large volume containing a limited number of differences with the archived version to be fetched (for example: using restore from an archive located at a remote server to revert a 100GB volume to yesterday's backup).
 
 
 #### `--use-snapshot`
@@ -821,9 +820,9 @@ to nail down the precisely desired range by observing the output of
 * Wyng locally stores information about backups in two ways:  Snapshots alongside your local
 source volumes, and metadata under _/var/lib/wyng_.  It is safe to _delete_
 Wyng snapshots without risking the integrity of backups (although `send` will become slower).
-However, as with all CoW snapshot based backup tools, you should never attempt to directly mount, alter or otherwise utilize a Wyng snapshot
+However, as with all CoW snapshot based backup tools, you should never attempt to directly mount, alter or otherwise directly utilize a local Wyng snapshot
 as this could (very likely) result in future backup sessions being corrupt (this is why Wyng
-snapshots are stored as read-only).  If you think you have somehow altered a Wyng snapshot, you
+snapshots are stored as read-only).  If you think you have somehow altered a local Wyng snapshot, you
 should consider it corrupt and immediately delete it before the next `send`.
 If you're in a pinch and need to use the data in a Wyng snapshot, you should first make your own
 copy or snapshot of the Wyng snapshot using `cp --reflink` or `lvcreate -s` and use that instead.
@@ -837,7 +836,7 @@ files in place.
 
 * If data corruption in the archive is suspected, use `wyng arch-check` which will scan for errors and show options for recovery.
 
-* If a volume becomes damaged and unrecoverable it may be necessary to delete it by its volume ID by using `wyng delete --vid` instead of the volume name.
+* If an archive volume becomes damaged and unrecoverable it may be necessary to delete it from the archive by its volume ID by using `wyng delete --vid` instead of the volume name.
 
 ### Testing
 

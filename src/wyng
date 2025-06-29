@@ -661,14 +661,14 @@ class ArchiveSession:
 
     attr_str  = ("localtime","previous","permissions","manifesthash")
     attr_int  = ("volsize","sequence")
-    attr_misc = ("tags","volume","archive","name","path","saved","loaded","toggle",
+    __slots__ = attr_str + attr_int \
+              + ("tags","volume","archive","name","path","saved","loaded","toggle",
                  "uuid","hashval","meta_checked","just_fetched")
     name_chk  = re.compile(r"^S_[0-9]{8}-[0-9]{6}$")
     sesname_sz= ArchiveVolume.sesname_sz    ; tag_len = 25    ; max_tags = 5    ; max_field = 64
     max_permsz= 32 * 4 * 2 + 5  # user & group names in utf-8 plus mode
     max_infosz= (tag_len * 4 + ArchiveSet.comment_len * 4 + 10) * max_tags + max_permsz \
               + sum(map(len, attr_str+attr_int)) + len(attr_str+attr_int)*(max_field+10)
-    __slots__ = attr_str + attr_int + attr_misc
 
     def __init__(self, volume, name, hashval, path="", addtags=[], show=False):
         self.volume   = volume;    self.archive = arch = volume.archive
@@ -1833,7 +1833,6 @@ class LvmVolume(LocalVolume):
         nv = storage.lvols[new_name] = LvmVolume(storage, name=new_name, vid=self.vid, members=m)
         storage.new_vol_entry(self.name, self.vid, replace=True)
 
-        nv.delete()
         self.unlock()
         do_exec([[CP.lvm, "lvrename", self.path, new_name]])
 
@@ -1866,6 +1865,8 @@ class LvmVolume(LocalVolume):
                 if check and retcode != 0:
                     raise CalledProcessError("lvremove failed "+str(retcode))
 
+            for col in self.colnames:   setattr(self, col, None)
+
     def create(self, size=None, snapshotfrom=None, ro=True, addtags=[]):
         vg = self.storage.path    ; rwmode = ["-pr"+("w" if not ro else "")]
         if self.exists():   raise ValueError(f"Volume {self.name} already exists.")
@@ -1878,8 +1879,7 @@ class LvmVolume(LocalVolume):
             do_exec([[CP.lvm, "lvcreate", "-kn", "-ay", "-V", str(size)+"b"] + rwmode
                       + addtags + ["--thin", "-n", self.name, vg+"/"+self.storage.lvpool]])
 
-        self.storage.lvols[self.name] = self
-        return self
+        return self.update()
 
     def update(self):
         self.storage.update_lvm_list(vol=self)
@@ -1888,17 +1888,16 @@ class LvmVolume(LocalVolume):
     def gettime(self):
         return int(time.mktime(time.strptime(self.lv_time, r"%Y-%m-%d %H:%M:%S %z"))*1000000000)
 
-    def settime(self, t):
-        if verbose:
-            err_out("Not setting time on LVM object.")
-        return False
-
     def resize(self, size):
         if not self.exists():   raise FileNotFoundError(self.path)
         do_exec([[CP.lvm, "lvresize", "-L", str(size)+"b", "-f", self.path]])
+        self.update()
 
     def getperms(self):
         return self.lv_attr[1]
+
+    def getsize(self):
+        return int(self.lv_size.split("B")[0])
 
     def is_arch_member(self):
         if not self.name.endswith(self.snap_ext) or "wyng" not in self.tags or not self.exists() \
@@ -2525,7 +2524,7 @@ class Destination:
 
     def __init__(self, dest_url, user_ssh_opts=[], user_qubes_opts=[]):
         os.makedirs(tmpdir+"/rpc", exist_ok=True)
-        self.write_helper_program(tmpdir+"/rpc")
+        Destination.write_helper_program(tmpdir+"/rpc")
 
         # parse and validate dest spec
         self.ssh_opts   = user_ssh_opts or self.ssh_opts
@@ -3116,26 +3115,39 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, other_vols={}):
         if datavol not in aset.vols and not monitor_only:
             add_volume(aset, datavol, opts.voldesc)
 
+        # 'mapfile' is the deltamap file, snap1 holds vol state between send/monitor ops
+        l_vol = lvols[datavol]   ; snap1, snap2 = l_vol.snap1, l_vol.snap2
         vol   = aset.vols[datavol]    ; mapfile = vol.mapfile()
         if vol.aliastype == "import_other":   continue
+
         if datavol in other_vols:
             if not (datavol.startswith("wyng-") and datavol.endswith("-metadata")):
                 print("  Queuing full scan of import '%s'" % datavol)
             vol.alias, vol.aliastype = other_vols[datavol], "import_other"
             continue
 
-        # 'mapfile' is the deltamap file, snap1 holds vol state between send/monitor ops
-        l_vol = lvols[datavol]   ; snap1, snap2 = l_vol.snap1, l_vol.snap2
-
-        if lvols[snap1].is_arch_member() == "false":
+        elif lvols[snap1].is_arch_member() == "false":
             if opts.remap:
-                lvols[snap1].delete()    ; lvols[snap2].delete()
+                lvols[snap1].delete()
             else:
                 print("  Skipping %s; snapshot is from a different archive. Use --remap to clear it."
                       % datavol)   ; error_cache.append(datavol)
                 continue
 
-        # Make deltamap or initial snapshot if necessary. Try to recover paired state
+        if len(vol.sessions) and not lvols[snap1].exists() and lvols[snap2].exists() \
+        and vol.last in lvols[snap2].tags.split(",") and "delta" not in lvols[snap2].tags \
+        and exists(mapfile) and vol.map_used() == 0 \
+        and vol.sessions[vol.last].gettime() == lvols[snap2].gettime():
+            l_vol.rotate_snapshots(rotate=True, timestamp_path=mapfile)
+            print("  Recovered interrupted snapshot rotation:", datavol)
+
+        # Make fresh session snapshot snap2
+        lvols[snap2].delete()
+        tagopts = ["--addtag=wyng", "--addtag=arch-"+aset.uuid]
+        if monitor_only:   tagopts.append("--addtag=delta")
+        lvols[snap2].create(snapshotfrom=datavol, ro=True, addtags=tagopts)
+
+        # Make deltamap if necessary. Try to recover paired state
         # by comparing timestamps; a match means remap is unnecessary.
         if len(vol.sessions):
             s1tags = lvols[snap1].tags.split(",")
@@ -3148,16 +3160,10 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, other_vols={}):
             if not lvols[snap1].exists() or not exists(mapfile)    \
             or os.stat(mapfile).st_mtime_ns != lvols[snap1].gettime() \
             or vol.last not in s1tags:
+
                 # Handle inadvertant mapfile snapshot mis-match
                 lvols[snap1].delete()
 
-            if not lvols[snap1].exists() and lvols[snap2].exists() \
-            and vol.last in lvols[snap2].tags.split(",") and "delta" not in lvols[snap2].tags \
-            and exists(mapfile) and vol.map_used() == 0 \
-            and vol.sessions[vol.last].gettime() == lvols[snap2].gettime():
-                l_vol.rotate_snapshots(rotate=True, timestamp_path=mapfile)
-                print("  Recovered interrupted snapshot rotation:", datavol)
- 
         elif monitor_only:
             print("  Skipping '%s'; No data." % datavol)    ; continue
 
@@ -3173,11 +3179,6 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, other_vols={}):
             print("  Skipping '%s'; No paired snapshot." % datavol)
             continue
 
-        # Make fresh snap2vol
-        lvols[snap2].delete()
-        tagopts = ["--addtag=wyng", "--addtag=arch-"+aset.uuid]
-        if monitor_only:   tagopts.append("--addtag=delta")
-        lvols[snap2].create(snapshotfrom=datavol, ro=True, addtags=tagopts)
 
     assert not unchanged_vols
     return incr_vols, complete_vols, unchanged_vols, other_vols
@@ -4055,7 +4056,8 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={}, ses_tags={},
         updated = updated or datavol not in unchanged_vols or bool(vol.map_used())
 
         if updated or options.send_unchanged:
-            if dedup and not aset.dedupindex and not re.match(r"^wyng-.+-metadata$", datavol):
+            if dedup and not aset.dedupindex and not re.match(r"^wyng-.+-metadata$", datavol) \
+            and updated:
                 if status1:   print("I/", end="\r", flush=True)
                 init_dedup_index(aset, extra_vols=len(other_vols))
 
@@ -5182,7 +5184,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 wip"       ; prog_date = "20250602"
+prog_version          = "0.8 beta"      ; prog_date = "20250625"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
@@ -5326,7 +5328,6 @@ try:
 
     os.makedirs(vardir, exist_ok=True)
     shutil.rmtree("/tmp/"+prog_name+"-debug", ignore_errors=True)
-
 
     # Dict of compressors in the form: (library, default_compress_level, compress_func)
     compressors =    {"zlib":   (zlib, 4, zlib.compress),
