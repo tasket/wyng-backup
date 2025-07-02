@@ -767,6 +767,12 @@ class ArchiveSession:
         else:
             return int(time.mktime(time.strptime(self.localtime, "%Y%m%d-%H%M%S"))*1000000000)
 
+    def is_changed(self):
+        sn   = self.volume.sesnames    ; ii = sn.index(self.name)
+        prev = self.volume.sessions[sn[ii-1]] if ii else None
+        return self.hashval != "0" or ii == 0 or self.volsize != prev.volsize \
+               or self.permissions != prev.permissions
+
     def save_info(self, ext=""):
         assert self.path   ; saved_files = []   ; arch = self.volume.archive
         etag = b''   ; fname = "info"   ; relpath = os.path.relpath(self.path, arch.path)
@@ -1665,6 +1671,12 @@ class LocalVolume:
         self.lockfile = None
         return True
 
+    def add_tags(self, addtags):
+        raise NotImplementedError()
+
+    def del_tags(self, tags=[]):
+        raise NotImplementedError()
+
     def rotate_snapshots(self, rotate=True, timestamp_path=None, addtags=[]):
         assert not self.name.endswith(self.snap_ext)
         if debug:
@@ -1678,6 +1690,10 @@ class LocalVolume:
                 with open(self.pdir+self.snap1,"rb") as vf:   os.fsync(vf)
         else:
             lvols[self.snap2].delete(sync=False)
+            if addtags and lvols[self.snap1].exists() and type(self) is LvmVolume:
+                lvols[self.snap1].del_tags((x for x in lvols[self.snap1].tags.split(",")
+                                              if x.startswith("S_")))
+                lvols[self.snap1].add_tags(addtags)
 
         if timestamp_path and lvols[self.snap1].exists():
             t = lvols[self.snap1].gettime()    ; os.utime(timestamp_path, ns=(t,t))
@@ -1822,12 +1838,18 @@ class LvmVolume(LocalVolume):
             self.snap1 = name + self.snap_ext[0]
             self.snap2 = name + self.snap_ext[1]
 
+    def add_tags(self, tags=[]):
+        if tags:   do_exec([[CP.lvm, "lvchange", self.path] + ["--addtag="+x for x in tags]])
+
+    def del_tags(self, tags=[]):
+        if tags:   do_exec([[CP.lvm, "lvchange", self.path] + ["--deltag="+x for x in tags]])
+
     def rename(self, new_name, addtags=[]):
         assert all((x.endswith(self.snap_ext) for x in (self.name, new_name)))
         assert self.exists()
         storage = self.storage
 
-        if addtags:   do_exec([[CP.lvm, "lvchange", self.path] + addtags])
+        if addtags:   self.add_tags(addtags)
 
         m = ((x, getattr(self,x)) for x in set(self.colnames) - {"lv_name","lv_path","thin_id"})
         nv = storage.lvols[new_name] = LvmVolume(storage, name=new_name, vid=self.vid, members=m)
@@ -1872,8 +1894,9 @@ class LvmVolume(LocalVolume):
         if self.exists():   raise ValueError(f"Volume {self.name} already exists.")
         if debug:   print("Create vol", self.name, "from", snapshotfrom, flush=True)
         if snapshotfrom:
-            do_exec([[CP.lvm, "lvcreate", "-kn", "-ay"] + rwmode + addtags + [
-                        "-s", vg+"/"+snapshotfrom, "-n", self.name]])
+            do_exec([[CP.lvm, "lvcreate", "-kn", "-ay"] + rwmode
+                               + ["--addtag="+x for x in addtags]
+                               + ["-s", vg+"/"+snapshotfrom, "-n", self.name]])
         else:
             assert size is not None
             do_exec([[CP.lvm, "lvcreate", "-kn", "-ay", "-V", str(size)+"b"] + rwmode
@@ -3143,8 +3166,7 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, other_vols={}):
 
         # Make fresh session snapshot snap2
         lvols[snap2].delete()
-        tagopts = ["--addtag=wyng", "--addtag=arch-"+aset.uuid]
-        if monitor_only:   tagopts.append("--addtag=delta")
+        tagopts = ["wyng", "arch-"+aset.uuid] + (["delta"] if monitor_only else [])
         lvols[snap2].create(snapshotfrom=datavol, ro=True, addtags=tagopts)
 
         # Make deltamap if necessary. Try to recover paired state
@@ -3160,7 +3182,6 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, other_vols={}):
             if not lvols[snap1].exists() or not exists(mapfile)    \
             or os.stat(mapfile).st_mtime_ns != lvols[snap1].gettime() \
             or vol.last not in s1tags:
-
                 # Handle inadvertant mapfile snapshot mis-match
                 lvols[snap1].delete()
 
@@ -3379,7 +3400,7 @@ def update_delta_digest_lvm(storage, aset, datavol, monitor_only):
     catch_signals()
     changed = changed or dnewchunks+dfreedblocks+anynew > 0
     if monitor_only:
-        tags = ["--addtag="+vol.last, "--addtag=delta-"+str(lvols[snap2vol].gettime())]
+        tags = [vol.last, "delta", "delta-"+str(lvols[snap2vol].gettime())]
         t2   = lvols[datavol].rotate_snapshots(rotate=changed, timestamp_path=vol.mapfile(),
                                                addtags=tags)
         if t2 != lvols[snap1vol].gettime():
@@ -3850,7 +3871,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
 
         storage.lvols[vol.name].rotate_snapshots(rotate=changed and l_vol.exists(),
                     timestamp_path=vol.mapfile(),
-                    addtags=["--addtag="+vol.last] + (["--addtag=delta"] if newmap else []))
+                    addtags=[vol.last] + (["delta"] if newmap else []))
 
     if not sent:   shutil.rmtree(ses.path)
     signal.alarm(0)    ; catch_signals(**signormal)
@@ -4039,8 +4060,8 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={}, ses_tags={},
 
     totalvsize = totalbcount = 0
     for datavol in list(other_vols.keys()) + sorted(incrementals + send_alls + unchanged_vols):
-        vol = aset.vols[datavol]
-        updated = sent = False    ; svsize = sbcount = stime = ddbytes = 0
+        vol = aset.vols[datavol]    ; svsize = sbcount = stime = ddbytes = 0
+        sent, updated = False, datavol not in unchanged_vols
         print(f"Volume '{datavol}'\n" if not status1 else
               f"            |     | {datavol}\r", flush=True, end="")
 
@@ -4053,7 +4074,7 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={}, ses_tags={},
 
         if monitor_only:   continue
 
-        updated = updated or datavol not in unchanged_vols or bool(vol.map_used())
+        updated = updated or bool(vol.map_used())
 
         if updated or options.send_unchanged:
             if dedup and not aset.dedupindex and not re.match(r"^wyng-.+-metadata$", datavol) \
@@ -4822,7 +4843,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
         and select_ses == sessions[-1]:
             if debug:   print(f"Pairing snapshot.")
             vol.init_deltamap()
-            tags = ["--addtag=wyng", "--addtag=arch-"+aset.uuid, "--addtag="+sessions[-1]]
+            tags = ["wyng", "arch-"+aset.uuid, sessions[-1]]
             save_storage.lvols[l_vol.snap2].delete()
             save_storage.lvols[l_vol.snap2].create(snapshotfrom=vol.alias, addtags=tags)
             l_vol = l_vol.update()    ; save_storage.lvols[l_vol.snap2].update()
@@ -4984,7 +5005,7 @@ def show_list(aset, selected_vols, depth=3, json_out=None):
               "volumes": {v.name: {"vid": v.vid, "desc": v.desc, "last": v.last,
                 "ts": v.sessions[v.last].gettime() if v.sessions else None,
                 "sessions": {s.name: {"volsize": s.volsize, "sequence": s.sequence,
-                  "ts": s.gettime(), "tags": s.tags} if depth > 2 else ""
+                  "ts": s.gettime(), "chg": s.is_changed(), "tags": s.tags} if depth > 2 else ""
                   for s in v.sessions.values()} } for v in aset.vols.values() }},
               json_out)
         except BrokenPipeError:
@@ -5184,7 +5205,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20250625"
+prog_version          = "0.8 beta"      ; prog_date = "20250627"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
