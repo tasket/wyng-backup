@@ -314,7 +314,8 @@ class ArchiveSet:
         return [self.confname+ext]
 
     def rename_saved(self, ext=".tmp"):
-        os.replace(self.confpath+ext, self.confpath)
+        if exists(self.confpath+ext):
+            os.replace(self.confpath+ext, self.confpath)
 
     # Set or clear state for the archive as 'in_process' in case of interruption during write.
     # Format is list containing strings or list of strings. For latter, ':|' is the delimiter.
@@ -523,13 +524,13 @@ class ArchiveVolume:
             f.write(etag)  ; f.write(buf)
         with open(pjoin(self.path,"sessions"+ext), "w") as f:
             json.dump(self.sesnames, f)
-        return [pjoin(vid,fname+ext), pjoin(vid,"sessions"+ext)] + arch.save_ini(ext)
+        return [pjoin(vid,"sessions"+ext), pjoin(vid,fname+ext)] + arch.save_ini(ext)
 
-    def rename_saved(self, ext=".tmp"):
+    def rename_saved(self, ext=".tmp", top=True):
         assert ext and exists(pjoin(self.path,"volinfo")+ext)
         for rpath in (pjoin(self.path,"volinfo"), pjoin(self.path,"sessions")):
             if exists(rpath+ext):   os.replace(rpath+ext, rpath)
-        self.archive.rename_saved(ext)
+        if top:   self.archive.rename_saved(ext)
 
     def volname_check(vname): # Fix: move to LocalStorage class
         if not 0 < len(vname) <= ArchiveVolume.volname_len:
@@ -800,11 +801,11 @@ class ArchiveSession:
         saved_files.extend([pjoin(relpath,fname+ext)] + self.volume.save_volinfo(ext))
         return saved_files
 
-    def rename_saved(self, ext=".tmp"):
+    def rename_saved(self, ext=".tmp", top=True):
         assert ext and exists(pjoin(self.path,"info")+ext)
         for rpath in (pjoin(self.path,x) for x in ("info", "manifest", "manifest.z")):
             if exists(rpath+ext):   os.replace(rpath+ext, rpath)
-        self.volume.rename_saved(ext)
+        self.volume.rename_saved(ext, top=top)
 
 # END class ArchiveSet, ArchiveVolume, ArchiveSession
 
@@ -2720,42 +2721,38 @@ class Destination:
 
         dest_program = r'''#  Copyright Christopher Laprise 2018-2025
 #  Licensed under GNU General Public License v3. See wyng-backup/LICENSE file.
-import os, sys, time, signal, shutil, subprocess as SPr, gzip, tarfile
+import os, sys, time, signal, shutil, subprocess as SPr, gzip, tarfile, json
+sighandlers = {}   ; sys_signals = ["INT","TERM","QUIT","ABRT","ALRM","TSTP","USR1"]
 
-def fssync(path, force=False):
-    if msync or force:   misc_procs.append(SPr.Popen(["sync","-f",path]))
-
-def catch_signals(sel=["INT","TERM","QUIT","ABRT","ALRM","TSTP","USR1"], iflag=False):
-    for sval in (getattr(signal,"SIG"+x) for x in sel):
-        signal.signal(sval, handle_signal) ; signal.siginterrupt(sval, iflag)
+def catch_signals(sel=sys_signals, iflag=False):
+    for sig in list(sighandlers):   signal.signal(sig, sighandlers.pop(sig))
+    for sig in (getattr(signal,"SIG"+x) for x in (sel or [])):
+        sighandlers[sig] = signal.getsignal(sig)   ; signal.signal(sig, handle_signal)
+        signal.siginterrupt(sig, iflag)
 
 def handle_signal(sig, frame):
     if sig == signal.SIGALRM:   raise IOError("Timeout ALRM")
 
 def err_out(t):   sys.stderr.write(t+"\n"); sys.stderr.flush()
 
+def fssync(path, force=False):
+    if msync or force:   misc_procs.append(SPr.Popen(["sync","-f",path]))
+
 def x_it(ec, text=None):
     if text:   err_out(text)
     sys.exit(ec)
 
-def helper_send(volid=None, ses=None, debug=False):
+def helper_send(debug=False):
     mkdirs = os.makedirs    ; hlink = os.link    ; dirname = os.path.dirname
-    if debug:   err_out(f"{os.path.abspath(os.curdir)}\n{volid} {ses}")
-    if not (volid.startswith("Vol_") and ses.startswith("S_") and exists("archive.ini")):
-        raise ValueError("Bad send args.")
-    open(tmpdir+"/start_"+volid, "w").close()
 
     with tarfile.open(mode="r|", fileobj=sys.stdin.buffer) as tarf:
         if debug:   err_out("Got tarfile")
         extract = tarf.extract    ; substitutions = {}    ; dirlist = set()
-        for i in os.scandir(volid):
-            if i.path.endswith("-tmp") and not i.path.endswith(ses+"-tmp"):
-                err_out("rmtree " + i.path)   ; shutil.rmtree(i.path, ignore_errors=True)
         for member in tarf:
             if debug:   err_out(f"{member.type} {member.name} {member.size}")
-            if not member.islnk():
+            if member.isfile():
                 extract(member, set_attrs=False)
-            else:
+            elif member.islnk():
                 source = src_orig = member.linkname   ; dest = member.name   ; ddir = dirname(dest)
                 if source in substitutions:   source = substitutions[source]
                 if ddir not in dirlist:   mkdirs(ddir, exist_ok=True)   ; dirlist.add(ddir)
@@ -2764,6 +2761,18 @@ def helper_send(volid=None, ses=None, debug=False):
                 except OSError as err:
                     if debug:   err_out(repr(err))   ; err_out(f"Substitution: {source} {dest}")
                     shutil.copyfile(source, dest)    ; substitutions[src_orig] = dest
+            elif member.ischr() and member.name == "mv":
+                catch_signals()    ; files = json.load(tarf.extractfile(tarf.next()))
+                if debug:   err_out("mv " + repr(files))
+                for f in files:   replace(f, f[:-4])
+                catch_signals(None)
+            elif member.isdir():
+                if debug:   err_out(f"Dir {os.path.abspath(os.curdir)} -- {member.name}")
+                vdir = member.name.split("/")[:2]    ; open(tmpdir+"/dir_"+vdir[0], "w").close()
+                for i in os.scandir(vdir[0]) if vdir[0].startswith("Vol_") and len(vdir) > 1 \
+                                             and str(time.time_ns())[-1] == "5" else []:
+                    if i.path.endswith("-tmp") and not i.path.endswith(vdir[1]+"-tmp"):
+                        err_out("rmtree " + i.path)   ; shutil.rmtree(i.path, ignore_errors=True)
             tarf.members = []
     fssync(".", force=True)
 
@@ -2875,7 +2884,7 @@ if cmd == "merge":
 elif cmd == "receive":
     helper_receive(lstf if lstf else sys.stdin)
 elif cmd == "send":
-    helper_send(volid=sys.argv[2], ses=sys.argv[3], debug=debug)
+    helper_send(debug=debug)
 elif cmd == "dedup":
     ddcount = 0    ; substitutions = {}
     for line in lstf:
@@ -3590,7 +3599,8 @@ def update_delta_digest_mf(volume, manifest, mapsize=None):
 # Returns (bool, int, int, int) representing whether a session was sent, the current volume size,
 # the number of bytes sent and the runtime in seconds.
 
-def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, benchmark=False):
+def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, benchmark=False,
+                tarf=None):
 
     def send_chunk_local(tar_info, etag, buf):
         chunkdir = pdirname(_fp := pjoin(destpath, tar_info.name))
@@ -3617,7 +3627,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
 
     if vol.aliastype == "import_other":
         # Use a plain file or blockdev as a source volume
-        volpath = vol.alias                     ; send_all = changed = True
+        volpath = vol.alias                     ; send_all = True    ; assert changed
         vol_ts  = os.stat(volpath).st_mtime_ns  ; volperms = storage.getperms(volpath)
         volsize = storage.getsize(volpath)
     else:
@@ -3681,14 +3691,8 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
     # Use tar to stream files to destination
     TarInfo  = tarfile.TarInfo    ; LNKTYPE = tarfile.LNKTYPE
     if not benchmark:
-        cmd = ["python3 "+dest.dtmp+"/dest_helper.py send "+vol.vid+" "+bksession
-            + (" --sync" if options.maxsync else "") + (" --debug" if debug else "")]
-        if debug:   print("\nDest run:\n", cmd, end=" ")
-        untar = SPr.Popen(dest.run_args(cmd, destcd=dest.path), stdin=SPr.PIPE, stdout=SPr.DEVNULL,
-                        stderr=open(tmpdir+"/send.log","w") if debug else SPr.DEVNULL)
-        tarf = tarfile.open(mode="w|", fileobj=untar.stdin)
-        tarf_addfile = tarf.addfile    ; tarf_add = tarf.add    ; stream_started = True
-        if debug:   print("Status:", untar.poll())
+        tarf_addfile = tarf.addfile    ; tarf_add = tarf.add              ; stream_started = True
+        tar_info = TarInfo(sdir)       ; tar_info.type = tarfile.DIRTYPE  ; tarf_addfile(tar_info)
     else:
         tarf_addfile = tarf_add = tar_add_pass    ; stream_started = False
 
@@ -3828,50 +3832,27 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
         saved_files = ses.save_info(ext=".tmp")
         for fpath in saved_files:    tarf_add(fpath, arcname=fpath)
 
-        tarf.close()    ; untar.stdin.close()
-        try:
-            untar.wait(timeout=180)
-        except SPr.TimeoutExpired:
-            print("Warning: tar process timeout.")
-            retcode = 99
-            untar.kill()
-        else:
-            retcode = untar.poll()
-
-        if retcode != 0:
-            raise RuntimeError("tar transport failure code %d" % retcode)
-
         os.link(ses.path+"/manifest.tmp", ses.path+"/manifest")
         if len(vol.sessions) > 1 and (ses.volsize // chunksize) != (prior_size // chunksize):
             check_manifest_sequence(vol, vol.sesnames, full=True)
 
         # Finalize on VM/remote
-        catch_signals()
+        tar_info = TarInfo("mv")   ; tar_info.type = tarfile.CHRTYPE   ; tarf_addfile(tar_info)
+        tar_info = TarInfo("mv2")  ; flistj = json.dumps(saved_files+[sdir+"-tmp"]).encode("utf-8")
+        tar_info.size = len(flistj); tarf_addfile(tar_info, fileobj=BytesIO(flistj))
 
-        dest.run([" && ".join(f"mv {x} {x[:-4]}" for x in saved_files)
-                 +" && mv -T "+sdir+"-tmp "+sdir
-                 +(" && ( nohup sync -f . 2&>/dev/null & )" if options.maxsync else "")
-                 ], destcd=dest.path, trap=True)
-
-        # Local finalize
-        ses.path = ses.path.rsplit("-tmp",maxsplit=1)[0]   ; os.replace(ses.path+"-tmp", ses.path)
-        ses.rename_saved(ext=".tmp")
-        if exists(ses.path+"/manifest.tmp"):   os.remove(ses.path+"/manifest.tmp")
         if old_mapfile and exists(old_mapfile):   os.remove(old_mapfile)
-        vol.init_deltamap()    ; fssync(vol.path)
+        ses.volume.init_deltamap()
 
     else:
+        saved_files = []
         vol.delete_session(bksession, remove=False)
 
     if vol.aliastype != "import_other":
-
         if (newmap := benchmark and send_all and len(vol.sessions) > 0):
             # If vol lost mapping, create new map in dry-run mode to prevent re-scan
             vol.init_deltamap()    ; update_delta_digest_mf(vol, ses.path+"/manifest")
-
-        storage.lvols[vol.name].rotate_snapshots(rotate=changed and l_vol.exists(),
-                    timestamp_path=vol.mapfile(),
-                    addtags=[vol.last] + (["delta"] if newmap else []))
+            if type(l_vol) is LvmVolume:   l_vol.add_tags(["delta"])
 
     if not sent:   shutil.rmtree(ses.path)
     signal.alarm(0)    ; catch_signals(**signormal)
@@ -3879,14 +3860,16 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
     runtime  = time.monotonic() - testtime
     t_m, t_s = divmod(runtime, 60); t_p = (f"{int(t_m)}m" if t_m else "") + f"{ceil(t_s)}s"
     if status1:
-        print(f"\r{bcount/MB: 9.1f}MB"[:12]+" |"+(t_p[:5].center(5) if bcount else "  - "), end="")
+        print(f"\r{bcount/MB: 9.1f}MB"[:12]+" |"+(t_p[:5].center(5) if bcount else "  - "),
+              end="", flush=True)
     else:
-        print("|"*((100-progress)//5) + "]", f" 100% {bcount/MB: 0.1f}MB ", end="")
+        print("|"*((100-progress)//5) + "]", f" 100% {bcount/MB: 0.1f}MB ",
+              end="", flush=True)
     if ddbytes and options.verbose:
         print("\n" if status1 else "", f"(reduced {ddbytes/MB:0.1f}MB)")
     if dedup and debug:   show_mem_stats()
 
-    return stream_started, ses.volsize, bcount, ddbytes, runtime
+    return stream_started, bcount, ddbytes, runtime, ses
 
 
 # Build deduplication hash index and list
@@ -4058,7 +4041,17 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={}, ses_tags={},
     hl = "—" * (min(max([len(aset.vols[v].name) for v in incrementals+send_alls]+[22]), 60)+20)
     print(hl, flush=True)
 
-    totalvsize = totalbcount = 0
+    totalvsize = totalbcount = 0    ; untar = tarf = None    ; saved_sessions = []
+    if not (monitor_only or benchmark):
+        cmd = ["python3 "+dest.dtmp+"/dest_helper.py send "
+            + (" --sync" if options.maxsync else "") + (" --debug" if debug else "")]
+        if debug:   print("\nDest run:\n", cmd, end=" ")
+        untar = SPr.Popen(dest.run_args(cmd, destcd=dest.path), stdin=SPr.PIPE,
+                    stdout=SPr.DEVNULL, stderr=open(tmpdir+"/send.log","w")
+                                        if debug else SPr.DEVNULL)
+        tarf  = tarfile.open(mode="w|", fileobj=untar.stdin)
+
+
     for datavol in list(other_vols.keys()) + sorted(incrementals + send_alls + unchanged_vols):
         vol = aset.vols[datavol]    ; svsize = sbcount = stime = ddbytes = 0
         sent, updated = False, datavol not in unchanged_vols
@@ -4087,19 +4080,49 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={}, ses_tags={},
                 autoprune(vol, needed_space=vol.changed_bytes, apmode=options.autoprune)
 
             # Send Volume
-            sent, svsize, sbcount, ddbytes, stime = \
+            if debug:   print("\nuntar status:", untar.poll())
+            sent, sbcount, ddbytes, stime, ses = \
                 send_volume(storage, vol, curtime, ses_tags, send_all=datavol in send_alls,
-                            changed=updated, benchmark=benchmark)
+                            changed=updated, benchmark=benchmark, tarf=tarf)
+            untar.stdin.flush()
+            saved_sessions.append((ses, updated))
             dest.free -= int(sbcount + (sbcount * 0.05))
             if vol.aliastype == "import_other":   del(imports[datavol])
 
         else:
             storage.lvols[vol.name].rotate_snapshots(rotate=False)
-            svsize = vol.volsize()
 
         p1, p2 = ("\r", " |  -" if not sent else "") if status1 else ("", "")
         print(p1 if sbcount or ddbytes or updated else p1+"  no change"+p2, flush=True)
-        totalvsize += svsize    ; totalbcount += sbcount
+        totalvsize += vol.volsize()    ; totalbcount += sbcount
+
+    if untar:
+        tarf.close()    ; untar.stdin.close()
+        try:
+            untar.wait(timeout=180)
+        except SPr.TimeoutExpired:
+            print("Warning: tar process timeout.")
+            retcode = 99
+            untar.kill()
+        else:
+            retcode = untar.poll()
+
+        if retcode != 0:
+            if debug and exists(lf := tmpdir+"/send.log"):   SPr.run([CP.cat, "-v", lf])
+            raise RuntimeError("tar transport failure code %d" % retcode)
+
+    # Local finalize
+    catch_signals()
+    for ses, changed in saved_sessions:
+        ses.path = ses.path.rsplit("-tmp",maxsplit=1)[0]   ; os.replace(ses.path+"-tmp", ses.path)
+        ses.rename_saved(ext=".tmp", top=False)    ; vol = ses.volume
+        if exists(ses.path+"/manifest.tmp"):   os.remove(ses.path+"/manifest.tmp")
+
+        if vol.aliastype != "import_other":
+            storage.lvols[vol.name].rotate_snapshots(rotate=changed,
+                        timestamp_path=vol.mapfile(), addtags=[vol.last])
+    if saved_sessions:   aset.rename_saved(ext=".tmp")
+    catch_signals(**signormal)
 
     if not monitor_only and (volct:= sum(map(len, (incrementals,send_alls,
                                                    unchanged_vols,other_vols)))):
@@ -5205,7 +5228,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name             = "wyng"
-prog_version          = "0.8 beta"      ; prog_date = "20250627"
+prog_version          = "0.8 wip"       ; prog_date = "20250701"
 format_version        = 3               ; debug     = False
 admin_permission      = os.getuid() == 0
 
