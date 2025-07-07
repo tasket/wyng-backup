@@ -28,7 +28,11 @@ untrusted data in guest filesystems to bolster container-based security.
 
 ---
 
-<p><img src="media/emblem-information.svg"/> <b>Notice: Wyng project has moved to <a href="https://codeberg.org/tasket/wyng-backup">Codeberg.org!</b></a></p>
+<table style="border-style: hidden; padding:0px;">
+    <tr vertical-align="center">
+        <td align="center" style="width:50px"><img src="media/info1.svg" height=42 /></td>
+        <td style="border-style: hidden;"><b>Notice: Wyng project has moved to <a href="https://codeberg.org/tasket/wyng-backup">Codeberg.org!</b></a></td>
+</tr></table>
 
 ---
 
