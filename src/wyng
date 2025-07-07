@@ -2322,7 +2322,7 @@ def remove_local_snapshots(storage, archive, del_all=False, purge=None):
 def parse_options(args, pdefs, altconf=""):
     conffile = altconf or (wyng_conf if exists(wyng_conf) else "")
     conf_block = {"config","debug","force","save-to","session","unattended","volume-desc","tag",
-                  "all","all-before","vols-from","import-other-from","upgrade-format",
+                  "all","all-before","vols-from","import-other-from","upgrade-format", "help",
                   "skip-corrupt-chunks"}
 
     if conffile and (altconf or not any(map(lambda x: x.startswith("--config"), args))):
@@ -2338,7 +2338,8 @@ def parse_options(args, pdefs, altconf=""):
                 else:
                     parser_defs_d[kopt]["default"] = v
 
-    parser = argparse.ArgumentParser(description="")
+    parser = argparse.ArgumentParser(prog=prog_name, description=prog_info[0], epilog=prog_info[1],
+                                     formatter_class=argparse.RawTextHelpFormatter)
     for x, y in pdefs:  parser.add_argument(*x, **y)
     options = parser.parse_args(args)   ; options.action = options.action.lower()
 
@@ -2782,7 +2783,6 @@ def helper_receive(lstf):
     for line in lstf:
         fname = line.strip()
         if not fname:   break
-        err_out(fname+" does not exist!!!") ####
         if not exists(fname):
             err_out(fname+" does not exist!")   ; fsize = 0
         else:
@@ -5227,10 +5227,13 @@ def cleanup():
 ##  MAIN  #########################################################################################
 
 # Constants / Globals
-prog_name             = "wyng"
-prog_version          = "0.8 wip"       ; prog_date = "20250701"
-format_version        = 3               ; debug     = False
-admin_permission      = os.getuid() == 0
+prog_name        = "wyng"
+prog_version     = "0.8 beta"      ; prog_date = "20250705"
+prog_info        = ("Backup logical volumes and disk images.",
+                    "License: GPLv3 (see 'LICENSE' file)"
+                    "\nWebsite: https://codeberg.org/tasket/wyng-backup")
+format_version   = 3               ; debug     = False
+admin_permission = os.getuid() == 0
 
 meta_reduce = meta_min = vardir = cachedir = tmpdir = None
 aset = storage = storagesets = None
@@ -5264,6 +5267,8 @@ dest_actions    = ("list","receive","verify","diff","arch-check") + write_action
 parser_defs = [
  [["action"],         {"choices": local_actions+dest_actions, "help": "Wyng Commands"}],
  [["volumes"],        {"nargs": "*"}],
+ [["--dest"],         {"default": "", "help": "URL: Location of archive"}],
+ [["--local"],        {"default": "", "help": "Path or LVM vg/pool containing local volumes"}],
  [["--unattended", "-u"], {"action": "store_true", "help": "Non-interactive, supress prompts"}],
  [["--authmin"],      {"default": "5", "help": "Minutes to remember authentication (default=5)"}],
  [["--all-before"],   {"dest": "allbefore", "action": "store_true",
@@ -5273,6 +5278,9 @@ parser_defs = [
                              " select session date|tag, singular or range."}],
  [["--session-strict"],{"choices": ["on","off"], "default": "on",
                         "help": "Accept/reject inclusive session date"}],
+ [["--dedup", "-d"],  {"action": "store_true", "help": "Data deduplication (send)"}],
+ [["--volume-desc"],  {"dest": "voldesc", "default": "",
+                       "help": "Set volume description (add, rename, send)"}],
  [["--tag"],          {"action": "append", "default": [],
                        "help": "tag_id[,description] Add tags when sending"}],
  [["--keep"],         {"action": "append", "default": [],
@@ -5292,8 +5300,6 @@ parser_defs = [
                        "help": "Import volume from non-snapshot file"}],
  [["--remap"],        {"action": "store_true", "help": "Remap volumes from other archive"}],
  [["--send-unchanged"], {"action": "store_true", "help": "Record unchanged volumes (send)"}],
- [["--dest"],         {"default": "", "help": "URL to archive"}],
- [["--local"],        {"default": "", "help": "Init: LVM vg/pool containing source volumes"}],
  [["--vols-from","--local-from"], {"dest": "vols_from",
                        "help": "Specify multiple volume sets grouped by local storage"}],
  [["--encrypt"],      {"help": "Encryption mode"}],
@@ -5322,10 +5328,7 @@ parser_defs = [
  [["--dry-run"],      {"action": "store_true", "help": "Dry run, do not make changes (send)"}],
  [["--debug"],        {"action": "store_true", "help": "Debug mode"}],
  [["--quiet"],        {"action": "store_true"}],
- [["--verbose"],      {"action": "count", "default": 0}],
- [["--dedup", "-d"],  {"action": "store_true", "help": "Data deduplication (send)"}],
- [["--volume-desc"],  {"dest": "voldesc", "default": "",
-                       "help": "Set volume description (add, rename, send)"}]
+ [["--verbose"],      {"action": "count", "default": 0}]
 ]
 
 try:

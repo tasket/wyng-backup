@@ -26,6 +26,12 @@ untrusted data in guest filesystems to bolster container-based security.
 
 ### Status
 
+---
+
+<p><img src="media/emblem-information.svg"/> <b>Notice: Wyng project has moved to <a href="https://codeberg.org/tasket/wyng-backup">Codeberg.org!</b></a></p>
+
+---
+
 Public beta with a range of features including:
 
  - Incremental backups of Linux logical volumes from Btrfs, XFS and Thin-provisioned LVM
