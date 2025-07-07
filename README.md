@@ -26,15 +26,11 @@ untrusted data in guest filesystems to bolster container-based security.
 
 ### Status
 
----
-
-<table style="border-style: hidden; padding:0px;">
+<table style="border-style:none; padding:0px;">
     <tr vertical-align="center">
-        <td align="center" style="width:50px"><img src="media/info1.svg" height=42 /></td>
-        <td style="border-style: hidden;"><b>Notice: Wyng project has moved to <a href="https://codeberg.org/tasket/wyng-backup">Codeberg.org!</b></a></td>
+        <td align="center" style="border-style:none; width:50px"><img src="media/info1.svg" height=42 /></td>
+        <td style="border-style:none;"><b>Notice: Wyng project has moved to <a href="https://codeberg.org/tasket/wyng-backup">Codeberg.org!</b></a></td>
 </tr></table>
-
----
 
 Public beta with a range of features including:
 
