@@ -1453,6 +1453,8 @@ class LocalStorage:
             old= SPr.check_output([CP.lvm, "lvs", "--noheadings", "-o","lv_attr", path], text=True)
             if p != old.strip()[1]:
                 do_exec([[CP.lvm, "lvchange", path, "-p", "r"+p]])
+        else:
+            raise ValueError("Bad non-file path: "+path)
 
     def getperms(self, path, vstat=None):
         vstat = vstat or os.stat(os.path.realpath(path))    ; uid, gid = vstat.st_uid, vstat.st_gid
@@ -2250,7 +2252,7 @@ def check_session_seq(vol, seslist=None, seq=None):
 def check_manifest_sequence(vol, sesnames, full=False, addcol=False):
     volsize   = vol.sessions[sesnames[-1]].volsize    ; aset = vol.archive    ; addr = 0
     chunksize = aset.chunksize    ; sesname_sz = vol.sesname_sz
-    manifest  = merge_manifests(vol, msessions=sesnames, addcol=addcol) \
+    manifest  = merge_manifests(vol, msessions=sesnames, vsize=volsize, addcol=addcol) \
                if len(sesnames) > 1 or addcol else vol.sessions[sesnames[-1]].path+"/manifest"
     with open(manifest, "r") as mrgf:
         for ln in mrgf:
@@ -2267,7 +2269,8 @@ def check_manifest_sequence(vol, sesnames, full=False, addcol=False):
                 raise ValueError(f"Chunk addr out of bounds: {ln}\n{manifest}")
             if full:
                 if addr != a1:
-                    raise ValueError(f"Seq error. Expected {addr} got {ln2}.\n{manifest}")
+                    raise ValueError(f"Seq error. Expected {addr} got {ln2} for vsize {volsize}."
+                                     f"\n{manifest}")
                 addr += chunksize
             else:
                 if not a1 >= addr:
@@ -5228,7 +5231,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 beta"      ; prog_date = "20250705"
+prog_version     = "0.8 beta"      ; prog_date = "20250708"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
