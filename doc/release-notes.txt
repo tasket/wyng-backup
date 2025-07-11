@@ -1,0 +1,3 @@
+v0.8beta13 – Fixed spurious error message in sequence checker; Use single stream for improved sending.
+
+v0.8beta12 – Faster receive --sparse; improved error handling; misc fixes and code cleanup.

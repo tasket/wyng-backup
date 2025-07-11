@@ -129,6 +129,7 @@ sudo wyng send --dest=file:/mnt/drive1/mylaptop.backup --local=volgrp1/pool1 roo
 This command sends two volumes 'root-volume' and 'home-volume' from the LVM thin pool 'volgrp1/pool1' to the destination archive.
 
 <br/>
+ 
 ## Operation
 
 Run Wyng using the following commands and arguments in the form of:
