@@ -641,7 +641,7 @@ Selects the encryption cipher/mode.  The available modes are:
 
 - `xchacha20-dgr` — Using HMAC-SHA256(rnd||hash) function.  This is the default.
 - `xchacha20-msr` — Using HMAC-SHA256(rnd||msg) function.
-- `xchacha20-ct` — Counter based; fast like _*-dgr_ with different safety trade-offs (see issue [158](https://github.com/tasket/wyng-backup/issues/158)).
+- `xchacha20-ct` — Counter based; fast like _*-dgr_ with different safety trade-offs (see issue [158](https://codeberg.org/tasket/wyng-backup/issues/158)).
 - `off` — Turns off Wyng's authentication and encryption.
 
 
@@ -742,7 +742,7 @@ to verifying everything within an archive.)
 
 ### Tips & Caveats
 
-* Qubes users: If you're using Wyng to backup Qubes VMs, you probably want to use the Wyng wrapper made especially for Qubes, [wyng-util-qubes](https://github.com/tasket/wyng-util-qubes), which makes saving & restoring VM settings along with data easy!
+* Qubes users: If you're using Wyng to backup Qubes VMs, you probably want to use the Wyng wrapper made especially for Qubes, [wyng-util-qubes](https://codeberg.org/tasket/wyng-util-qubes), which makes saving & restoring VM settings along with data easy!
 
 * LVM users: Wyng has an internal snapshot manager which creates snapshots of volumes
 in addition to any snapshots you may already have on your local storage system.
@@ -789,7 +789,7 @@ remove snapshots, there may be orphaned snapshots remaining under your old volum
 or local directory. Deleting them can prevent unnecessary consumption of disk space.  LVM snapshots can be found with the patterns `'*.tick'` and `'*.tock'` with
 the tag "wyng".  Btrfs/XFS snapshots can be found with `'sn*.wyng?'`.
 
-* Keeping a [duplicate](https://github.com/tasket/wyng-backup/issues/199) archive or "a backup of the backup" is possible with the following:
+* Keeping a [duplicate](https://codeberg.org/tasket/wyng-backup/issues/199) archive or "a backup of the backup" is possible with the following:
 ```
       mv destpath destpath-incomplete
       rsync -uaHW --delete --no-compress sourcepath/. destpath-incomplete
@@ -797,7 +797,7 @@ the tag "wyng".  Btrfs/XFS snapshots can be found with `'sn*.wyng?'`.
 ```
 
 <ul>
-The simple rsync example above can become bogged-down with unnecessary transfers because it doesn't take into account when pruning shifts data into different paths.  A script that addresses this performance pitfall is available <a href="https://gist.github.com/tasket/08f38279d8702c7defcb62cb4afdae7a">here</a>.</ul>
+The simple rsync example above can become bogged-down with unnecessary transfers because it doesn't take into account when pruning shifts data into different paths.  A `sync-archive.py` script that addresses this performance pitfall is available in the _misc/_ folder.
 <ul>
 Note that since a duplicate archive is identical, including internal UUIDs, it should only be kept for an emergency such as when the original archive is no longer available or becomes unusable. Switching back and forth between the original and duplicate for regular archival operations is not supported.</ul>
 
