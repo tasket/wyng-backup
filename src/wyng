@@ -2767,8 +2767,10 @@ def helper_send(debug=False):
                 if ddir not in dirlist:   mkdirs(ddir, exist_ok=True)   ; dirlist.add(ddir)
                 try:
                     hlink(source, dest)
-                except PermissionError as err:
-                    if debug:   err_out(repr(err))   ; err_out(f"Substitution: {source} {dest}")
+                except OSError as err:
+                    if debug:   err_out(repr(err))
+                    if err.errno != 31:   raise err
+                    err_out(f"Sub: {source} {dest}")
                     shutil.copyfile(source, dest)    ; substitutions[src_orig] = dest
             elif member.ischr() and member.name == "mv":
                 catch_signals()    ; files = json.load(tarf.extractfile(tarf.next()))
@@ -5238,7 +5240,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 beta"      ; prog_date = "20250715"
+prog_version     = "0.8 beta"      ; prog_date = "20250716"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
