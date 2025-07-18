@@ -2869,6 +2869,9 @@ def helper_merge_finalize():
 cmd = sys.argv[1]   ; debug = "--debug" in sys.argv   ; msync = "--sync" in sys.argv
 tmpdir = os.path.dirname(os.path.abspath(sys.argv[0]))  ; misc_procs = []; magic  = b"\xff\x11\x15"
 exists = os.path.exists    ; replace = os.replace    ; remove = os.remove
+err_out(f"Python {sys.version}\n{os.uname()}")
+err_out(f"Args:\n{sys.argv}\n")
+
 if cmd in ("receive","dedup") and exists(tmpdir+"/dest.lst.gz"):
     lstf = gzip.open(tmpdir+"/dest.lst.gz", "rt")
 else:
@@ -3260,19 +3263,20 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only, other_vols=
         if len(vol.sessions):
             lastses = vol.sessions[vol.last]
 
+            if not lvols[snap1].exists() and l_vol.gettime() == lastses.gettime() \
+            and lastses.volsize == l_vol.getsize() and not vol.map_used():
+                # Create snap1 from datavol if its missing but source timestamp aligns
+                lvols[snap1].create(snapshotfrom=datavol, ro=True)
+                # Avoid race condition
+                if lvols[snap1].gettime() != lastses.gettime() \
+                or lvols[snap1].getsize() != lastses.volsize:
+                    lvols[snap1].delete()
+
             if not exists(mapfile) and lvols[snap1].exists() \
             and lastses.gettime() == lvols[snap1].gettime()  \
             and lastses.volsize == lvols[snap1].getsize():
                 # Create deltamap if its missing but datavol and lastses timestamps align
                 vol.init_deltamap(timestamp=lvols[snap1].gettime())
-
-            if exists(mapfile) and not lvols[snap1].exists() \
-            and os.stat(mapfile).st_mtime_ns == l_vol.gettime() == lastses.gettime() \
-            and lastses.volsize == l_vol.getsize():
-                # Create snap1 from datavol if its missing but other timestamps align
-                lvols[snap1].create(snapshotfrom=datavol, ro=True)
-                # Avoid race condition
-                if lvols[snap1].gettime() != lastses.gettime():   lvols[snap1].delete()
 
             if not lvols[snap1].exists() or not exists(mapfile) \
             or os.stat(mapfile).st_mtime_ns != lvols[snap1].gettime():
@@ -5240,7 +5244,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 beta"      ; prog_date = "20250716"
+prog_version     = "0.8 wip"      ; prog_date = "20250717"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
