@@ -2767,6 +2767,12 @@ def helper_send(debug=False):
                 if ddir not in dirlist:   mkdirs(ddir, exist_ok=True)   ; dirlist.add(ddir)
                 try:
                     hlink(source, dest)
+                except PermissionError as err: ####
+                    err_out(source)
+                    err_out(repr(os.stat(source)) if exists(source) else "Does not exist!")
+                    err_out(dest)
+                    err_out(repr(os.stat(dest)) if exists(dest) else "Does not exist!")
+                    raise err
                 except OSError as err:
                     if debug:   err_out(repr(err))
                     if err.errno != 31:   raise err
