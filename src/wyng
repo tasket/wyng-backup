@@ -526,11 +526,11 @@ class ArchiveVolume:
             json.dump(self.sesnames, f)
         return [pjoin(vid,"sessions"+ext), pjoin(vid,fname+ext)] + arch.save_ini(ext)
 
-    def rename_saved(self, ext=".tmp", top=True):
+    def rename_saved(self, ext=".tmp"):
         assert ext and exists(pjoin(self.path,"volinfo")+ext)
         for rpath in (pjoin(self.path,"volinfo"), pjoin(self.path,"sessions")):
             if exists(rpath+ext):   os.replace(rpath+ext, rpath)
-        if top:   self.archive.rename_saved(ext)
+        #### if top:   self.archive.rename_saved(ext)
 
     def volname_check(vname): # Fix: move to LocalStorage class
         if not 0 < len(vname) <= ArchiveVolume.volname_len:
@@ -801,11 +801,11 @@ class ArchiveSession:
         saved_files.extend([pjoin(relpath,fname+ext)] + self.volume.save_volinfo(ext))
         return saved_files
 
-    def rename_saved(self, ext=".tmp", top=True):
+    def rename_saved(self, ext=".tmp"):
         assert ext and exists(pjoin(self.path,"info")+ext)
         for rpath in (pjoin(self.path,x) for x in ("info", "manifest", "manifest.z")):
             if exists(rpath+ext):   os.replace(rpath+ext, rpath)
-        self.volume.rename_saved(ext, top=top)
+        self.volume.rename_saved(ext)
 
 # END class ArchiveSet, ArchiveVolume, ArchiveSession
 
@@ -1586,7 +1586,7 @@ class LocalStorage:
     def update_lvm_list(self, vol=None):
         if not shutil.which(CP.lvm):   sys.stderr.write("LVM not available.\n"); return
 
-        delim   = ":::"            ; colnames = LvmVolume.colnames
+        delim   = ":::"            ; colnames = list(LvmVolume.colnames)
         vgs_all = self.vgs_all     ; LvmVol   = LvmVolume
 
         cmd = [CP.lvm, "lvs", "--units=b", "--noheadings", "--separator="+delim,
@@ -1595,7 +1595,8 @@ class LocalStorage:
         do_exec([cmd], out=tmpdir+"/volumes.lst")
 
         for ln in open(tmpdir+"/volumes.lst", "r"):
-            lv = LvmVol(self, "", members=zip(colnames, ln.strip().split(delim)))
+            m  = dict(zip(colnames, ln.strip().split(delim))); m["tags"]= set(m["tags"].split(","))
+            lv = LvmVol(self, "", members=m)
             vgs_all.setdefault(lv.vg_name, {})[lv.name] = lv
 
         self.lvols = vgs_all[self.vgname]
@@ -1694,7 +1695,7 @@ class LocalVolume:
         else:
             lvols[self.snap2].delete(sync=False)
             if addtags and lvols[self.snap1].exists() and type(self) is LvmVolume:
-                lvols[self.snap1].del_tags((x for x in lvols[self.snap1].tags.split(",")
+                lvols[self.snap1].del_tags((x for x in lvols[self.snap1].tags
                                               if x.startswith("S_")))
                 lvols[self.snap1].add_tags(addtags)
 
@@ -1824,14 +1825,15 @@ class LvmVolume(LocalVolume):
 
     snap_ext  = (".tick",".tock")
     maxname   = 112    ; maxpath = maxname    ; alphanumsym = r"^[a-zA-Z0-9\+\._-]+$"
-    colnames  = ("vg_name","lv_name","lv_attr","lv_size",
-                 "lv_time","pool_lv","thin_id","tags")
+    colnames  = {"vg_name","lv_name","lv_attr","lv_size",
+                 "lv_time","pool_lv","thin_id","tags"}
     __slots__ = colnames
 
-    def __init__(self, storage, name=None, vid=None, members=[], parent=None):
+    def __init__(self, storage, name=None, vid=None, members={}, parent=None):
 
-        self.tags = ""
-        for attr, val in members:   setattr(self, attr, val)
+        self.tags = set()
+        for attr in set(members) & self.colnames:
+            setattr(self, attr, members[attr])
 
         super()._my_init(storage, name or self.lv_name, vid, parent=parent)
         name = self.name    ; assert bool(name)
@@ -1841,11 +1843,13 @@ class LvmVolume(LocalVolume):
             self.snap1 = name + self.snap_ext[0]
             self.snap2 = name + self.snap_ext[1]
 
-    def add_tags(self, tags=[]):
-        if tags:   do_exec([[CP.lvm, "lvchange", self.path] + ["--addtag="+x for x in tags]])
+    def add_tags(self, tags):
+        do_exec([[CP.lvm, "lvchange", self.path] + ["--addtag="+x for x in tags]])
+        self.tags |= set(tags)
 
-    def del_tags(self, tags=[]):
-        if tags:   do_exec([[CP.lvm, "lvchange", self.path] + ["--deltag="+x for x in tags]])
+    def del_tags(self, tags):
+        do_exec([[CP.lvm, "lvchange", self.path] + ["--deltag="+x for x in tags]])
+        self.tags -= set(tags)
 
     def rename(self, new_name, addtags=[]):
         assert all((x.endswith(self.snap_ext) for x in (self.name, new_name)))
@@ -1854,7 +1858,7 @@ class LvmVolume(LocalVolume):
 
         if addtags:   self.add_tags(addtags)
 
-        m = ((x, getattr(self,x)) for x in set(self.colnames) - {"lv_name","lv_path","thin_id"})
+        m = {x: getattr(self,x) for x in self.colnames - {"lv_name","lv_path","thin_id"}}
         nv = storage.lvols[new_name] = LvmVolume(storage, name=new_name, vid=self.vid, members=m)
         storage.new_vol_entry(self.name, self.vid, replace=True)
 
@@ -1926,8 +1930,8 @@ class LvmVolume(LocalVolume):
         return int(self.lv_size.split("B")[0])
 
     def is_arch_member(self):
-        if not self.name.endswith(self.snap_ext) or "wyng" not in self.tags or not self.exists() \
-        or not self.storage.auuid:
+        if not self.name.endswith(self.snap_ext) or "wyng" not in self.tags \
+        or not self.exists() or not self.storage.auuid:
             return "na"
         if "arch-"+self.storage.auuid not in self.tags:
             return "false"
@@ -1938,7 +1942,7 @@ class LvmVolume(LocalVolume):
         if not self.name.endswith(self.snap_ext):   raise ValueError("Not a snapshot.")
 
         if not self.exists() or not exists(mapfile) or self.gettime() != os.stat(mapfile).st_mtime_ns \
-        or sestag not in self.tags.split(","):
+        or sestag not in self.tags:
             return "N"
         elif os.stat(mapfile).st_blocks != 0:
             return "D"
@@ -2072,6 +2076,7 @@ def arch_init(aset):
     aset.save_ini(init=True)    ; fssync(aset.path, force=True, sync=True)
     update_dest(aset, pathlist=([aset.saltname, "salt.bak"]
                                 if aset.datacrypto else []) + [aset.confname], sync=True)
+    return aset
 
 
 # Check/verify an entire archive
@@ -2297,7 +2302,7 @@ def remove_local_snapshots(storage, archive, del_all=False, purge=None):
 
     # Remove LVM snapshots
     for lv in (x for vg in storage.vgs_all.values() for x in vg.values()):
-        if lv.name.endswith(lv.snap_ext) and "wyng" in lv.tags.split(","):
+        if lv.name.endswith(lv.snap_ext) and "wyng" in lv.tags:
 
             if not archive or (purge_other and lv.is_arch_member() == "false") \
             or (del_all and lv.is_arch_member() == "true" ):
@@ -2396,8 +2401,7 @@ def get_configs(opts):
     if opts.action in ("arch-init",):
         if dest.archive_ini_hash != "none":
             raise StorageError(5, "Archive already exists: "+dest.spec)
-        arch_init(ArchiveSet(tmpdir, dest, opts))
-        return None
+        return arch_init(ArchiveSet(tmpdir, dest, opts))
 
     aset = get_configs_remote(dest, cachedir, opts)    ; os.utime(aset.path)
     if aset.updated_at is None:
@@ -2758,11 +2762,12 @@ def helper_send(debug=False):
                 extract(member, set_attrs=False)
             elif member.islnk():
                 source = src_orig = member.linkname   ; dest = member.name   ; ddir = dirname(dest)
+                if debug:   err_out(f"ln {source}")
                 if source in substitutions:   source = substitutions[source]
                 if ddir not in dirlist:   mkdirs(ddir, exist_ok=True)   ; dirlist.add(ddir)
                 try:
                     hlink(source, dest)
-                except OSError as err:
+                except PermissionError as err:
                     if debug:   err_out(repr(err))   ; err_out(f"Substitution: {source} {dest}")
                     shutil.copyfile(source, dest)    ; substitutions[src_orig] = dest
             elif member.ischr() and member.name == "mv":
@@ -3170,7 +3175,7 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, other_vols={}):
                 continue
 
         if len(vol.sessions) and not lvols[snap1].exists() and lvols[snap2].exists() \
-        and vol.last in lvols[snap2].tags.split(",") and "delta" not in lvols[snap2].tags \
+        and vol.last in lvols[snap2].tags and "delta" not in lvols[snap2].tags \
         and exists(mapfile) and vol.map_used() == 0 \
         and vol.sessions[vol.last].gettime() == lvols[snap2].gettime():
             l_vol.rotate_snapshots(rotate=True, timestamp_path=mapfile)
@@ -3184,7 +3189,7 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, other_vols={}):
         # Make deltamap if necessary. Try to recover paired state
         # by comparing timestamps; a match means remap is unnecessary.
         if len(vol.sessions):
-            s1tags = lvols[snap1].tags.split(",")
+            s1tags = lvols[snap1].tags
 
             if not exists(mapfile) and lvols[snap1].exists() \
             and vol.last in s1tags and "delta" not in lvols[snap1].tags:
@@ -4051,7 +4056,7 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={}, ses_tags={},
         if debug:   print("\nDest run:\n", cmd, end=" ")
         untar = SPr.Popen(dest.run_args(cmd, destcd=dest.path), stdin=SPr.PIPE,
                     stdout=SPr.DEVNULL, stderr=open(tmpdir+"/send.log","w")
-                                        if debug else SPr.DEVNULL)
+                                        if not purgelogs else SPr.DEVNULL)
         tarf  = tarfile.open(mode="w|", fileobj=untar.stdin)
 
 
@@ -4118,7 +4123,7 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={}, ses_tags={},
     catch_signals()
     for ses, changed in saved_sessions:
         ses.path = ses.path.rsplit("-tmp",maxsplit=1)[0]   ; os.replace(ses.path+"-tmp", ses.path)
-        ses.rename_saved(ext=".tmp", top=False)    ; vol = ses.volume
+        ses.rename_saved(ext=".tmp")    ; vol = ses.volume
         if exists(ses.path+"/manifest.tmp"):   os.remove(ses.path+"/manifest.tmp")
 
         if vol.aliastype != "import_other":
@@ -5021,7 +5026,6 @@ def retry_in_process(aset):
 def show_list(aset, selected_vols, depth=3, json_out=None):
 
     options = aset.opts
-    if aset.dest.archive_ini_hash == "none":   print("(CACHED)")
     if json_out:
         try:
             print("",file=json_out); json.dump({"wversion": prog_version, "fver": aset.format_ver,
@@ -5037,6 +5041,7 @@ def show_list(aset, selected_vols, depth=3, json_out=None):
         except BrokenPipeError:
             pass
         return
+
     if options.verbose:
         print("\nArchive Settings:")
         for key, val in aset.conf["var"].items():
@@ -5089,7 +5094,8 @@ def show_list(aset, selected_vols, depth=3, json_out=None):
             month = sname[2:8]    ; ses = vol.sessions[sname] if sname else None
             if options.unattended or options.verbose:
                 # plain listing
-                print(sname[2:], f"({ses.volsize} bytes)" if ses and options.verbose else "")
+                print(sname[2:], f"({ses.volsize} bytes)" if ses and options.verbose else "",
+                      "Chg" if ses and ses.is_changed() else "")
                 if ses and options.verbose:
                     for tag in sorted(ses.tags.items()):
                         print(" tag:", tag[0]+(", "+tag[1] if tag[1] else ""))
@@ -5198,16 +5204,17 @@ def err_out(text):
 
 @atexit.register
 def cleanup():
-    if debug:
-        shutil.rmtree("/tmp/"+prog_name+"-debug", ignore_errors=True)
-        if tmpdir:   shutil.move(tmpdir, "/tmp/"+prog_name+"-debug")
-
     try:
-        if not debug:
-            if aset:
-                aset.dest.remove_dtmp()
-                shutil.rmtree(aset.big_tmpdir, ignore_errors=True)
-            if tmpdir and exists(tmpdir):   shutil.rmtree(tmpdir, ignore_errors=True)
+        if aset and not debug:
+            aset.dest.remove_dtmp()
+            shutil.rmtree(aset.big_tmpdir, ignore_errors=True)
+
+        if tmpdir and exists(tmpdir):
+            if purgelogs:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+            else:
+                shutil.rmtree("/tmp/"+prog_name+"-debug", ignore_errors=True)
+                shutil.move(tmpdir, "/tmp/"+prog_name+"-debug")
 
         if cachedir and meta_reduce in ("on","extra"):
             SPr.run([CP.find, cachedir, "(", "-name", "manifest", "-o", "-name", "manifest.tmp"]
@@ -5231,23 +5238,26 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 beta"      ; prog_date = "20250708"
+prog_version     = "0.8 beta"      ; prog_date = "20250715"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
-format_version   = 3               ; debug     = False
-admin_permission = os.getuid() == 0
+release_string   = "%s %s release %s" % (prog_name.capitalize(), prog_version, prog_date)
+format_version   = 3
 
+debug = purgelogs = False
 meta_reduce = meta_min = vardir = cachedir = tmpdir = None
 aset = storage = storagesets = None
 time_start, monotonic_start = time.time(), time.monotonic()
 signal_handlers  = {}    ; signals_caught = []    ; error_cache = []
+admin_permission = os.getuid() == 0
 
 
 if sys.hexversion < 0x3080000:
     x_it(1, "Python ver. 3.8 or greater required.")
 
 cpu_flags = [x for x in open("/proc/cpuinfo") if x.startswith("flags")] [0].split()[1:]
+tmpdir    = tempfile.mkdtemp(prefix=prog_name, dir="/tmp")
 
 max_address     = 0xffffffffffffffff # 64bits
 # for 64bits, a subdir split of 9+7 allows =< 4096 files per dir:
@@ -5329,31 +5339,36 @@ parser_defs = [
  [["--opt-qubes"],    {"action": "append", "default": [], "help": "Override qvm-run options"}],
  [["--change-uuid"],  {"action": "store_true", "help": "Change the archive UUID (arch-check)"}],
  [["--dry-run"],      {"action": "store_true", "help": "Dry run, do not make changes (send)"}],
+ [["--purge-logs"],   {"action": "store_true", "help": "Purge logs before exiting"}],
  [["--debug"],        {"action": "store_true", "help": "Debug mode"}],
  [["--quiet"],        {"action": "store_true"}],
  [["--verbose"],      {"action": "count", "default": 0}]
 ]
 
 try:
-    options = parse_options(sys.argv[1:], parser_defs)
+    options   = parse_options(sys.argv[1:], parser_defs)
 
-    # Set stdout to devnull if --quiet is specified
-    debug = options.debug    #; assert not (options.quiet and (options.verbose or debug))
-    verbose = options.verbose or debug
+    debug     = options.debug
+    purgelogs = options.purge_logs and not debug
+    verbose   = options.verbose or debug
+    with open(tmpdir+"/err.log", "wt") as f:
+        print("Python", sys.version, "\n", os.uname(), "\n", file=f)
+        print("Options:\n", vars(options) | {"passcmd":""}, "\n", file=f)
+        print(release_string, file=f)
     if debug and not options.json:
         print("Python", sys.version, "\n", os.uname())
-        print("\n", vars(options) | {"passcmd":""}, "\n")
+        print("Options:\n", vars(options) | {"passcmd":""}, "\n")
         options.verbose = True; options.quiet = False
     if options.quiet and options.action not in ("list","version"):
+        # Set stdout to devnull if --quiet is specified
         options.unattended = True
         sys.stdout = open(os.devnull, "w")
 
-    signormal = {"sel": ["INT"], "iflag": True} if not debug else {"sel": None}
-    catch_signals(**signormal)
-
-    print("%s %s release %s" % (prog_name.capitalize(), prog_version, prog_date), flush=True)
+    print(release_string, flush=True)
     if options.action == "version":   x_it(0)
 
+    signormal = {"sel": ["INT"], "iflag": True} if not debug else {"sel": None}
+    catch_signals(**signormal)
 
     # Allow only one instance at a time
     lockpath = "/var/lock/"+prog_name
@@ -5373,7 +5388,6 @@ try:
     # cachedir: holds cached archive metadata.
     vardir      = "/var/lib/"+prog_name
     cachedir    = options.metadir or vardir
-    tmpdir      = tempfile.mkdtemp(prefix=prog_name, dir="/tmp")
     meta_reduce, meta_min = options.meta_reduce.split(":")
 
     os.makedirs(vardir, exist_ok=True)
@@ -5397,6 +5411,8 @@ try:
     # Create ArchiveSet, LocalStorage and Destination objects with get_configs().
     # Passphrase input happens here; no stdin before this point!
     aset        = get_configs(options)
+    if options.action in {"archi-init"}:
+        x_it(0)
     uuids[aset.subdir]   = [aset.uuid, aset.dest.spec]
     storage, storagesets = get_configs_storage(aset, options, require_local=not options.save_to and
                                             options.action in ("monitor","send","receive","diff"))
