@@ -2762,34 +2762,28 @@ def helper_send(debug=False):
                 extract(member, set_attrs=False)
             elif member.islnk():
                 source = src_orig = member.linkname   ; dest = member.name   ; ddir = dirname(dest)
-                if debug:   err_out(f"ln {source}")
+                if debug:   err_out(f"ln: {source}")
                 if source in substitutions:   source = substitutions[source]
                 if ddir not in dirlist:   mkdirs(ddir, exist_ok=True)   ; dirlist.add(ddir)
                 try:
                     hlink(source, dest)
-                except PermissionError as err: ####
-                    err_out(source)
-                    err_out(repr(os.stat(source)) if exists(source) else "Does not exist!")
-                    err_out(dest)
-                    err_out(repr(os.stat(dest)) if exists(dest) else "Does not exist!")
-                    raise err
                 except OSError as err:
-                    if debug:   err_out(repr(err))
                     if err.errno != 31:   raise err
-                    err_out(f"Sub: {source} {dest}")
+                    if debug:   err_out(repr(err))
+                    err_out(f"sub: {source} {dest}")
                     shutil.copyfile(source, dest)    ; substitutions[src_orig] = dest
             elif member.ischr() and member.name == "mv":
                 catch_signals()    ; files = json.load(tarf.extractfile(tarf.next()))
-                if debug:   err_out("mv " + repr(files))
+                if debug:   err_out("mv: " + repr(files))
                 for f in files:   replace(f, f[:-4])
                 catch_signals(None)
             elif member.isdir():
-                if debug:   err_out(f"Dir {os.path.abspath(os.curdir)} -- {member.name}")
+                if debug:   err_out(f"dir: {os.path.abspath(os.curdir)} -- {member.name}")
                 vdir = member.name.split("/")[:2]    ; open(tmpdir+"/dir_"+vdir[0], "w").close()
                 for i in os.scandir(vdir[0]) if vdir[0].startswith("Vol_") and len(vdir) > 1 \
                                              and str(time.time_ns())[-1] == "5" else []:
                     if i.path.endswith("-tmp") and not i.path.endswith(vdir[1]+"-tmp"):
-                        err_out("rmtree " + i.path)   ; shutil.rmtree(i.path, ignore_errors=True)
+                        err_out("rmtree: " + i.path)   ; shutil.rmtree(i.path, ignore_errors=True)
             tarf.members = []
     fssync(".", force=True)
 
@@ -2875,8 +2869,8 @@ def helper_merge_finalize():
 cmd = sys.argv[1]   ; debug = "--debug" in sys.argv   ; msync = "--sync" in sys.argv
 tmpdir = os.path.dirname(os.path.abspath(sys.argv[0]))  ; misc_procs = []; magic  = b"\xff\x11\x15"
 exists = os.path.exists    ; replace = os.replace    ; remove = os.remove
-err_out(f"Python {sys.version}\n{os.uname()}")
-err_out(f"Args:\n{sys.argv}\n")
+err_out(f"{os.uname()}\nUser {os.getuid()}, Groups: {os.getgroups()}"
+        f"\n{sys.implementation}\nArgs:\n{sys.argv}\n")
 
 if cmd in ("receive","dedup") and exists(tmpdir+"/dest.lst.gz"):
     lstf = gzip.open(tmpdir+"/dest.lst.gz", "rt")
@@ -4068,7 +4062,7 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={}, ses_tags={},
         if debug:   print("\nDest run:\n", cmd, end=" ")
         untar = SPr.Popen(dest.run_args(cmd, destcd=dest.path), stdin=SPr.PIPE,
                     stdout=SPr.DEVNULL, stderr=open(tmpdir+"/send.log","w")
-                                        if not purgelogs else SPr.DEVNULL)
+                                        if not purgetmp else SPr.DEVNULL)
         tarf  = tarfile.open(mode="w|", fileobj=untar.stdin)
 
 
@@ -5187,9 +5181,7 @@ class WTimeoutError(Exception):
 def handle_signal(signum, frame):
     if signum == signal.SIGINT:   x_it(8)
     if signum == signal.SIGALRM:
-        if debug and exists(tmpdir+"/send.log"):
-            print(x for x in open(tmpdir+"/send.log","r"))
-        raise WTimeoutError("Timeout")
+        raise WTimeoutError("Timeout.\nSee send.log for details.")
     if signum not in signals_caught:   signals_caught.append(signum)
     sys.stderr.write(" *** Caught signal "+str(signum))
 
@@ -5216,13 +5208,15 @@ def err_out(text):
 
 @atexit.register
 def cleanup():
+    if not admin_permission:   return
+
     try:
         if aset and not debug:
             aset.dest.remove_dtmp()
             shutil.rmtree(aset.big_tmpdir, ignore_errors=True)
 
         if tmpdir and exists(tmpdir):
-            if purgelogs:
+            if purgetmp:
                 shutil.rmtree(tmpdir, ignore_errors=True)
             else:
                 shutil.rmtree("/tmp/"+prog_name+"-debug", ignore_errors=True)
@@ -5257,7 +5251,7 @@ prog_info        = ("Backup logical volumes and disk images.",
 release_string   = "%s %s release %s" % (prog_name.capitalize(), prog_version, prog_date)
 format_version   = 3
 
-debug = purgelogs = False
+debug = purgetmp = False
 meta_reduce = meta_min = vardir = cachedir = tmpdir = None
 aset = storage = storagesets = None
 time_start, monotonic_start = time.time(), time.monotonic()
@@ -5351,17 +5345,15 @@ parser_defs = [
  [["--opt-qubes"],    {"action": "append", "default": [], "help": "Override qvm-run options"}],
  [["--change-uuid"],  {"action": "store_true", "help": "Change the archive UUID (arch-check)"}],
  [["--dry-run"],      {"action": "store_true", "help": "Dry run, do not make changes (send)"}],
- [["--purge-logs"],   {"action": "store_true", "help": "Purge logs before exiting"}],
+ [["--purge-tmp"],    {"action": "store_true", "help": "Purge logs before exiting"}],
  [["--debug"],        {"action": "store_true", "help": "Debug mode"}],
  [["--quiet"],        {"action": "store_true"}],
  [["--verbose"],      {"action": "count", "default": 0}]
 ]
 
 try:
-    options   = parse_options(sys.argv[1:], parser_defs)
-
-    debug     = options.debug
-    purgelogs = options.purge_logs and not debug
+    options   = parse_options(sys.argv[1:], parser_defs)   ; debug  = options.debug
+    purgetmp = options.purge_tmp and not debug           ; action = options.action
     verbose   = options.verbose or debug
     with open(tmpdir+"/err.log", "wt") as f:
         print("Python", sys.version, "\n", os.uname(), "\n", file=f)
@@ -5423,17 +5415,17 @@ try:
     # Create ArchiveSet, LocalStorage and Destination objects with get_configs().
     # Passphrase input happens here; no stdin before this point!
     aset        = get_configs(options)
-    if options.action in {"archi-init"}:
+    if action in {"archi-init"}:
         x_it(0)
     uuids[aset.subdir]   = [aset.uuid, aset.dest.spec]
     storage, storagesets = get_configs_storage(aset, options, require_local=not options.save_to and
-                                            options.action in ("monitor","send","receive","diff"))
+                                            action in ("monitor","send","receive","diff"))
 
     # Handle unfinished in_process
     if aset.in_process and aset.dest.online:
         print("** Prior operation in progress:", " ".join(aset.in_process[0:2]))
 
-        if options.action in write_actions:   retry_in_process(aset)
+        if action in write_actions:   retry_in_process(aset)
 
 
     # Display archive update time as local time
@@ -5448,21 +5440,21 @@ try:
     datavols      = sorted(set(aset.vols.keys()) - exclude_vols) if options.all else []
     selected_vols = sorted(set(options.volumes[:] + datavols))
     for v in selected_vols[:]:
-        if v not in aset.vols and options.action not in {"add","delete","rename",
-                                                         "send","arch-check"}:
+        if v not in aset.vols and action not in {"add","delete","rename",
+                                                 "send","arch-check"}:
             print(f"Volume '{v}' not found; Skipping.")
             selected_vols.remove(v)
 
 
     ## Process Commands ##
 
-    if options.action   == "monitor":
+    if action   == "monitor":
         for storage, vols in storagesets.items():
             monitor_send(storage, aset, vols or selected_vols, monitor_only=True)
         print()
 
 
-    elif options.action == "send":
+    elif action == "send":
         sid, ses_tags = None, {}
         other_vols = {x: os.path.abspath(y)
                     for x,y in map(lambda a: a.split(":|:",maxsplit=1), options.import_other_from)}
@@ -5478,7 +5470,7 @@ try:
         if other_vols:   error_cache.extend(list(other_vols))
 
 
-    elif options.action == "prune":
+    elif action == "prune":
         if options.autoprune.lower() == "off" and not options.session:
             x_it(1, "Specify --autoprune or --session for prune.")
         dvs = selected_vols
@@ -5498,7 +5490,7 @@ try:
                 print(autoprune(aset.vols[dv], apmode=options.autoprune))
 
 
-    elif options.action == "receive":
+    elif action == "receive":
 
         if len(selected_vols) != 1 and options.save_to:
             x_it(1, "Specify one volume for receive --save-to.")
@@ -5523,7 +5515,7 @@ try:
                 if count is None:   error_cache.append(dv)
 
 
-    elif options.action == "verify":
+    elif action == "verify":
         for storage, vols in storagesets.items():
             dvlist = vols or selected_vols
             for dv in dvlist:
@@ -5535,7 +5527,7 @@ try:
                 if count is None:   error_cache.append(dv)
 
 
-    elif options.action == "diff":
+    elif action == "diff":
         for storage, vols in storagesets.items():
             dvlist = vols or selected_vols
             if not storage.online and vols:
@@ -5547,11 +5539,11 @@ try:
                 if count is None:   error_cache.append(dv)
 
 
-    elif options.action == "list":
+    elif action == "list":
         show_list(aset, selected_vols, json_out=sys.stdout if options.json else None)
 
 
-    elif options.action == "add":
+    elif action == "add":
         if len(options.volumes) < 1:
             x_it(1, "Volume name(s) required for add.")
 
@@ -5559,12 +5551,12 @@ try:
             if dv not in aset.vols:   add_volume(aset, dv, options.voldesc)
 
 
-    elif options.action == "rename":
+    elif action == "rename":
         if len(options.volumes) != 2:  x_it(1,"Rename requires two volume names.")
         rename_volume(storage, aset, options.volumes[0], options.volumes[1])
 
 
-    elif options.action == "delete":
+    elif action == "delete":
         if options.clean or options.purge:
             if options.volumes:
                 x_it(1, "Cannot delete volumes with clean/purge.")
@@ -5590,22 +5582,22 @@ try:
                                     else { "dv": options.volumes[0]})
 
 
-    elif options.action == "arch-init":
+    elif action == "arch-init":
         pass
 
 
-    elif options.action == "arch-check":
+    elif action == "arch-check":
         arch_check(storage, aset, selected_vols)
 
 
-    elif options.action == "arch-deduplicate":
+    elif action == "arch-deduplicate":
         if not aset.dest.hlinks:
             x_it(1, "Hardlinks not supported on dest.")
         dedup_existing(aset)
 
 
     # Save overview to cache
-    if not exists(f:=cachedir+"/cached") or options.action in write_actions + ("arch-check",):
+    if not exists(f:=cachedir+"/cached") or action in write_actions + ("arch-check",):
         json.dump({x:y for x,y in uuids.items()
                        if exists(f"{cachedir}/{x}/archive.ini")}, open(f,"w"))
 
@@ -5621,6 +5613,10 @@ except (InputError, SelectionError, OptionError, AuthenticationError) as e:
 
 except StorageError as e:
     x_it(e.args[0], f"\n{e.__class__.__name__}: {e.args[-1]}\n")
+
+except BrokenPipeError as e:
+    e.add_note("See Wyng log for details.")
+    raise e
 
 
 ## END ##

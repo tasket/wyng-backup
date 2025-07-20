@@ -141,26 +141,26 @@ Run Wyng using the following commands and arguments in the form of:
 
 | _Command_ | _Description_  |
 |---------|---|
-| **list** _[volume_name]_    | List volumes or volume sessions.
-| **send** _[volume_name]_    | Perform a backup of enabled volumes.
-| **receive** _volume_name [*]_   | Restore volume(s) from the archive.
-| **verify** _volume_name [*]_    | Verify volumes' data integrity.
-| **prune** _[volume_name] [*]_   | Remove older backup sessions to recover archive space.
-| **delete** _volume_name_    | Remove entire volume from config and archive.
-| **rename** _vol_name_ _new_name_  | Renames a volume in the archive.
-| **arch-init**               | Create a new Wyng archive.
-| **arch-deduplicate**        | Deduplicate existing data in an archive.
-| **version**                 | Print the Wyng version and exit.
+| **list** _[volume_name]_    | List volumes or volume sessions
+| **send** _[volume_name]_    | Perform a backup of enabled volumes
+| **receive** _volume_name [*]_   | Restore volume(s) from the archive
+| **verify** _volume_name [*]_    | Verify volumes' data integrity
+| **prune** _[volume_name] [*]_   | Remove older backup sessions to recover archive space
+| **delete** _volume_name_    | Remove entire volume from config and archive
+| **rename** _vol_name_ _new_name_  | Renames a volume in the archive
+| **arch-init**               | Create a new Wyng archive
+| **arch-deduplicate**        | Deduplicate existing data in an archive
+| **version**                 | Print the Wyng version and exit
 
 
 ### Advanced commands
 
 | _Command_ | _Description_  |
 |---------|---|
-| **monitor**                     | Collect volume change metadata & rotate snapshots.
-| **diff** _volume_name [*]_      | Compare local volume with archived volume.
-| **add** _volume_name [*]_       | Adds a volume name without session data to the archive.
-| **arch-check** _[volume_name] [*]_    | Thorough check of archive data & metadata
+| **monitor**                     | Collect volume change metadata & rotate snapshots
+| **diff** _volume_name [*]_      | Compare local volume with archived volume
+| **add** _volume_name [*]_       | Adds a volume name without session data to the archive
+| **arch-check** _[volume_name] [*]_ | Thorough check of archive data & metadata
 
 <br/>
 
@@ -352,25 +352,25 @@ the volume data if present.
 | _Option_                      | _Description_
 |-------------------------------|--------------
 --dest=_URL_           | Location of backup archive.
---local=_vg/pool_  _...or..._    | Storage pool containing local volumes.
+--local=_vg/pool_  _...or..._    | Storage pool containing local volumes
 --local=_/absolute/path_    | 
 --authmin=_N_          | Remember authentication for N minutes (default: 5)
---all, -a              | Select all volumes (most cmds); Or clean all snapshots (delete).
---volex=_volname_      | Exclude volumes (send, monitor, list, prune).
---dedup, -d            | Use deduplication for send (see notes).
---session=_date-time[,date-time]_ | Select a session or session range by date-time or tag (receive, verify, prune).
---all-before           | Select all sessions before the specified _--session date-time_ (prune).
---autoprune=off        | Automatic pruning by calendar date.
+--all, -a              | Select all volumes (most cmds); Or clean all snapshots (delete)
+--volex=_volname_      | Exclude volumes (send, monitor, list, prune)
+--dedup, -d            | Use deduplication for send (see notes)
+--session=_date-time[,date-time]_ | Select a session or session range by date-time or tag (receive, verify, prune)
+--all-before           | Select all sessions before the specified _--session date-time_ (prune)
+--autoprune=off        | Automatic pruning by calendar date
 --apdays=_A:B:C:D_     | Number of days to keep or to thin-out older sessions
---keep=_date-time_     | Specify date-time or tag of sessions to keep (prune).
---tag=tagname[,desc]   | Use session tags (send, list).
+--keep=_date-time_     | Specify date-time or tag of sessions to keep (prune)
+--tag=tagname[,desc]   | Use session tags (send, list)
 --sparse               | Receive volume data sparsely (implies --sparse-write)
 --sparse-write         | Overwrite local data only where it differs (receive)
---use-snapshot         | Use snapshots when available for faster `receive`.
+--use-snapshot         | Use snapshots when available for faster `receive`
 --send-unchanged       | Record unchanged volumes, don't skip them (send)
---unattended, -u       | Don't prompt for interactive input.
---clean                | Perform garbage collection (arch-check) or metadata removal (delete).
---verbose              | Increase details.
+--unattended, -u       | Don't prompt for interactive input
+--clean                | Perform garbage collection (arch-check) or metadata removal (delete)
+--verbose              | Increase details
 --quiet                | Shhh...
 
 
@@ -379,28 +379,29 @@ the volume data if present.
 | _Option_                      | _Description_
 |-------------------------------|--------------
 --save-to=_path_       | Save a volume to _path_ (receive).
---vols-from=_json file_ | Specify local:[volumes] sets instead of --local.
+--vols-from=_json file_ | Specify local:[volumes] sets instead of --local
 --import-other-from    | Import volume data from a non-snapshot capable path during `send`
 --session-strict=_on_ | Don't retrieve volume from next-oldest session if no exact session match
 --encrypt=_cipher_     | Set encryption mode or _'off'_ (default: _'xchacha20-dgr'_)
---compression          | (arch-init) Set compression type:level.
---hashtype             | (arch-init) Set data hash algorithm: _hmac-sha256_ or _blake2b_.
---chunk-factor         | (arch-init) Set archive chunk size.
+--compression          | (arch-init) Set compression type:level
+--hashtype             | (arch-init) Set data hash algorithm: _hmac-sha256_ or _blake2b_
+--chunk-factor         | (arch-init) Set archive chunk size
 --volume-desc          | Set volume description (add, rename, send)
 --vid                  | Select volume by ID (delete)
 --tar-bypass           | Use direct access for file:/ archives (send)
 --passcmd=_'command'_  | Read passphrase from output of a wallet/auth app
---upgrade-format       | Upgrade older Wyng archive to current format. (arch-check)
---change-uuid          | Change the archive UUID to a new random value. (arch-check)
---dry-run              | Make `send` session a dry run, see estimate of changed data.
---remap                | Remap volume to current archive during `send` or `diff`.
---json                 | Output volume: session info in json format (list).
---force                | Not used with most commands.
---force-allow-rollback | Accept archive if it was reverted to an earlier state.
---opt-ssh              | Override internal _ssh_ options.
---opt-qubes            | Override internal _qvm-run_ options.
---meta-reduce=_mode:N_ | Reduce or extend local metadata caching.
---meta-dir=_path_      | Use a different metadata dir than the default.
+--upgrade-format       | Upgrade older Wyng archive to current format (arch-check)
+--change-uuid          | Change the archive UUID to a new random value (arch-check)
+--dry-run              | Make `send` session a dry run, see estimate of changed data
+--remap                | Remap volume to current archive during `send` or `diff`
+--json                 | Output volume: session info in json format (list)
+--force                | Not used with most commands
+--force-allow-rollback | Accept archive if it was reverted to an earlier state
+--opt-ssh              | Override internal _ssh_ options
+--opt-qubes            | Override internal _qvm-run_ options
+--purge-tmp            | Remove /tmp data including session logs before exiting
+--meta-reduce=_mode:N_ | Reduce or extend local metadata caching
+--meta-dir=_path_      | Use a different metadata dir than the default
 --config=_file_        | Use alternate config .ini file
 --debug                | Debug mode
 
@@ -798,13 +799,15 @@ the tag "wyng".  Btrfs/XFS snapshots can be found with `'sn*.wyng?'`.
 ```
 
 <ul>
-The simple rsync example above can become bogged-down with unnecessary transfers because it doesn't take into account when pruning shifts data into different paths.  A `sync-archive.py` script that addresses this performance pitfall is available in the _misc/_ folder.
+The simple rsync example above can become bogged-down with unnecessary transfers because it doesn't take into account when pruning shifts data into different paths.  A `sync-archive.py` script that addresses this performance pitfall is available in the _misc/_ folder.</ul>
 <ul>
 Note that since a duplicate archive is identical, including internal UUIDs, it should only be kept for an emergency such as when the original archive is no longer available or becomes unusable. Switching back and forth between the original and duplicate for regular archival operations is not supported.</ul>
 
 * _Sending to multiple archives:_ If you have created separate archives (not duplicates as described in the last section) and want to backup one or more volumes to both archives, Wyng can do this seamlessly from non-LVM storage systems such as Btrfs.  With LVM, the --remap option would have to be used each time you switch archives; this slows Wyng down to the pace of a regular incremental backup program, so keeping a duplicate archive using rsync or similar may be preferable.  However, this issue doesn't affect sending different sets of volumes to different archives, only when a specific volume is sent to more than one archive.
 
 * Wyng archives should be stored on Unix-like filesystems that were formatted with default or close-to default metadata settings (i.e. _inode_ capacity has not been manually reduced). Any format providing a 16KB:1 (or lower) data-to-inode ratio should work fine regardless of the Wyng chunksize being used.
+
+* Archive file permissions can change when moving an archive to a different system or switching to a different _dest_ protocol (i.e. from _file:_ to _ssh:_). A mis-match of permissions (such as ownership) can result in permission errors that prevent Wyng from completing a command. In such cases using `chown -R` on the archive directory may be necessary (See your OS documentation for details).
 
 
 ### Troubleshooting notes
@@ -816,6 +819,8 @@ act on all known volumes if you don't specify any volumes.  You must now use `-a
 now work for other commands as well.  This change also enables adding new volumes while doing a
 complete backup, for instance: `wyng -a send my-new-volume` – updates every volume already
 in the archive plus backup 'my-new-volume' as well.
+
+* "BrokenPipeError": A broken pipe can occur for various reasons when a Wyng helper process encounters an error while accessing archive files.  Since the helper is usually remote, the real error isn't immediately shown and Wyng only detects that its pipe to the helper is broken. Viewing the logs in the /tmp/wyng-debug dir will show the underlying error.
 
 * Backup sessions shown in `list` output may be seemingly (but not actually) out of
 order if the system's local time shifts
@@ -834,7 +839,7 @@ should consider it corrupt and immediately delete it before the next `send`.
 If you're in a pinch and need to use the data in a Wyng snapshot, you should first make your own
 copy or snapshot of the Wyng snapshot using `cp --reflink` or `lvcreate -s` and use that instead.
 
-* Error _"Cached metadata is newer"_ indicates that something has reverted the archive to an earlier state.  This could be due to a rollback attack, but could also be the result of your own actions such as keeping multiple copies of the same archive and alternately mounting them at the same location (in which case giving each copy a slightly different dir name can avert this error"; it could also be the result of a Wyng cache handling bug.  Use the `--force-allow-rollback` option if you need to recover from this error and use the older archive as is.
+* Error _"Cached metadata is newer"_ indicates that something has reverted the archive to an earlier state.  This could be due to a rollback attack, but could also be the result of your own actions such as keeping multiple copies of the same archive and alternately mounting them at the same location (in which case giving each copy a slightly different dir name can avert this error".  Use the `--force-allow-rollback` option if you need to recover from this error and use the older archive as is.
 
 * Metadata cached under _/var/lib/wyng_ may also be manually deleted.  However, the _archive.\*_
 root files in each 'a_*' directory are part of Wyng's defense against rollback attacks, so if you
