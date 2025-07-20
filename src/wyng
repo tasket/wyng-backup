@@ -2064,14 +2064,15 @@ def arch_init(aset):
 
     print("Compression   : %s:%s" % (aset.compression, aset.compr_level))
 
+    chfactor = 3
     if opts.chfactor:
         # accepts an exponent from 1 to 6
         chfactor = int(opts.chfactor)
         if not ( 0 < chfactor < 7 ):
             raise OptionError("Requested chunk size not supported.")
-        aset.chunksize = (aset.min_chunksize//2) * (2** chfactor)
-        if aset.chunksize > 256 * 1024:
-            print("Large chunk size set:", aset.chunksize)
+    aset.chunksize = (aset.min_chunksize//2) * (2** chfactor)
+    if aset.chunksize != 256 * 1024:
+        print("Chunk size set:", aset.chunksize)
 
     aset.save_ini(init=True)    ; fssync(aset.path, force=True, sync=True)
     update_dest(aset, pathlist=([aset.saltname, "salt.bak"]
@@ -2395,6 +2396,8 @@ def get_configs(opts):
     if not dest.writable and opts.action in write_actions \
     and not (opts.action == "delete" and opts.clean):
         raise StorageError(5, "Destination not writable.")
+    if not dest.umatch and opts.action in set(write_actions) - {"arch-init"}:
+        raise StorageError(5, "File ownership mis-match on destination.")
     if dest.archive_ini_hash == "none" and opts.action not in local_actions+("arch-init",):
         raise StorageError(6, f"Archive not found at '{dest.spec}'")
 
@@ -2574,7 +2577,7 @@ class Destination:
         self.spec   = dest_url                        ; self.sys = dparts.netloc
         self.path   = os.path.normpath(dparts.path)   ; self.archive_ini_hash = "none"
         self.free   = self.dtmp     =  None           ; self.last_chunkdir    = "\x00\x00"
-        self.online = self.writable = self.hlinks = self.dir_exists = False
+        self.online = self.writable = self.hlinks = self.dir_exists = self.umatch = False
         self.agent_name = "wyng-agent-" + str(os.getuid()) \
                         + ArchiveSet.get_combo_id(os.getuid(), "", self.spec)
 
@@ -2677,7 +2680,10 @@ class Destination:
                 +NL+ r"set +e && printf '\nwyng_online\n'"
                 +NL+ r"printf '\nwyng_check_free ' && df -PT . | tail -1"
                 +NL+ r"printf '\nwyng_archive_ini '"
-                +r"  && { if [ -e archive.ini ]; then sha256sum archive.ini; else echo none; fi }"
+                +r"  && { if [ -e archive.ini ]; then"
+                +NL+r"    sha256sum archive.ini"
+                +NL+r"    [ ! -O archive.ini ] || printf '\nwyng_owner_match\n'"
+                +NL+r"else echo none; fi }"
 
                 # test write access and hardlinks
                 +(NL+ r"touch archive.dat && printf '\nwyng_writable\n'"
@@ -2708,6 +2714,8 @@ class Destination:
                 self.dir_exists = True
             elif ln.startswith("wyng_archive_ini") and len(parts := ln.split()) > 1:
                 self.archive_ini_hash = parts[1]
+            elif ln.startswith("wyng_owner_match"):
+                self.umatch = True
             elif ln.startswith("wyng_check_free"):
                 if len(parts := ln.split()) > 5 and is_num(parts[5]):
                     self.free = int(parts[5]) * 1024
@@ -5244,7 +5252,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 wip"      ; prog_date = "20250717"
+prog_version     = "0.8 wip"      ; prog_date = "20250718"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
