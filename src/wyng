@@ -89,6 +89,7 @@ class ArchiveSet:
         self.subdir      = None
         self.gethash     = hash_funcs["blake2b"]
         self.autoreduce  = children > 1
+        self.autoprune_s = set()
 
         # persisted:
         self.format_ver  = 0
@@ -239,6 +240,11 @@ class ArchiveSet:
             if children > 1:
                 # load volume objects fully
                 self.load_volumes(children, show=show)
+                # compile global sessions for synced autoprune calendar
+                self.autoprune_s = {s for v in self.vols.values() for s in v.sesnames} \
+                                   if self.opts.autoprune.lower() != "off" else set() \
+                                    - {v.last for v in self.vols.values()}
+
 
     def load_volumes(self, children, vids=[], handle=False, show=False):
 
@@ -530,7 +536,6 @@ class ArchiveVolume:
         assert ext and exists(pjoin(self.path,"volinfo")+ext)
         for rpath in (pjoin(self.path,"volinfo"), pjoin(self.path,"sessions")):
             if exists(rpath+ext):   os.replace(rpath+ext, rpath)
-        #### if top:   self.archive.rename_saved(ext)
 
     def volname_check(vname): # Fix: move to LocalStorage class
         if not 0 < len(vname) <= ArchiveVolume.volname_len:
@@ -4261,8 +4266,8 @@ def autoprune(vol, needed_space=0, apmode="off", include=set()):
     if apmode not in ("on","full") and not include:   return 0
 
     datavol   = vol.name                      ; dest    = vol.archive.dest
-    apmode    = apmode.lower()                ; exclude = set()
-    sessions  = vol.sesnames[:-1]             ; marked  = 0
+    apmode    = apmode.lower()                ; exclude = set()    ; marked  = 0
+    sessions  = sorted(aset.autoprune_s.copy()) or vol.sesnames[:-1]
     startdate = to_date(sessions[0])          ; nthresh = 3 if apmode == "on" else 0
     enddate   = min(to_date(sessions[-2]), today-thin_days) if len(sessions) > 2 else 0
 
@@ -4306,15 +4311,17 @@ def autoprune(vol, needed_space=0, apmode="off", include=set()):
                     for dses in apcal[span+bigday]:
                         if dses[1]:
                             # always decr bigday, but don't toggle if session is excluded
-                            dlist[bigday] -= 1
-                            dses[1] = vol.sessions[dses[0]].toggle = dses[0] in exclude
+                            dlist[bigday] -= 1    ; dses[1] = False
+                            if dses[0] in vol.sessions:
+                                vol.sessions[dses[0]].toggle = dses[0] in exclude
                             break
 
     # Find contiguous marked ranges and merge/prune them. Repeat until free >= needed space.
     factor = 1    ; removed_total = 0    ; sessions.append("End")
     while True:
-        to_prune = []    ; removed_ct = 0    ; skipped = False
+        to_prune, pruned = [], set()     ; removed_ct = 0    ; skipped = False
         for ses in sessions:
+            if ses not in vol.sesnames:   sessions[sessions.index(ses)] = None   ; continue
             if ses is None:   continue
             if ses == "End" or vol.sessions[ses].toggle :
                 if to_prune:
@@ -4325,6 +4332,7 @@ def autoprune(vol, needed_space=0, apmode="off", include=set()):
                     target_s = vol.sesnames[vol.sesnames.index(to_prune[-1]) + 1]
                     merge_sessions(vol, to_prune, target_s, clear_sources=True)
 
+                    pruned.update(to_prune)
                     for i in to_prune:   sessions[sessions.index(i)] = None
                     include -= set(to_prune)    ; removed_ct += len(to_prune);   to_prune.clear()
                     if not include and nthresh and removed_ct >= nthresh*factor:  break # for ses
@@ -4344,7 +4352,7 @@ def autoprune(vol, needed_space=0, apmode="off", include=set()):
             factor += 2
 
     if options.verbose:   print(datavol+": Removed", removed_total)
-    return removed_total
+    return removed_total, pruned
 
 
 # Accepts a list of session names in ascending order (or else uses all sessions in the volume)
@@ -5252,7 +5260,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 wip"      ; prog_date = "20250718"
+prog_version     = "0.8 wip"      ; prog_date = "20250719"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
@@ -5479,9 +5487,10 @@ try:
 
 
     elif action == "prune":
-        if options.autoprune.lower() == "off" and not options.session:
+        ap = options.autoprune.lower()   ; dvs = selected_vols
+        if ap == "off" and not options.session:
             x_it(1, "Specify --autoprune or --session for prune.")
-        dvs = selected_vols
+
 
         if not options.unattended and len(dvs):
             print("This operation will delete session(s) from the archive;")
@@ -5494,8 +5503,8 @@ try:
             print(dv, end=" -", flush=True)
             if options.session:
                 print(prune_sessions(aset.vols[dv], options.session.split(",", maxsplit=1)))
-            elif options.autoprune.lower() in ("on","full"):
-                print(autoprune(aset.vols[dv], apmode=options.autoprune))
+            elif ap in ("on","full"):
+                print(autoprune(aset.vols[dv], apmode=ap))
 
 
     elif action == "receive":
