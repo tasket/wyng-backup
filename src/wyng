@@ -84,12 +84,12 @@ class ArchiveSet:
         self.dedupindex  = {}
         self.dedupsessions = []
         self.raw_hashval = None
-        self.apdays      = None
         self.big_tmpdir  = self.path+"/.tmp"
         self.subdir      = None
         self.gethash     = hash_funcs["blake2b"]
         self.autoreduce  = children > 1
-        self.autoprune_s = set()
+        self.apdays      = None
+        self._autoprune_s= set()
 
         # persisted:
         self.format_ver  = 0
@@ -413,6 +413,14 @@ class ArchiveSet:
             if not hmac.compare_digest(digest, self.b64hash(mbuf)):
                 raise ValueError("Hash does not match.")
             with open(destname,"wb") as f:   f.write(self.decompress(mbuf))
+
+    # compile global sessions for synced autoprune calendar
+    def get_global_ap_ses(self):
+        if self._autoprune_s:   return self._autoprune_s.copy()
+        self._autoprune_s = {s for v in self.vols.values() for s in v.sesnames} \
+                             if self.opts.autoprune.lower() != "off" else set() \
+                             - {v.last for v in self.vols.values()}
+        return self._autoprune_s.copy()
 
     def get_combo_id(userid, uuid, url):
         assert uuid or url
@@ -1817,6 +1825,7 @@ class ReflinkVolume(FileVolume):
 
     def paired_state(self, mapfile, sestag):
         if not self.name.endswith(self.snap_ext):   raise ValueError("Not a snapshot.")
+
         if not self.exists() or not exists(mapfile) or self.gettime() != os.stat(mapfile).st_mtime_ns:
             return "N"
         elif os.stat(mapfile).st_blocks != 0:
@@ -2767,17 +2776,20 @@ def helper_send(debug=False):
     mkdirs = os.makedirs    ; hlink = os.link    ; dirname = os.path.dirname
 
     with tarfile.open(mode="r|", fileobj=sys.stdin.buffer) as tarf:
+        def altextract(*a, **ka): ka.pop("filter"); return tarf.extract(*a, **ka)
+        extract = altextract if sys.version_info[:2] < (3,10) else tarf.extract
+
         if debug:   err_out("Got tarfile")
-        extract = tarf.extract    ; substitutions = {}    ; dirlist = set()
+        substitutions = {}    ; pdir = ""
         for member in tarf:
             if debug:   err_out(f"{member.type} {member.name} {member.size}")
             if member.isfile():
-                extract(member, set_attrs=False)
+                extract(member, set_attrs=False, filter="data")
             elif member.islnk():
                 source = src_orig = member.linkname   ; dest = member.name   ; ddir = dirname(dest)
                 if debug:   err_out(f"ln: {source}")
                 if source in substitutions:   source = substitutions[source]
-                if ddir not in dirlist:   mkdirs(ddir, exist_ok=True)   ; dirlist.add(ddir)
+                if ddir != pdir:   mkdirs(ddir, exist_ok=True)   ; pdir = ddir
                 try:
                     hlink(source, dest)
                 except OSError as err:
@@ -3735,8 +3747,9 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
 
         # Feed delta bmap to inner loop in pieces segmented by large zero delimeter.
         # This allows skipping most areas when changes are few.
-        zdelim  = bytes(64)    ; zdlen = len(zdelim)*8      ; minibmap = None   ; bmap_list = []
-        addr    = counter = percent = bcount = ddbytes = 0  ; checkpt = 512     ; bmsz = zdlen*300
+        addr    = counter = percent = bcount = ddbytes = 0   ; checkpt = 32*MB//chunksize+80
+        zdelim  = bytes(64)  ; zdlen = len(zdelim)*8
+        minibmap, bmap_list, bmsz   = None, [], zdlen*300
 
         while addr < volsize:
             if len(bmap_list):
@@ -4267,7 +4280,7 @@ def autoprune(vol, needed_space=0, apmode="off", include=set()):
 
     datavol   = vol.name                      ; dest    = vol.archive.dest
     apmode    = apmode.lower()                ; exclude = set()    ; marked  = 0
-    sessions  = sorted(aset.autoprune_s.copy()) or vol.sesnames[:-1]
+    sessions  = sorted(aset.get_global_ap_ses())
     startdate = to_date(sessions[0])          ; nthresh = 3 if apmode == "on" else 0
     enddate   = min(to_date(sessions[-2]), today-thin_days) if len(sessions) > 2 else 0
 
@@ -4317,9 +4330,9 @@ def autoprune(vol, needed_space=0, apmode="off", include=set()):
                             break
 
     # Find contiguous marked ranges and merge/prune them. Repeat until free >= needed space.
-    factor = 1    ; removed_total = 0    ; sessions.append("End")
+    pruned, factor = set(), 1    ; sessions.append("End")
     while True:
-        to_prune, pruned = [], set()     ; removed_ct = 0    ; skipped = False
+        to_prune = []     ; removed_ct = 0    ; skipped = False
         for ses in sessions:
             if ses not in vol.sesnames:   sessions[sessions.index(ses)] = None   ; continue
             if ses is None:   continue
@@ -4340,7 +4353,6 @@ def autoprune(vol, needed_space=0, apmode="off", include=set()):
                 to_prune.append(ses)
 
         if removed_ct:
-            removed_total += removed_ct
             dest.get_free(tmpdir+"/merge.log")    ; os.remove(tmpdir+"/merge.log")
 
         if skipped and apmode != "off":   continue # while
@@ -4351,8 +4363,8 @@ def autoprune(vol, needed_space=0, apmode="off", include=set()):
         else:
             factor += 2
 
-    if options.verbose:   print(datavol+": Removed", removed_total)
-    return removed_total, pruned
+    if debug:   print(pruned)
+    return len(pruned)
 
 
 # Accepts a list of session names in ascending order (or else uses all sessions in the volume)
@@ -4673,6 +4685,9 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
         elif paired == "D":
             l_vol = storage.lvols[snap1vol]
             print("Snapshot is type delta:")
+        elif storage.lvols[snap1vol].exists():
+            l_vol = storage.lvols[snap1vol]
+            print("Snapshot is not paired:")
         else:
             print("Snapshot not available; Comparing with source volume instead.")
 
@@ -4689,7 +4704,6 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
     if verify_only != 2:
         print("\nReceiving" if save_path else "\nVerifying", f"volume '{vol.name}'",select_ses[2:])
         if save_path:    print("Saving to %s '%s'" % (save_type, save_path))
-        if not verbose:   print("[", end="")
 
     # Collect session manifests
     diff_ses = []
@@ -4746,6 +4760,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
                 if sparse else None
 
     # Open manifest then receive, check and save data
+    if verify_only != 2 and not verbose:   print("[", end="")
     addr = -1    ; bcount = diff_count = progress = 0    ; buf = b''    ; magic = dest.magic
     for mfline in open(manifest, "r") if volsize else []:
         if lchunk_addr <= addr >= 0:   break
@@ -4758,7 +4773,6 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
                   f"] {x:.1%}")), end=" ", flush=True)
         elif (addr/volsize)*100 > progress and verify_only != 2:
             print("|", end="", flush=True)   ; progress += 5
-
 
         # Process zeros quickly
         if cksum == "0":
@@ -5260,7 +5274,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 wip"      ; prog_date = "20250719"
+prog_version     = "0.8 beta"      ; prog_date = "20250720"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
