@@ -784,7 +784,7 @@ class ArchiveSession:
     def is_changed(self):
         sn   = self.volume.sesnames    ; ii = sn.index(self.name)
         prev = self.volume.sessions[sn[ii-1]] if ii else None
-        return self.hashval != "0" or ii == 0 or self.volsize != prev.volsize \
+        return self.manifesthash != "0" or ii == 0 or self.volsize != prev.volsize \
                or self.permissions != prev.permissions
 
     def save_info(self, ext=""):
@@ -1597,6 +1597,7 @@ class LocalStorage:
 
     # Retrieves survey of all LVM VGs/LVs
     def update_lvm_list(self, vol=None):
+        if not self.online:   return
         if not shutil.which(CP.lvm):   sys.stderr.write("LVM not available.\n"); return
 
         delim   = ":::"            ; colnames = list(LvmVolume.colnames)
@@ -1604,7 +1605,10 @@ class LocalStorage:
 
         cmd = [CP.lvm, "lvs", "--units=b", "--noheadings", "--separator="+delim,
                     "--options=" + ",".join(colnames)]
-        if vol:   cmd.append(vol.path)
+        if vol and not exists(vol.path):
+            return
+        elif vol:
+            cmd.append(vol.path)
         do_exec([cmd], out=tmpdir+"/volumes.lst")
 
         for ln in open(tmpdir+"/volumes.lst", "r"):
@@ -1722,7 +1726,7 @@ class LocalVolume:
         self.storage.setperms(self.path, perms)
 
     def exists(self):
-        return exists(self.path)
+        return self.storage.online and exists(self.path)
 
     def check_pathname(path):
         if not 0 < len(path) <= LocalVolume.maxpath:
@@ -1826,7 +1830,8 @@ class ReflinkVolume(FileVolume):
     def paired_state(self, mapfile, sestag):
         if not self.name.endswith(self.snap_ext):   raise ValueError("Not a snapshot.")
 
-        if not self.exists() or not exists(mapfile) or self.gettime() != os.stat(mapfile).st_mtime_ns:
+        if self.is_arch_member() != "true" or not exists(mapfile) \
+        or self.gettime() != os.stat(mapfile).st_mtime_ns:
             return "N"
         elif os.stat(mapfile).st_blocks != 0:
             return "D"
@@ -1935,7 +1940,7 @@ class LvmVolume(LocalVolume):
     def resize(self, size):
         if not self.exists():   raise FileNotFoundError(self.path)
         do_exec([[CP.lvm, "lvresize", "-L", str(size)+"b", "-f", self.path]])
-        self.update()
+        return self.update()
 
     def getperms(self):
         return self.lv_attr[1]
@@ -1944,10 +1949,10 @@ class LvmVolume(LocalVolume):
         return int(self.lv_size.split("B")[0])
 
     def is_arch_member(self):
-        if not self.name.endswith(self.snap_ext) or "wyng" not in self.tags \
-        or not self.exists() or not self.storage.auuid:
+        if not self.exists() or not self.name.endswith(self.snap_ext) or "wyng" not in self.tags \
+        or not self.storage.auuid:
             return "na"
-        if "arch-"+self.storage.auuid not in self.tags:
+        if not self.tags or "arch-"+self.storage.auuid not in self.tags:
             return "false"
         else:
             return "true"
@@ -1955,8 +1960,8 @@ class LvmVolume(LocalVolume):
     def paired_state(self, mapfile, sestag):
         if not self.name.endswith(self.snap_ext):   raise ValueError("Not a snapshot.")
 
-        if not self.exists() or not exists(mapfile) or self.gettime() != os.stat(mapfile).st_mtime_ns \
-        or sestag not in self.tags:
+        if self.is_arch_member() != "true" or not exists(mapfile) \
+        or self.gettime() != os.stat(mapfile).st_mtime_ns or sestag not in self.tags:
             return "N"
         elif os.stat(mapfile).st_blocks != 0:
             return "D"
@@ -3183,7 +3188,7 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, other_vols={}):
             continue
 
         if datavol not in aset.vols and not monitor_only:
-            add_volume(aset, datavol, opts.voldesc)
+            add_volume(aset, datavol, opts.voldesc, storage=storage)
 
         # 'mapfile' is the deltamap file, snap1 holds vol state between send/monitor ops
         l_vol = lvols[datavol]   ; snap1, snap2 = l_vol.snap1, l_vol.snap2
@@ -3269,7 +3274,7 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only, other_vols=
             continue
 
         if datavol not in aset.vols and not monitor_only:
-            add_volume(aset, datavol, opts.voldesc)
+            add_volume(aset, datavol, opts.voldesc, storage=storage)
 
         vol   = aset.vols[datavol]    ; mapfile = vol.mapfile()
         if vol.aliastype == "import_other":   continue
@@ -4956,7 +4961,7 @@ def rename_volume(storage, aset, oldname, newname):
             oldsnap.delete()
 
 
-def add_volume(aset, datavol, desc):
+def add_volume(aset, datavol, desc, storage=None):
     vol = aset.add_volume_meta(datavol, desc=desc, ext=".tmp")
     if not vol:   return
 
@@ -4965,10 +4970,11 @@ def add_volume(aset, datavol, desc):
     vol.rename_saved(ext=".tmp")
     catch_signals(**signormal)
 
-    new_lvol = storage.new_vol_entry(datavol, vol.vid)
-    for atr in ("snap1","snap2"):
-        if (lv := storage.lvols[getattr(new_lvol, atr)]).is_arch_member() == "true":
-            lv.delete()
+    if storage and storage.online:
+        new_lvol = storage.new_vol_entry(datavol, vol.vid)
+        for atr in ("snap1","snap2"):
+            if (lv := storage.lvols[getattr(new_lvol, atr)]).is_arch_member() == "true":
+                lv.delete()
 
 
 # Remove a volume from the archive
@@ -5274,7 +5280,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 beta"      ; prog_date = "20250720"
+prog_version     = "0.8 beta"      ; prog_date = "20250721"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
