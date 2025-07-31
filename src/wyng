@@ -1017,7 +1017,8 @@ def agent_get(agname, duration):
 
 def agent_make(agname, duration, keys):
     p = SPr.Popen([CP.python, f"{tmpdir}/{prog_name}_agent.py","store",agname], text=False,
-                  shell=False, stdin=SPr.PIPE, stdout=SPr.DEVNULL, stderr=SPr.STDOUT)
+                  shell=False, stdin=SPr.PIPE, stdout=SPr.DEVNULL, stderr=SPr.STDOUT,
+                  process_group=0)
     pwrite = p.stdin.write   ; pwrite(min(duration,60).to_bytes(1,"big"))
     for k in keys:   pwrite(len(k).to_bytes(1,"big"))   ; pwrite(k)   ; pwrite(Destination.magic)
     p.poll(); p.stdin.flush(); p.stdin.close()
@@ -2361,6 +2362,8 @@ def parse_options(args, pdefs, altconf=""):
             if (kopt := "--"+k) in parser_defs_d and k not in conf_block:
                 if parser_defs_d[kopt].get("action") == "append":
                     parser_defs_d[kopt]["default"] = list(filter(None, v.splitlines()))
+                elif parser_defs_d[kopt].get("action") == "count":
+                    parser_defs_d[kopt]["default"] = int(v)
                 elif parser_defs_d[kopt].get("action") in ("store_true","store_false"):
                     parser_defs_d[kopt]["default"] = bool(int(v))
                 else:
@@ -2419,6 +2422,8 @@ def get_configs(opts):
         raise StorageError(5, "File ownership mis-match on destination.")
     if dest.archive_ini_hash == "none" and opts.action not in local_actions+("arch-init",):
         raise StorageError(6, f"Archive not found at '{dest.spec}'")
+    if opts.force_allow_rollback:
+        err_out("Caution: Allowing rollback.")
 
     if opts.action in ("arch-init",):
         if dest.archive_ini_hash != "none":
@@ -2439,7 +2444,8 @@ def get_configs_remote(dest, base_dir, opts):
 
     show = debug and opts.action.lower() == "list"
 
-    recv_list = [(ArchiveSet.confname,  ArchiveSet.max_conf_sz),
+    confname  = ArchiveSet.confname
+    recv_list = [(confname,  ArchiveSet.max_conf_sz),
                  (ArchiveSet.saltname, DataCryptography.max_keyfile_sz),
                  ("salt.bak", DataCryptography.max_keyfile_sz)]
     fetch_file_blobs(recv_list, tmpdir, dest, skip0=True)
@@ -2449,7 +2455,7 @@ def get_configs_remote(dest, base_dir, opts):
     if aset.format_ver == 2:
         if opts.action == "arch-check" and opts.upgrade_format:
             os.mkdir(v2dir := tmpdir+"/:oldv2:")
-            os.replace(aset.path+"/"+aset.confname, v2dir+"/"+aset.confname)
+            os.replace(aset.path+"/"+confname, v2dir+"/"+confname)
             arch_check(None, OldArchiveSet_V2(v2dir, dest), upgrade=True); x_it(0)
         else:
             x_it(1, "Error:  Old V2 format. "
@@ -2457,14 +2463,14 @@ def get_configs_remote(dest, base_dir, opts):
     else:
         assert aset.updated_at is not None
 
-    arch_dir = base_dir + aset.subdir    ; ini = pjoin(arch_dir, ArchiveSet.confname)
+    arch_dir = base_dir + aset.subdir    ; ini = pjoin(arch_dir, confname)
 
     if exists(ini) and not hmac.compare_digest(aset.raw_hashval,
                                         hashlib.sha256(open(ini,"rb").read()).hexdigest()):
         try:
             cache_aset = ArchiveSet(arch_dir, dest, opts, children=0, prior_auth=aset)
         except Exception as e:
-            err_out(repr(e)+"\nCached archive.ini didn't load.")
+            err_out(repr(e)+f"\nCached {confname} didn't load.")
             shutil.rmtree(arch_dir)
         else:
             if debug:   err_out(repr(cache_aset.header) +"\n"+repr(aset.header))
@@ -2483,28 +2489,36 @@ def get_configs_remote(dest, base_dir, opts):
                     reason = (f"Cached metadata is newer, from {cache_aset.path}\n"
                               f"{cache_aset.updated_at} vs. {aset.updated_at}")
                     if opts.force_allow_rollback:
-                        err_out(reason + "\nAllowing rollback: Caution!")
+                        err_out(reason)
                         if aset.mcrypto:
                             # advance counters
                             aset.mcrypto.set_counter(cache_aset.mci_count)
                             aset.datacrypto.set_counter(cache_aset.dataci_count)
-                            aset.save_ini()    ; update_dest(aset, pathlist=[aset.confname])
+                            aset.save_ini()    ; update_dest(aset, pathlist=[confname])
                         del(cache_aset)    ; shutil.rmtree(arch_dir+"-old", ignore_errors=True)
                         os.replace(arch_dir, arch_dir+"-old")
                     else:
                         raise ValueError(reason)
 
-                # Fix: Check for .tmp versions
             elif cache_aset.updated_at < aset.updated_at:
-                if verbose:   err_out("Updating metadata cache.")
-                shutil.rmtree(arch_dir+"-old", ignore_errors=True)
-                os.replace(arch_dir, arch_dir+"-old")
+                if exists(sl := cache_aset.path+"/sendlist.tmp"):
+                    if verbose:   err_out("Recovering cache.")
+                    for mdf in open(sl, "r"):
+                        if debug:   print("mv", mdf)
+                        if exists(p := f"{cache_aset.path}/{mdf.strip()}"):   os.replace(p, p[:-4])
+                    os.remove(sl)
+                    return get_configs_remote(dest, base_dir, opts)
+                else:
+                    if verbose:   err_out("Updating metadata cache.")
+                    shutil.rmtree(arch_dir+"-old", ignore_errors=True)
+                    os.replace(arch_dir, arch_dir+"-old")
 
             else:
                 if debug:
                     aset.conf.write(sys.stderr)    ; cache_aset.conf.write(sys.stderr)
                 raise ValueError("\nUnhandled cache divergence.")
 
+    if exists(sl := arch_dir+"/sendlist.tmp"):   os.remove(sl)
     if not exists(ini):
         os.makedirs(arch_dir, exist_ok=True)
         for f, _ in recv_list:
@@ -2778,12 +2792,16 @@ def x_it(ec, text=None):
     sys.exit(ec)
 
 def helper_send(debug=False):
+    def altextract(*a, **ka): ka.pop("filter"); return tarf.extract(*a, **ka)
     mkdirs = os.makedirs    ; hlink = os.link    ; dirname = os.path.dirname
 
-    with tarfile.open(mode="r|", fileobj=sys.stdin.buffer) as tarf:
-        def altextract(*a, **ka): ka.pop("filter"); return tarf.extract(*a, **ka)
+    while True:
+        try:
+            tarf = tarfile.open(mode="r|", fileobj=sys.stdin.buffer)
+        except tarfile.ReadError as e:
+            if debug:   err_out(repr(e))
+            break
         extract = altextract if sys.version_info[:2] < (3,10) else tarf.extract
-
         if debug:   err_out("Got tarfile")
         substitutions = {}    ; pdir = ""
         for member in tarf:
@@ -2815,7 +2833,7 @@ def helper_send(debug=False):
                     if i.path.endswith("-tmp") and not i.path.endswith(vdir[1]+"-tmp"):
                         err_out("rmtree: " + i.path)   ; shutil.rmtree(i.path, ignore_errors=True)
             tarf.members = []
-    fssync(".", force=True)
+        tarf.close()   ; fssync(".", force=True)
 
 def helper_receive(lstf):
     stdout_write = sys.stdout.buffer.write   ; exists = os.path.exists   ; getsize= os.path.getsize
@@ -3644,7 +3662,7 @@ def update_delta_digest_mf(volume, manifest, mapsize=None):
 # the number of bytes sent and the runtime in seconds.
 
 def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, benchmark=False,
-                tarf=None):
+                untar=None):
 
     def send_chunk_local(tar_info, etag, buf):
         chunkdir = pdirname(_fp := pjoin(destpath, tar_info.name))
@@ -3730,10 +3748,12 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
         pdirname   = os.path.dirname   ; makedirs  = os.makedirs
     else:
         send_chunk = send_chunk_remote
-        catch_signals(["ALRM","INT"], iflag=True)    ; signal.alarm(120)
+        catch_signals(["ALRM","INT"], iflag=True, int_exit=True)    ; signal.alarm(120)
 
     # Use tar to stream files to destination
-    TarInfo  = tarfile.TarInfo    ; LNKTYPE = tarfile.LNKTYPE
+    TarInfo = tarfile.TarInfo    ; LNKTYPE = tarfile.LNKTYPE
+    tarf    = tarfile.open(mode="w|", fileobj=untar.stdin)
+
     if not benchmark:
         tarf_addfile = tarf.addfile    ; tarf_add = tarf.add              ; stream_started = True
         tar_info = TarInfo(sdir)       ; tar_info.type = tarfile.DIRTYPE  ; tarf_addfile(tar_info)
@@ -3831,22 +3851,25 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
                     i = b2int(bhashb[:ht_ksize], "big")   ; ddses = None   ; pos = 0
                     while (pos := hashtree[i].find(bhashb, pos)) >= 0:
                         if pos % hash_w == 0:
+                            # hit: read index item
                             ddataf_seek(chtree[i][pos//hash_w] * (ses_w+ch_w))
                             ddses  = ddsessions[b2int(ddataf_read(ses_w),"big")]
                             if ddses is None:
                                 hashtree[i][pos:pos+hash_w] = ddblank_ch # zero-out obsolete entry
                             else:
+                                # make dedup link
                                 ddchx = ddataf_read(ch_w).hex().zfill(chdigits)
                                 tar_info.type = LNKTYPE
                             ddataf_seek(0,2)    ; break
                         pos += 1
 
                     if ddses is None and bhashb != ddblank_ch and idxcount < chtree_max:
+                        # miss: add this chunk as new index item
                         hashtree[i].extend(bhashb)   ; chtree[i].append(idxcount)   ; idxcount += 1
                         ddataf_write(ses_index.to_bytes(ses_w,"big") + addr.to_bytes(ch_w,"big"))
 
                 if tar_info.type == LNKTYPE:
-                    # Send link only (dedup)
+                    # send dedup link
                     tar_info.linkname = "%s/%s/%s/x%s" % \
                         (ddses.volume.vid,
                             ddses.name+"-tmp" if ddses is ses else ddses.name,
@@ -3882,11 +3905,20 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
             check_manifest_sequence(vol, vol.sesnames, full=True)
 
         # Finalize on VM/remote
+        catch_signals()
         tar_info = TarInfo("mv")   ; tar_info.type = tarfile.CHRTYPE   ; tarf_addfile(tar_info)
         tar_info = TarInfo("mv2")  ; flistj = json.dumps(saved_files+[sdir+"-tmp"]).encode("utf-8")
         tar_info.size = len(flistj); tarf_addfile(tar_info, fileobj=BytesIO(flistj))
+        tarf.close()    ; untar.stdin.flush()
 
-        if old_mapfile and exists(old_mapfile):   os.remove(old_mapfile)
+        # Finalize local cache
+        with open(aset.path+"/sendlist.tmp","a") as slf:
+            for ii in saved_files:   print(ii, file=slf)
+        ses.path = ses.path.rsplit("-tmp",maxsplit=1)[0]
+        os.replace(ses.path+"-tmp", ses.path)    ; ses.rename_saved(ext=".tmp")
+
+        if exists(ses.path+"/manifest.tmp"):     os.remove(ses.path+"/manifest.tmp")
+        if old_mapfile and exists(old_mapfile):  os.remove(old_mapfile)
         ses.volume.init_deltamap()
 
     else:
@@ -3899,8 +3931,11 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
             vol.init_deltamap()    ; update_delta_digest_mf(vol, ses.path+"/manifest")
             if type(l_vol) is LvmVolume:   l_vol.add_tags(["delta"])
 
+        storage.lvols[vol.name].rotate_snapshots(rotate=changed,
+                    timestamp_path=vol.mapfile(), addtags=[vol.last])
+
+    catch_signals(**signormal)    ; signal.alarm(0)
     if not sent:   shutil.rmtree(ses.path)
-    signal.alarm(0)    ; catch_signals(**signormal)
 
     runtime  = time.monotonic() - testtime
     t_m, t_s = divmod(runtime, 60); t_p = (f"{int(t_m)}m" if t_m else "") + f"{ceil(t_s)}s"
@@ -3914,7 +3949,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
         print("\n" if status1 else "", f"(reduced {ddbytes/MB:0.1f}MB)")
     if dedup and debug:   show_mem_stats()
 
-    return stream_started, bcount, ddbytes, runtime, ses
+    return stream_started, bcount, ddbytes, runtime
 
 
 # Build deduplication hash index and list
@@ -4086,16 +4121,13 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={}, ses_tags={},
     hl = "—" * (min(max([len(aset.vols[v].name) for v in incrementals+send_alls]+[22]), 60)+20)
     print(hl, flush=True)
 
-    totalvsize = totalbcount = 0    ; untar = tarf = None    ; saved_sessions = []
+    totalvsize = totalbcount = 0    ; untar = tarf = None
     if not (monitor_only or benchmark):
         cmd = ["python3 "+dest.dtmp+"/dest_helper.py send "
             + (" --sync" if options.maxsync else "") + (" --debug" if debug else "")]
         if debug:   print("\nDest run:\n", cmd, end=" ")
-        untar = SPr.Popen(dest.run_args(cmd, destcd=dest.path), stdin=SPr.PIPE,
-                    stdout=SPr.DEVNULL, stderr=open(tmpdir+"/send.log","w")
-                                        if not purgetmp else SPr.DEVNULL)
-        tarf  = tarfile.open(mode="w|", fileobj=untar.stdin)
-
+        untar = SPr.Popen(dest.run_args(cmd, destcd=dest.path), process_group=0,
+                    stdin=SPr.PIPE, stdout=SPr.DEVNULL, stderr=open(tmpdir+"/send.log","w"))
 
     for datavol in list(other_vols.keys()) + sorted(incrementals + send_alls + unchanged_vols):
         vol = aset.vols[datavol]    ; svsize = sbcount = stime = ddbytes = 0
@@ -4126,23 +4158,23 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={}, ses_tags={},
 
             # Send Volume
             if debug:   print("\nuntar status:", untar.poll())
-            sent, sbcount, ddbytes, stime, ses = \
+            sent, sbcount, ddbytes, stime = \
                 send_volume(storage, vol, curtime, ses_tags, send_all=datavol in send_alls,
-                            changed=updated, benchmark=benchmark, tarf=tarf)
-            untar.stdin.flush()
-            saved_sessions.append((ses, updated))
+                            changed=updated, benchmark=benchmark, untar=untar)
+
             dest.free -= int(sbcount + (sbcount * 0.05))
-            if vol.aliastype == "import_other":   del(imports[datavol])
 
         else:
             storage.lvols[vol.name].rotate_snapshots(rotate=False)
+
+        if vol.aliastype == "import_other":   del(imports[datavol])
 
         p1, p2 = ("\r", " |  -" if not sent else "") if status1 else ("", "")
         print(p1 if sbcount or ddbytes or updated else p1+"  no change"+p2, flush=True)
         totalvsize += vol.volsize()    ; totalbcount += sbcount
 
     if untar:
-        tarf.close()    ; untar.stdin.close()
+        untar.stdin.close()
         try:
             untar.wait(timeout=180)
         except SPr.TimeoutExpired:
@@ -4155,19 +4187,6 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={}, ses_tags={},
         if retcode != 0:
             if debug and exists(lf := tmpdir+"/send.log"):   SPr.run([CP.cat, "-v", lf])
             raise RuntimeError("tar transport failure code %d" % retcode)
-
-    # Local finalize
-    catch_signals()
-    for ses, changed in saved_sessions:
-        ses.path = ses.path.rsplit("-tmp",maxsplit=1)[0]   ; os.replace(ses.path+"-tmp", ses.path)
-        ses.rename_saved(ext=".tmp")    ; vol = ses.volume
-        if exists(ses.path+"/manifest.tmp"):   os.remove(ses.path+"/manifest.tmp")
-
-        if vol.aliastype != "import_other":
-            storage.lvols[vol.name].rotate_snapshots(rotate=changed,
-                        timestamp_path=vol.mapfile(), addtags=[vol.last])
-    if saved_sessions:   aset.rename_saved(ext=".tmp")
-    catch_signals(**signormal)
 
     if not monitor_only and (volct:= sum(map(len, (incrementals,send_alls,
                                                    unchanged_vols,other_vols)))):
@@ -4523,7 +4542,8 @@ def merge_sessions(volume, sources, target, clear_sources=False):
                             + (" --resume" if resume else "")+(" --sync" if opts.maxsync else "")
                             ], destcd=dest.path),
                        [CP.cat, "-v"], [CP.tail, "--bytes=2000"]
-                      ], cwd=aset.path, check=False, pipefail=True, out=tmpdir+"/merge.log"
+                      ], cwd=aset.path, process_group=0, check=False, pipefail=True,
+                         out=tmpdir+"/merge.log"
                      )
 
     if retcode == 50:
@@ -5198,12 +5218,14 @@ class NulIO(io.BytesIO):
     def __enter__(self):   self.close(); return self
 
 
-def catch_signals(sel=["INT","TERM","QUIT","ABRT","ALRM","TSTP","USR1","USR2"], iflag=False):
+def catch_signals(sel=["INT","TERM","QUIT","ABRT","ALRM","TSTP","USR1","USR2"],
+                  ign=False, iflag=False, int_exit=False):
     # Remove existing handlers
     for sig in list(signal_handlers):   signal.signal(sig, signal_handlers.pop(sig))
     # Set handler on requested signals
+    h = signal.SIG_IGN if ign else functools.partial(handle_signal, int_exit=int_exit)
     for sig in (getattr(signal,"SIG"+x) for x in (sel or [])):
-        signal_handlers[sig] = signal.getsignal(sig)   ; signal.signal(sig, handle_signal)
+        signal_handlers[sig] = signal.getsignal(sig)    ; signal.signal(sig, h)
         signal.siginterrupt(sig, iflag)
 
     while not sel and signals_caught:   os.kill(os.getpid(), signals_caught.pop(0))
@@ -5214,8 +5236,8 @@ class WTimeoutError(Exception):
     def __del__(self):            os._exit(1)
 
 
-def handle_signal(signum, frame):
-    if signum == signal.SIGINT:   x_it(8)
+def handle_signal(signum, frame, int_exit=False):
+    if signum == signal.SIGINT and int_exit:   x_it(8)
     if signum == signal.SIGALRM:
         raise WTimeoutError("Timeout.\nSee send.log for details.")
     if signum not in signals_caught:   signals_caught.append(signum)
@@ -5280,7 +5302,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 beta"      ; prog_date = "20250721"
+prog_version     = "0.8 wip"      ; prog_date = "20250728"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
@@ -5407,7 +5429,7 @@ try:
     print(release_string, flush=True)
     if options.action == "version":   x_it(0)
 
-    signormal = {"sel": ["INT"], "iflag": True} if not debug else {"sel": None}
+    signormal = {"sel": ["INT"], "iflag": True, "int_exit": True} if not debug else {"sel": None}
     catch_signals(**signormal)
 
     # Allow only one instance at a time
@@ -5651,9 +5673,9 @@ except (InputError, SelectionError, OptionError, AuthenticationError) as e:
 except StorageError as e:
     x_it(e.args[0], f"\n{e.__class__.__name__}: {e.args[-1]}\n")
 
-except BrokenPipeError as e:
-    e.add_note("See Wyng log for details.")
+except Exception as e:
+    print()
+    if e is BrokenPipeError:   e.add_note("See Wyng log for details.")
     raise e
-
 
 ## END ##
