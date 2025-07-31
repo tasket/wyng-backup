@@ -246,12 +246,12 @@ class ArchiveSet:
                                     - {v.last for v in self.vols.values()}
 
 
-    def load_volumes(self, children, vids=[], handle=False, show=False):
+    def load_volumes(self, children, vids=[], reload=False, handle=False, show=False):
 
         errors = []    ; vids = vids or list(self.conf["volumes"].keys())
         recv_list = [(x+"/volinfo", ArchiveVolume.max_volinfosz)
                        for x in self.conf["volumes"].keys() if x in vids]
-        fetch_file_blobs(recv_list, self.path, self.dest, skip_exists=True)
+        fetch_file_blobs(recv_list, self.path, self.dest, skip_exists=not reload)
         do_exec([[CP.chattr, "+c"] + list(self.conf["volumes"].keys())],
                 cwd=self.path, check=False)
 
@@ -272,7 +272,7 @@ class ArchiveSet:
             #loadses = allvols or self.in_process or options.from_arch or options.dedup or
             try:
                 vol  = ArchiveVolume(self, vid, hashval, pjoin(self.path,vid),
-                                name=vname, children=children, show=show)
+                                name=vname, children=children, reload=reload, show=show)
             except Exception as e:
                 errors.append((vid, e))
                 if not handle:   raise e
@@ -439,7 +439,8 @@ class ArchiveVolume:
     __slots__ = ("vid","name","hashval","archive","path","alias","aliastype","sessions","sesnames",
                  "_seslist","last","meta_checked","tags","desc","changed_bytes")
 
-    def __init__(self, archive, vid, hashval, path, name=None, children=2, show=False):
+    def __init__(self, archive, vid, hashval, path, name=None,
+                 children=2, reload=False, show=False):
         self.vid       = vid                       ; self.tags    = {}
         self.archive   = archive                   ; self.path    = path
         self.hashval   = hashval                   ; self.changed_bytes = 0
@@ -482,12 +483,12 @@ class ArchiveVolume:
         self.alias = self.name
 
         if children > 1:
-            self.load_sessions()
+            self.load_sessions(reload=reload)
 
         if exists(pjoin(path,"volchanged")):
             self.changed_bytes = int(open(pjoin(path,"volchanged"),"r").readlines()[0].strip())
 
-    def load_sessions(self, sesids=[], handle=False, mfdecode=False, force=False, show=False):
+    def load_sessions(self, sesids=[], handle=False, mfdecode=False, reload=False, show=False):
 
         sessions, path, vid, vname = self.sessions, self.path, self.vid, self.name
         Ses = ArchiveSession    ; sesids = sesids or list(sessions.keys())    ; errors = []
@@ -495,7 +496,7 @@ class ArchiveVolume:
         # fetch session metadata 'info' from remote
         ses_list =[(vid+"/"+x, x, vname) for x in sesids]
         fetch_file_blobs([(x+"/info", ArchiveSession.max_infosz) for x,_,_ in ses_list],
-                         self.archive.path, self.archive.dest, skip_exists=not force, skip0=True)
+                         self.archive.path, self.archive.dest, skip_exists=not reload, skip0=True)
 
         for sname in sesids or sessions:
             if not (s := sessions[sname]).loaded:
@@ -2440,15 +2441,16 @@ def get_configs(opts):
 
 # Fetch copy of archive metadata from remote/dest
 
-def get_configs_remote(dest, base_dir, opts):
+def get_configs_remote(dest, base_dir, opts, reload=False):
 
     show = debug and opts.action.lower() == "list"
 
     confname  = ArchiveSet.confname
-    recv_list = [(confname,  ArchiveSet.max_conf_sz),
-                 (ArchiveSet.saltname, DataCryptography.max_keyfile_sz),
+    recv_list = [(confname,  ArchiveSet.max_conf_sz)]
+    fetch_file_blobs(recv_list, tmpdir, dest, skip0=True, skip_exists=not reload)
+    recv_list = [(ArchiveSet.saltname, DataCryptography.max_keyfile_sz),
                  ("salt.bak", DataCryptography.max_keyfile_sz)]
-    fetch_file_blobs(recv_list, tmpdir, dest, skip0=True)
+    fetch_file_blobs(recv_list, tmpdir, dest, skip0=True, skip_exists=True)
 
     # Instantiate ArchiveSet to authenticate archive.ini
     aset = ArchiveSet(tmpdir, dest, opts, children=0, pass_agent=int(opts.authmin), show=debug)
@@ -2508,15 +2510,17 @@ def get_configs_remote(dest, base_dir, opts):
                         if exists(p := f"{cache_aset.path}/{mdf.strip()}"):   os.replace(p, p[:-4])
                     os.remove(sl)
                     return get_configs_remote(dest, base_dir, opts)
-                else:
+                elif not reload:
                     if verbose:   err_out("Updating metadata cache.")
-                    shutil.rmtree(arch_dir+"-old", ignore_errors=True)
-                    os.replace(arch_dir, arch_dir+"-old")
+                    os.replace(cache_aset.confpath, cache_aset.confpath+"-old")
+                    return get_configs_remote(dest, base_dir, opts, reload=True)
+                else:
+                    raise ValueError("\nCache reload failed.")
 
             else:
                 if debug:
                     aset.conf.write(sys.stderr)    ; cache_aset.conf.write(sys.stderr)
-                raise ValueError("\nUnhandled cache divergence.")
+                raise ValueError("\nUnhandled cache error.")
 
     if exists(sl := arch_dir+"/sendlist.tmp"):   os.remove(sl)
     if not exists(ini):
@@ -5302,7 +5306,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 wip"      ; prog_date = "20250728"
+prog_version     = "0.8 wip"      ; prog_date = "20250729"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
