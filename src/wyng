@@ -1364,7 +1364,8 @@ class LocalStorage:
     def __init__(self, localpath, opts, auuid=None, arch_vols={}, clean=False, sync=False,
                  require_online=False):
 
-        self.stypes  = { "tlvm":  LvmVolume, "rlnk": ReflinkVolume, "file": FileVolume }
+        self.stypes  = { "tlvm":  LvmVolume, "rlnk": ReflinkVolume, "file": FileVolume,
+                         None: FileVolume }
         self.rltypes = { "btrfs", "xfs" }
         self.opts    = copy.deepcopy(opts)
 
@@ -1375,12 +1376,13 @@ class LocalStorage:
         self.users, self.groups  = {}, {}
         self.path = self.pooltype = self.fstype = self.lvpool = self.block_size = None
         self.online = self.can_snapshot = False
+        self.prep_snapshots = prepare_snapshots_reflink
 
         loctype, locvol, locpool, pathxvg = LocalStorage.parse_local_path(localpath)
         ol_reason = ""
 
         if loctype is None:
-            self.path           = None
+            self.path = self.pooltype = None
 
         elif loctype in ("lvm volgroup", "tlvm pool"):
             self.pooltype       = "tlvm"          ; self.path    = "/dev/"+pathxvg+"/"
@@ -1393,7 +1395,8 @@ class LocalStorage:
             self.prep_snapshots = prepare_snapshots_lvm
 
         elif loctype == "file" and exists(pathxvg):
-            self.path       = pathxvg.rstrip("/")+"/"; self.online, self.can_snapshot = True, False
+            self.path       = pathxvg.rstrip("/")+"/"
+            self.online, self.can_snapshot = True, False
             self.fstype     = fs = LocalStorage.get_fs_type(self.path)
             self.pooltype   = "rlnk" if fs in self.rltypes else "file"
 
@@ -1416,8 +1419,8 @@ class LocalStorage:
         if require_online and not self.online:
             err_out("Local storage is offline: "+repr(localpath)+ol_reason)
 
+        self.LVolClass = self.stypes[self.pooltype]
         if self.online:
-            self.LVolClass    = self.stypes[self.pooltype]
             self.metadata_unlock()
             self.update_vol_list(arch_vols)
 
@@ -1593,6 +1596,7 @@ class LocalStorage:
 
     # Create survey of all interesting volumes
     def update_vol_list(self, arch_vols):
+        if not self.online:   return
         self.lvols.clear()
         if self.pooltype == "tlvm":   self.update_lvm_list()
         for vname, vid in arch_vols.items():
@@ -1678,8 +1682,6 @@ class LocalVolume:
     __slots__ = ("storage","lockfile","pdir","path","name","vid","snap1","snap2","parent","stat")
 
     def _my_init(self, storage, name, vid=None, parent=None):
-        assert storage.online
-
         self.storage   = storage                        ; self.lockfile = None
         self.pdir      = storage.path.rstrip("/")+"/"   ; self.path     = self.pdir+name
         self.name      = name                           ; self.vid      = vid
@@ -2574,6 +2576,11 @@ def get_configs_storage(aset, opts, require_local=True):
                                      arch_vols=arch_vols, auuid=aset.uuid)] \
                         = [x[0] for x in vols]
 
+        if not (storage or storagesets) and opts.import_other_from:
+            storage = LocalStorage(None, opts, require_online=False,
+                                   arch_vols=arch_vols, auuid=aset.uuid)
+            storagesets[storage] = []
+
     else:
         storage = LocalStorage(local_url or None, opts, require_online=require_local,
                                 arch_vols=arch_vols, auuid=aset.uuid)
@@ -3211,7 +3218,8 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, other_vols={}):
             continue
 
         if datavol not in aset.vols and not monitor_only:
-            add_volume(aset, datavol, opts.voldesc, storage=storage)
+            add_volume(aset, datavol, opts.voldesc,
+                       storage=None if datavol in other_vols else storage)
 
         # 'mapfile' is the deltamap file, snap1 holds vol state between send/monitor ops
         l_vol = lvols[datavol]   ; snap1, snap2 = l_vol.snap1, l_vol.snap2
@@ -3297,7 +3305,8 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only, other_vols=
             continue
 
         if datavol not in aset.vols and not monitor_only:
-            add_volume(aset, datavol, opts.voldesc, storage=storage)
+            add_volume(aset, datavol, opts.voldesc,
+                       storage=None if datavol in other_vols else storage)
 
         vol   = aset.vols[datavol]    ; mapfile = vol.mapfile()
         if vol.aliastype == "import_other":   continue
@@ -4070,7 +4079,7 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={}, ses_tags={},
         for vol in aset.vols.values():   autoprune(vol, apmode="full")
 
     storage.check_support()
-    if not storage.can_snapshot:
+    if not storage.can_snapshot and datavols:
         reason = "Local not a subvolume or no snapshot feature"
         if not storage.online:   reason = "Local path not found"
         err_out(f"\nError, {reason}: ({storage.pooltype}) {storage.path}")
@@ -4127,7 +4136,7 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={}, ses_tags={},
     hl = "—" * (min(max([len(aset.vols[v].name) for v in incrementals+send_alls]+[22]), 60)+20)
     print(hl, flush=True)
 
-    totalvsize = totalbcount = 0    ; untar = tarf = None
+    totalvsize = totalbcount = 0    ; untar = tarf = None   ; sent_vols = []
     if not (monitor_only or benchmark):
         cmd = ["python3 "+dest.dtmp+"/dest_helper.py send "
             + (" --sync" if options.maxsync else "") + (" --debug" if debug else "")]
@@ -4168,7 +4177,7 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={}, ses_tags={},
                 send_volume(storage, vol, curtime, ses_tags, send_all=datavol in send_alls,
                             changed=updated, benchmark=benchmark, untar=untar)
 
-            dest.free -= int(sbcount + (sbcount * 0.05))
+            dest.free -= int(sbcount + (sbcount * 0.05))    ; sent_vols.append(vol.name)
 
         else:
             storage.lvols[vol.name].rotate_snapshots(rotate=False)
@@ -4194,8 +4203,7 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={}, ses_tags={},
             if debug and exists(lf := tmpdir+"/send.log"):   SPr.run([CP.cat, "-v", lf])
             raise RuntimeError("tar transport failure code %d" % retcode)
 
-    if not monitor_only and (volct:= sum(map(len, (incrementals,send_alls,
-                                                   unchanged_vols,other_vols)))):
+    if not monitor_only and (volct:= len(sent_vols)):
         print(hl, "\n%0d volumes, %0d——>%0d MB in %.1f seconds."
               % (volct, totalvsize/MB, totalbcount/MB, time.monotonic() - ms_start)
               )
@@ -5099,7 +5107,7 @@ def show_list(aset, selected_vols, depth=3, json_out=None):
             print("",file=json_out); json.dump({"wversion": prog_version, "fver": aset.format_ver,
               "wdate": prog_date, "uuid": aset.uuid, "updated_at": aset.updated_at,
               "encrypted": bool(aset.mcrypto and aset.datacrypto), "is_auth": bool(aset.mcrypto),
-              "pooltype": storage.pooltype, "url": aset.dest.spec,
+              "url": aset.dest.spec,
               "volumes": {v.name: {"vid": v.vid, "desc": v.desc, "last": v.last,
                 "ts": v.sessions[v.last].gettime() if v.sessions else None,
                 "sessions": {s.name: {"volsize": s.volsize, "sequence": s.sequence,
@@ -5310,7 +5318,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 beta"      ; prog_date = "20250730"
+prog_version     = "0.8 beta"      ; prog_date = "20250731"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
@@ -5532,8 +5540,9 @@ try:
             sid, ses_tags = monitor_send(storage, aset, vols or selected_vols, monitor_only=False,
                                         use_sesid=sid, ses_tags=ses_tags, imports=other_vols,
                                         benchmark=options.dry_run)
+            selected_vols.clear()   ; other_vols.clear()
 
-        if other_vols:   error_cache.extend(list(other_vols))
+        if other_vols:   error_cache.extend(list(other_vols.keys()))
 
 
     elif action == "prune":
