@@ -545,6 +545,7 @@ class ArchiveVolume:
         assert ext and exists(pjoin(self.path,"volinfo")+ext)
         for rpath in (pjoin(self.path,"volinfo"), pjoin(self.path,"sessions")):
             if exists(rpath+ext):   os.replace(rpath+ext, rpath)
+        self.archive.rename_saved(ext)
 
     def volname_check(vname): # Fix: move to LocalStorage class
         if not 0 < len(vname) <= ArchiveVolume.volname_len:
@@ -1821,10 +1822,11 @@ class ReflinkVolume(FileVolume):
         return self
 
     def is_arch_member(self):
-        if not self.name.startswith("sn") or not self.name.endswith(self.snap_ext) \
-        or not self.exists():
+        fname  = os.path.split(self.name)[-1]
+        if not fname.startswith("".join(("sn",self.storage.auuid,"_"))) \
+        or not fname.endswith(self.snap_ext) or not self.exists():
             return "na"
-        elif self.parent and self.name.startswith("".join((subdir,"sn",self.storage.auuid,"_"))):
+        elif self.parent and fname.startswith("".join(("sn",self.storage.auuid,"_"))):
             return "true"
         else:
             return "false"
@@ -2140,7 +2142,7 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
 
         # try sessions
         vol = [x for x in aset.vols.values() if x.vid == vid][0]
-        ses_errs = vol.load_sessions(handle=True, force=True, mfdecode=True)
+        ses_errs = vol.load_sessions(handle=True, reload=True, mfdecode=True)
         seslist  = list(vol.sessions.values())    ; removed = []
 
         # un-loaded sessions cannot be sorted, so remove them from seslist
@@ -2504,15 +2506,14 @@ def get_configs_remote(dest, base_dir, opts, reload=False):
 
             elif cache_aset.updated_at < aset.updated_at:
                 if exists(sl := cache_aset.path+"/sendlist.tmp"):
-                    if verbose:   err_out("Recovering cache.")
+                    print("Recovering cache.")
                     for mdf in open(sl, "r"):
                         if debug:   print("mv", mdf)
                         if exists(p := f"{cache_aset.path}/{mdf.strip()}"):   os.replace(p, p[:-4])
                     os.remove(sl)
                     return get_configs_remote(dest, base_dir, opts)
                 elif not reload:
-                    if verbose:   err_out("Updating metadata cache.")
-                    os.replace(cache_aset.confpath, cache_aset.confpath+"-old")
+                    print("Updating metadata cache.")
                     return get_configs_remote(dest, base_dir, opts, reload=True)
                 else:
                     raise ValueError("\nCache reload failed.")
@@ -3916,10 +3917,11 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
         tarf.close()    ; untar.stdin.flush()
 
         # Finalize local cache
-        with open(aset.path+"/sendlist.tmp","a") as slf:
+        with open(aset.path+"/sendlist.tmp","w") as slf:
             for ii in saved_files:   print(ii, file=slf)
         ses.path = ses.path.rsplit("-tmp",maxsplit=1)[0]
         os.replace(ses.path+"-tmp", ses.path)    ; ses.rename_saved(ext=".tmp")
+        os.remove(aset.path+"/sendlist.tmp")
 
         if exists(ses.path+"/manifest.tmp"):     os.remove(ses.path+"/manifest.tmp")
         if old_mapfile and exists(old_mapfile):  os.remove(old_mapfile)
@@ -5223,16 +5225,18 @@ class NulIO(io.BytesIO):
 
 
 def catch_signals(sel=["INT","TERM","QUIT","ABRT","ALRM","TSTP","USR1","USR2"],
-                  ign=False, iflag=False, int_exit=False):
+                  sig_ign=False, ign=False, iflag=False, int_exit=False):
     # Remove existing handlers
     for sig in list(signal_handlers):   signal.signal(sig, signal_handlers.pop(sig))
     # Set handler on requested signals
-    h = signal.SIG_IGN if ign else functools.partial(handle_signal, int_exit=int_exit)
+    h = signal.SIG_IGN if sig_ign else functools.partial(handle_signal, int_exit=int_exit)
     for sig in (getattr(signal,"SIG"+x) for x in (sel or [])):
         signal_handlers[sig] = signal.getsignal(sig)    ; signal.signal(sig, h)
         signal.siginterrupt(sig, iflag)
 
-    while not sel and signals_caught:   os.kill(os.getpid(), signals_caught.pop(0))
+    while not sel and signals_caught:
+        s = signals_caught.pop(0)
+        if not ign:   os.kill(os.getpid(), s)
 
 
 class WTimeoutError(Exception):
@@ -5241,7 +5245,7 @@ class WTimeoutError(Exception):
 
 
 def handle_signal(signum, frame, int_exit=False):
-    if signum == signal.SIGINT and int_exit:   x_it(8)
+    if signum == signal.SIGINT and int_exit:   x_it(8, " *** Interrupt.")
     if signum == signal.SIGALRM:
         raise WTimeoutError("Timeout.\nSee send.log for details.")
     if signum not in signals_caught:   signals_caught.append(signum)
@@ -5306,7 +5310,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 wip"      ; prog_date = "20250729"
+prog_version     = "0.8 beta"      ; prog_date = "20250730"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
