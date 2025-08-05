@@ -230,8 +230,8 @@ wyng prune --all --session=20180605-000000,20180701-140000 --dest=file:/mnt/driv
 volumes. Alternately, `--all-before` may be used with a single `--session` date-time
 to prune all sessions prior to that time.
 
-The `--keep` option can accept a single date-time or a tag in the form `^tagID`.
-Matching sessions will be excluded from pruning and autopruning.
+Exclusions: The `--keep` option can accept a single date-time or a tag in the form `^tagID`.
+Matching sessions will be excluded from pruning and autopruning. Also, any volumes with names that match _'wyng-*metadata'_ will be automatically excluded unless the `--all` option was used to select all volumes.
 
 Also see `--autoprune` option below which works with `prune` and `send` commands.
 
