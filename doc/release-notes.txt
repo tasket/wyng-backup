@@ -1,4 +1,4 @@
-v0.8beta14 - Synced autoprune; keep prior log by default; improved snapshot handling; minor fixes and refinements.
+v0.8beta14 - Synced autoprune; protection for metadata vols; keep prior log by default; improved snapshot & cache handling; minor fixes and refinements.
 
 v0.8beta13 – Fixed spurious error message in sequence checker; Use single stream for improved sending.
 
