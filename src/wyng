@@ -2537,8 +2537,10 @@ def get_configs_remote(dest, base_dir, opts, reload=False):
                                  f"{cache_aset.updated_at} {cache_aset.in_process[:1]}")
 
     elif not exists(ini) and exists(aset.confpath):
+        os.makedirs(arch_dir, exist_ok=True)
         for f in ("salt.bak", ArchiveSet.saltname, confname):
-            shutil.copy(pjoin(aset.path,f), arch_dir)
+            if exists(f1 := pjoin(aset.path, f)) and not exists(f2 := pjoin(arch_dir, f)):
+                shutil.copyfile(f1, f2)
 
     if exists(sl := arch_dir+"/sendlist.tmp"):   os.remove(sl)
     if not exists(ini):
@@ -5336,7 +5338,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 beta"      ; prog_date = "20250803"
+prog_version     = "0.8 beta"      ; prog_date = "20250804"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
