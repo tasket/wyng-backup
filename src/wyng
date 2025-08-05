@@ -114,8 +114,8 @@ class ArchiveSet:
         # halt configuration if this is a new or temp config
         os.makedirs(self.path, exist_ok=True)
         if not exists(self.confpath+ext):
-            self.uuid = str(uuid.uuid4())
-            return
+            if debug:   print("New archive conf:")
+            self.uuid = str(uuid.uuid4())    ; return
 
         # decode archive.ini file
         # Format "magic" is "[WYNGvv]\n" where vv = format version: 9 bytes
@@ -2439,6 +2439,7 @@ def get_configs(opts):
         return arch_init(ArchiveSet(tmpdir, dest, opts))
 
     aset = get_configs_remote(dest, cachedir, opts)    ; os.utime(aset.path)
+
     if aset.updated_at is None:
         raise StorageError(6, "Archive not found.")
     aset.apdays = opts.apdays
@@ -2461,6 +2462,7 @@ def get_configs_remote(dest, base_dir, opts, reload=False):
 
     # Instantiate ArchiveSet to authenticate archive.ini
     aset = ArchiveSet(tmpdir, dest, opts, children=0, pass_agent=int(opts.authmin), show=debug)
+
     if aset.format_ver == 2:
         if opts.action == "arch-check" and opts.upgrade_format:
             os.mkdir(v2dir := tmpdir+"/:oldv2:")
@@ -2473,6 +2475,7 @@ def get_configs_remote(dest, base_dir, opts, reload=False):
         assert aset.updated_at is not None
 
     arch_dir = base_dir + aset.subdir    ; ini = pjoin(arch_dir, confname)
+    if debug:   print("\nArch dir:", arch_dir)
 
     if exists(ini) and not hmac.compare_digest(aset.raw_hashval,
                                         hashlib.sha256(open(ini,"rb").read()).hexdigest()):
@@ -2533,6 +2536,10 @@ def get_configs_remote(dest, base_dir, opts, reload=False):
                                  f"{aset.updated_at} {aset.in_process[:1]}",
                                  f"{cache_aset.updated_at} {cache_aset.in_process[:1]}")
 
+    elif not exists(ini) and exists(aset.confpath):
+        for f in ("salt.bak", ArchiveSet.saltname, confname):
+            shutil.copy(pjoin(aset.path,f), arch_dir)
+
     if exists(sl := arch_dir+"/sendlist.tmp"):   os.remove(sl)
     if not exists(ini):
         os.makedirs(arch_dir, exist_ok=True)
@@ -2547,6 +2554,7 @@ def get_configs_remote(dest, base_dir, opts, reload=False):
         depth = 1
     else:
         depth = 2
+
     return ArchiveSet(arch_dir, dest, opts, children=depth, allvols=True,
                       prior_auth=aset, show=show)
 
@@ -3157,7 +3165,7 @@ def update_dest(arch, pathlist=[], volumes=[], sessions=[], ext="", delete=False
 def fetch_file_blobs(recv_list, recv_dir, dest, ext="", skip0=False, skip_exists=False,
                      verifier=None):
 
-    if debug:   print("Fetch requested:", recv_list)
+    if debug:   print(f"Fetch requested to {recv_dir}:", recv_list)
     magic = dest.magic    ; exists = os.path.exists
     recv_list = [(x,y) for x,y in recv_list if not skip_exists or not exists(recv_dir+"/"+x)]
     if not recv_list:   return []
@@ -5328,7 +5336,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 beta"      ; prog_date = "20250801"
+prog_version     = "0.8 beta"      ; prog_date = "20250803"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
