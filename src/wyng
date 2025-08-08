@@ -2822,7 +2822,7 @@ def x_it(ec, text=None):
     sys.exit(ec)
 
 def helper_send(debug=False):
-    def altextract(*a, **ka): ka.pop("filter"); return tarf.extract(*a, **ka)
+    def altextract(m, set_attrs, filter):  return tarf.extract(m, set_attrs=set_attrs)
     mkdirs = os.makedirs    ; hlink = os.link    ; dirname = os.path.dirname
 
     while True:
@@ -2831,7 +2831,10 @@ def helper_send(debug=False):
         except tarfile.ReadError as e:
             if debug:   err_out(repr(e))
             break
-        extract = altextract if sys.version_info[:2] < (3,10) else tarf.extract
+        extract = tarf.extract \
+                  if (pyv := sys.version_info)[:2] > (3,11) or (pyv[:2] == (3,11) and pyv[2] > 3) \
+                  or (pyv[:2] == (3,10) and pyv[2] > 11) or (pyv[:2] == (3,9) and pyv[2] > 16) \
+                  or (pyv[:2] == (3,8) and pyv[2] > 16) else altextract
         if debug:   err_out("Got tarfile")
         substitutions = {}    ; pdir = ""
         for member in tarf:
@@ -5338,7 +5341,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 beta"      ; prog_date = "20250804"
+prog_version     = "0.8 beta"      ; prog_date = "20250805"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
