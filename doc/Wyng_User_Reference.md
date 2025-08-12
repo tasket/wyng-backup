@@ -21,7 +21,7 @@ _aging snapshot_ space consumption pitfalls.
 
 Wyng also doesn't require the source admin system to ever mount processed volumes or
 to handle them as anything other than blocks, so it safely handles
-untrusted data in guest filesystems to bolster container-based security.
+untrusted data in guest file systems to bolster container-based security.
 
 
 ### Status
@@ -36,7 +36,7 @@ Public beta with a range of features including:
 
  - Incremental backups of Linux logical volumes from Btrfs, XFS and Thin-provisioned LVM
 
- - Supported destinations: Local filesystem, Virtual machine or SSH host
+ - Supported destinations: Local file system, Virtual machine or SSH host
 
  - Fast pruning of old backup sessions
 
@@ -64,8 +64,6 @@ Version 0.8 major enhancements:
 
  - Configure defaults in /etc/wyng/wyng.ini
 
- - Mountpoints no longer required at destination
-
  - Simple selection of archives and local paths: Choose any _local_ or _dest_ each time you run Wyng
 
  - Multiple volumes can now be specified for most Wyng commands; send and receive support multiple storage pools
@@ -84,12 +82,12 @@ Before starting:
 should be installed, respectively.
 
 * Volumes to be backed-up should reside locally in one of the following snapshot-capable
-storage types:  LVM thin-provisioned pool, Btrfs subvolume, or XFS/reflink capable filesystem. Otherwise, volumes may be imported from or saved to other filesystems at standard (slower) speeds.
+storage types:  LVM thin-provisioned pool, Btrfs subvolume, or XFS/reflink capable file system. Otherwise, volumes may be imported from or saved to other file systems at standard (slower) speeds.
 
 * For backing up from LVM, _thin-provisioning-tools & lvm2_ must be present on the source system.  For Btrfs, the `btrfs` command must be present.
 
 * The destination system where the Wyng archive is stored (if different from source) should
-also have python3, plus a basic Unix command set and filesystem (i.e. a typical Linux or BSD
+also have python3, plus a basic Unix command set and file system (i.e. a typical Linux or BSD
 system). Otherwise, _samba_, FUSE, etc. may be used to access remote storage using smb, sftp, s3 or other protocols
 without concern for python or Unix commands.
 
@@ -123,7 +121,7 @@ and directory path.
 Next you can start making backups with `wyng send`:
 
 ```
-sudo wyng send --dest=file:/mnt/drive1/mylaptop.backup --local=volgrp1/pool1 root-volume home-volume
+sudo wyng send --dest=file:/mnt/drive2/mylaptop.backup --local=volgrp1/pool1 root-volume home-volume
 ```
 
 This command sends two volumes 'root-volume' and 'home-volume' from the LVM thin pool 'volgrp1/pool1' to the destination archive.
@@ -173,7 +171,7 @@ already exists in the archive, incremental mode is automatically used.
 
 ```
 
-wyng send my_big_volume --local=vg/pool --dest=file:/mnt/drive1/mylaptop.backup
+wyng send my_big_volume --local=vg/pool --dest=file:/mnt/drive2/mylaptop.backup
 
 ```
 
@@ -194,13 +192,13 @@ If `--session` is used, only one date-time is accepted. The volume name is requi
 
 ```
 
-wyng receive vm-work-private --local=vg/pool --dest=file:/mnt/drive1/mylaptop.backup
+wyng receive vm-work-private --local=vg/pool --dest=file:/mnt/drive2/mylaptop.backup
 
 ```
 
 ...restores a volume called 'vm-work-private' to 'myfile.img' in
 the LVM thin pool 'vg/pool'.  Note that `--dest` always refers to the archive location, so
-the volume is being restored _from_ '/mnt/drive1/mylaptop.backup'.
+the volume is being restored _from_ '/mnt/drive2/mylaptop.backup'.
 
 For any save path, Wyng will try to discard old data before receiving unless `--sparse`,
 `--sparse-write` or `--use-snapshot` options are used.
@@ -221,7 +219,7 @@ To use, supply a single exact date-time in _YYYYMMDD-HHMMSS_ format to remove a
 specific session, or two date-times representing a range:
 
 ```
-wyng prune --all --session=20180605-000000,20180701-140000 --dest=file:/mnt/drive1/mylaptop.backup
+wyng prune --all --session=20180605-000000,20180701-140000 --dest=file:/mnt/drive2/mylaptop.backup
 ```
 
 ...removes backup sessions from midnight on June 5 through 2pm on July 1 for all
@@ -394,6 +392,7 @@ the volume data if present.
 --remap                | Remap volume to current archive during `send` or `diff`
 --json                 | Output volume: session info in json format (list)
 --force                | Not used with most commands
+--force-retry          | Retry in-process transaction again
 --force-allow-rollback | Accept archive if it was reverted to an earlier state
 --opt-ssh              | Override internal _ssh_ options
 --opt-qubes            | Override internal _qvm-run_ options
@@ -415,7 +414,7 @@ commands. It accepts one of the following forms:
 
 | _URL Form_ | _Destination Type_
 |----------|-----------------
-|__file:__/path                           | Local filesystem
+|__file:__/path                           | Local file system
 |__ssh:__//user@example.com[:port][/path]      | SSH server
 |__qubes:__//vm-name[/path]                     | Qubes virtual machine
 |__qubes-ssh:__//vm-name:me@example.com[:port][/path]  | SSH server via a Qubes VM
@@ -426,7 +425,7 @@ commands. It accepts one of the following forms:
 The location of local copy-on-write storage where logical volumes, disk images, etc. reside.  This serves as the _source_ for `send` commands, and as the place where `receive` restores/saves volumes.
 
 This parameter takes one of two forms: Either the source volume group and pool as 'vgname/poolname'
-or a directory path on a reflink-capable filesystem such as Btrfs or XFS (for Btrfs the path should
+or a directory path on a reflink-capable file system such as Btrfs or XFS (for Btrfs the path should
 end at a subvolume).  Required for commands `monitor` and `diff`, `receive` when
 not using `--saveto`, and `send` when not using `--import-other-from`.
 
@@ -515,7 +514,7 @@ up to 20%.
 
 When used with the `send` command, data chunks from the new backup will be sent only if
 they don't already exist somewhere in the archive. Otherwise, a link will be used saving
-disk space and possibly time and bandwith.
+disk space and possibly time and bandwidth.
 
 The trade-off for deduplicating is longer startup time for Wyng, in addition to using more
 memory and CPU resources during backups. Using `--dedup` works best if you are backing-up
@@ -535,7 +534,7 @@ Since it affects the amount of data transmitted, including the `--dedup` option 
 Autoprune may be used with either the `prune` or `send` commands and will cause Wyng to
 automatically remove older backup sessions according to date criteria. When used with `send`
 specifically, the autopruning process will be triggered in advance of sending new sessions
-when using _full_ mode, or in _on_ mode only or if the destination filesytem is
+when using _full_ mode, or in _on_ mode only or if the destination file system is
 low on free space.  (See _--apdays_ to specify additional autoprune parameters.)
 
 Selectable modes are:
@@ -595,7 +594,7 @@ When it is specified this option causes slow delta comparisons to be used for th
 instead of the default fast snapshot-based delta comparisons.  It is not recommended for regular
 use with large volumes.
 
-The special delimeter used to separate the _volname_ (archive volume name) and the _path_ is ':|:'
+The special delimiter used to separate the _volname_ (archive volume name) and the _path_ is ':|:'
 which means this option cannot be used to `send` directly to volume names in the archive which
 contain that character sequence.
 
@@ -678,6 +677,11 @@ Used with `send`, all included volumes will be recorded under a single session d
 Used with `receive`, the alias is used to receive to a volume name that is different than the archived volume's listed name.
 
 Upon completion Wyng may supply a result/error listing in a file at the same json path with the extension ".error".
+
+#### `--force-retry`
+
+Wyng normally re-tries completion of an interrupted (in-process) transaction only once and running Wyng afterward will result in "Interrupted process already retried" errors. Using `--force-retry` suppresses the error and allows the transaction to be attempted again.
+
 
 ### Configuration files
 
@@ -782,7 +786,7 @@ to verifying everything within an archive.)
 in addition to any snapshots you may already have on your local storage system.
 This can pose a serious challenge to _lvmthin_ (aka thin-provisioned LVM) as the default space
 allocated for metadata is often too small for rigorous & repeated snapshot rotation
-cycles.  It is recommended to _at least double_ the existing or default tmeta space
+cycles.  It is recommended to _at least double_ the existing or default _tmeta_ space
 on each thin pool used with `wyng send` or `wyng monitor`; see the man page
 section _[Manually manage free metadata space of a thin pool LV](https://www.linux.org/docs/man7/lvmthin.html)_ for guidance on using
 the `lvextend --poolmetadatasize` command.
@@ -837,7 +841,7 @@ Note that since a duplicate archive is identical, including internal UUIDs, it s
 
 * _Sending to multiple archives:_ If you have created separate archives (not duplicates as described in the last section) and want to backup one or more volumes to both archives, Wyng can do this seamlessly from non-LVM storage systems such as Btrfs.  With LVM, the --remap option would have to be used each time you switch archives; this slows Wyng down to the pace of a regular incremental backup program, so keeping a duplicate archive using rsync or similar may be preferable.  However, this issue doesn't affect sending different sets of volumes to different archives, only when a specific volume is sent to more than one archive.
 
-* Wyng archives should be stored on Unix-like filesystems that were formatted with default or close-to default metadata settings (i.e. _inode_ capacity has not been manually reduced). Any format providing a 16KB:1 (or lower) data-to-inode ratio should work fine regardless of the Wyng chunksize being used.
+* Wyng archives should be stored on Unix-like file systems that were formatted with default or close-to default metadata settings (i.e. _inode_ capacity has not been manually reduced). Any format providing a 16KB:1 (or lower) data-to-inode ratio should work fine regardless of the Wyng chunk size being used.
 
 * Archive file permissions can change when moving an archive to a different system or switching to a different _dest_ protocol (i.e. from _file:_ to _ssh:_). A mis-match of permissions (such as ownership) can result in permission errors that prevent Wyng from completing a command. In such cases using `chown -R` on the archive directory may be necessary (See your OS documentation for details).
 

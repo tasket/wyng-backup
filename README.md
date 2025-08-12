@@ -21,7 +21,7 @@ _aging snapshot_ space consumption pitfalls.
 
 Wyng also doesn't require the source admin system to ever mount processed volumes or
 to handle them as anything other than blocks, so it safely handles
-untrusted data in guest filesystems to bolster container-based security.
+untrusted data in guest file systems to bolster container-based security.
 
 
 ### Status
@@ -36,7 +36,7 @@ Public beta with a range of features including:
 
  - Incremental backups of Linux logical volumes from Btrfs, XFS and Thin-provisioned LVM
 
- - Supported destinations: Local filesystem, Virtual machine or SSH host
+ - Supported destinations: Local file system, Virtual machine or SSH host
 
  - Fast pruning of old backup sessions
 
@@ -64,8 +64,6 @@ Version 0.8 major enhancements:
 
  - Configure defaults in /etc/wyng/wyng.ini
 
- - Mountpoints no longer required at destination
-
  - Simple selection of archives and local paths: Choose any _local_ or _dest_ each time you run Wyng
 
  - Multiple volumes can now be specified for most Wyng commands; send and receive support multiple storage pools
@@ -84,12 +82,12 @@ Before starting:
 should be installed, respectively.
 
 * Volumes to be backed-up should reside locally in one of the following snapshot-capable
-storage types:  LVM thin-provisioned pool, Btrfs subvolume, or XFS/reflink capable filesystem. Otherwise, volumes may be imported from or saved to other filesystems at standard (slower) speeds.
+storage types:  LVM thin-provisioned pool, Btrfs subvolume, or XFS/reflink capable file system. Otherwise, volumes may be imported from or saved to other file systems at standard (slower) speeds.
 
 * For backing up from LVM, _thin-provisioning-tools & lvm2_ must be present on the source system.  For Btrfs, the `btrfs` command must be present.
 
 * The destination system where the Wyng archive is stored (if different from source) should
-also have python3, plus a basic Unix command set and filesystem (i.e. a typical Linux or BSD
+also have python3, plus a basic Unix command set and file system (i.e. a typical Linux or BSD
 system). Otherwise, _samba_, FUSE, etc. may be used to access remote storage using smb, sftp, s3 or other protocols
 without concern for python or Unix commands.
 
@@ -123,7 +121,7 @@ and directory path.
 Next you can start making backups with `wyng send`:
 
 ```
-sudo wyng send --dest=file:/mnt/drive1/mylaptop.backup --local=volgrp1/pool1 root-volume home-volume
+sudo wyng send --dest=file:/mnt/drive2/mylaptop.backup --local=volgrp1/pool1 root-volume home-volume
 ```
 
 This command sends two volumes 'root-volume' and 'home-volume' from the LVM thin pool 'volgrp1/pool1' to the destination archive.
@@ -136,7 +134,11 @@ Run Wyng using the following commands and arguments in the form of:
 
 **wyng \[--options] command \[volume_names] \[--options]**
 
-For additional commands, options, and advanced usage notes see the [Wyng User Reference](doc/Wyng_User_Reference.md).
+---
+
+For additional commands, options, and advanced usage notes see the _[Wyng User Reference](doc/Wyng_User_Reference.md)._
+
+---
 
 ### Command summary
 
@@ -158,7 +160,7 @@ already exists in the archive, incremental mode is automatically used.
 
 ```
 
-wyng send my_big_volume --local=vg/pool --dest=file:/mnt/drive1/mylaptop.backup
+wyng send my_big_volume --local=vg/pool --dest=file:/mnt/drive2/mylaptop.backup
 
 ```
 
@@ -180,13 +182,13 @@ If `--session` is used, only one date-time is accepted. The volume name is requi
 
 ```
 
-wyng receive vm-work-private --local=vg/pool --dest=file:/mnt/drive1/mylaptop.backup
+wyng receive vm-work-private --local=vg/pool --dest=file:/mnt/drive2/mylaptop.backup
 
 ```
 
 ...restores a volume called 'vm-work-private' to 'myfile.img' in
 the LVM thin pool 'vg/pool'.  Note that `--dest` always refers to the archive location, so
-the volume is being restored _from_ '/mnt/drive1/mylaptop.backup'.
+the volume is being restored _from_ '/mnt/drive2/mylaptop.backup'.
 
 For any save path, Wyng will try to discard old data before receiving unless `--sparse`,
 `--sparse-write` or `--use-snapshot` options are used.
@@ -257,7 +259,7 @@ commands. It accepts one of the following forms:
 
 | _URL Form_ | _Destination Type_
 |----------|-----------------
-|__file:__/path                           | Local filesystem
+|__file:__/path                           | Local file system
 |__ssh:__//user@example.com[:port][/path]      | SSH server
 |__qubes:__//vm-name[/path]                     | Qubes virtual machine
 |__qubes-ssh:__//vm-name:me@example.com[:port][/path]  | SSH server via a Qubes VM
@@ -268,7 +270,7 @@ commands. It accepts one of the following forms:
 The location of local copy-on-write storage where logical volumes, disk images, etc. reside.  This serves as the _source_ for `send` commands, and as the place where `receive` restores/saves volumes.
 
 This parameter takes one of two forms: Either the source volume group and pool as 'vgname/poolname'
-or a directory path on a reflink-capable filesystem such as Btrfs or XFS (for Btrfs the path should
+or a directory path on a reflink-capable file system such as Btrfs or XFS (for Btrfs the path should
 end at a subvolume).  Required for commands `monitor` and `diff`, `receive` when
 not using `--saveto`, and `send` when not using `--import-other-from`.
 
@@ -294,6 +296,9 @@ Retrieve the latest local snapshot, if one is available, as the baseline for the
 Also use `--sparse` if you want Wyng to fall back to
 sparse mode when snapshots are not already present.
 
+### User Guide
+
+For additional commands, options, and advanced usage notes see the _[Wyng User Reference](doc/Wyng_User_Reference.md)._
 
 ### Verifying Code
 
