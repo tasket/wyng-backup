@@ -68,7 +68,7 @@ class ArchiveSet:
     attr_str    = {"compression","compr_level","hashtype","uuid","updated_at","ci_mode"}
 
     def __init__(self, top, dest, opts, ext="", allvols=False, children=2, show=False,
-                 pass_agent=0, passphrase=None, prior_auth=None):
+                 pass_agent=0, passphrase=None, prior_auth=None, reload=False):
         self.time_start      = time_start
         self.monotonic_start = monotonic_start
         self.dest        = dest
@@ -234,16 +234,7 @@ class ArchiveSet:
 
         # load volume metadata objects
         if children:
-            # initial load, depth 1
-            self.load_volumes(1, show=show)
-
-            if children > 1:
-                # load volume objects fully
-                self.load_volumes(children, show=show)
-                # compile global sessions for synced autoprune calendar
-                self.autoprune_s = {s for v in self.vols.values() for s in v.sesnames} \
-                                   if self.opts.autoprune.lower() != "off" else set() \
-                                    - {v.last for v in self.vols.values()}
+            self.load_volumes(2 if reload else children, show=show, reload=reload)
 
 
     def load_volumes(self, children, vids=[], reload=False, handle=False, show=False):
@@ -2508,12 +2499,12 @@ def get_configs_remote(dest, base_dir, opts, reload=False):
                             aset.datacrypto.set_counter(cache_aset.dataci_count)
                             aset.save_ini()    ; update_dest(aset, pathlist=[confname])
                         del(cache_aset)    ; shutil.rmtree(arch_dir+"-old", ignore_errors=True)
-                        os.replace(arch_dir, arch_dir+"-old")
+                        os.remove(ini)     ; reload = True
                     else:
                         raise ValueError(reason)
 
             elif cache_aset.updated_at < aset.updated_at:
-                if exists(sl := cache_aset.path+"/sendlist.tmp"):
+                if exists(sl := cache_aset.path+"/sendlist.tmp") and opts.force:
                     print("Recovering cache.")
                     for mdf in open(sl, "r"):
                         if debug:   print("mv", mdf)
@@ -2522,7 +2513,7 @@ def get_configs_remote(dest, base_dir, opts, reload=False):
                     return get_configs_remote(dest, base_dir, opts)
                 elif not reload:
                     print("Updating metadata cache.")
-                    return get_configs_remote(dest, base_dir, opts, reload=True)
+                    os.remove(ini)     ; reload = True
                 else:
                     raise ValueError("Cache reload failed.")
 
@@ -2536,18 +2527,13 @@ def get_configs_remote(dest, base_dir, opts, reload=False):
                                  f"{aset.updated_at} {aset.in_process[:1]}",
                                  f"{cache_aset.updated_at} {cache_aset.in_process[:1]}")
 
-    elif not exists(ini) and exists(aset.confpath):
+    if not exists(ini) and exists(aset.confpath):
         os.makedirs(arch_dir, exist_ok=True)
         for f in ("salt.bak", ArchiveSet.saltname, confname):
             if exists(f1 := pjoin(aset.path, f)) and not exists(f2 := pjoin(arch_dir, f)):
                 shutil.copyfile(f1, f2)
 
     if exists(sl := arch_dir+"/sendlist.tmp"):   os.remove(sl)
-    if not exists(ini):
-        os.makedirs(arch_dir, exist_ok=True)
-        for f, _ in recv_list:
-            if exists(pjoin(tmpdir,f)):
-                shutil.copyfile(pjoin(tmpdir,f), pjoin(arch_dir,f))
 
     # Initial auth successful! Fetch + auth volume metadata...
     if opts.action in ("arch-check","delete"):
@@ -2558,7 +2544,7 @@ def get_configs_remote(dest, base_dir, opts, reload=False):
         depth = 2
 
     return ArchiveSet(arch_dir, dest, opts, children=depth, allvols=True,
-                      prior_auth=aset, show=show)
+                      prior_auth=aset, show=show, reload=reload)
 
 
 # Returns either a single LocalStorage obj from --local, or a dict of them
@@ -3945,12 +3931,8 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
         tar_info.size = len(flistj); tarf_addfile(tar_info, fileobj=BytesIO(flistj))
         tarf.close()    ; untar.stdin.flush()
 
-        # Finalize local cache
         with open(aset.path+"/sendlist.tmp","w") as slf:
             for ii in saved_files:   print(ii, file=slf)
-        ses.path = ses.path.rsplit("-tmp",maxsplit=1)[0]
-        os.replace(ses.path+"-tmp", ses.path)    ; ses.rename_saved(ext=".tmp")
-        os.remove(aset.path+"/sendlist.tmp")
 
         if exists(ses.path+"/manifest.tmp"):     os.remove(ses.path+"/manifest.tmp")
         if old_mapfile and exists(old_mapfile):  os.remove(old_mapfile)
@@ -4221,6 +4203,13 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={}, ses_tags={},
             if debug and exists(lf := tmpdir+"/send.log"):   SPr.run([CP.cat, "-v", lf])
             raise RuntimeError("tar transport failure code %d" % retcode)
 
+    # Local cache finalize
+    catch_signals()
+    for ses in (aset.vols[v].sessions[aset.vols[v].last] for v in sent_vols):
+        ses.path = ses.path.rsplit("-tmp",maxsplit=1)[0]   ; os.replace(ses.path+"-tmp", ses.path)
+        ses.rename_saved(ext=".tmp")
+    catch_signals(**signormal)
+
     if not monitor_only and (volct:= len(sent_vols)):
         print(hl, "\n%0d volumes, %0d——>%0d MB in %.1f seconds."
               % (volct, totalvsize/MB, totalbcount/MB, time.monotonic() - ms_start)
@@ -4362,7 +4351,7 @@ def autoprune(vol, needed_space=0, apmode="off", include=set(), allvols=False):
         sdate = to_date(ses)
         if (apmode != "off" and oldest and sdate <= oldest) or ses in include:
             for dses in apcal[sdate.toordinal()]:
-                if dses[0] == ses and ses not in exclude:
+                if dses[0] == ses and ses in vol.sessions and ses not in exclude:
                     vol.sessions[ses].toggle = False
 
     # Mark sessions for thinning-out according to ndays + nsessions;
@@ -5341,7 +5330,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 beta"      ; prog_date = "20250805"
+prog_version     = "0.8 beta"      ; prog_date = "20250809"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
