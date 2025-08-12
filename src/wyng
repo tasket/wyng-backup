@@ -2351,7 +2351,7 @@ def parse_options(args, pdefs, altconf=""):
     conffile = altconf or (wyng_conf if exists(wyng_conf) else "")
     conf_block = {"config","debug","force","save-to","session","unattended","volume-desc","tag",
                   "all","all-before","vols-from","import-other-from","upgrade-format", "help",
-                  "skip-corrupt-chunks"}
+                  "skip-corrupt-chunks","force-retry"}
 
     if conffile and (altconf or not any(map(lambda x: x.startswith("--config"), args))):
         confp = configparser.ConfigParser()    ; confp.optionxform = lambda option: option
@@ -2842,6 +2842,7 @@ def helper_send(debug=False):
             elif member.ischr() and member.name == "mv":
                 catch_signals()    ; files = json.load(tarf.extractfile(tarf.next()))
                 if debug:   err_out("mv: " + repr(files))
+                for f in (x[:-4] for x in files):   os.utime(f) if exists(f) else None
                 for f in files:   replace(f, f[:-4])
                 catch_signals(None)
             elif member.isdir():
@@ -2918,13 +2919,17 @@ def helper_merge_finalize():
     try:
         print("Merge: Finalize target")
         m = "merge/"    ; open(m+"CHECK-start-finalize","w").close()
+        for f in (m+target+"/info.tmp", m+merge_target+"/info", m+target+"/manifest.z.tmp",
+                  m+merge_target+"/manifest.z", m+merge_target, target, "volinfo.tmp", "volinfo",
+                  "../archive.ini.tmp", "../archive.ini", "..", "."):
+            if exists(f):   os.utime(f) # touch first
         if not resume or exists(m+target+"/info.tmp"):
             replace(m+target+"/info.tmp", m+merge_target+"/info")
         if exists(m+target+"/manifest.z.tmp"):
             replace(m+target+"/manifest.z.tmp", m+merge_target+"/manifest.z")
         if not resume or not exists(target):         replace(m+merge_target, target)
         if not resume or exists("volinfo.tmp"):      replace("volinfo.tmp", "volinfo")
-        if not resume or exists("archive.ini.tmp"):  replace("../archive.ini.tmp", "../archive.ini")
+        if not resume or exists("../archive.ini.tmp"): replace("../archive.ini.tmp", "../archive.ini")
         if not exists(target):   raise FileNotFoundError(target)
         fssync(".")
     except Exception as err:
@@ -4083,8 +4088,8 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={}, ses_tags={},
     curtime  = use_sesid or time.strftime("%Y%m%d-%H%M%S", time.localtime(time_start))
     dedup    = options.dedup and dest.hlinks
 
-    if options.dedup and not dest.hlinks:
-        err_out("Hardlinks not supported on dest.")
+    if not monitor_only and options.dedup and not dest.hlinks:
+        err_out("Hardlinks not supported on dest.")   ; options.dedup = aset.opts.dedup = False
 
     if options.autoprune.lower() == "full":
         for vol in aset.vols.values():   autoprune(vol, apmode="full")
@@ -4736,7 +4741,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
         l_vol = storage.lvols[vol.alias]     ; snap1vol = l_vol.snap1
         paired = storage.lvols[snap1vol].paired_state(vol.mapfile(), vol.last)
         if not l_vol.exists():
-            err_out("Local volume must exist for diff.")
+            err_out(f"{vol.name}: Local volume does not exist.")
             return None
 
         if paired == "Y":
@@ -5097,10 +5102,10 @@ def retry_in_process(aset):
             ipskip = True
         else:
             aset.set_in_process(None)
+    elif exists(aset.path+"/in_process_retry") and not options.force_retry:
+        raise RuntimeError("Interrupted process already retried.")
     elif aset.in_process:
         open(aset.path+"/in_process_retry","w").close()
-    elif exists(aset.path+"/in_process_retry"):
-        raise RuntimeError("Interrupted process already retried.")
 
     if not ipskip and aset.in_process and aset.in_process[0] in ("delete","merge") \
     and aset.in_process[1].startswith("Vol_"):
@@ -5341,7 +5346,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 beta"      ; prog_date = "20250810"
+prog_version     = "0.8 beta"      ; prog_date = "20250811"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
@@ -5430,6 +5435,7 @@ parser_defs = [
  [["--meta-reduce"],  {"default": "on:3000", "help": "Metadata retention policy (see doc)"}],
  [["--json"],         {"action": "store_true", "help": "Output as json format (list)"}],
  [["--force"],        {"action": "store_true", "help": "Force action"}],
+ [["--force-retry"],  {"action": "store_true", "help": "Retry in-process transaction again"}],
  [["--force-allow-rollback"], {"action": "store_true", "help": "Allow rollback (caution)"}],
  [["--clean"],        {"action": "store_true", "help": "Delete orphan snapshots, metadata"}],
  [["--purge"],        {"choices": ["other","full"], "default": None,
@@ -5555,9 +5561,6 @@ try:
         sid, ses_tags = None, {}
         other_vols = {x: os.path.abspath(y)
                     for x,y in map(lambda a: a.split(":|:",maxsplit=1), options.import_other_from)}
-
-        if options.dedup and not aset.dest.hlinks:
-            err_out("Hardlinks not supported on dest.")   ; options.dedup = aset.opts.dedup = False
 
         for storage, vols in storagesets.items():
             sid, ses_tags = monitor_send(storage, aset, vols or selected_vols, monitor_only=False,
