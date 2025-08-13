@@ -3316,11 +3316,12 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only, other_vols=
             if dv in other_vols:   other_vols.remove(dv)
             else:                  datavols.remove(dv)
             continue
-        atrs[dv] = vp
+
+        if dv in datavols:   atrs[dv] = vp
 
     # Get attributes for vol paths
     do_exec([[CP.xargs, CP.lsattr]], inlines=list(atrs.values()), out=tmpdir+"/attr.lst")
-    for dv, a in zip(atrs, map(str.split, open(tmpdir+"/attr.lst"))):  atrs[dv] = a[0]
+    atrs = {x: y[0] for x,y in zip(atrs, map(str.split, open(tmpdir+"/attr.lst")))}
 
     for datavol in datavols + list(other_vols.keys()):
 
@@ -3330,7 +3331,7 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only, other_vols=
 
         vol   = aset.vols[datavol]    ; mapfile = vol.mapfile()
         if vol.aliastype == "import_other":   continue
-        if "C" in atrs[datavol] and datavol in datavols:
+        if datavol in atrs and datavol in datavols and "C" in atrs[datavol]:
             if verbose:   print("  Cannot snapshot:")
             other_vols[datavol] = pjoin(storage.path, datavol)
         if datavol in other_vols:
