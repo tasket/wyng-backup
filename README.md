@@ -272,26 +272,21 @@ The location of local copy-on-write storage where logical volumes, disk images, 
 This parameter takes one of two forms: Either the source volume group and pool as 'vgname/poolname'
 or a directory path on a reflink-capable file system such as Btrfs or XFS (for Btrfs the path should
 end at a subvolume).  Required for commands `monitor` and `diff`, `receive` when
-not using `--saveto`, and `send` when not using `--import-other-from`.
+not using `--save-to`, and `send` when not using `--import-other-from`.
 
 
 #### `--session=<date-time>[,<date-time>]` OR
 #### `--session=^<tag>[,^<tag>]`
 
-Session allows you to specify a single date-time or tag spec for the `receive`, `verify`, `diff`,
-and `arch-check` commands. Using a tag selects the last session having that tag. When specifying
-a tag, it must be prefixed by a `^` carat.
+Session allows you to specify a single date-time or tag spec for the `receive`, `verify`, `diff`, `prune, `list`, and `arch-check` commands as well as a comma-separated range for `prune`. Using a single tag selects the last session having that tag. When specifying
+tags, each must be prefixed by a `^` carat.
 
-For `prune`, specifying either a single date-time or a comma-separated range is possible.
-Specifying a tag will have different effects: a single tag spec will remove only each individual session
-with that tag, whereas a tag in a dual (range) spec will define an inclusive range anchored at the first
-instance of the tag (when the tag is the first spec) or the last instance (when the tag is the
-second range spec). Also, date-times and tags may be used together in a range spec.
+For more details, see the _Wyng User Reference_.
 
 
 #### `--use-snapshot`
 
-Retrieve the latest local snapshot, if one is available, as the baseline for the `receive` process. This can result in near-instantaneous receiving of archived volumes. In cases where an older session is requested, only the differences between the snapshot and the requested version of the volume will be transferred from the archive, which can greatly accelerate `receive`.
+Use the latest local snapshot, if one is available, as the baseline for the `receive` process. This can result in near-instantaneous receiving of archived volumes. In cases where an older session is requested, only the differences between the snapshot and the requested version of the volume will be transferred from the archive, which can greatly accelerate `receive`.
 
 Also use `--sparse` if you want Wyng to fall back to
 sparse mode when snapshots are not already present.

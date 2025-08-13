@@ -28,7 +28,7 @@ untrusted data in guest file systems to bolster container-based security.
 
 <table style="border-style:none; padding:0px;">
     <tr vertical-align="center" style="border-style:none;">
-        <td align="center" style="border-style:none; width:50px"><img src="media/info1.svg" height=42 /></td>
+        <td align="center" style="border-style:none; width:50px"><img src="../media/info1.svg" height=42 /></td>
         <td style="border-style:none;"><b>Notice: Wyng project has moved to <a href="https://codeberg.org/tasket/wyng-backup">Codeberg.org!</b></a></td>
 </tr></table>
 
@@ -427,21 +427,19 @@ The location of local copy-on-write storage where logical volumes, disk images, 
 This parameter takes one of two forms: Either the source volume group and pool as 'vgname/poolname'
 or a directory path on a reflink-capable file system such as Btrfs or XFS (for Btrfs the path should
 end at a subvolume).  Required for commands `monitor` and `diff`, `receive` when
-not using `--saveto`, and `send` when not using `--import-other-from`.
+not using `--save-to`, and `send` when not using only `--import-other-from`.
 
 
 #### `--session=<date-time>[,<date-time>]` OR
 #### `--session=^<tag>[,^<tag>]`
 
-Session allows you to specify a single date-time or tag spec for the `receive`, `verify`, `diff`,
-and `arch-check` commands. Using a tag selects the last session having that tag. When specifying
-a tag, it must be prefixed by a `^` carat.
+Session allows you to specify a single date-time or tag spec for the `receive`, `verify`, `diff`, `prune`, `list`, and `arch-check` commands as well as a comma-separated range for `prune`. Using a single tag selects the last session having that tag. When specifying
+tags, each must be prefixed by a `^` carat.
 
 For `prune`, specifying either a single date-time or a comma-separated range is possible.
 Specifying a tag will have different effects: a single tag spec will remove only each individual session
 with that tag, whereas a tag in a dual (range) spec will define an inclusive range anchored at the first
-instance of the tag (when the tag is the first spec) or the last instance (when the tag is the
-second range spec). Also, date-times and tags may be used together in a range spec.
+instance of the tag (first spec is a tag) and/or the last instance (when the second spec is a tag). Also, date-times and tags may be used together in a range spec.
 
 
 #### `--keep=<spec>`
@@ -492,7 +490,7 @@ you want to restore over a low-bandwidth connection a locally-existing large vol
 
 #### `--use-snapshot`
 
-Retrieve the latest local snapshot, if one is available, as the baseline for the `receive` process. This can result in near-instantaneous receiving of archived volumes. In cases where an older session is requested, only the differences between the snapshot and the requested version of the volume will be transferred from the archive, which can greatly accelerate `receive`.
+Use the latest local snapshot, if one is available, as the baseline for the `receive` process. This can result in near-instantaneous receiving of archived volumes. In cases where an older session is requested, only the differences between the snapshot and the requested version of the volume will be transferred from the archive, which can greatly accelerate `receive`.
 
 Also use `--sparse` if you want Wyng to fall back to
 sparse mode when snapshots are not already present.
@@ -501,7 +499,7 @@ sparse mode when snapshots are not already present.
 #### `--save-to=<path>`
 
 Its possible to receive to any valid file path or block device using the `--save-to` option,
-which can be used in place of `--local`.  Only one volume can be specified at a time when using `--save-to`.
+which can be used in place of `--local`.  Only one volume can be received at a time when using `--save-to`.
 
 
 #### `--tar-bypass` _(experimental)_
@@ -587,12 +585,12 @@ Wyng then reads instead of prompting for passphrase input.  If a prior auth from
 
 #### `--import-other-from=volname:|:path`
 
-Enables `send`ing a volume from a path that is not a supported snapshot storage type.  This may
+Enables `send`-ing a volume from a path that is not a supported snapshot storage type.  This may
 be any regular file or a block device which is seek-able.
 
 When it is specified this option causes slow delta comparisons to be used for the specified volume(s)
 instead of the default fast snapshot-based delta comparisons.  It is not recommended for regular
-use with large volumes.
+use with large volumes if speed or efficiency are a priority.
 
 The special delimiter used to separate the _volname_ (archive volume name) and the _path_ is ':|:'
 which means this option cannot be used to `send` directly to volume names in the archive which
@@ -672,7 +670,7 @@ Selects the encryption cipher/mode.  The available modes are:
 
 For efficiently automating Wyng usage with multiple volumes grouped by their associated local storage, json is accepted in the form... `{"local1": [["v-name1","v-alias1"], []*], "local2": []*}`
 
-Used with `send`, all included volumes will be recorded under a single session date-time.  The _alias_ may be null, the same as the vol name, or different; when different Wyng will interpret this as a request to rename(!) the archived volume to the alias – use with caution.
+Used with `send`, all included volumes will be recorded under a single session date-time.  The _alias_ may be specified as null, the same as the vol name, or a different name; when different Wyng will interpret this as a request to rename(!) the archived volume to the alias – use with caution.
 
 Used with `receive`, the alias is used to receive to a volume name that is different than the archived volume's listed name.
 
@@ -680,7 +678,7 @@ Upon completion Wyng may supply a result/error listing in a file at the same jso
 
 #### `--force-retry`
 
-Wyng normally re-tries completion of an interrupted (in-process) transaction only once and running Wyng afterward will result in "Interrupted process already retried" errors. Using `--force-retry` suppresses the error and allows the transaction to be attempted again.
+Wyng normally re-tries completion of an interrupted (in-process) archive transaction only once and running Wyng afterward will result in "Interrupted process already retried" errors. Using `--force-retry` suppresses the error and allows the transaction to be attempted again.
 
 
 ### Configuration files
@@ -751,8 +749,7 @@ object at any point in time; they aren't well suited to telling us if that objec
 attacks that replace your current archive with an older version (in Wyng this is related to
 replay attacks, but not downgrade attacks).  Wyng guards against
 such attacks by checking that the time encoded in your locally cached archive.ini isn't newer
-than the one on the destination/remote; Wyng also displays the last archive modification time
-whenever you access it.
+than the one in the archive itself on the destination; Wyng also displays the last archive modification time whenever you access it.
 
 
 #### Protecting and Verifying Archive Authenticity:
@@ -773,20 +770,20 @@ gpg --verify laptop1.sig laptop1.backup/archive.ini && wyng arch-check --dest=fi
 Note that custom signature files should _not_ be stored within the archive directory.
 
 (Although volumes can be verified piecemeal with the `wyng verify` command, it is not suited
-to verifying everything within an archive.)
+to verifying everything within an archive in a timely manner.)
 
 
 ### Tips & Caveats
 
-* Wyng doesn't store the `--local` path in the archive. Normally, this means if you're receiving volumes that must go to different local paths or LVM pools, you must group the volumes into separate invocations of `wyng --local=<path> receive <vols>`, one group of _vols_ for each _path_. However, for automated use of Wyng this can be reduced to a single invocation with the `--local-from` option which accepts volume lists grouped by each local spec.
+* Storage paths: Wyng doesn't store the `--local` path in the archive. Normally, this means if you're receiving volumes that must go to different local paths or LVM pools, you must group the volumes into separate invocations of `wyng --local=<path> receive <vols>`, one group of _vols_ for each _path_. However, for automated use of Wyng this can be reduced to a single invocation with the `--local-from` option which accepts volume lists grouped by each local spec. Also, Wyng doesn't care if a volume you're receiving was sent using `--import-other-from`; by default trying to receive such a volume will place it in the `--local` path unless you decide to use `--save-to`.
 
-* Qubes users: If you're using Wyng to backup Qubes VMs, you probably want to use the Wyng wrapper made especially for Qubes, [wyng-util-qubes](https://codeberg.org/tasket/wyng-util-qubes), which makes saving & restoring VM settings along with data easy!
+* [Qubes OS](https://qubes-os.org) users: If you're using Wyng to backup Qubes VMs, you probably want to use the Wyng wrapper made especially for Qubes, [wyng-util-qubes](https://codeberg.org/tasket/wyng-util-qubes), which makes saving & restoring VM settings along with data easy!
 
 * LVM users: Wyng has an internal snapshot manager which creates snapshots of volumes
 in addition to any snapshots you may already have on your local storage system.
 This can pose a serious challenge to _lvmthin_ (aka thin-provisioned LVM) as the default space
 allocated for metadata is often too small for rigorous & repeated snapshot rotation
-cycles.  It is recommended to _at least double_ the existing or default _tmeta_ space
+cycles.  It is recommended to _at least double_ the default _tmeta_ space
 on each thin pool used with `wyng send` or `wyng monitor`; see the man page
 section _[Manually manage free metadata space of a thin pool LV](https://www.linux.org/docs/man7/lvmthin.html)_ for guidance on using
 the `lvextend --poolmetadatasize` command.
@@ -802,14 +799,13 @@ only a few minutes (there is no need to dismount the images).  For example:
 ```
 
 <ul>
-Note that while the 'autodefrag' mount option can be used as an alternative, the overall performance will be reduced due to the smaller fragments and constant effect of write-amplification.</ul>
+Note that while the 'autodefrag' mount option can be used as an alternative, the overall performance may be reduced due to the smaller fragments and constant write-amplification effects. Similarly, enabling Btrfs compression will also have a defragging effect.</ul>
 
 <ul>
 Btrfs deduplicators like `bees` or `duperemove` can quickly increase fragmentation
-(i.e. undo the effects of _defragment_) if not used carefully. The `duperemove` docs
+(i.e. undo the effects of defragment) if not used carefully. The `duperemove` docs
 indicate that choosing a larger block size will limit fragmentation, making it
-preferable to _bees_. The block `-b` value should be matched to the one used 
-for `defragment -t`.</ul>
+preferable to `bees`. The block `-b` value should be matched to the value used for `defragment -t`.</ul>
 
 * Receive/restore and deduplication:  Wyng `receive` can prevent data duplication when there is an existing volume to over-write; in sparse mode it will compare existing data on disk with incoming data from the archive and avoid writing to areas that match.  The `--use-snapshot` option has a similar space-saving effect and may be combined with the _sparse_ options.  However, Wyng cannot tell if any other volumes on the system are related to the volumes being received, and it won't automatically use them as a starting point to reduce consumption of disk space; to attain the 'dedup' effect when restoring its up to you to create snapshots from related volumes at your respective receive paths/LVs before running `wyng --sparse receive`.
 
@@ -898,11 +894,11 @@ Unix commands or support a compatible FUSE protocol such as sshfs(sftp) or s3.
 
 ### Donations
 
-<a href="https://liberapay.com/tasket/donate"><img alt="Donate using Liberapay" src="media/lp_donate.svg" height=54></a>
+<a href="https://liberapay.com/tasket/donate"><img alt="Donate using Liberapay" src="../media/lp_donate.svg" height=54></a>
 
-<a href="https://ko-fi.com/tasket"><img src="media/ko-fi.png" height=57></a> <a href="https://ko-fi.com/tasket">Ko-Fi donate</a>
+<a href="https://ko-fi.com/tasket"><img src="../media/ko-fi.png" height=57></a> <a href="https://ko-fi.com/tasket">Ko-Fi donate</a>
 
-<a href="https://www.buymeacoffee.com/tasket"><img src="media/buymeacoffee_57.png" height=57></a> <a href="https://www.buymeacoffee.com/tasket">Buy me a coffee!</a>
+<a href="https://www.buymeacoffee.com/tasket"><img src="../media/buymeacoffee_57.png" height=57></a> <a href="https://www.buymeacoffee.com/tasket">Buy me a coffee!</a>
 
 
 If you like this project, monetary contributions are welcome and can
