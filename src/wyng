@@ -52,6 +52,8 @@ class SelectionError(ValueError):   pass
 
 class AuthenticationError(ValueError):   pass
 
+class DecodeError(ValueError):   pass
+
 class StorageError(ValueError):   pass
 
 
@@ -258,17 +260,24 @@ class ArchiveSet:
                 # instantiate:
 
             if vids and key not in vids:   continue
-            vid = key; hashval = value; vname = None
+            vid = key; hashval = value; vname = err = None
 
             #loadses = allvols or self.in_process or options.from_arch or options.dedup or
             try:
-                vol  = ArchiveVolume(self, vid, hashval, pjoin(self.path,vid),
-                                name=vname, children=children, reload=reload, show=show)
+                vol  = ArchiveVolume(self, vid, hashval, pjoin(self.path,vid), name=vname,
+                                     children=children, reload=reload, show=show)
             except Exception as e:
-                errors.append((vid, e))
-                if not handle:   raise e
+                err = e    ; errors.append((vid, e))
 
-            self.vols[vol.name] = vol
+            if not err:
+                self.vols[vol.name] = vol
+            elif not handle and reload:
+                raise err
+
+        if errors and not reload:
+            print(errors); print("RELOAD") ####
+            return self.load_volumes(2, vids=[x[0] for x in errors], reload=True,
+                                     handle=handle, show=show)
 
         return errors
 
@@ -392,18 +401,26 @@ class ArchiveSet:
 
         return digest
 
-    def decode_file(self, fname, fdest=None, digest=None, max_sz=16000000):
+    def decode_file(self, fname, digest, max_sz, try_ext=".tmp"):
         # Enh: optimize memory use
-        destname= fdest or (fname[:-2] if fname.endswith(".z") else fname)
         mcrypto = self.mcrypto         ; buf_start = mcrypto.buf_start if mcrypto else 0
 
-        with  open(fname,"r+b") as inf,   mmap.mmap(inf.fileno(), 0) as inmap:
-            if not (buf_start < len(inmap) <= max_sz + buf_start):
-                raise ValueError("Bad buffer size.")
-            mbuf = mcrypto.decrypt(inmap) if mcrypto else bytes(inmap)
-            if not hmac.compare_digest(digest, self.b64hash(mbuf)):
-                raise ValueError("Hash does not match.")
-            with open(destname,"wb") as f:   f.write(self.decompress(mbuf))
+        for ext in ["", try_ext] if try_ext and exists(fname+try_ext) else [""]:
+            error = None
+            with  open(fname+ext,"rb") as inf:
+                if not (buf_start < os.stat(inf.fileno()).st_size <= max_sz + buf_start):
+                    error = f"Bad buffer size {os.stat(inf.fileno()).st_size}: {fname+ext}"
+                else:
+                    mbuf = mcrypto.decrypt(inf.read()) if mcrypto else bytes(inf.read())
+                    if not hmac.compare_digest(digest, self.b64hash(mbuf)):
+                        error = "MD file %s hash %s, expected %s" \
+                                % (fname+ext, self.b64hash(mbuf), digest)
+            if not error:
+                if ext:   os.replace(fname, fname+ext) ; print("HIT", fname+ext) ####
+                return self.decompress(mbuf)
+            if ext:   os.remove(fname+ext) ; print("MISS", fname+ext) ####
+
+        raise DecodeError(error)
 
     # compile global sessions for synced autoprune calendar
     def get_global_ap_ses(self):
@@ -445,16 +462,10 @@ class ArchiveVolume:
         if show:  print("\n", vid, "-", name)
         if path and not exists(path):   os.makedirs(path)
         if path and hashval:
-            with open(pjoin(path,"volinfo"), "rb") as f:
-                fsize = os.fstat(f.fileno()).st_size
-                if fsize > self.max_volinfosz:   raise ValueError("volinfo too large")
-                buf = f.read(fsize)
-            if archive.mcrypto:   buf = archive.mcrypto.decrypt(buf)
-            if not hmac.compare_digest(hashval, archive.b64hash(buf)):
-                raise ValueError("Volume %s hash %s, expected %s" \
-                                 % (vid, archive.b64hash(buf), hashval))
-            if show:   print(archive.decompress(buf).decode("UTF-8"))
-            with io.StringIO(archive.decompress(buf).decode("UTF-8")) as f:
+            buf = archive.decode_file(pjoin(path,"volinfo"), hashval, self.max_volinfosz)
+            if show:   print(buf.decode("UTF-8"))
+
+            with io.StringIO(buf.decode("UTF-8")) as f:
                 for ln in f:
                     vname, value = ln.split("=", maxsplit=1)
                     vname = vname.strip()    ; value = value.strip()
@@ -470,11 +481,13 @@ class ArchiveVolume:
             if self.desc and not all(map(str.isprintable, self.desc)) \
             or len(self.desc) > ArchiveSet.comment_len:
                 raise ValueError("Bad desc: "+repr(self.desc))
+            if len(self.sessions) > self.max_sessions:
+                raise ValueError(f"Too many sessions: {len(self.sessions)}")
 
         self.alias = self.name
 
         if children > 1:
-            self.load_sessions(reload=reload)
+            self.load_sessions()
 
         if exists(pjoin(path,"volchanged")):
             self.changed_bytes = int(open(pjoin(path,"volchanged"),"r").readlines()[0].strip())
@@ -496,18 +509,24 @@ class ArchiveVolume:
                 except Exception as e:
                     #err_out(f"{self.vid} - {sname}\n{repr(e)}")
                     errors.append((sname, e))
-                    if not handle:   raise e
-
+                    if not handle and reload:   raise e
 
         # session name list sorted by sequence field
         if not errors:
             self._seslist = list(self.sessions.values())
             self._seslist.sort(key=lambda x: x.sequence)
             self.sesnames = [y.name for y in self._seslist]
+        elif not reload:
+            print(errors); print("RELOAD") ####
+            return self.load_sessions(sesids=[x[0] for x in errors], handle=handle, reload=True)
+        elif not handle:
+            raise errors[0][1]
+
         if self.sesnames:   self.last = self.sesnames[-1]
 
-        if mfdecode:
+        if mfdecode and not errors:
             errors.extend(self.decode_manifests(sesids, force=True, handle=handle))
+            if errors and not handle:   raise errors[0][1]
 
         return errors
 
@@ -638,9 +657,9 @@ class ArchiveVolume:
             do_exec([[CP.chattr, "+c", ses.path]], check=False)
             if ses.manifesthash == "0":   open(path,"wb").close()   ; return
 
-            self.archive.decode_file(path+".z", fdest=path+".tmp",
-                                        digest=ses.manifesthash, max_sz=ses.manifest_max())
-            os.replace(path+".tmp", path)
+            buf = self.archive.decode_file(path+".z", ses.manifesthash, ses.manifest_max())
+            with open(path+".dtmp", "wb") as f:   f.write(buf)
+            os.replace(path+".dtmp", path)
             ses.just_fetched = True
         else:
             os.utime(path)
@@ -699,16 +718,9 @@ class ArchiveSession:
         self.manifesthash = None
 
         if path and hashval:
-            with open(pjoin(path,"info"), "rb") as sf:
-                fsize = os.fstat(sf.fileno()).st_size
-                if fsize > self.max_infosz:   raise ValueError("info too large")
-                buf = sf.read(fsize)
-            if arch.mcrypto:   buf = arch.mcrypto.decrypt(buf)
-            if show:   print(self.volume.vid, self.name); print(arch.decompress(buf).decode("UTF-8"))
-            if not hmac.compare_digest(hashval, arch.b64hash(buf)):
-                raise ValueError("%s Session %s hash %s, expected %s" \
-                                 % (volume.vid, name, arch.b64hash(buf), hashval))
-            with io.StringIO(arch.decompress(buf).decode("UTF-8")) as sf:
+            buf = arch.decode_file(pjoin(path,"info"), hashval, self.max_infosz)
+            if show:   print(buf.decode("UTF-8"))
+            with io.StringIO(buf.decode("UTF-8")) as sf:
                 attrlist = self.attr_str + self.attr_int
                 for ln in sf:
                     vname, value = map(str.strip, ln.split("=", maxsplit=1))
@@ -721,13 +733,18 @@ class ArchiveSession:
                         setattr(self, vname,
                                 int(value) if vname in self.attr_int else value)
 
-            if self.volsize > max_address + 1:
-                raise ValueError("Bad volume size.")
+            if not 0 <= self.volsize <= max_address:
+                raise ValueError(f"Bad volume size: {self.volsize}")
+            if self.sequence < 0:
+                raise ValueError(f"Bad sequence: {self.sequence}")
             if not (self.localtime.isdigit() or self.name_chk.match("S_" + self.localtime)):
                 raise ValueError("Bad localtime.")
             if not self.name_chk.match(self.name):
                 raise ValueError("Bad name field.")
-            # Enh: validation check for permissions
+            if not (x := self.permissions) in {"r","w"} and not (len((y := x.split(":"))) == 3 \
+            and len(x) <= self.max_permsz and y[0].isdigit() and "".join(y[1:]).isalnum()):
+                raise ValueError(f"Bad permissions field: {x}")
+
             self.saved = self.loaded = True
 
         for tag in addtags:   self.tag_add(tag)
@@ -1236,7 +1253,7 @@ class DataCryptography:
 
     # Decrypt [X]ChaCha20-Poly1305:
     def _dec_chacha20_poly1305(self, buf):
-        untrusted_buf = memoryview(buf)
+        untrusted_buf = buf #### memoryview(buf)
         nonce  = untrusted_buf[:self.nonce_sz]
         ci_tag = untrusted_buf[self.nonce_sz:self.buf_start]
         cipher = self.ChaCha20_Poly1305_new(key=self.key, nonce=nonce)
@@ -2358,7 +2375,9 @@ def parse_options(args, pdefs, altconf=""):
         confp["var-global-default"] = {}       ; confp.read_file(open(conffile, "r"))
         parser_defs_d = {x[0]: y for x, y in pdefs}
         for k, v in confp["var-global-default"].items():
-            if (kopt := "--"+k) in parser_defs_d and k not in conf_block:
+            if k in conf_block:
+                err_out(f"Ignoring config item: {k}")
+            elif (kopt := "--"+k) in parser_defs_d:
                 if parser_defs_d[kopt].get("action") == "append":
                     parser_defs_d[kopt]["default"] = list(filter(None, v.splitlines()))
                 elif parser_defs_d[kopt].get("action") == "count":
@@ -2367,6 +2386,8 @@ def parse_options(args, pdefs, altconf=""):
                     parser_defs_d[kopt]["default"] = bool(int(v))
                 else:
                     parser_defs_d[kopt]["default"] = v
+            else:
+                raise OptionError(f"Unknown item in config: {k}")
 
     parser = argparse.ArgumentParser(prog=prog_name, description=prog_info[0], epilog=prog_info[1],
                                      formatter_class=argparse.RawTextHelpFormatter)
@@ -2493,27 +2514,14 @@ def get_configs_remote(dest, base_dir, opts, reload=False):
                               f"{cache_aset.updated_at} vs. {aset.updated_at}")
                     if opts.force_allow_rollback:
                         err_out(reason)
-                        if aset.mcrypto:
-                            # advance counters
-                            aset.mcrypto.set_counter(cache_aset.mci_count)
-                            aset.datacrypto.set_counter(cache_aset.dataci_count)
-                            aset.save_ini()    ; update_dest(aset, pathlist=[confname])
-                        del(cache_aset)    ; shutil.rmtree(arch_dir+"-old", ignore_errors=True)
-                        os.remove(ini)     ; reload = True
+                        os.remove(ini)
                     else:
                         raise ValueError(reason)
 
             elif cache_aset.updated_at < aset.updated_at:
-                if exists(sl := cache_aset.path+"/sendlist.tmp") and opts.force:
-                    print("Recovering cache.")
-                    for mdf in open(sl, "r"):
-                        if debug:   print("mv", mdf)
-                        if exists(p := f"{cache_aset.path}/{mdf.strip()}"):   os.replace(p, p[:-4])
-                    os.remove(sl)
-                    return get_configs_remote(dest, base_dir, opts)
-                elif not reload:
+                if not reload:
                     print("Updating metadata cache.")
-                    os.remove(ini)     ; reload = True
+                    os.remove(ini)
                 else:
                     raise ValueError("Cache reload failed.")
 
@@ -2532,8 +2540,6 @@ def get_configs_remote(dest, base_dir, opts, reload=False):
         for f in ("salt.bak", ArchiveSet.saltname, confname):
             if exists(f1 := pjoin(aset.path, f)) and not exists(f2 := pjoin(arch_dir, f)):
                 shutil.copyfile(f1, f2)
-
-    if exists(sl := arch_dir+"/sendlist.tmp"):   os.remove(sl)
 
     # Initial auth successful! Fetch + auth volume metadata...
     if opts.action in ("arch-check","delete"):
@@ -3948,9 +3954,6 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
         tar_info.size = len(flistj); tarf_addfile(tar_info, fileobj=BytesIO(flistj))
         tarf.close()    ; untar.stdin.flush()
 
-        with open(aset.path+"/sendlist.tmp","w") as slf:
-            for ii in saved_files:   print(ii, file=slf)
-
         if exists(ses.path+"/manifest.tmp"):     os.remove(ses.path+"/manifest.tmp")
         if old_mapfile and exists(old_mapfile):  os.remove(old_mapfile)
         ses.volume.init_deltamap()
@@ -5347,7 +5350,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 beta"      ; prog_date = "20250811"
+prog_version     = "0.8 wip"      ; prog_date = "20250812"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
