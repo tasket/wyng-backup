@@ -275,7 +275,7 @@ class ArchiveSet:
                 raise err
 
         if errors and not reload:
-            print(errors); print("RELOAD") ####
+            if debug:   print(repr(errors[0][1]), "\nRELOAD:", [x[0] for x in errors])
             return self.load_volumes(2, vids=[x[0] for x in errors], reload=True,
                                      handle=handle, show=show)
 
@@ -416,9 +416,9 @@ class ArchiveSet:
                         error = "MD file %s hash %s, expected %s" \
                                 % (fname+ext, self.b64hash(mbuf), digest)
             if not error:
-                if ext:   os.replace(fname, fname+ext) ; print("HIT", fname+ext) ####
+                if ext:   os.replace(fname, fname+ext)
                 return self.decompress(mbuf)
-            if ext:   os.remove(fname+ext) ; print("MISS", fname+ext) ####
+            if ext:   os.remove(fname+ext)
 
         raise DecodeError(error)
 
@@ -517,7 +517,7 @@ class ArchiveVolume:
             self._seslist.sort(key=lambda x: x.sequence)
             self.sesnames = [y.name for y in self._seslist]
         elif not reload:
-            print(errors); print("RELOAD") ####
+            if debug:   print(repr(errors[0][1]), "\nRELOAD:", [x[0] for x in errors])
             return self.load_sessions(sesids=[x[0] for x in errors], handle=handle, reload=True)
         elif not handle:
             raise errors[0][1]
@@ -1253,7 +1253,7 @@ class DataCryptography:
 
     # Decrypt [X]ChaCha20-Poly1305:
     def _dec_chacha20_poly1305(self, buf):
-        untrusted_buf = buf #### memoryview(buf)
+        untrusted_buf = buf
         nonce  = untrusted_buf[:self.nonce_sz]
         ci_tag = untrusted_buf[self.nonce_sz:self.buf_start]
         cipher = self.ChaCha20_Poly1305_new(key=self.key, nonce=nonce)
@@ -1714,7 +1714,7 @@ class LocalVolume:
     def del_tags(self, tags=[]):
         raise NotImplementedError()
 
-    def rotate_snapshots(self, rotate=True, timestamp_path=None, addtags=[]):
+    def rotate_snapshots(self, rotate=True, delsnap2=True, timestamp_path=None, addtags=[]):
         assert not self.name.endswith(self.snap_ext)
         if debug:
             print("Rotate Snapshots", self.name, rotate, timestamp_path, addtags, flush=True)
@@ -1726,7 +1726,7 @@ class LocalVolume:
                 lvols[self.snap2].rename(self.snap1, addtags=addtags)
                 with open(self.pdir+self.snap1,"rb") as vf:   os.fsync(vf)
         else:
-            lvols[self.snap2].delete(sync=False)
+            if delsnap2:   lvols[self.snap2].delete(sync=False)
             if addtags and lvols[self.snap1].exists() and type(self) is LvmVolume:
                 lvols[self.snap1].del_tags((x for x in lvols[self.snap1].tags
                                               if x.startswith("S_")))
@@ -2155,7 +2155,7 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
 
         # try sessions
         vol = [x for x in aset.vols.values() if x.vid == vid][0]
-        ses_errs = vol.load_sessions(handle=True, reload=True, mfdecode=True)
+        ses_errs = vol.load_sessions(handle=True, mfdecode=True)
         seslist  = list(vol.sessions.values())    ; removed = []
 
         # un-loaded sessions cannot be sorted, so remove them from seslist
@@ -3273,16 +3273,16 @@ def prepare_snapshots_lvm(storage, aset, datavols, monitor_only, other_vols={}):
         # Make deltamap if necessary. Try to recover paired state
         # by comparing timestamps; a match means remap is unnecessary.
         if len(vol.sessions):
-            s1tags = lvols[snap1].tags
+            lastses = vol.sessions[vol.last]    ; s1tags = lvols[snap1].tags
 
             if not exists(mapfile) and lvols[snap1].exists() \
             and vol.last in s1tags and "delta" not in lvols[snap1].tags:
                 # Latest session matches current snapshot; OK to make blank map.
                 vol.init_deltamap(timestamp=lvols[snap1].gettime())
 
-            if not lvols[snap1].exists() or not exists(mapfile)    \
-            or os.stat(mapfile).st_mtime_ns != lvols[snap1].gettime() \
-            or vol.last not in s1tags:
+            if lvols[snap1].exists() and (not exists(mapfile)
+            or (os.stat(mapfile).st_mtime_ns != lvols[snap1].gettime()
+                and lastses.gettime() != lvols[snap1].gettime())):
                 # Handle inadvertant mapfile snapshot mis-match
                 lvols[snap1].delete()
 
@@ -3370,8 +3370,9 @@ def prepare_snapshots_reflink(storage, aset, datavols, monitor_only, other_vols=
                 # Create deltamap if its missing but datavol and lastses timestamps align
                 vol.init_deltamap(timestamp=lvols[snap1].gettime())
 
-            if not lvols[snap1].exists() or not exists(mapfile) \
-            or os.stat(mapfile).st_mtime_ns != lvols[snap1].gettime():
+            if lvols[snap1].exists() and (not exists(mapfile)
+            or (os.stat(mapfile).st_mtime_ns != lvols[snap1].gettime()
+                and lastses.gettime() != lvols[snap1].gettime())):
                 # Handle inadvertant mapfile snapshot mis-match
                 lvols[snap1].delete()
 
@@ -3514,12 +3515,13 @@ def update_delta_digest_lvm(storage, aset, datavol, monitor_only):
 
     catch_signals()
     changed = changed or dnewchunks+dfreedblocks+anynew > 0
+    tags = [vol.last, "delta", "delta-"+str(lvols[snap2vol].gettime())]
+    t2   = lvols[datavol].rotate_snapshots(rotate=changed and monitor_only, delsnap2=monitor_only,
+                                           timestamp_path=vol.mapfile(), addtags=tags)
+    if t2 != lvols[snap1vol].gettime():
+        raise ValueError("Bad rotation timestamp.")
+
     if monitor_only:
-        tags = [vol.last, "delta", "delta-"+str(lvols[snap2vol].gettime())]
-        t2   = lvols[datavol].rotate_snapshots(rotate=changed, timestamp_path=vol.mapfile(),
-                                               addtags=tags)
-        if t2 != lvols[snap1vol].gettime():
-            raise ValueError("Bad rotation timestamp.")
         print(("\r  %d ch, %d dis" % (dnewchunks, dfreedblocks//chunksize))
                 if changed else "\r  no change    ")
 
@@ -3670,8 +3672,10 @@ def update_delta_digest_reflink(storage, aset, datavol, monitor_only):
 
     catch_signals()
     changed = changed or dnewblocks+dfreedblocks > 0
+    lvols[datavol].rotate_snapshots(rotate=changed and monitor_only, delsnap2=monitor_only,
+                                    timestamp_path=vol.mapfile())
+
     if monitor_only:
-        t = lvols[datavol].rotate_snapshots(rotate=changed, timestamp_path=vol.mapfile())
         print(("\r  %d ch, %d dis" % (dnewblocks, dfreedblocks//chunksize))
                 if changed else "\r  no change    ")
 
@@ -5350,7 +5354,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 wip"      ; prog_date = "20250812"
+prog_version     = "0.8 beta"      ; prog_date = "20250815"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
