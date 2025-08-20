@@ -416,7 +416,7 @@ class ArchiveSet:
                         error = "MD file %s hash %s, expected %s" \
                                 % (fname+ext, self.b64hash(mbuf), digest)
             if not error:
-                if ext:   os.replace(fname, fname+ext)
+                if ext:   os.replace(fname+ext, fname)
                 return self.decompress(mbuf)
             if ext:   os.remove(fname+ext)
 
@@ -3958,6 +3958,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
         tar_info.size = len(flistj); tarf_addfile(tar_info, fileobj=BytesIO(flistj))
         tarf.close()    ; untar.stdin.flush()
 
+        ses.path = ses.path.rsplit("-tmp",maxsplit=1)[0]   ; os.replace(ses.path+"-tmp", ses.path)
         if exists(ses.path+"/manifest.tmp"):     os.remove(ses.path+"/manifest.tmp")
         if old_mapfile and exists(old_mapfile):  os.remove(old_mapfile)
         ses.volume.init_deltamap()
@@ -4089,7 +4090,7 @@ def dedup_existing(aset):
 # Controls flow of monitor and send_volume procedures:
 
 def monitor_send(storage, aset, datavols, monitor_only, imports={}, ses_tags={},
-                 use_sesid=None, benchmark=False):
+                 use_sesid=None, benchmark=False, vname_sz=30):
 
     options, dest = aset.opts, aset.dest    ; status1 = not options.unattended
     ms_start = time.monotonic()    ; MB   = 1024**2
@@ -4157,7 +4158,7 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={}, ses_tags={},
         print(f"\nSending backup session {curtime}:" if not benchmark
               else "\nDry run (not sending):")
 
-    hl = "—" * (min(max([len(aset.vols[v].name) for v in incrementals+send_alls]+[22]), 60)+20)
+    hl = "—" * (min(max([vname_sz]+[30]), shutil.get_terminal_size().columns)+20)
     print(hl, flush=True)
 
     totalvsize = totalbcount = 0    ; untar = tarf = None   ; sent_vols = []
@@ -4200,7 +4201,7 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={}, ses_tags={},
                 send_volume(storage, vol, curtime, ses_tags, send_all=datavol in send_alls,
                             changed=updated, benchmark=benchmark, untar=untar)
 
-            dest.free -= int(sbcount + (sbcount * 0.05))    ; sent_vols.append(vol.name)
+            dest.free -= int(sbcount + (sbcount * 0.05))    ; sent_vols.append(vol)
 
         else:
             storage.lvols[vol.name].rotate_snapshots(rotate=False)
@@ -4229,8 +4230,7 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={}, ses_tags={},
 
     # Local cache finalize
     catch_signals()
-    for ses in (aset.vols[v].sessions[aset.vols[v].last] for v in sent_vols):
-        ses.path = ses.path.rsplit("-tmp",maxsplit=1)[0]   ; os.replace(ses.path+"-tmp", ses.path)
+    for ses in (v.sessions[v.last] for v in sent_vols):
         ses.rename_saved(ext=".tmp")
     catch_signals(**signormal)
 
@@ -5566,14 +5566,15 @@ try:
 
 
     elif action == "send":
-        sid, ses_tags = None, {}
+        sid, ses_tags = None, {}    ; stvols = [v for x in storagesets.values() for v in x]
         other_vols = {x: os.path.abspath(y)
                     for x,y in map(lambda a: a.split(":|:",maxsplit=1), options.import_other_from)}
+        vname_sz   = max(map(len, list(other_vols) + selected_vols + stvols), default=30)
 
         for storage, vols in storagesets.items():
             sid, ses_tags = monitor_send(storage, aset, vols or selected_vols, monitor_only=False,
                                         use_sesid=sid, ses_tags=ses_tags, imports=other_vols,
-                                        benchmark=options.dry_run)
+                                        benchmark=options.dry_run, vname_sz=vname_sz)
             selected_vols.clear()   ; other_vols.clear()
 
         if other_vols:   error_cache.extend(list(other_vols.keys()))
