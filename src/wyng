@@ -269,8 +269,8 @@ class ArchiveSet:
                 raise err
 
         if errors and not reload:
-            if debug:   print(repr(errors[0][1]), "\nRELOAD:", [x[0] for x in errors])
-            recv_list = [(x+"/volinfo", ArchiveVolume.max_volinfosz) for x[0] in errors]
+            if debug:   print(repr(errors[0][1]), "\nRELOAD:", [x for x,_ in errors])
+            recv_list = [(x+"/volinfo", ArchiveVolume.max_volinfosz) for x,_ in errors]
             fetch_file_blobs(recv_list, self.path, self.dest, skip_exists=False)
             return self.load_volumes(2, vids=[x[0] for x in errors], reload=True,
                                      handle=handle, show=show)
@@ -2050,6 +2050,7 @@ def clear_array(ar):
 # Initialize a new ArchiveSet:
 
 def arch_init(aset):
+    print(f"\nCreate new archive: '{aset.opts.dest}'\n")
 
     if not zstd:   print("Package python3-zstd is not installed.")
     opts = aset.opts    ; data_ci = opts.encrypt or "xchacha20-dgr"
@@ -5353,7 +5354,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 beta"      ; prog_date = "20250816"
+prog_version     = "0.8 beta"      ; prog_date = "20250817"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
