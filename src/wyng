@@ -240,13 +240,7 @@ class ArchiveSet:
 
 
     def load_volumes(self, children, vids=[], reload=False, handle=False, show=False):
-
         errors = []    ; vids = vids or list(self.conf["volumes"].keys())
-        recv_list = [(x+"/volinfo", ArchiveVolume.max_volinfosz)
-                       for x in self.conf["volumes"].keys() if x in vids]
-        fetch_file_blobs(recv_list, self.path, self.dest, skip_exists=not reload)
-        do_exec([[CP.chattr, "+c"] + list(self.conf["volumes"].keys())],
-                cwd=self.path, check=False)
 
         for key, value in self.conf["volumes"].items():
             # conditions when a volume must be loaded:
@@ -276,8 +270,13 @@ class ArchiveSet:
 
         if errors and not reload:
             if debug:   print(repr(errors[0][1]), "\nRELOAD:", [x[0] for x in errors])
+            recv_list = [(x+"/volinfo", ArchiveVolume.max_volinfosz) for x[0] in errors]
+            fetch_file_blobs(recv_list, self.path, self.dest, skip_exists=False)
             return self.load_volumes(2, vids=[x[0] for x in errors], reload=True,
                                      handle=handle, show=show)
+
+        do_exec([[CP.chattr, "+c"] + list(self.conf["volumes"].keys())],
+                cwd=self.path, check=False)
 
         return errors
 
@@ -405,7 +404,7 @@ class ArchiveSet:
         # Enh: optimize memory use
         mcrypto = self.mcrypto         ; buf_start = mcrypto.buf_start if mcrypto else 0
 
-        for ext in ["", try_ext] if try_ext and exists(fname+try_ext) else [""]:
+        for ext in [try_ext, ""] if try_ext and exists(fname+try_ext) else [""]:
             error = None
             with  open(fname+ext,"rb") as inf:
                 if not (buf_start < os.stat(inf.fileno()).st_size <= max_sz + buf_start):
@@ -416,7 +415,9 @@ class ArchiveSet:
                         error = "MD file %s hash %s, expected %s" \
                                 % (fname+ext, self.b64hash(mbuf), digest)
             if not error:
-                if ext:   os.replace(fname+ext, fname)
+                if ext:
+                    if debug:   print("Recovered", fname+ext)
+                    os.replace(fname+ext, fname)
                 return self.decompress(mbuf)
             if ext:   os.remove(fname+ext)
 
@@ -497,15 +498,10 @@ class ArchiveVolume:
         sessions, path, vid, vname = self.sessions, self.path, self.vid, self.name
         Ses = ArchiveSession    ; sesids = sesids or list(sessions.keys())    ; errors = []
 
-        # fetch session metadata 'info' from remote
-        ses_list =[(vid+"/"+x, x, vname) for x in sesids]
-        fetch_file_blobs([(x+"/info", ArchiveSession.max_infosz) for x,_,_ in ses_list],
-                         self.archive.path, self.archive.dest, skip_exists=not reload, skip0=True)
-
         for sname in sesids or sessions:
             if not (s := sessions[sname]).loaded:
                 try:
-                    s = sessions[sname] = Ses(self, sname, s.hashval, path+"/"+sname, show=show)
+                    s = sessions[sname] = Ses(self, sname, s.hashval, path+"/"+sname, show=False)
                 except Exception as e:
                     #err_out(f"{self.vid} - {sname}\n{repr(e)}")
                     errors.append((sname, e))
@@ -517,8 +513,11 @@ class ArchiveVolume:
             self._seslist.sort(key=lambda x: x.sequence)
             self.sesnames = [y.name for y in self._seslist]
         elif not reload:
-            if debug:   print(repr(errors[0][1]), "\nRELOAD:", [x[0] for x in errors])
-            return self.load_sessions(sesids=[x[0] for x in errors], handle=handle, reload=True)
+            if debug:   print(repr(errors[0][1]), "\nRELOAD:", [x for x,_ in errors])
+            recv_list = [(f"{vid}/{x}/info", ArchiveSession.max_infosz) for x,_ in errors]
+            fetch_file_blobs(recv_list, self.archive.path, self.archive.dest,
+                             skip_exists=False, skip0=True)
+            return self.load_sessions(sesids=[x for x,_ in errors], handle=handle, reload=True)
         elif not handle:
             raise errors[0][1]
 
@@ -5354,7 +5353,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 beta"      ; prog_date = "20250815"
+prog_version     = "0.8 beta"      ; prog_date = "20250816"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
