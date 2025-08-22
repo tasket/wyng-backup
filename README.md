@@ -242,7 +242,7 @@ These cannot be changed for an archive after it is initialized.
 --local=_vg/pool_  _...or..._    | Storage pool containing local volumes
 --local=_/absolute/path_    | 
 --session=_date-time[,date-time]_ | Select a session or session range by date-time or tag (receive, verify, prune)
---use-snapshot         | Use snapshots when available for faster `receive`
+--use-snapshot         | Receive from the local snapshot (receive)
 --send-unchanged       | Record unchanged volumes, don't skip them (send)
 --unattended, -u       | Don't prompt for interactive input
 --verbose              | Increase details

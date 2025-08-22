@@ -1,4 +1,6 @@
-v0.8beta15 - Additional error prevention and recovery; add --force-retry option; support sending 'nodatacow' volumes; fix for index errors
+v0.8beta16 rel 20250820 - Fix use-snapshot issue 260; additional error prevention and recovery; add force-retry and use-snapshot-diff options; support sending 'nodatacow' volumes; fix for index errors
+
+v0.8beta15 - Deprecated.
 
 v0.8beta14 - Synced autoprune; protection for metadata vols; keep prior log by default; improved snapshot & cache handling; minor fixes and refinements.
 

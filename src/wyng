@@ -409,11 +409,14 @@ class ArchiveSet:
             with  open(fname+ext,"rb") as inf:
                 if not (buf_start < os.stat(inf.fileno()).st_size <= max_sz + buf_start):
                     error = f"Bad buffer size {os.stat(inf.fileno()).st_size}: {fname+ext}"
-                else:
-                    mbuf = mcrypto.decrypt(inf.read()) if mcrypto else bytes(inf.read())
-                    if not hmac.compare_digest(digest, self.b64hash(mbuf)):
-                        error = "MD file %s hash %s, expected %s" \
-                                % (fname+ext, self.b64hash(mbuf), digest)
+                if not error:
+                    try:
+                        mbuf = mcrypto.decrypt(inf.read()) if mcrypto else bytes(inf.read())
+                    except Exception as e:
+                        error = repr(e)
+                if not error and not hmac.compare_digest(digest, self.b64hash(mbuf)):
+                    error = "MD file %s hash %s, expected %s" \
+                            % (fname+ext, self.b64hash(mbuf), digest)
             if not error:
                 if ext:
                     if debug:   print("Recovered", fname+ext)
@@ -4201,7 +4204,7 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={}, ses_tags={},
                 send_volume(storage, vol, curtime, ses_tags, send_all=datavol in send_alls,
                             changed=updated, benchmark=benchmark, untar=untar)
 
-            dest.free -= int(sbcount + (sbcount * 0.05))    ; sent_vols.append(vol)
+            dest.free -= int(sbcount + (sbcount * 0.05))    ; sent_vols.append((vol, sent))
 
         else:
             storage.lvols[vol.name].rotate_snapshots(rotate=False)
@@ -4230,7 +4233,7 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={}, ses_tags={},
 
     # Local cache finalize
     catch_signals()
-    for ses in (v.sessions[v.last] for v in sent_vols):
+    for ses in (v.sessions[v.last] for v,s in sent_vols if s):
         ses.rename_saved(ext=".tmp")
     catch_signals(**signormal)
 
@@ -4448,6 +4451,8 @@ def merge_manifests(vol, msessions=None, mtarget=None, vsize=None, addcol=False,
     sespaths  = [ os.path.basename(vol.sessions[x].path) for x in msessions ]
     tmp       = aset.big_tmpdir if vol.volsize() > 128000000000 else tmpdir
     outfile   = tempfile.NamedTemporaryFile(dir=tmp, prefix="mout_", delete=False)
+    if debug:   print("manifest:", outfile.name, "vsize:", vsize)
+    if vsize == 0:   outfile.close()   ; return outfile.name
 
     if not aset.dedupsessions:   vol.decode_manifests(msessions)
     for suffix in ("/manifest\x00", "\x00"):
@@ -4473,19 +4478,22 @@ def merge_manifests(vol, msessions=None, mtarget=None, vsize=None, addcol=False,
 
     if rdiff:
         # merge a different set of manifests, use their address column to filter the main merge:
-        mfilter = merge_manifests(vol, msessions=list(reversed(rdiff)), vsize=vsize, addcol=False)
+        rdsize  = vol.sessions[rdiff[-1]].volsize    ; rdlast = vol.last_chunk_addr(rdsize)[1]
+        mfilter = merge_manifests(vol, msessions=list(reversed(rdiff)), vsize=rdsize)
+        if debug:   print("mfilter:", mfilter, "\nrdlast chunk:", rdlast)
         cmds.append([CP.sort, "-msd", "-k2,2", mfilter, "-"])
-        cmds.append([CP.awk, r'{if (PREV==$2) print $0} {PREV=$2}'])
+        cmds.append([CP.awk, "-v", "LST="+rdlast, r'{if (PREV==$2 || LST<=$2) print $0}{PREV=$2}'])
 
-    if vsize is not None and vsize < max(vol.sessions[x].volsize for x in msessions):
+    if vsize < max(vol.sessions[x].volsize for x in msessions):
         # session vol size shrank, so filter result by requested vsize
         cmds.append([CP.awk, r'$2<="'+vol.last_chunk_addr(vsize)[1]+'"'])
 
     do_exec(cmds, out=outfile.file, cwd=cdir)
 
-    for f in slist:  os.remove(f)
-    if rdiff:        os.remove(mfilter)
-    if addcol:       cdir_obj.cleanup()
+    if not debug:
+        for f in slist:  os.remove(f)
+        if rdiff:        os.remove(mfilter)
+        if addcol:       cdir_obj.cleanup()
     return outfile.name
 
 
@@ -4709,7 +4717,8 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
             l_vol = save_storage.new_vol_entry(vol.alias, vol.vid)    ; save_path = l_vol.path
 
         # possibly use snapshot as baseline for receive
-        if returned_home and options.use_snapshot and save_storage.pooltype in ("rlnk","tlvm") \
+        if returned_home and (options.use_snapshot or options.use_snapshot_diff) \
+        and save_storage.pooltype in ("rlnk","tlvm") \
         and (snap_lv := save_storage.lvols[l_vol.snap1]).paired_state(vol.mapfile(), vol.last)=="Y":
             assert l_vol.path == save_path
             sparse_write = use_snapshot = True    ; sparse = False
@@ -4779,22 +4788,24 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
 
     # Collect session manifests
     diff_ses = []
-    if use_snapshot and save_storage and save_storage.online:
-        # sessions after selected, except if last ses (then we're already done)
-        if select_ses == vol.last:
-            save_storage.setperms(save_path, ses_obj.permissions)
-            if is_num(ses_obj.localtime):   save_storage.settime(save_path, int(ses_obj.localtime))
-            print("Snapshot retrieved...Done.")
-            return volsize
+    if options.use_snapshot_diff and use_snapshot and save_storage and save_storage.online \
+    and select_ses != vol.last:
         print("Using snapshot as baseline.")
         incl_ses = sessions[:sessions.index(select_ses)+1]
         diff_ses = sessions[sessions.index(select_ses)+1:]
+        if debug:   print("diff:", diff_ses)
+    elif use_snapshot and save_storage and save_storage.online and select_ses == vol.last:
+        # sessions after selected, except if last ses (then we're already done)
+        save_storage.setperms(save_path, ses_obj.permissions)
+        if is_num(ses_obj.localtime):   save_storage.settime(save_path, int(ses_obj.localtime))
+        print("Snapshot retrieved...Done.")
+        return volsize
     elif verify_only == 2:
         # only selected session
         incl_ses = [select_ses]
     else:
         # everything upto & including selected
-        incl_ses = sessions[:sessions.index(select_ses)+1]
+        incl_ses = sessions[:sessions.index(select_ses)+1]    ; use_snapshot = False
 
     # Verify metadata then merge manifests and send chunk list to dest system:
     # sed is used to expand chunk info into a path and filter out any entries
@@ -4803,7 +4814,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
     if compare_files(aset, volumes=[vol], sessions=[vol.sessions[x] for x in incl_ses]):
         x_it(1, "Error: Local and archive metadata differ.")
     vol.decode_manifests(incl_ses+diff_ses, force=True)
-    manifest = merge_manifests(vol, msessions=incl_ses, addcol=True, rdiff=diff_ses)
+    manifest = merge_manifests(vol, msessions=incl_ses, addcol=True, vsize=volsize, rdiff=diff_ses)
 
     if debug:
         print(f"{vol.vid} CHUNK SIZE: {chunksize}\nEND SEQUENCE:")
@@ -5354,7 +5365,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 beta"      ; prog_date = "20250817"
+prog_version     = "0.8 beta"      ; prog_date = "20250820"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
@@ -5424,7 +5435,9 @@ parser_defs = [
  [["--skip-corrupt-chunks"], {"action": "store_true",
                        "help": "Continue despite corrupt chunks (receive)"}],
  [["--use-snapshot"], {"action": "store_true",
-                       "help": "Use local snapshot as baseline for receive"}],
+                       "help": "Receive from the local snapshot"}],
+ [["--use-snapshot-diff"], {"action": "store_true",
+                       "help": "Experimental: Use local snapshot for differential receive"}],
  [["--import-other-from"], {"action": "append", "default": [],
                        "help": "Import volume from non-snapshot file"}],
  [["--remap"],        {"action": "store_true", "help": "Remap volumes from other archive"}],
@@ -5451,7 +5464,7 @@ parser_defs = [
  [["--maxsync"],      {"action": "store_true", "help": "Use more fs sync"}],
  [["--upgrade-format"], {"action": "store_true",
                        "help": "Upgrade archive to current spec (arch-check)"}],
- [["--tar-bypass"],   {"action": "store_true", "help": "Bypass tar for file: archives (send)"}],
+ [["--tar-bypass"],   {"action": "store_true", "help": "Experimental: Bypass tar for file: archives (send)"}],
  [["--opt-ssh"],      {"action": "append", "default": [], "help": "Override ssh options"}],
  [["--opt-qubes"],    {"action": "append", "default": [], "help": "Override qvm-run options"}],
  [["--change-uuid"],  {"action": "store_true", "help": "Change the archive UUID (arch-check)"}],

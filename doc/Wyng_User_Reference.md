@@ -362,7 +362,7 @@ the volume data if present.
 --tag=tagname[,desc]   | Use session tags (send, list)
 --sparse               | Receive volume data sparsely (implies --sparse-write)
 --sparse-write         | Overwrite local data only where it differs (receive)
---use-snapshot         | Use snapshots when available for faster `receive`
+--use-snapshot         | Receive from local the local snapshot (receive)
 --send-unchanged       | Record unchanged volumes, don't skip them (send)
 --unattended, -u       | Don't prompt for interactive input
 --clean                | Perform garbage collection (arch-check) or metadata removal (delete)
@@ -377,6 +377,7 @@ the volume data if present.
 --save-to=_path_       | Save a volume to _path_ (receive).
 --vols-from=_json file_ | Specify local:[volumes] sets instead of --local
 --import-other-from    | Import volume data from a non-snapshot capable path during `send`
+--use-snapshot-diff    | Experimental: Use local snapshot in differential mode (receive)
 --session-strict=_on_ | Don't retrieve volume from next-oldest session if no exact session match
 --encrypt=_cipher_     | Set encryption mode or _'off'_ (default: _'xchacha20-dgr'_)
 --compression          | (arch-init) Set compression type:level
@@ -384,7 +385,7 @@ the volume data if present.
 --chunk-factor         | (arch-init) Set archive chunk size
 --volume-desc          | Set volume description (add, rename, send)
 --vid                  | Select volume by ID (delete)
---tar-bypass           | Use direct access for file:/ archives (send)
+--tar-bypass           | Experimental: Use direct access for file:/ archives (send)
 --passcmd=_'command'_  | Read passphrase from output of a wallet/auth app
 --upgrade-format       | Upgrade older Wyng archive to current format (arch-check)
 --change-uuid          | Change the archive UUID to a new random value (arch-check)
@@ -490,11 +491,17 @@ you want to restore over a low-bandwidth connection a locally-existing large vol
 
 #### `--use-snapshot`
 
-Use the latest local snapshot, if one is available, as the baseline for the `receive` process. This can result in near-instantaneous receiving of archived volumes. In cases where an older session is requested, only the differences between the snapshot and the requested version of the volume will be transferred from the archive, which can greatly accelerate `receive`.
+Receive a volume instantly from the newest local snapshot, if available. If the snapshot isn't available then `receive` will retrieve the volume data from the archive.
 
 Also use `--sparse` if you want Wyng to fall back to
 sparse mode when snapshots are not already present.
 
+
+#### `--use-snapshot-diff`
+
+Use the newest local snapshot, if one is available, as a baseline for the `receive` process. This can result in greatly accelerated receiving of archived volumes as only the differences between the snapshot and the requested version of the volume will be transferred.
+
+Implies `--use-snapshot`.
 
 #### `--save-to=<path>`
 
