@@ -779,6 +779,9 @@ Note that custom signature files should _not_ be stored within the archive direc
 (Although volumes can be verified piecemeal with the `wyng verify` command, it is not suited
 to verifying everything within an archive in a timely manner.)
 
+### Known Issues
+
+* Issue [260](https://codeberg.org/tasket/wyng-backup/issues/260): Versions of Wyng v0.8 older than _'20250820'_ may receive a volume incorrectly when `--use-snapshot` is used and the session is older than the most recent.  To resolve the issue the use-snapshot feature was split into two different options: A safe version enabled with `--use-snapshot` which only retrieves a whole snapshot if the specified session is newest, and an experimental version enabled by `--use-snapshot-diff` that can perform differential receive vs the snapshot if the session is older. If you use Wyng with `receive --use snapshot` to retrieve older versions of data then you are strongly urged to upgrade to a current release.
 
 ### Tips & Caveats
 
