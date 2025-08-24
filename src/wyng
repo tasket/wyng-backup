@@ -1484,7 +1484,7 @@ class LocalStorage:
             p  = "w" if pbits & stat.S_IWUSR else ""
             old= SPr.check_output([CP.lvm, "lvs", "--noheadings", "-o","lv_attr", path], text=True)
             if p != old.strip()[1]:
-                do_exec([[CP.lvm, "lvchange", path, "-p", "r"+p]])
+                do_exec([[CP.lvm, "lvchange", path, "-p", "r"+p]], newses=True)
         else:
             raise ValueError("Bad non-file path: "+path)
 
@@ -1523,10 +1523,10 @@ class LocalStorage:
         self.locked = True
         return mark, spath
 
-    def metadata_unlock(self, lvpool=None):
+    def metadata_unlock(self, lvpool=None, lv_all=False):
         mark_t = (0, self.path)
         if self.pooltype == "tlvm":
-            for pl in {lvpool} if lvpool else {getattr(x, "pool_lv", self.lvpool)
+            for pl in {self.lvpool} if lvpool else {getattr(x, "pool_lv", self.lvpool)
                                                for x in self.lvols.values()}:
                 if pl:   self._lvm_meta_snapshot("release", pool=pl)
 
@@ -1589,22 +1589,24 @@ class LocalStorage:
     # Reserve or release lvm thinpool metadata snapshot.
     # action must be "reserve" or "release".
     def do_lvm_meta_snapshot(action, tpool, sid, check=True, show=False):
+        global lvm_metadata_snaps
         assert action in {"release","reserve"}
         if debug or show:   print("dmsetup:", action, tpool, sid)
-        return SPr.run([CP.dmsetup, "message", tpool, sid, action+"_metadata_snap"],
-                       check=check, capture_output=not show)
+        if action == "reserve":   lvm_metadata_snaps.add((tpool,sid))
+        p = SPr.run([CP.dmsetup, "message", tpool, sid, action+"_metadata_snap"],
+                    stdin=SPr.DEVNULL, stdout=SPr.DEVNULL, stderr=SPr.DEVNULL,
+                    start_new_session=True, check=check)
+        if action == "release" and (tpool,sid) in lvm_metadata_snaps:
+            lvm_metadata_snaps.remove((tpool,sid))
+        return p
 
     def _lvm_meta_snapshot(self, action, pool=None):
-        global lvm_metadata_snaps
         vgname   = self.vgname.replace("-","--")
         poolname = (pool or self.lvpool).replace("-","--")
         if debug:   print(f"TLVM meta snapshot: {vgname}/{poolname} {action}", flush=True)
 
         tpool, sid = vgname+"-"+poolname+"-tpool", "0"
-        if action == "reserve":   lvm_metadata_snaps.add((tpool,sid))
         LocalStorage.do_lvm_meta_snapshot(action, tpool, sid, check= action=="reserve")
-        if action == "release" and (tpool,sid) in lvm_metadata_snaps:
-            lvm_metadata_snaps.remove((tpool,sid))
 
     def new_vol_entry(self, newname, vid, replace=False):
         if newname not in (lvols := self.lvols) or replace:
@@ -1892,11 +1894,11 @@ class LvmVolume(LocalVolume):
             self.snap2 = name + self.snap_ext[1]
 
     def add_tags(self, tags):
-        do_exec([[CP.lvm, "lvchange", self.path] + ["--addtag="+x for x in tags]])
+        do_exec([[CP.lvm, "lvchange", self.path] + ["--addtag="+x for x in tags]], newses=True)
         self.tags |= set(tags)
 
     def del_tags(self, tags):
-        do_exec([[CP.lvm, "lvchange", self.path] + ["--deltag="+x for x in tags]])
+        do_exec([[CP.lvm, "lvchange", self.path] + ["--deltag="+x for x in tags]], newses=True)
         self.tags -= set(tags)
 
     def rename(self, new_name, addtags=[]):
@@ -1911,7 +1913,7 @@ class LvmVolume(LocalVolume):
         storage.new_vol_entry(self.name, self.vid, replace=True)
 
         self.unlock()
-        do_exec([[CP.lvm, "lvrename", self.path, new_name]])
+        do_exec([[CP.lvm, "lvrename", self.path, new_name]], newses=True)
 
     def delete(self, sync=True, check=False, force=False):
         # Enh: re-write with asyncio
@@ -1934,7 +1936,7 @@ class LvmVolume(LocalVolume):
                  +  CP.lvm + " lvremove -f " + self.path]
             if not (sync or clean):   cmds = [CP.ionice, "-c3"] + cmds
             p = SPr.Popen(cmds, shell=False,
-                                stdout=SPr.DEVNULL, stderr=SPr.DEVNULL)
+                                stdout=SPr.DEVNULL, stderr=SPr.DEVNULL, start_new_session=True)
             if not sync and len(procs) < maxprocs:
                 procs.append(p)
             else:
@@ -1951,11 +1953,11 @@ class LvmVolume(LocalVolume):
         if snapshotfrom:
             do_exec([[CP.lvm, "lvcreate", "-kn", "-ay"] + rwmode
                                + ["--addtag="+x for x in addtags]
-                               + ["-s", vg+"/"+snapshotfrom, "-n", self.name]])
+                               + ["-s", vg+"/"+snapshotfrom, "-n", self.name]], newses=True)
         else:
             assert size is not None
-            do_exec([[CP.lvm, "lvcreate", "-kn", "-ay", "-V", str(size)+"b"] + rwmode
-                      + addtags + ["--thin", "-n", self.name, vg+"/"+self.storage.lvpool]])
+            do_exec([[CP.lvm, "lvcreate", "-kn", "-ay", "-V", str(size)+"b"] + rwmode + addtags
+                     + ["--thin", "-n", self.name, vg+"/"+self.storage.lvpool]], newses=True)
 
         return self.update()
 
@@ -1968,7 +1970,7 @@ class LvmVolume(LocalVolume):
 
     def resize(self, size):
         if not self.exists():   raise FileNotFoundError(self.path)
-        do_exec([[CP.lvm, "lvresize", "-L", str(size)+"b", "-f", self.path]])
+        do_exec([[CP.lvm, "lvresize", "-L", str(size)+"b", "-f", self.path]], newses=True)
         return self.update()
 
     def getperms(self):
@@ -3035,8 +3037,8 @@ sys.stderr.write("--==--\n")
 # automatically process the separate pipe chains in tandem. This allows separate but related chains
 # to feed outputs to an aggregating process using extra file descriptors or named pipes.
 
-def do_exec(commands, cwd=None, check=True, out="", infile="", inlines=[], text=False,
-            pgroup=None, pipefail=False, timeout=None, getctl=False, otherctl=None):
+def do_exec(commands, cwd=None, check=True, out="", infile="", inlines=[], text=False, pgroup=None,
+            newses=False, pipefail=False, timeout=None, getctl=False, otherctl=None):
     ftype   = "t" if text else "b"
     if issubclass(type(out), io.IOBase):
         outf = out
@@ -3061,7 +3063,7 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", inlines=[], text=
     for i, clist in enumerate(commands):
         p = SPr.Popen(clist, cwd=cwd, stdin=inf if i==0 else procs[i-1].stdout,
                              stdout=outf if i==len(commands)-1 else SPr.PIPE,
-                             stderr=errf, process_group=pgroup)
+                             stderr=errf, process_group=pgroup, start_new_session=newses)
         if len(procs):  procs[-1].stdout.close()
         procs.append(p)    ; pgroup = os.getpgid(p.pid)
 
@@ -5343,7 +5345,7 @@ def cleanup():
     if not admin_permission:   return
 
     try:
-        for tpool, sid in lvm_metadata_snaps:
+        for tpool, sid in list(lvm_metadata_snaps):
             LocalStorage._lvm_meta_snapshot("release", tpool, sid, check=False, show=True)
     except Exception as e:
         err_out(repr(e))
