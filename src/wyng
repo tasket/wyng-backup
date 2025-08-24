@@ -1523,10 +1523,10 @@ class LocalStorage:
         self.locked = True
         return mark, spath
 
-    def metadata_unlock(self, lvpool=None, lv_all=False):
+    def metadata_unlock(self, lvpool=None):
         mark_t = (0, self.path)
         if self.pooltype == "tlvm":
-            for pl in {self.lvpool} if lvpool else {getattr(x, "pool_lv", self.lvpool)
+            for pl in {lvpool} if lvpool else {getattr(x, "pool_lv", self.lvpool)
                                                for x in self.lvols.values()}:
                 if pl:   self._lvm_meta_snapshot("release", pool=pl)
 
@@ -1838,9 +1838,10 @@ class ReflinkVolume(FileVolume):
             snap_path = self.storage.lvols[snapshotfrom].path
             do_exec([[CP.env, "-u", "LC_ALL", CP.cp, "-p", "--reflink=always",
                       snap_path, self.path]])
-        else:
-            assert size is not None
-            with open(self.path, "wb") as vf:  vf.truncate(size); vf.flush()
+            if size is not None:   self.resize(size)
+
+        elif size is not None:
+            with open(self.path, "w") as f:   f.truncate(size)
 
         if ro:   rel_chmod(self.path, "-", 0o222)
         self.update()
@@ -1954,8 +1955,9 @@ class LvmVolume(LocalVolume):
             do_exec([[CP.lvm, "lvcreate", "-kn", "-ay"] + rwmode
                                + ["--addtag="+x for x in addtags]
                                + ["-s", vg+"/"+snapshotfrom, "-n", self.name]], newses=True)
-        else:
-            assert size is not None
+            if size is not None:   self.resize(size)
+
+        elif size is not None:
             do_exec([[CP.lvm, "lvcreate", "-kn", "-ay", "-V", str(size)+"b"] + rwmode + addtags
                      + ["--thin", "-n", self.name, vg+"/"+self.storage.lvpool]], newses=True)
 
@@ -4459,8 +4461,8 @@ def autoprune(vol, needed_space=0, apmode="off", include=set(), allvols=False):
 
 def merge_manifests(vol, msessions=None, mtarget=None, vsize=None, addcol=False, rdiff=[]):
     # Enh: implement mtarget to support merge_sessions()
-    aset      = vol.archive                    ; slist  = []
-    msessions = msessions or vol.sesnames
+    aset      = vol.archive                    ; slist   = []
+    msessions = msessions or vol.sesnames      ; mfilter = None
     sespaths  = [ os.path.basename(vol.sessions[x].path) for x in msessions ]
     tmp       = aset.big_tmpdir if vol.volsize() > 128000000000 else tmpdir
     outfile   = tempfile.NamedTemporaryFile(dir=tmp, prefix="mout_", delete=False)
@@ -4489,13 +4491,12 @@ def merge_manifests(vol, msessions=None, mtarget=None, vsize=None, addcol=False,
 
     cmds = [[CP.sort, "-umsd", "-k2,2", "--batch-size=16", "--files0-from="+slsort]]
 
-    if rdiff:
+    if rdiff and (rdsize := vol.sessions[rdiff[-1]].volsize) > 0:
         # merge a different set of manifests, use their address column to filter the main merge:
-        rdsize  = vol.sessions[rdiff[-1]].volsize    ; rdlast = vol.last_chunk_addr(rdsize)[1]
         mfilter = merge_manifests(vol, msessions=list(reversed(rdiff)), vsize=rdsize)
-        if debug:   print("mfilter:", mfilter, "\nrdlast chunk:", rdlast)
+        if debug:   print("mfilter:", mfilter, "\nrdlast chunk:", vol.last_chunk_addr(rdsize)[1])
         cmds.append([CP.sort, "-msd", "-k2,2", mfilter, "-"])
-        cmds.append([CP.awk, "-v", "LST="+rdlast, r'{if (PREV==$2 || LST<=$2) print $0}{PREV=$2}'])
+        cmds.append([CP.awk, "-v", "PREV=none", r'{if (PREV==$2) print $0}{PREV=$2}'])
 
     if vsize < max(vol.sessions[x].volsize for x in msessions):
         # session vol size shrank, so filter result by requested vsize
@@ -4505,7 +4506,7 @@ def merge_manifests(vol, msessions=None, mtarget=None, vsize=None, addcol=False,
 
     if not debug:
         for f in slist:  os.remove(f)
-        if rdiff:        os.remove(mfilter)
+        if mfilter:      os.remove(mfilter)
         if addcol:       cdir_obj.cleanup()
     return outfile.name
 
@@ -4736,7 +4737,8 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
             assert l_vol.path == save_path
             sparse_write = use_snapshot = True    ; sparse = False
             l_vol.delete(force=True)
-            l_vol.create(snapshotfrom=snap_lv.name, ro=False)
+            l_vol.create(size=volsize if select_ses != vol.last else None,
+                         snapshotfrom=snap_lv.name, ro=False)
 
         elif save_type == "tlvm pool":
             if not l_vol.exists():
@@ -4801,14 +4803,12 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
 
     # Collect session manifests
     diff_ses = []
-    if options.use_snapshot_diff and use_snapshot and save_storage and save_storage.online \
-    and select_ses != vol.last:
+    if options.use_snapshot_diff and use_snapshot and select_ses != vol.last and volsize > 0:
         print("Using snapshot as baseline.")
         incl_ses = sessions[:sessions.index(select_ses)+1]
         diff_ses = sessions[sessions.index(select_ses)+1:]
         if debug:   print("diff:", diff_ses)
-    elif use_snapshot and save_storage and save_storage.online and select_ses == vol.last:
-        # sessions after selected, except if last ses (then we're already done)
+    elif use_snapshot and select_ses == vol.last:
         save_storage.setperms(save_path, ses_obj.permissions)
         if is_num(ses_obj.localtime):   save_storage.settime(save_path, int(ses_obj.localtime))
         print("Snapshot retrieved...Done.")
@@ -5379,11 +5379,12 @@ def cleanup():
 
 
 
+
 ##  MAIN  #########################################################################################
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 wip"      ; prog_date = "20250821"
+prog_version     = "0.8 wip"      ; prog_date = "20250822"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
