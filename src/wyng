@@ -4496,7 +4496,8 @@ def merge_manifests(vol, msessions=None, mtarget=None, vsize=None, addcol=False,
         mfilter = merge_manifests(vol, msessions=list(reversed(rdiff)), vsize=rdsize)
         if debug:   print("mfilter:", mfilter, "\nrdlast chunk:", vol.last_chunk_addr(rdsize)[1])
         cmds.append([CP.sort, "-msd", "-k2,2", mfilter, "-"])
-        cmds.append([CP.awk, "-v", "PREV=none", r'{if (PREV==$2) print $0}{PREV=$2}'])
+        cmds.append([CP.awk, "-v", "PREV=none", "-v", "LST="+vol.last_chunk_addr(rdsize)[1],
+                             r'{if (PREV==$2 || LST<$2) print $0}{PREV=$2}'])
 
     if vsize < max(vol.sessions[x].volsize for x in msessions):
         # session vol size shrank, so filter result by requested vsize
@@ -5384,7 +5385,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 wip"      ; prog_date = "20250822"
+prog_version     = "0.8 beta"      ; prog_date = "20250823"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
