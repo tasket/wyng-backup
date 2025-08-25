@@ -1828,6 +1828,7 @@ class ReflinkVolume(FileVolume):
         self.stat = None
 
     def create(self, size=None, snapshotfrom=None, ro=True, addtags=[]):
+        assert size or snapshotfrom
         assert self.storage.online and self.storage.fstype in self.storage.rltypes
         if self.exists():   raise ValueError(f"Volume {self.name} already exists.")
         if debug:   print("Create vol", self.name, "from", snapshotfrom, flush=True)
@@ -1948,6 +1949,7 @@ class LvmVolume(LocalVolume):
             for col in self.colnames:   setattr(self, col, None)
 
     def create(self, size=None, snapshotfrom=None, ro=True, addtags=[]):
+        assert size or snapshotfrom and self.storage.online
         vg = self.storage.path    ; rwmode = ["-pr"+("w" if not ro else "")]
         if self.exists():   raise ValueError(f"Volume {self.name} already exists.")
         if debug:   print("Create vol", self.name, "from", snapshotfrom, flush=True)
@@ -1955,8 +1957,8 @@ class LvmVolume(LocalVolume):
             do_exec([[CP.lvm, "lvcreate", "-kn", "-ay"] + rwmode
                                + ["--addtag="+x for x in addtags]
                                + ["-s", vg+"/"+snapshotfrom, "-n", self.name]], newses=True)
-            if size is not None:   self.resize(size)
-
+            if size is not None and size != self.storage.lvols[snapshotfrom].getsize():
+                self.resize(size)
         elif size is not None:
             do_exec([[CP.lvm, "lvcreate", "-kn", "-ay", "-V", str(size)+"b"] + rwmode + addtags
                      + ["--thin", "-n", self.name, vg+"/"+self.storage.lvpool]], newses=True)
@@ -5385,7 +5387,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 beta"      ; prog_date = "20250823"
+prog_version     = "0.8 beta"      ; prog_date = "20250824"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
