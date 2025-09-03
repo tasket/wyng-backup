@@ -1,4 +1,4 @@
-v0.8rc1 20250901 - More thorough cleanup after interrupted send; fix "local storage offline" warnings.
+v0.8rc1 20250902 - More thorough cleanup after interrupted send; fix "local storage offline" warnings.
 
 v0.8beta16 20250824 - Fix use-snapshot issue 260; additional error prevention and recovery; add force-retry and use-snapshot-diff options; support sending 'nodatacow' volumes; fix for index errors
 
