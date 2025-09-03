@@ -2244,12 +2244,13 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
                        if x.is_dir() and x.name.startswith("Vol_")}
 
     vdir_strays = vol_dirs - set(aset.conf["volumes"].keys())
-    if vdir_strays:
-        print("Stray volume dirs:", vdir_strays)
-        if options.clean and dest.online:
+    if debug:   print("Stray volume dirs:", vdir_strays)
+    if options.clean and dest.online:
+        if vdir_strays:
             assert len([v for v in aset.vols.values() if v.vid in vdir_strays]) == 0
             dest.run(["rm -rf"] + vdir_strays, destcd=dest.path)
-            print("Stray dirs deleted.")
+        dest.run([f"rm -rf {x}/S*-tmp\n" for x in vol_list],  destcd=dest.path)
+        if debug:   print("Stray dirs deleted.")
 
     # Check volume contents at various levels (dirs, metadata, content)
     for volname, vol in ((vn,v) for vn,v in aset.vols.items() if vn in vol_list and dest.online):
@@ -2261,7 +2262,7 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
 
         # Remove session tmp dirs
         for sdir in os.scandir(vol.path):
-            if sdir.name.startswith("S_") and sdir.name.endswith("-tmp"):
+            if sdir.name.startswith("S") and sdir.name.endswith("-tmp"):
                 if debug:   print("Removing partial session dir '%s'" % sdir.name)
                 dest.run(["rm -rf " + vol.vid+"/"+sdir.name], destcd=dest.path)
                 shutil.rmtree(vol.path+"/"+sdir.name, ignore_errors=True)
@@ -2836,6 +2837,9 @@ def x_it(ec, text=None):
 def helper_send(debug=False):
     def altextract(m, set_attrs, filter):  return tarf.extract(m, set_attrs=set_attrs)
     mkdirs = os.makedirs    ; hlink = os.link    ; dirname = os.path.dirname
+    if not exists("archive.ini"):   x_it(10, "Archive not found.")
+    for f in (x.name+"/S-tmp" for x in os.scandir() if x.is_dir() and x.name.startswith("Vol_")):
+        if exists(f):   shutil.rmtree(f)
 
     while True:
         try:
@@ -2868,16 +2872,11 @@ def helper_send(debug=False):
             elif member.ischr() and member.name == "mv":
                 catch_signals()    ; files = json.load(tarf.extractfile(tarf.next()))
                 if debug:   err_out("mv: " + repr(files))
-                for f in (x[:-4] for x in files):   os.utime(f) if exists(f) else None
-                for f in files:   replace(f, f[:-4])
+                for ft, f in files:   os.utime(ft) if exists(ft) else None
+                for ft, f in files:   replace(ft, f)
                 catch_signals(None)
             elif member.isdir():
                 if debug:   err_out(f"dir: {os.path.abspath(os.curdir)} -- {member.name}")
-                vdir = member.name.split("/")[:2]    ; open(tmpdir+"/dir_"+vdir[0], "w").close()
-                for i in os.scandir(vdir[0]) if vdir[0].startswith("Vol_") and len(vdir) > 1 \
-                                             and str(time.time_ns())[-1] == "5" else []:
-                    if i.path.endswith("-tmp") and not i.path.endswith(vdir[1]+"-tmp"):
-                        err_out("rmtree: " + i.path)   ; shutil.rmtree(i.path, ignore_errors=True)
             tarf.members = []
         tarf.close()   ; fssync(".", force=True)
 
@@ -3749,9 +3748,8 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
     options     = aset.opts                     ; status1     = not options.unattended
     chunksize   = aset.chunksize                ; dedup       = newmap = False
     chdigits    = max_address.bit_length()//4   ; chformat    = "x%0"+str(chdigits)+"x"
-    bksession   = "S_"+curtime                  ; sdir        = pjoin(vol.vid, bksession)
-    prior_size  = vol.volsize()
-    old_mapfile = vol.mapfile()                 ; addrsplit   = -address_split[1]
+    bksession   = "S_"+curtime                  ; addrsplit   = -address_split[1]
+    prior_size  = vol.volsize()                 ; old_mapfile = vol.mapfile()
     lvols       = storage.lvols
     compress = compressors[aset.compression][2] ; compresslevel = int(aset.compr_level)
 
@@ -3781,11 +3779,10 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
         fullmanifest = None
     fman_hash     = fman_fname = ""
 
+    stmp, sdir      = pjoin(vol.vid, "S-tmp"), pjoin(vol.vid, bksession)
     ses = vol.new_session(bksession, addtags=list(ses_tags.items()))
-    ses.localtime   = str(vol_ts)
-    ses.volsize     = volsize
-    ses.permissions = volperms
-    ses.path        = vol.path+"/"+bksession+"-tmp"
+    ses.localtime   = str(vol_ts)    ; ses.volsize  = volsize
+    ses.permissions = volperms       ; ses.path     = pjoin(aset.path, stmp)
 
     # Code from init_dedup_indexN() localized here for efficiency.
     if aset.dedupindex:
@@ -3797,8 +3794,9 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
         ddsessions  = aset.dedupsessions                 ; ses_index = ddsessions.index(ses)
 
     # Set current dir and make new session folder
-    os.chdir(aset.path)    ; os.makedirs(sdir+"-tmp")
-    do_exec([[CP.chattr, "+c", sdir+"-tmp"]], check=False)
+    os.chdir(aset.path)
+    if exists(stmp):    shutil.rmtree(stmp)
+    os.makedirs(stmp)   ; do_exec([[CP.chattr, "+c", stmp]], check=False)
 
 
     if aset.datacrypto:
@@ -3823,13 +3821,13 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
     if not benchmark:
         tarf     = tarfile.open(mode="w|", fileobj=untar.stdin)
         tarf_addfile = tarf.addfile    ; tarf_add = tarf.add              ; stream_started = True
-        tar_info = TarInfo(sdir)       ; tar_info.type = tarfile.DIRTYPE  ; tarf_addfile(tar_info)
+        tar_info = TarInfo(stmp)       ; tar_info.type = tarfile.DIRTYPE  ; tarf_addfile(tar_info)
     else:
         tarf_addfile = tarf_add = tar_add_pass    ; stream_started = False
 
     # Open source volume and its delta bitmap as r, session manifest as w.
     with open(volpath,"rb", buffering=chunksize) if changed else NulIO() as vf, \
-         open(sdir+"-tmp/manifest.tmp", "wt") as hashf, \
+         open(stmp+"/manifest.tmp", "wt") as hashf, \
          open(old_mapfile,"rb") if not send_all else NulIO() as bmapf:
 
         vf_seek = vf.seek; vf_read = vf.read   ; BytesIO = io.BytesIO
@@ -3911,7 +3909,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
 
                 # Add buffer to stream
                 print(b64hash, destfile, file=hashf)
-                tar_info = TarInfo("%s-tmp/%s/%s" % (sdir, destfile[1:addrsplit], destfile))
+                tar_info = TarInfo("%s/%s/%s" % (stmp, destfile[1:addrsplit], destfile))
 
                 # If chunk already in archive, link to it
                 if dedup:
@@ -3973,12 +3971,12 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
 
         # Finalize on VM/remote
         catch_signals()
-        tar_info = TarInfo("mv")   ; tar_info.type = tarfile.CHRTYPE   ; tarf_addfile(tar_info)
-        tar_info = TarInfo("mv2")  ; flistj = json.dumps(saved_files+[sdir+"-tmp"]).encode("utf-8")
-        tar_info.size = len(flistj); tarf_addfile(tar_info, fileobj=BytesIO(flistj))
+        ti = TarInfo("mv")   ; ti.type = tarfile.CHRTYPE   ; tarf_addfile(ti)
+        flistj = json.dumps([[x, x[:-4]] for x in saved_files] + [[stmp, sdir]]).encode("utf-8")
+        ti = TarInfo("mv2") ; ti.size = len(flistj); tarf_addfile(ti, fileobj=BytesIO(flistj))
         tarf.close()    ; untar.stdin.flush()
 
-        ses.path = ses.path.rsplit("-tmp",maxsplit=1)[0]   ; os.replace(ses.path+"-tmp", ses.path)
+        pth = ses.path   ; ses.path = pjoin(aset.path, sdir)   ; os.replace(pth, ses.path)
         if exists(ses.path+"/manifest.tmp"):     os.remove(ses.path+"/manifest.tmp")
         if old_mapfile and exists(old_mapfile):  os.remove(old_mapfile)
         ses.volume.init_deltamap()
@@ -5387,7 +5385,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 beta"      ; prog_date = "20250824"
+prog_version     = "0.8 rc1"      ; prog_date = "20250901"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
@@ -5486,7 +5484,8 @@ parser_defs = [
  [["--maxsync"],      {"action": "store_true", "help": "Use more fs sync"}],
  [["--upgrade-format"], {"action": "store_true",
                        "help": "Upgrade archive to current spec (arch-check)"}],
- [["--tar-bypass"],   {"action": "store_true", "help": "Experimental: Bypass tar for file: archives (send)"}],
+ [["--tar-bypass"],   {"action": "store_true",
+                       "help": "Experimental: Bypass tar for file: archives (send)"}],
  [["--opt-ssh"],      {"action": "append", "default": [], "help": "Override ssh options"}],
  [["--opt-qubes"],    {"action": "append", "default": [], "help": "Override qvm-run options"}],
  [["--change-uuid"],  {"action": "store_true", "help": "Change the archive UUID (arch-check)"}],
@@ -5503,7 +5502,7 @@ try:
     verbose   = options.verbose or debug
 
     # early storage unlock (esp. tlvm)
-    get_configs_storage(None, options, unlock=True)
+    get_configs_storage(None, options, require_local=False, unlock=True)
 
     with open(tmpdir+"/err.log", "wt") as f:
         print("Python", sys.version, "\n", os.uname(), "\n", file=f)

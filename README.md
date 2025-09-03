@@ -134,11 +134,6 @@ Run Wyng using the following commands and arguments in the form of:
 
 **wyng \[--options] command \[volume_names] \[--options]**
 
----
-
-For additional commands, options, and advanced usage notes see the _[Wyng User Reference](doc/Wyng_User_Reference.md)._
-
----
 
 ### Command summary
 
@@ -150,6 +145,9 @@ For additional commands, options, and advanced usage notes see the _[Wyng User R
 | **arch-init**               | Create a new Wyng archive
 | **version**                 | Print the Wyng version and exit
 
+For additional commands, options, and advanced usage notes see the _[Wyng User Reference](doc/Wyng_User_Reference.md)._
+
+<br/>
 
 ### Command details
 
@@ -278,7 +276,7 @@ not using `--save-to`, and `send` when not using `--import-other-from`.
 #### `--session=<date-time>[,<date-time>]` OR
 #### `--session=^<tag>[,^<tag>]`
 
-Session allows you to specify a single date-time or tag spec for the `receive`, `verify`, `diff`, `prune, `list`, and `arch-check` commands as well as a comma-separated range for `prune`. Using a single tag selects the last session having that tag. When specifying
+Session allows you to specify a single date-time or tag spec for the `receive`, `verify`, `diff`, `prune`, `list`, and `arch-check` commands as well as a comma-separated range for `prune`. Using a single tag selects the last session having that tag. When specifying
 tags, each must be prefixed by a `^` carat.
 
 For more details, see the _Wyng User Reference_.
