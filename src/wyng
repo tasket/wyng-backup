@@ -2248,7 +2248,7 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
     if options.clean and dest.online:
         if vdir_strays:
             assert len([v for v in aset.vols.values() if v.vid in vdir_strays]) == 0
-            dest.run(["rm -rf"] + vdir_strays, destcd=dest.path)
+            dest.run(["rm -rf"] + list(vdir_strays), destcd=dest.path)
         dest.run([f"rm -rf {x}/S*-tmp\n" for x in vol_list],  destcd=dest.path)
         if debug:   print("Stray dirs deleted.")
 
@@ -5385,7 +5385,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 rc1"      ; prog_date = "20250901"
+prog_version     = "0.8 rc1"      ; prog_date = "20250902"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
