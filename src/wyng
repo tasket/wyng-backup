@@ -2288,7 +2288,8 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
         for sesname in reversed(vol.sesnames):
 
             if (selses and "S_"+selses != sesname) \
-            or (newest and not selses and sesname != vol.last):
+            or (newest and not selses and sesname != vol.last) \
+            or vol.sessions[sesname].manifesthash == "0":
                 continue
 
             print(" ", sesname[2:], end=" :", flush=True)
@@ -3937,7 +3938,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
                     # send dedup link
                     tar_info.linkname = "%s/%s/%s/x%s" % \
                         (ddses.volume.vid,
-                            ddses.name+"-tmp" if ddses is ses else ddses.name,
+                            "S-tmp" if ddses is ses else ddses.name,
                             ddchx[:addrsplit],
                             ddchx)
                     ddbytes += len(buf)
@@ -5385,7 +5386,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 rc1"      ; prog_date = "20250902"
+prog_version     = "0.8 rc1"      ; prog_date = "20250903"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
