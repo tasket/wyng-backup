@@ -32,7 +32,7 @@ untrusted data in guest file systems to bolster container-based security.
         <td style="border-style:none;"><b>Notice: Wyng project has moved to <a href="https://codeberg.org/tasket/wyng-backup">Codeberg.org!</b></a></td>
 </tr></table>
 
-Public beta with a range of features including:
+Release candidate with a range of features including:
 
  - Incremental backups of Linux logical volumes from Btrfs, XFS and Thin-provisioned LVM
 
@@ -192,8 +192,6 @@ For any save path, Wyng will try to discard old data before receiving unless `--
 `--sparse-write` or `--use-snapshot` options are used.
 
 
-<br>
- 
 ### list
 
 Displays the volumes contained in a Wyng archive.
