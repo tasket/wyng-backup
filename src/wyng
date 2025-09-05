@@ -743,7 +743,7 @@ class ArchiveSession:
                 raise ValueError("Bad localtime.")
             if not self.name_chk.match(self.name):
                 raise ValueError("Bad name field.")
-            if not (x := self.permissions) in {"r","w"} and not (len((y := x.split(":"))) == 3 \
+            if not (x := self.permissions) in {"r","w",""} and not (len((y := x.split(":"))) == 3 \
             and len(x) <= self.max_permsz and y[0].isdigit() and "".join(y[1:]).isalnum()):
                 raise ValueError(f"Bad permissions field: {x}")
 
@@ -5386,7 +5386,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 rc1"      ; prog_date = "20250903"
+prog_version     = "0.8 rc1"      ; prog_date = "20250904"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
