@@ -21,7 +21,7 @@
 # 9 - User Input, Option or Selection error
 
 
-import sys, signal, os, stat, shutil, subprocess as SPr, time, datetime
+import sys, signal, os, pwd, grp, stat, shutil, subprocess as SPr, time, datetime
 import re, mmap, bz2, zlib, gzip, tarfile, io, fcntl, tempfile
 import argparse, configparser, copy, hashlib, hmac, functools, uuid
 import getpass, base64, platform, resource, itertools, string, struct
@@ -57,7 +57,19 @@ class DecodeError(ValueError):   pass
 class StorageError(ValueError):   pass
 
 
-# ArchiveSet manages archive metadata incl. volumes and sessions
+
+# ArchiveSet is the archive 'root', manages archive metadata incl. volumes and sessions.
+
+# top:        Path where cache subdir for this archive located, typically '/var/lib/wyng'.
+# dest:       Object to access where the actual archive is stored.
+# opts:       'argparser' args under which this class is invoked.
+# allvols:    (bool)  Force load of all volumes.
+# children:   (int)   0-2 Level in root->vols->sessions heirarchy to stop loading.
+# reload:     (bool)  Force reload of all metadata from dest to local cache.
+# show:       (bool)  Display data for debugging.
+# pass-agent: (int)   The 'authmin' option value.
+# passphrase: (bytes) Passphrase for crypto.  Required if no active agent or prior_auth.
+# prior_auth: Other ArchiveSet object already having crypto access.
 
 class ArchiveSet:
 
@@ -440,6 +452,15 @@ class ArchiveSet:
                            digest_size=20).hexdigest()
 
 
+
+# ArchiveVolume manages 'volinfo' volume metadata and sessions.
+
+# archive:    Parent ArchiveSet obj.
+# vid:        (str)   Volume ID, see 'vid_chk' for format.
+# hashval:    (str)   The hash for validating this volinfo.
+# path:       (path)  Location of the volinfo and subordinate metadata.
+# name:       (path)  The volume name (may have relative dir elements).
+
 class ArchiveVolume:
 
     vid_chk       = re.compile(r"^Vol_[0-9a-fA-F]+$")
@@ -559,7 +580,7 @@ class ArchiveVolume:
             if exists(rpath+ext):   os.replace(rpath+ext, rpath)
         self.archive.rename_saved(ext)
 
-    def volname_check(vname): # Fix: move to LocalStorage class
+    def volname_check(vname): # Cleanup: move to LocalStorage class
         if not 0 < len(vname) <= ArchiveVolume.volname_len:
             return f"Volume path/name length must be 1 - {ArchiveVolume.volname_len}."
         if not vname.isprintable():
@@ -687,6 +708,15 @@ class ArchiveVolume:
 
         return errors
 
+
+
+# ArchiveSession manages specific session 'info' and 'manifest.z' metadata.
+
+# volume:     Parent ArchiveVolume obj.
+# name:       (str)   Name of session, see name_chk for format.
+# path:       (path)  Location of this info in cache.
+# hashval:    (str)   Hash for validating this 'info'.
+# addtags:    (list)  Tags (id, desc) to be applied to this session.
 
 class ArchiveSession:
 
@@ -1041,7 +1071,15 @@ def agent_make(agname, duration, keys):
     return p
 
 
-# DataCryptography(): Handle crypto functions and state for volume data
+# DataCryptography(): Handle crypto functions and state for volume (meta)data
+
+# First instantiate class, then .load() using relevant params.
+#  ci_type:    The common code for a metadata+data ciper pair (1st col in crypto_codes).
+#  keyfile:    Store for the non-passphrase keys / key factors. In Wyng V3 format, keys are
+#              not stored here, only salts and counters; 'archive.salt'
+#  passphrase: If no prior 'agentkeys', this is used with keyfile factors to generate keys.
+#  agentkeys:  A tuple of pre-generated keys from an agent or prior instance.
+#  cadence:    The step val determining how often counters are updated in keyfile.
 
 class DataCryptography:
 
@@ -1337,7 +1375,8 @@ class DataCryptography:
         return  nonce, cipher.encrypt(buf)
 
 
-# Define absolute paths of commands
+
+# CP: Define absolute paths of commands
 
 class CP:
     awk    = "/usr/bin/gawk"    ; sed   = "/usr/bin/sed"     ; sort     = "/usr/bin/sort"
@@ -1354,10 +1393,11 @@ class CP:
     btrfs      = "/usr/sbin/btrfs" if os.path.exists("/usr/sbin/btrfs") else "/bin/btrfs"
 
 
-# Manage local (source) data volumes, thin lvm and reflink image files and snapshots.
+
+# LocalStorage manages local (source) data volumes, thin lvm and reflink image files and snapshots.
 # Volume names are mapped into the 'lvols' cache based on whether they are found
 # under the current --local path or if a volume name exists in the archive.
-# lvols enties may point to local volumes that are non-existant, so use v.exists().
+# lvols enties may point to local volumes that are non-existant, so use .exists() & .update().
 
 class LocalStorage:
 
@@ -1374,6 +1414,10 @@ class LocalStorage:
     except:
         fallocate = None    ; print("fallocate() function not available.")
 
+    users  = {x.pw_name: x.pw_uid for x in pwd.getpwall()}; uids = {y: x for x,y in users.items()}
+    groups = {x.gr_name: x.gr_gid for x in grp.getgrall()}; gids = {y: x for x,y in groups.items()}
+
+
     def __init__(self, localpath, opts, auuid=None, arch_vols={}, clean=False, sync=False,
                  require_online=False, unlock=True):
 
@@ -1386,7 +1430,6 @@ class LocalStorage:
         self.gc_procs  = []          ; self.locked  = False      ; self.auuid     = auuid
         self.clean     = clean       ; self.sync    = sync       ; self.arch_vols = arch_vols
         self.lvols, self.vgs_all = {}, {}
-        self.users, self.groups  = {}, {}
         self.path = self.pooltype = self.fstype = self.lvpool = self.block_size = None
         self.online = self.can_snapshot = False
         self.prep_snapshots = prepare_snapshots_reflink
@@ -1423,11 +1466,6 @@ class LocalStorage:
                 self.acquire_deltas = get_reflink_deltas
             self.process_deltas = update_delta_digest_reflink
             self.prep_snapshots = prepare_snapshots_reflink
-
-        self.users  = {x[0]: int(x[2]) for x in
-                        (ln.split(":") for ln in open("/etc/passwd","r") if ln.strip())}
-        self.groups = {x[0]: int(x[2]) for x in
-                        (ln.split(":") for ln in open("/etc/group","r") if ln.strip())}
 
         if require_online and not self.online:
             err_out("Local storage is offline: "+repr(localpath)+ol_reason)
@@ -1489,10 +1527,10 @@ class LocalStorage:
             raise ValueError("Bad non-file path: "+path)
 
     def getperms(self, path, vstat=None):
-        vstat = vstat or os.stat(os.path.realpath(path))    ; uid, gid = vstat.st_uid, vstat.st_gid
+        vstat = vstat or os.stat(os.path.realpath(path))
         # use names in place of uid/gid numbers:
-        user  = [x for x, num in self.users.items()  if num == uid][0]
-        group = [x for x, num in self.groups.items() if num == gid][0]
+        user  = self.uids[vstat.st_uid]
+        group = self.gids[vstat.st_gid]
         return f"{stat.S_IMODE(vstat.st_mode)}:{user}:{group}"
 
     def settime(self, path, t):
@@ -1769,7 +1807,8 @@ class LocalVolume:
 
 class FileVolume(LocalVolume):
 
-    snap_ext = (None, None)
+    snap_ext  = (None, None)
+    __slots__ = tuple()
 
     def __init__(self, storage, name, vid=None, parent=None):
         super()._my_init(storage, name, vid, parent=parent)
@@ -1797,7 +1836,8 @@ class FileVolume(LocalVolume):
 
 class ReflinkVolume(FileVolume):
 
-    snap_ext = (".wyng1",".wyng2")
+    snap_ext  = (".wyng1",".wyng2")
+    __slots__ = tuple()
 
     def __init__(self, storage, name, vid=None, parent=None):
         super().__init__(storage, name, vid, parent=parent)
@@ -1879,7 +1919,7 @@ class LvmVolume(LocalVolume):
     maxname   = 112    ; maxpath = maxname    ; alphanumsym = r"^[a-zA-Z0-9\+\._-]+$"
     colnames  = {"vg_name","lv_name","lv_attr","lv_size",
                  "lv_time","pool_lv","thin_id","tags"}
-    __slots__ = colnames
+    __slots__ = tuple(colnames)
 
     def __init__(self, storage, name=None, vid=None, members={}, parent=None):
 
@@ -2075,7 +2115,7 @@ def arch_init(aset):
     opts = aset.opts    ; data_ci = opts.encrypt or "xchacha20-dgr"
     agent_get(aset.dest.agent_name, -1)  # cancel old auth
 
-    # Fix: duplicates code in aset... move to aset class.
+    # Cleanup: move to aset class.
     if data_ci in (x[0] for x in DataCryptography.crypto_codes.values() if x[2]):
         aset.ci_mode, ci_t = [(x,y) for x,y in DataCryptography.crypto_codes.items()
                                     if y[0] == data_ci][0]
@@ -2281,7 +2321,7 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
         print("  Checking indexes,", end="", flush=True)
         for ses in vol.sesnames:
             check_manifest_sequence(vol, [ses], full=ses == vol.sesnames[0])
-            #### FIX: implement deepclean
+            # Enh: implement deepclean
 
         # Check hashes of each session individually
         print(" data:")    ; newest = options.session in {"newest"}
@@ -2737,7 +2777,7 @@ class Destination:
         if debug:   print("\nDest detect:")
 
         if self.dtype == "qubes-ssh":
-            # fix: possibly remove dargs and use dest.run()
+            # Enh: possibly remove dargs and use dest.run()
             dargs = self.run_map["qubes"][:-1] + [self.sys.split(":")[0]]
 
             cmd = dargs + [shell_prefix + "mkdir -p /tmp/wyngrpc"]
@@ -3972,10 +4012,10 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
 
         # Finalize on VM/remote
         catch_signals()
-        ti = TarInfo("mv")   ; ti.type = tarfile.CHRTYPE   ; tarf_addfile(ti)
+        ti = TarInfo("mv")    ; ti.type = tarfile.CHRTYPE    ; tarf_addfile(ti)
         flistj = json.dumps([[x, x[:-4]] for x in saved_files] + [[stmp, sdir]]).encode("utf-8")
-        ti = TarInfo("mv2") ; ti.size = len(flistj); tarf_addfile(ti, fileobj=BytesIO(flistj))
-        tarf.close()    ; untar.stdin.flush()
+        ti = TarInfo("mv2")   ; ti.size = len(flistj)   ; tarf_addfile(ti, fileobj=BytesIO(flistj))
+        tarf.close()          ; untar.stdin.flush()
 
         pth = ses.path   ; ses.path = pjoin(aset.path, sdir)   ; os.replace(pth, ses.path)
         if exists(ses.path+"/manifest.tmp"):     os.remove(ses.path+"/manifest.tmp")
@@ -4229,7 +4269,7 @@ def monitor_send(storage, aset, datavols, monitor_only, imports={}, ses_tags={},
 
         p1, p2 = ("\r", " |  -" if not sent else "") if status1 else ("", "")
         print(p1 if sbcount or ddbytes or updated else p1+"  no change"+p2, flush=True)
-        if ddbytes and verbose:   print(f"  (reduced {ddbytes/MB:0.1f}MB)")
+        if ddbytes and verbose:   print(f"\r{-(ddbytes/MB): 9.1f}MB"[:12]+" (dedup)")
         totalvsize += vol.volsize()    ; totalbcount += sbcount
 
     if untar:
@@ -4482,7 +4522,7 @@ def merge_manifests(vol, msessions=None, mtarget=None, vsize=None, addcol=False,
         cdir_obj = tempfile.TemporaryDirectory(dir=tmp, prefix="m_")
         cdir     = cdir_obj.name    ; slsort  = slist[1]
 
-        # fix: extrapolate path with filename
+        # Enh: extrapolate path with filename
         for fname in sespaths:
             open(cdir+"/"+fname, "w").close()
             do_exec([[CP.awk, r'{sub("/manifest","",FILENAME); print $0, FILENAME > "'
@@ -4746,7 +4786,6 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
             if not l_vol.exists():
                 print("Creating '%s' in thin pool %s[%s]." %
                       (l_vol.name, save_storage.path, save_storage.lvpool))
-                # Fix:  translate to safe lvm name
                 l_vol.create(volsize, ro=False)    ; sparse_write = sparse = False
 
             elif l_vol.getsize() != volsize:
@@ -5181,8 +5220,11 @@ def show_list(aset, selected_vols, depth=3, json_out=None):
         return
 
     if options.verbose:
-        print("\nArchive Settings:")
+        print("\nArchive Properties:")
         for key, val in aset.conf["var"].items():
+            if key == "ci_mode":
+                ci = DataCryptography.crypto_codes[val]
+                print(" cipher         =", ci[0], "" if data_ci=="off" else f"({ci[1]})")
             print(" %-15s = %s" % (key, val))
 
     # Print list of sessions grouped by tag. First, organize by tag:
@@ -5386,7 +5428,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 rc1"      ; prog_date = "20250904"
+prog_version     = "0.8 wip"      ; prog_date = "20250905"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
