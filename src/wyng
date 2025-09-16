@@ -81,7 +81,7 @@ class ArchiveSet:
     attr_ints   = {"format_ver","chunksize","mci_count","dataci_count"}
     attr_str    = {"compression","compr_level","hashtype","uuid","updated_at","ci_mode"}
 
-    def __init__(self, top, dest, opts, ext="", allvols=False, children=2, show=False,
+    def __init__(self, top, dest, opts, allvols=False, children=2, show=False,
                  pass_agent=0, passphrase=None, prior_auth=None, reload=False):
         self.time_start      = time_start
         self.monotonic_start = monotonic_start
@@ -127,14 +127,14 @@ class ArchiveSet:
 
         # halt configuration if this is a new or temp config
         os.makedirs(self.path, exist_ok=True)
-        if not exists(self.confpath+ext):
+        if not exists(self.confpath):
             if debug:   print("New archive conf:")
             self.uuid = str(uuid.uuid4())    ; return
 
         # decode archive.ini file
         # Format "magic" is "[WYNGvv]\n" where vv = format version: 9 bytes
         # Format mode is next as "ci = m0\n" where m = cipher mode: 8 bytes
-        with open(self.confpath+ext, "rb") as f:
+        with open(self.confpath, "rb") as f:
             self.header = (header0 := f.read(9)) + (header1 := f.read(8))
             buf = f.read(self.max_conf_sz)
         self.raw_hashval = hashlib.sha256(header0 + header1 + buf).hexdigest()
@@ -2522,16 +2522,15 @@ def get_configs(opts):
 
 # Fetch copy of archive metadata from remote/dest
 
-def get_configs_remote(dest, base_dir, opts, reload=False):
+def get_configs_remote(dest, base_dir, opts):
 
     show = debug and opts.action.lower() == "list"
 
     confname  = ArchiveSet.confname
-    recv_list = [(confname,  ArchiveSet.max_conf_sz)]
-    fetch_file_blobs(recv_list, tmpdir, dest, skip0=True, skip_exists=not reload)
-    recv_list = [(ArchiveSet.saltname, DataCryptography.max_keyfile_sz),
+    root_list = [(confname,  ArchiveSet.max_conf_sz),
+                 (ArchiveSet.saltname, DataCryptography.max_keyfile_sz),
                  ("salt.bak", DataCryptography.max_keyfile_sz)]
-    fetch_file_blobs(recv_list, tmpdir, dest, skip0=True, skip_exists=True)
+    fetch_file_blobs(root_list, tmpdir, dest, skip0=True)
 
     # Instantiate ArchiveSet to authenticate archive.ini
     aset = ArchiveSet(tmpdir, dest, opts, children=0, pass_agent=int(opts.authmin), show=debug)
@@ -2580,11 +2579,8 @@ def get_configs_remote(dest, base_dir, opts, reload=False):
                         raise ValueError(reason)
 
             elif cache_aset.updated_at < aset.updated_at:
-                if not reload:
-                    print("Updating metadata cache.")
-                    os.remove(ini)
-                else:
-                    raise ValueError("Cache reload failed.")
+                print("Updating metadata cache.")
+                os.remove(ini)
 
             elif cache_aset.updated_at == aset.updated_at and cache_aset.in_process:
                 pass # un-initialized in_process
@@ -2598,9 +2594,8 @@ def get_configs_remote(dest, base_dir, opts, reload=False):
 
     if not exists(ini) and exists(aset.confpath):
         os.makedirs(arch_dir, exist_ok=True)
-        for f in ("salt.bak", ArchiveSet.saltname, confname):
-            if exists(f1 := pjoin(aset.path, f)) and not exists(f2 := pjoin(arch_dir, f)):
-                shutil.copyfile(f1, f2)
+        for f1, f2 in ((pjoin(tmpdir,x), pjoin(arch_dir,x)) for x,_ in root_list):
+            if exists(f1) and not exists(f2):   shutil.copyfile(f1, f2)
 
     # Initial auth successful! Fetch + auth volume metadata...
     if opts.action in ("arch-check","delete"):
@@ -2611,7 +2606,7 @@ def get_configs_remote(dest, base_dir, opts, reload=False):
         depth = 2
 
     return ArchiveSet(arch_dir, dest, opts, children=depth, allvols=True,
-                      prior_auth=aset, show=show, reload=reload)
+                      prior_auth=aset, show=show)
 
 
 # Returns either a single LocalStorage obj from --local, or a dict of them
@@ -2821,7 +2816,7 @@ class Destination:
                     err_out(open(tmpdir+log+"-out", "r").read())
             if debug:   print(cmd); err_out(repr(e))
 
-        for ln in open(tmpdir+"/dest-state.log","r"):
+        for ln in open(lf, "r") if exists(lf := tmpdir+"/dest-state.log") else []:
             if debug:   print(ln, end="")
             if ln.startswith("wyng_run"):
                 run = True
