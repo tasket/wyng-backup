@@ -695,11 +695,12 @@ class ArchiveVolume:
         ses_list = [self.sessions[ses] for ses in sesnames]
 
         ff = fetch_file_blobs([(pjoin(self.vid, ses.name, "manifest.z"), ses.manifest_max())
-                                 for ses in ses_list if ses.path and not ses.path.endswith("-tmp")
+                                 for ses in ses_list if ses.path and ses.saved
                                  and ses.manifesthash != "0"],
                               apath, dest, skip_exists=not force)
 
         for ses in ses_list:
+            if not ses.saved:   continue
             try:
                 self.decode_one_manifest(ses, force=force)
             except Exception as e:
@@ -721,7 +722,7 @@ class ArchiveVolume:
 class ArchiveSession:
 
     attr_str  = ("localtime","previous","permissions","manifesthash")
-    attr_int  = ("volsize","sequence")
+    attr_int  = ("volsize","sequence","mfcs")
     __slots__ = attr_str + attr_int \
               + ("tags","volume","archive","name","path","saved","loaded","toggle",
                  "uuid","hashval","meta_checked","just_fetched")
@@ -748,6 +749,7 @@ class ArchiveSession:
         self.tags     = {}
         self.permissions  = ""
         self.manifesthash = None
+        self.mfcs     = None
 
         if path and hashval:
             buf = arch.decode_file(pjoin(path,"info"), hashval, self.max_infosz)
@@ -832,8 +834,16 @@ class ArchiveSession:
         return self.manifesthash != "0" or ii == 0 or self.volsize != prev.volsize \
                or self.permissions != prev.permissions
 
+    def full_manifest_crc32(self):
+        seq = self.sequence     ; vol = self.volume    ; sessions = vol.sessions
+        sl = [x for x in vol.sesnames if sessions[x].sequence <= seq]
+        assert sl[-1] == self.name
+        crc = file_crc32(mf := merge_manifests(vol, sl, vsize=self.volsize, addcol=False))
+        os.remove(mf)
+        return crc
+
     def save_info(self, ext=""):
-        assert self.path   ; saved_files = []   ; arch = self.volume.archive
+        assert self.path   ; saved_files = []   ; vol = self.volume   ; arch = vol.archive
         etag = b''   ; fname = "info"   ; relpath = os.path.relpath(self.path, arch.path)
 
         if os.path.getsize(self.path+"/manifest"+ext) == 0:
@@ -841,6 +851,14 @@ class ArchiveSession:
         else:
             saved_files.append(pjoin(relpath, mfz := "manifest.z"+ext))
             self.manifesthash = arch.encode_file(self.path+"/manifest"+ext, fdest=self.path+"/"+mfz)
+
+        if self.mfcs is None:
+            if self.previous != "none" and (_ps := vol.sessions[self.previous]).mfcs is not None \
+            and self.manifesthash == "0":
+                self.mfcs = _ps.mfcs
+            else:
+                self.mfcs = self.full_manifest_crc32()
+
         with io.StringIO() as f:
             for attr in self.attr_str+self.attr_int:
                 print(attr, "=", field := getattr(self, attr), file=f)
@@ -866,6 +884,7 @@ class ArchiveSession:
         self.volume.rename_saved(ext)
 
 # END class ArchiveSet, ArchiveVolume, ArchiveSession
+
 
 
 class OldArchiveSet_V2:
@@ -3163,6 +3182,13 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", inlines=[], text=
     return close()[-1]
 
 
+def file_crc32(fname):
+    crc = 0
+    with open(fname, "rb") as f:
+        while fbuf := f.read(65536):   crc = zlib.crc32(fbuf, crc)
+    return crc
+
+
 # Compare files between local and dest archive, using hashes.
 # The file tmpdir/compare-files.lst can be pre-populated with file paths if clear=False;
 # otherwise will build metadata file list from Volume & Session objects.
@@ -3196,8 +3222,6 @@ def compare_files(arch, pathlist=[], volumes=[], sessions=[], clear=True, manife
 
     return result
 
-
-## Enh: Create aset functions to supply meta filenames for objects
 
 def update_dest(arch, pathlist=[], volumes=[], sessions=[], ext="", delete=False, sync=False):
     lcd = arch.path    ; dest = arch.dest
@@ -3998,10 +4022,10 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
     if (sent := stream_started):
         # Save session info
         if crypto:   aset.datacrypto.save_counter()
+        os.link(ses.path+"/manifest.tmp", ses.path+"/manifest")
         saved_files = ses.save_info(ext=".tmp")
         for fpath in saved_files:    tarf_add(fpath, arcname=fpath)
 
-        os.link(ses.path+"/manifest.tmp", ses.path+"/manifest")
         if len(vol.sessions) > 1 and (ses.volsize // chunksize) != (prior_size // chunksize):
             check_manifest_sequence(vol, vol.sesnames, full=True)
 
@@ -4863,6 +4887,8 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
     if compare_files(aset, volumes=[vol], sessions=[vol.sessions[x] for x in incl_ses]):
         x_it(1, "Error: Local and archive metadata differ.")
     vol.decode_manifests(incl_ses+diff_ses, force=True)
+    if not (verify_only == 2 or (_s := vol.sessions[select_ses]).mfcs is None \
+            or _s.full_manifest_crc32() == _s.mfcs):   raise ValueError("Manifest CRC")
     manifest = merge_manifests(vol, msessions=incl_ses, addcol=True, vsize=volsize, rdiff=diff_ses)
 
     if debug:
@@ -5423,7 +5449,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 wip"      ; prog_date = "20250905"
+prog_version     = "0.8 wip"      ; prog_date = "20250906"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
