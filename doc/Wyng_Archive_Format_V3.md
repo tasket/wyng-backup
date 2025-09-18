@@ -1,7 +1,7 @@
 Wyng Archive Format V3
 ======================
 
-Document version 0.9.8, date 2025-08-25  
+Document version 1.0.0, date 2025-09-17  
 Author:  Christopher Laprise,  tasket@protonmail.com  
 
 Home URLs:  
@@ -258,7 +258,10 @@ SESSION METADATA
 |'previous = '     | str        | Name of previous session or "None" for oldest session
 |'permissions  = ' | str        | mode_int:user:group or single char "r\|w"
 |'manifesthash = ' | 256bit_b64_str or '0' | manifest hash, or '0' if empty session
-|'tag = '          | str        | 'tag_id description' (0 or more occurrences)
+|'mfcs = '         | int        | CRC32 of the full (merged) manifest for this volume snapshot; never updated
+|'tag = '          | str        | 'tag_id description' (0 or more occurrences) with all chars printable and tag_id cannot contain `'[space],=\^'`
+
+Note: In the Wyng v0.8 implementation the fields 'permissions' and 'mfcs' are treated as optional to maintain compatibility with earlier beta archives.
 
 
 ---
@@ -317,7 +320,7 @@ _hash_ – A cryptograghic digest of binary data, via either BLAKE2b-256 or SHA-
 
 _manifest_ – A list of volume data chunks which identifies each chunk by its hash and address (offset within the volume).
 
-_session_ – A version of a volume during a specific backup session at a specific time; a snapshot copy.
+_session_ – A backup session or a version of a volume during a specific backup session at a specific time; a snapshot copy. Referenced by session names using the form 'S_YYYYMMDD-HHMMSS'.
 
 _volume_ – Any contiguous set of binary blocks, which likely contains a filesystem; a logical volume, disk image or disk partition.
 
