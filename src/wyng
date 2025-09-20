@@ -842,6 +842,10 @@ class ArchiveSession:
         os.remove(mf)
         return crc
 
+    def check_full_manifest(self, note=""):
+        if self.mfcs is not None and self.mfcs != self.full_manifest_crc32():
+            raise ValueError(f"Manifest checksum for {self.volume.name} [{self.name}] {note}")
+
     def save_info(self, ext=""):
         assert self.path   ; saved_files = []   ; vol = self.volume   ; arch = vol.archive
         etag = b''   ; fname = "info"   ; relpath = os.path.relpath(self.path, arch.path)
@@ -2328,8 +2332,15 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
 
         if len(vol.sessions) > 1 and exists(vol.mapfile(-2)):   os.remove(vol.mapfile(-2))
 
-        if not check_session_seq(vol):   raise ValueError("Session out of sequence error.")
+        if not check_session_seq(vol):
+            err_out("Session out of sequence error.")    ; error_cache.append(vol.name)
+
         if startup:   continue
+
+        try:
+            vol.sessions[vol.last].check_full_manifest()
+        except Exception as e:
+            err_out(repr(e))    ; error_cache.append(vol.name)
 
         # Remove stray volume dirs and other files
         deepclean = options.clean and options.force
@@ -2360,9 +2371,9 @@ def check_session_seq(vol, seslist=None, seq=None):
     seslist = seslist or vol._seslist    ; err = False
     if seq is None:   seq = len(seslist)-1
     if not seslist:   return True
-
     if seslist[0].previous != "None":
         err_out(f"Missing oldest. [0] = {seslist[0].name} -> {seslist[0].previous}"); err = True
+
     for si, ses in enumerate(seslist[1:seq+1]):
         if ses.previous != seslist[si].name:
             err_out(f"Prev Out of sequence: {ses.name} -> {seslist[si].name}"); err = True
@@ -4581,7 +4592,7 @@ def merge_manifests(vol, msessions=None, mtarget=None, vsize=None, addcol=False,
 def merge_sessions(volume, sources, target, clear_sources=False):
 
     aset       = volume.archive    ; dest = aset.dest    ; resume = bool(aset.in_process)
-    opts       = aset.opts         ; vid  = volume.vid
+    opts       = aset.opts         ; vid  = volume.vid   ; tses   = volume.sessions[target]
     m_tmp      = tmpdir if volume.volsize() < 128000000000 else aset.big_tmpdir
     if debug:   print(f"Merge {vid} '{volume.name}'\n", sources, "T", target)
 
@@ -4594,7 +4605,12 @@ def merge_sessions(volume, sources, target, clear_sources=False):
     os.chdir(volume.path)
 
     if not resume:
-        volsize    = volume.sessions[target].volsize
+        if tses.mfcs is None:
+            tses.mfcs = tses.full_manifest_crc32()
+        else:
+            tses.check_full_manifest()
+
+        volsize    = tses.volsize
         vol_shrank = volsize < max(x.volsize for x in volume.sessions.values()
                                     if x.name in sources)
         lc_filter  = '"'+volume.last_chunk_addr(volsize)[1]+'"'
@@ -4661,7 +4677,7 @@ def merge_sessions(volume, sources, target, clear_sources=False):
     lcmds, dest_cmds = [], ""
     if not resume:
         aset.set_in_process(None, tmp=True, todest=False)
-        files = volume.sessions[target].save_info(".tmp")
+        files = tses.save_info(".tmp")
         lcmds += [CP.tar, "-cf", "-"] + files + [vid+"/merge.lst.gz", "archive.ini"]
         dest_cmds += "tar -o -xf -"
 
@@ -4690,12 +4706,13 @@ def merge_sessions(volume, sources, target, clear_sources=False):
         x_it(retcode, "Error: Remote exited!")
 
     # Local finalize
-    volume.sessions[target].rename_saved(ext=".tmp")
+    tses.rename_saved(ext=".tmp")
     aset.set_in_process(None, save=False)
+    tses.check_full_manifest(note="After merge")
     catch_signals(**signormal)
 
     # Check consistency after resuming merge
-    if resume and compare_files(aset, volumes=[volume], sessions=[volume.sessions[target]],
+    if resume and compare_files(aset, volumes=[volume], sessions=[tses],
                                 manifest=True):
         x_it(1, "Error: Local and dest metadata differ.")
 
@@ -4887,8 +4904,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
     if compare_files(aset, volumes=[vol], sessions=[vol.sessions[x] for x in incl_ses]):
         x_it(1, "Error: Local and archive metadata differ.")
     vol.decode_manifests(incl_ses+diff_ses, force=True)
-    if not (verify_only == 2 or (_s := vol.sessions[select_ses]).mfcs is None \
-            or _s.full_manifest_crc32() == _s.mfcs):   raise ValueError("Manifest CRC")
+    if verify_only != 2:   vol.sessions[select_ses].check_full_manifest()
     manifest = merge_manifests(vol, msessions=incl_ses, addcol=True, vsize=volsize, rdiff=diff_ses)
 
     if debug:
@@ -5449,7 +5465,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 wip"      ; prog_date = "20250906"
+prog_version     = "0.8 wip"      ; prog_date = "20250907"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
