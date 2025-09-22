@@ -13,11 +13,8 @@ from older backup sessions.
 
 Having nearly instantaneous access to volume changes and a nimble archival format
 enables backing up even terabyte-sized volumes multiple times per hour with little
-impact on system resources.
-
-Wyng pushes data to archives in a stream-like fashion, which avoids temporary data
-caches and re-processing data. And Wyng's ingenious snapshot rotation avoids common
-_aging snapshot_ space consumption pitfalls.
+impact on system resources. And Wyng's ingenious snapshot rotation avoids the common
+problem of added space consumption from aging snapshots.
 
 Wyng also doesn't require the source admin system to ever mount processed volumes or
 to handle them as anything other than blocks, so it safely handles
