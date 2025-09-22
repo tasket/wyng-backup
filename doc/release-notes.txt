@@ -1,4 +1,4 @@
-v0.8rc2 20250918 - Add manifest crc, prune safeguards, minor fixes, code cleanup and comments.
+v0.8rc2 20250920 - Add manifest crc, prune safeguards, minor fixes, code cleanup and comments.
 
 v0.8rc1 20250904 - More thorough cleanup after interrupted send; fix "bad permissions" error and "local storage offline" warnings.
 

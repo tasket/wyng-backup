@@ -4448,7 +4448,7 @@ def autoprune(vol, needed_space=0, apmode="off", include=set(), allvols=False):
     apcal = { day: [] for day in range(dtdate(startdate.year,1,1).toordinal(),
                                        to_date(sessions[-1]).toordinal()+ndays) }
     for ses in sessions:  apcal[to_date(ses).toordinal()].append([ses, True])
-    for ses in vol.sessions:  ses.toggle = True
+    for ses in vol.sessions.values():  ses.toggle = True
 
     # Build set of excluded sessions
     for sx in options.keep:
@@ -4492,7 +4492,8 @@ def autoprune(vol, needed_space=0, apmode="off", include=set(), allvols=False):
     # Find contiguous marked ranges and merge/prune them. Repeat until free >= needed space.
     pruned, factor = set(), 1    ; psessions = vol.sesnames + ["End"]
 
-    if compare_files(aset, volumes=[vol], sessions=[x for x in vol.sessions if not x.toggle]):
+    if compare_files(aset, volumes=[vol], sessions=[x for x in vol.sessions.values()
+                                                      if not x.toggle]):
         x_it(1, "Error: Local and archive metadata differ.")
 
     while True:
@@ -5470,7 +5471,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 rc2"      ; prog_date = "20250918"
+prog_version     = "0.8 rc2"      ; prog_date = "20250920"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
