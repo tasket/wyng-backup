@@ -634,6 +634,7 @@ class ArchiveVolume:
         return bool(self.mdvol_chk.match(self.name))
 
     def new_session(self, sname, addtags=[]):
+        if sname in self.sessions:   raise ValueError("Duplicate session name")
         ns = ArchiveSession(self, sname, None, addtags=addtags)
         ns.path = pjoin(self.path, sname)
         ns.sequence = self.sessions[self.last].sequence + 1 if self.sessions else 0
@@ -5471,7 +5472,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 rc2"      ; prog_date = "20250920"
+prog_version     = "0.8 rc2"      ; prog_date = "20250921"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
