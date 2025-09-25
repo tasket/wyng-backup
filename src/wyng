@@ -3644,10 +3644,10 @@ def get_reflink_deltas(storage, aset, datavols):
                 err_out("'%s' snapshot not found (different subvolume?); Skipping..." % vol.name)
                 datavols.remove(vol.name);   break
 
-            # filefrag output: file extent ranges, their 'physical' block ranges, extent length.
+            # filefrag output: file extent ranges, their 'physical' block ranges, flags.
             # sort will merge this output from two vols.
-            # uniq -u will filter-out exact extent/phys/len matches between the two vols.
-            # The result will be a list of extent ranges that have changed.
+            # uniq -u will filter-out exact extent/phys/len/flags matches between the two vols.
+            # The result will be a list of file offset-ranges that have changed.
 
             devs.add(os.stat(stpath+snapname).st_dev)
             cmds.append([
@@ -5018,17 +5018,16 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
         # Validate data chunk
         if not compare_digest(cksum, b64enc(gethash(untrusted_buf)).decode("ascii")):
             with open(tmpdir+"/bufdump", "wb") as dump:   dump.write(untrusted_buf)
-            print(size, mfline)
+            err_out(f"\n{size} {mfline}")
             if options.skip_corrupt_chunks and save_path:
                 print("Skipping corrupt chunk at", addr)
-                punch_zero_hole(volfno, addr)
                 continue
-            else:
+            elif not sparse_write:
                 if save_path and save_type == "file":
                     volf.truncate(0)
                 elif save_path:
                     do_exec([[CP.env, "-u", "LC_ALL", CP.blkdiscard, save_path]])
-                raise ValueError("Bad hash "+faddr+" :: "+str(b64enc(gethash(untrusted_buf))))
+            raise ValueError("Bad hash at "+faddr+" :: "+str(b64enc(gethash(untrusted_buf))))
 
         ##  Buffer is OK  ##
         buf = untrusted_buf   ; bcount += len(buf)
@@ -5472,7 +5471,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 rc2"      ; prog_date = "20250921"
+prog_version     = "0.8 wip"      ; prog_date = "20250924"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
