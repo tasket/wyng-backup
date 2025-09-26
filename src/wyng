@@ -2357,16 +2357,14 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
         # Check hashes of each session individually
         print(" data:")    ; newest = options.session in {"newest"}
         for sesname in reversed(vol.sesnames):
-
             if (selses and "S_"+selses != sesname) \
-            or (newest and not selses and sesname != vol.last) \
-            or vol.sessions[sesname].manifesthash == "0":
-                continue
+            or (newest and not selses and sesname != vol.last):   continue
 
             print(" ", sesname[2:], end=" :", flush=True)
-            bcount = receive_volume(storage, vol, select_ses=sesname[2:], ses_strict=True,
-                                    verify_only=2)
-            #if attended:   print(bcount, "bytes OK")
+            if vol.sessions[sesname].manifesthash == "0":   print(": OK")
+            else:   receive_volume(storage, vol, select_ses=sesname[2:],
+                                   ses_strict=True, verify_only=2)
+
 
 def check_session_seq(vol, seslist=None, seq=None):
     seslist = seslist or vol._seslist    ; err = False
@@ -2939,8 +2937,10 @@ def helper_send(debug=False):
             elif member.ischr() and member.name == "mv":
                 catch_signals()    ; files = json.load(tarf.extractfile(tarf.next()))
                 if debug:   err_out("mv: " + repr(files))
-                for ft, f in files:   os.utime(ft) if exists(ft) else None
+                for ft, f in files:   os.utime(f) if exists(f) else None
                 for ft, f in files:   replace(ft, f)
+                for ft, f in files:
+                    if f.endswith(("archive.ini","/volinfo")):   shutil.copyfile(f, f+".bak")
                 catch_signals(None)
             elif member.isdir():
                 if debug:   err_out(f"dir: {os.path.abspath(os.curdir)} -- {member.name}")
@@ -3011,9 +3011,8 @@ def helper_merge_finalize():
     try:
         print("Merge: Finalize target")
         m = "merge/"    ; open(m+"CHECK-start-finalize","w").close()
-        for f in (m+target+"/info.tmp", m+merge_target+"/info", m+target+"/manifest.z.tmp",
-                  m+merge_target+"/manifest.z", m+merge_target, target, "volinfo.tmp", "volinfo",
-                  "../archive.ini.tmp", "../archive.ini", "..", "."):
+        for f in (m+merge_target+"/info", m+merge_target+"/manifest.z", m+merge_target, target,
+                  "volinfo", "../archive.ini", "..", "."):
             if exists(f):   os.utime(f) # touch first
         if not resume or exists(m+target+"/info.tmp"):
             replace(m+target+"/info.tmp", m+merge_target+"/info")
@@ -3024,6 +3023,7 @@ def helper_merge_finalize():
         if not resume or exists("../archive.ini.tmp"): replace("../archive.ini.tmp", "../archive.ini")
         if not resume or exists("sessions.tmp"):     replace("sessions.tmp", "sessions")
         if not exists(target):   raise FileNotFoundError(target)
+        for f in ("volinfo", "../archive.ini"):      shutil.copyfile(f, f+".bak")
         fssync(".")
     except Exception as err:
         x_it(70, repr(err))
@@ -3249,7 +3249,9 @@ def update_dest(arch, pathlist=[], volumes=[], sessions=[], ext="", delete=False
 
     do_exec([[CP.tar,"-cf","-","--no-recursion","--verbatim-files-from","--files-from", "-"],
              dest.run_args(["tar -o -xf -"]
-                            + [" && mv '"+x+ext+"' '"+x+"'" for x in update_list if ext],
+                            + [" && mv '"+x+ext+"' '"+x+"'" for x in update_list if ext]
+                            + [" && cp -a '"+x+"' '"+x+".bak'" for x in update_list
+                                 if x.endswith(("archive.ini","/volinfo"))],
                             destcd=dest.path)
             ], inlines=[x+ext for x in update_list],
             cwd=lcd)
@@ -4895,7 +4897,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
     elif use_snapshot and select_ses == vol.last:
         save_storage.setperms(save_path, ses_obj.permissions)
         if is_num(ses_obj.localtime):   save_storage.settime(save_path, int(ses_obj.localtime))
-        print("Snapshot retrieved...Done.")
+        print("Snapshot retrieved.")
         return volsize
     elif verify_only == 2:
         # only selected session
@@ -5471,7 +5473,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 wip"      ; prog_date = "20250924"
+prog_version     = "0.8 wip"      ; prog_date = "20250925"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
