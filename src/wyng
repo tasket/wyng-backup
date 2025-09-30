@@ -2961,7 +2961,8 @@ def helper_receive(lstf):
         if fsize:
             with open(fname,"rb") as dataf:   fdata = dataf.read(fsize)
             if len(fdata) != fsize:   x_it(20, f"Size mismatch: {len(fdata)} vs {fsize}")
-            stdout_write(fdata); stdout_flush()
+            stdout_write(fdata)
+        stdout_flush()
     stdout_write(magicm); stdout_write(b'\xFF'*128); stdout_flush(); time.sleep(0.2)
     sys.stdout.close()
     sys.stderr.write(f"Last item: {fname} {fsize}\n")
@@ -3631,12 +3632,15 @@ def get_reflink_deltas(storage, aset, datavols, retry=3):
     res = SPr.check_output([CP.filefrag, "-v", storage.path+"/.tmp.wyng"], text=True)
     r1  = [x for x in res.splitlines() if x.startswith("File size") and x.endswith("bytes)")]
     storage.block_size = int(r1[0].split()[-2])    ; os.remove(storage.path+"/.tmp.wyng")
-    if debug:   print("Block size:", storage.block_size)
+    if debug:   print("Block size:", storage.block_size,
+                      "\nGet rlnk deltas for", datavols, flush=True)
+
     assert aset.chunksize and aset.chunksize % storage.block_size == 0
 
     generation, stpath = storage.metadata_lock()
 
     for vol in (aset.vols[x] for x in datavols[:]):
+        if debug:   print(vol.vid, generation)
         lv = storage.lvols[vol.name]                ; cmds, devs = [], set()
         dpath = tmpdir+"/delta."+vol.vid
 
@@ -3644,7 +3648,7 @@ def get_reflink_deltas(storage, aset, datavols, retry=3):
         for side, snapname, outp in (("11", lv.snap1, ' > "'+dpath+'-p"'), ("22", lv.snap2, "")):
             if not exists(stpath+snapname):
                 err_out("'%s' snapshot not found (different subvolume?); Skipping..." % vol.name)
-                datavols.remove(vol.name);   break
+                datavols.remove(vol.name)    ; error_cache.append(vol.name)    ; break
 
             # filefrag output: file extent ranges, their 'physical' block ranges, flags.
             # sort will merge this output from two vols.
@@ -3671,7 +3675,6 @@ def get_reflink_deltas(storage, aset, datavols, retry=3):
 
         if vol.name not in datavols:   continue
         assert len(devs) == 1
-        if debug:   print("Get rlnk deltas for", vol.name, flush=True)
 
         # Save output from first volume to a named pipe. 'getctl' means run it async; below we
         # will add it to the sort/uniq pipeline via 'otherctl'. This prevents tmp files
@@ -3696,7 +3699,7 @@ def get_reflink_deltas(storage, aset, datavols, retry=3):
     # while doing one snap pair at a time to increase chances of success.
     if storage.metadata_unlock()[0] != generation:
         if retry < 13 and not debug:
-            err_out("Re-scanning deltas for matching Gen ID...")   ; time.sleep(retry)
+            err_out(" Re-scanning deltas for matching Gen ID...")   ; time.sleep(retry)
             return get_reflink_deltas(storage, aset, datavols, retry=retry*2)
         else:
             raise StorageError(7, "Filesystem Generation IDs differ.")
@@ -4989,8 +4992,9 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
 
         # allow for slight expansion from compression algo
         if untrusted_size > chunksize + (chunksize // 64) or untrusted_size < 1:
+            if debug:   err_out(f"\n{untrusted_size} {mfline}")
             if options.skip_corrupt_chunks and save_path:
-                print("Skipping wrong-sized chunk at", addr)
+                print("\nSkipping wrong-sized chunk at", addr)
                 continue
             else:
                 if save_path and save_type == "file":
@@ -5023,9 +5027,9 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
         # Validate data chunk
         if not compare_digest(cksum, b64enc(gethash(untrusted_buf)).decode("ascii")):
             with open(tmpdir+"/bufdump", "wb") as dump:   dump.write(untrusted_buf)
-            err_out(f"\n{size} {mfline}")
+            if debug:   err_out(f"\n{size} {mfline}")
             if options.skip_corrupt_chunks and save_path:
-                print("Skipping corrupt chunk at", addr)
+                print("\nSkipping corrupt chunk at", addr)
                 continue
             elif not sparse_write:
                 if save_path and save_type == "file":
@@ -5476,7 +5480,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 wip"      ; prog_date = "20250926"
+prog_version     = "0.8 wip"      ; prog_date = "20250927"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
