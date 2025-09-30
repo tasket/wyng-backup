@@ -2902,11 +2902,13 @@ def x_it(ec, text=None):
 def helper_send(debug=False):
     def altextract(m, set_attrs, filter):  return tarf.extract(m, set_attrs=set_attrs)
     mkdirs = os.makedirs    ; hlink = os.link    ; dirname = os.path.dirname
+    sigalarm = signal.alarm
     if not exists("archive.ini"):   x_it(10, "Archive not found.")
     for f in (x.name+"/S-tmp" for x in os.scandir() if x.is_dir() and x.name.startswith("Vol_")):
         if exists(f):   shutil.rmtree(f)
 
     while True:
+        sigalarm(180)
         try:
             tarf = tarfile.open(mode="r|", fileobj=sys.stdin.buffer)
         except tarfile.ReadError as e:
@@ -2919,6 +2921,7 @@ def helper_send(debug=False):
         if debug:   err_out("Got tarfile")
         substitutions = {}    ; pdir = ""
         for member in tarf:
+            sigalarm(700)
             if debug:   err_out(f"{member.type} {member.name} {member.size}")
             if member.isfile():
                 extract(member, set_attrs=False, filter="data")
@@ -2945,12 +2948,15 @@ def helper_send(debug=False):
             elif member.isdir():
                 if debug:   err_out(f"dir: {os.path.abspath(os.curdir)} -- {member.name}")
             tarf.members = []
-        tarf.close()   ; fssync(".", force=True)
+        tarf.close()   ; fssync(".", force=True)   ; sigalarm(0)
 
 def helper_receive(lstf):
-    stdout_write = sys.stdout.buffer.write   ; exists = os.path.exists   ; getsize= os.path.getsize
-    stdout_flush = sys.stdout.buffer.flush   ; magicm = magic            ; fname, fsize= "(none)",0
+    stdout_write = sys.stdout.buffer.write   ; exists   = os.path.exists ; getsize= os.path.getsize
+    stdout_flush = sys.stdout.buffer.flush   ; sigalarm = signal.alarm
+    fname, fsize = "(none)",0                ; magicm   = magic
+
     for line in lstf:
+        sigalarm(700)
         fname = line.strip()
         if not fname:   break
         if not exists(fname):
@@ -2964,7 +2970,7 @@ def helper_receive(lstf):
             stdout_write(fdata)
         stdout_flush()
     stdout_write(magicm); stdout_write(b'\xFF'*128); stdout_flush(); time.sleep(0.2)
-    sys.stdout.close()
+    sys.stdout.close()   ; sigalarm(0)
     sys.stderr.write(f"Last item: {fname} {fsize}\n")
 
 def helper_merge():
@@ -3833,6 +3839,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
     bksession   = "S_"+curtime                  ; addrsplit   = -address_split[1]
     prior_size  = vol.volsize()                 ; old_mapfile = vol.mapfile()
     lvols       = storage.lvols
+    sigalarm    = signal.alarm
     compress = compressors[aset.compression][2] ; compresslevel = int(aset.compr_level)
 
     if vol.aliastype == "import_other":
@@ -3896,7 +3903,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
         pdirname   = os.path.dirname   ; makedirs  = os.makedirs
     else:
         send_chunk = send_chunk_remote
-        catch_signals(["ALRM","INT"], iflag=True, int_exit=True)    ; signal.alarm(120)
+        catch_signals(["ALRM","INT"], iflag=True, int_exit=True)    ; sigalarm(120)
 
     # Use tar to stream files to destination
     TarInfo = tarfile.TarInfo    ; LNKTYPE = tarfile.LNKTYPE    ; tarf = None
@@ -3939,7 +3946,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
             for chunk, addr in enumerate(range( addr, volsize if send_all
                         else min(volsize, addr+len(minibmap)*8*chunksize), chunksize)):
 
-                destfile = chformat % addr    ; signal.alarm(600)
+                destfile = chformat % addr    ; sigalarm(600)
 
                 if fullmanifest:
                     try:
@@ -4076,7 +4083,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
         storage.lvols[vol.name].rotate_snapshots(rotate=changed,
                     timestamp_path=vol.mapfile(), addtags=[vol.last])
 
-    catch_signals(**signormal)    ; signal.alarm(0)
+    catch_signals(**signormal)    ; sigalarm(0)
     if not sent:   shutil.rmtree(ses.path)
 
     runtime  = time.monotonic() - testtime
@@ -4760,7 +4767,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
     decompress  = compressors[aset.compression][0].decompress
     decrypt     = aset.datacrypto.decrypt if aset.datacrypto else None
     compare_digest = hmac.compare_digest          ; b64enc    = base64.urlsafe_b64encode
-    gethash     = aset.getdatahash
+    gethash     = aset.getdatahash                ; sigalarm  = signal.alarm
 
     if not (storage.online or verify_only or options.save_to):
         err_out("Please specify a valid --local storage.")   ; error_cache.append(vol.name)
@@ -4976,6 +4983,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
 
             continue
 
+        sigalarm(600)
         # Request chunks on-demand if local chunk doesn't match cksum
         if sparse and save_path:
             volf_seek(addr)    ; localbuf = volf_read(chunksize)
@@ -5068,6 +5076,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
             volf_seek(addr)    ; diff_count += len(buf) if buf != volf.read(chunksize) else 0
             if diff_count:   break
 
+    sigalarm(0)
     if debug:   print("\nEND receive stream.")
     if gv_stdin:   gv_stdin.close()
     rc = getvol.poll()
