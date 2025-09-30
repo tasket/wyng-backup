@@ -3624,7 +3624,7 @@ def update_delta_digest_lvm(storage, aset, datavol, monitor_only):
     return changed, snap2size, volperms
 
 
-def get_reflink_deltas(storage, aset, datavols):
+def get_reflink_deltas(storage, aset, datavols, retry=3):
 
     # Get filesystem block size
     open(storage.path+"/.tmp.wyng","wb").close()
@@ -3695,7 +3695,11 @@ def get_reflink_deltas(storage, aset, datavols):
     # This could be extended with a fallback mode that checks _get_btrfs_generation() directly
     # while doing one snap pair at a time to increase chances of success.
     if storage.metadata_unlock()[0] != generation:
-        raise StorageError(7, "fs generation ids differ.")
+        if retry < 13 and not debug:
+            err_out("Re-scanning deltas for matching Gen ID...")   ; time.sleep(retry)
+            return get_reflink_deltas(storage, aset, datavols, retry=retry*2)
+        else:
+            raise StorageError(7, "Filesystem Generation IDs differ.")
 
     return datavols
 
@@ -4987,7 +4991,6 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
         if untrusted_size > chunksize + (chunksize // 64) or untrusted_size < 1:
             if options.skip_corrupt_chunks and save_path:
                 print("Skipping wrong-sized chunk at", addr)
-                punch_zero_hole(volfno, addr)
                 continue
             else:
                 if save_path and save_type == "file":
@@ -5426,7 +5429,7 @@ def x_it(code, text=None):
 
 
 def err_out(text):
-    sys.stdout.write(text+"\n")
+    sys.stderr.write(text+"\n")    ; sys.stderr.flush()
 
 
 @atexit.register
@@ -5473,7 +5476,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 wip"      ; prog_date = "20250925"
+prog_version     = "0.8 wip"      ; prog_date = "20250926"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
