@@ -5489,7 +5489,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 wip"      ; prog_date = "20250927"
+prog_version     = "0.8 wip"      ; prog_date = "20250928"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
@@ -5714,6 +5714,8 @@ try:
         vname_sz   = max(map(len, list(other_vols) + selected_vols + stvols), default=30)
 
         for storage, vols in storagesets.items():
+            if not (vols or selected_vols):   continue
+
             sid, ses_tags = monitor_send(storage, aset, vols or selected_vols, monitor_only=False,
                                         use_sesid=sid, ses_tags=ses_tags, imports=other_vols,
                                         benchmark=options.dry_run, vname_sz=vname_sz)
@@ -5754,13 +5756,14 @@ try:
         if options.session and len(options.session.split(",")) > 1:
             x_it(1, "Specify only one session for receive.")
 
-        if not options.unattended and not options.force:
+        if not options.unattended and not options.force and (selected_vols
+        or sum(len(x) for x in storagesets.values())):
             print("\nWarning:  Receiving to existing volumes will overwrite them!")
             ans = ask_input("Are you sure? [y/N]: ")
             if ans.lower() not in {"y","yes"}:   x_it(1)
 
         for storage, vols in storagesets.items():
-            dvlist = vols or selected_vols
+            dvlist = vols or selected_vols    ; selected_vols = []
             if not storage.online and vols:
                 err_out("\n Offline volumes: " + ", ".join(vols))
                 error_cache.extend(vols)   ; continue
@@ -5774,7 +5777,7 @@ try:
 
     elif action == "verify":
         for storage, vols in storagesets.items():
-            dvlist = vols or selected_vols
+            dvlist = vols or selected_vols    ; selected_vols = []
             for dv in dvlist:
                 count = receive_volume(storage, aset.vols[dv],
                             select_ses="" if not options.session
@@ -5786,7 +5789,7 @@ try:
 
     elif action == "diff":
         for storage, vols in storagesets.items():
-            dvlist = vols or selected_vols
+            dvlist = vols or selected_vols    ; selected_vols = []
             if not storage.online and vols:
                 err_out("\n Offline volumes: " + ", ".join(vols))
                 error_cache.extend(vols)   ; continue
