@@ -1569,7 +1569,7 @@ class LocalStorage:
         with open(path, "rb") as f:
             return f.seek(0,2)
 
-    def metadata_lock(self, lvpool=None):
+    def metadata_lock(self, lvpool=None, retry=False):
         mark = 0    ; spath = self.path
         if self.pooltype == "tlvm":
             self._lvm_meta_snapshot("reserve", pool=lvpool)
@@ -1577,7 +1577,7 @@ class LocalStorage:
             if not self.fstype or self.fstype not in ("btrfs","xfs"):
                 raise ValueError("Bad fstype "+repr(self.fstype))
             if self.fstype == "btrfs":
-                mark, spath = self._btrfs_subvol_snapshot()
+                mark, spath = self._btrfs_subvol_snapshot(retry=retry)
             elif self.fstype == "xfs":
                 pass # possibly file-lock and chmod -r rlnk snapshots
         else:
@@ -1617,21 +1617,19 @@ class LocalStorage:
             if not shutil.which(CP.btrfs):  raise RuntimeError("Required command not found: btrfs")
             # maybe also check kernel version and xfs reflink support...
 
-    def _btrfs_subvol_snapshot(self, delete=False):
+    def _btrfs_subvol_snapshot(self, delete=False, retry=False):
         if delete and not self.can_snapshot:   return None, None
 
         svpath = self.path    ; dest = self.snappath    ; gen = 0    ; sv_start = time.monotonic()
-
-        # remove snapshot at wrong path
-        if exists(badpath := self.path.rstrip("/")+os.path.basename(dest.rstrip("/"))):
-            do_exec([[CP.env, "-u", "LC_ALL",
-                      CP.btrfs, "subvolume", "delete", "-c", badpath]], check=False)
-
         if debug:   print(f"\nSubvol snapshot: '{dest}' {exists(dest)} del={delete}", flush=True)
-        if exists(dest):
+
+        if retry and not delete:
+            return self._get_btrfs_generation(dest), dest
+        elif exists(dest):
             if delete:   gen = self._get_btrfs_generation(dest)
             do_exec([[CP.env, "-u", "LC_ALL",
                       CP.btrfs, "subvolume", "delete", "-c", dest]])
+
         if not delete:
             do_exec([[CP.env, "-u", "LC_ALL",
                       CP.btrfs, "subvolume", "snapshot", "-r", svpath, dest]])
@@ -3644,7 +3642,7 @@ def get_reflink_deltas(storage, aset, datavols, retry=3):
 
     assert aset.chunksize and aset.chunksize % storage.block_size == 0
 
-    generation, stpath = storage.metadata_lock()
+    generation, stpath = storage.metadata_lock(retry=retry > 3)
 
     for vol in (aset.vols[x] for x in datavols[:]):
         if debug:   print(vol.vid, generation)
@@ -3664,21 +3662,21 @@ def get_reflink_deltas(storage, aset, datavols, retry=3):
 
             devs.add(os.stat(stpath+snapname).st_dev)
             cmds.append([
-              [CP.filefrag, "-v", stpath+snapname],
+              [CP.filefrag, "-s", "-v", stpath+snapname],
               # BEGIN defines the expected filefrag header layout (PAT);
               # END exits with code 2 if no end line (extents found) was found or HEADER != PAT;
               # a non-matching line (00..wyng) is printed if 0 extents found.
               # Printed fields are arranged to complement 'uniq' as it can only skip fields and
               # then must compare the rest of the line.  gsub removes punctuation.
               # 'outp' is used to redirect output for only one side (other side goes to stdout).
-              [CP.awk, r'BEGIN {PAT="^\\s*ext:\\s+logical_offset:\\s+physical_offset:\\s+length:"}'
-                       r' NR<4 && $0 ~ PAT {HDR="Y"}'
-                       r' /^\s*[0-9]+:/ {gsub(/\.|:/, " ", $0);'
-                                        r' print '+side+', $2, $6, $3, $4, $5, $NF'+outp+r'}'
-                       r' END {if ($0 ~ /\s0 extents found$/) {print "00 0 1 0 0 0 wyng"'+outp+r'}'
-                              r' else if (!(HDR=="Y" && $0 ~ /extents? found$/)) exit 2}'
-             ]]
-            )
+              [CP.awk, "-v", "SD="+side,
+                  r'BEGIN {PAT="^\\s*ext:\\s+logical_offset:\\s+physical_offset:\\s+length:"}'
+                  r' NR<4 && $0 ~ PAT {HDR="Y"}'
+                  r' /^\s*[0-9]+:/ {gsub(/\.|:/, " "); sub(/unknown|delalloc|0x/, SD"W-&", $NF);'
+                                   r' print '+side+', $2, $6, $3, $4, $5, $NF'+outp+r'}'
+                  r' END {if ($0 ~ /\s0 extents found$/) {print "00 0 1 0 0 0 wyng"'+outp+r'}'
+                         r' else if (!(HDR=="Y" && $0 ~ /extents? found$/)) exit 2}']
+             ])
 
         if vol.name not in datavols:   continue
         assert len(devs) == 1
