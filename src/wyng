@@ -560,7 +560,7 @@ class ArchiveVolume:
             print("name =", self.name, file=f)
             print("desc =", self.desc, file=f)
             for ses in self.sessions.values():
-                if ses.saved:   print(ses.name, "=", ses.hashval, file=f)
+                print(ses.name, "=", ses.hashval, file=f)
 
             buf = arch.compress(f.getvalue().encode("UTF-8"), int(arch.compr_level))
             assert len(buf) <= self.max_volinfosz
@@ -878,7 +878,7 @@ class ArchiveSession:
         if arch.mcrypto:   etag, buf = arch.mcrypto.encrypt(buf)
         with open(pjoin(self.path,fname+ext), "wb") as f:
             f.write(etag)  ; f.write(buf)
-        self.saved = self.loaded = True
+        self.saved = self.loaded = not ext
         saved_files.extend([pjoin(relpath,fname+ext)] + self.volume.save_volinfo(ext))
         return saved_files
 
@@ -886,6 +886,7 @@ class ArchiveSession:
         assert ext and exists(pjoin(self.path,"info")+ext)
         for rpath in (pjoin(self.path,x) for x in ("info", "manifest", "manifest.z")):
             if exists(rpath+ext):   os.replace(rpath+ext, rpath)
+        self.saved = self.loaded = True
         self.volume.rename_saved(ext)
 
 # END class ArchiveSet, ArchiveVolume, ArchiveSession
@@ -5489,7 +5490,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 wip"      ; prog_date = "20250928"
+prog_version     = "0.8 wip"      ; prog_date = "20251001"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
