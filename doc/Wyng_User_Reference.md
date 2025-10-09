@@ -34,7 +34,7 @@ untrusted data in guest file systems to bolster container-based security.
 
 Release candidate with a range of features including:
 
- - Incremental backups of Linux logical volumes from Btrfs, XFS and Thin-provisioned LVM
+ - Incremental backups of Linux logical volumes from Btrfs and Thin-provisioned LVM
 
  - Supported destinations: Local file system, Virtual machine or SSH host
 
@@ -50,7 +50,7 @@ Release candidate with a range of features including:
 
 Version 0.8 major enhancements:
 
- - Btrfs and XFS reflink support
+ - Reflink local storage support
 
  - Authenticated encryption with auth caching
 
@@ -82,7 +82,7 @@ Before starting:
 should be installed, respectively.
 
 * Volumes to be backed-up should reside locally in one of the following snapshot-capable
-storage types:  LVM thin-provisioned pool, Btrfs subvolume, or XFS/reflink capable file system. Otherwise, volumes may be imported from or saved to other file systems at standard (slower) speeds.
+storage types:  LVM thin-provisioned pool or reflink-capable file system such as Btrfs. Otherwise, volumes may be imported from or saved to other file systems at standard (slower) speeds.
 
 * For backing up from LVM, _thin-provisioning-tools & lvm2_ must be present on the source system.  For Btrfs, the `btrfs` command must be present.
 
@@ -704,6 +704,16 @@ Upon completion Wyng may supply a result/error listing in a file at the same jso
 #### `--force-retry`
 
 Wyng normally re-tries completion of an interrupted (in-process) archive transaction only once and running Wyng afterward will result in "Interrupted process already retried" errors. Using `--force-retry` suppresses the error and allows the transaction to be attempted again.
+
+#### `--vouch=<vflag>`
+
+Allows the user to vouch that a pre-condition outside of Wyng's control has been accounted for, where Wyng would normally refuse and exit with an error.  This can be used to run Wyng on configurations that haven't been thoroughly tested, so caution is urged.
+
+Possible _vflags_:
+
+- 'fs_online_factors' - This must be used with `send` or `monitor` on an unsupported reflink local storage type (i.e. not Btrfs).  It indicates to Wyng that you've prevented, for example, [XFS online](https://codeberg.org/tasket/wyng-backup/issues/277) _fsck_ from running at the same time Wyng is running to maintain the integrity of delta scans.
+
+- 'reflink_fs_<_fstype_\>' - Allow `send` and `monitor` from a reflink filesystem type other than Btrfs, with _fstype_ being the Linux identifier for the unsupported local filesystem (example: _'xfs'_). The _fs_online_factors_ vflag must also be vouched if this is used.
 
 
 ### Configuration files

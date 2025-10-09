@@ -1448,7 +1448,8 @@ class LocalStorage:
 
         self.stypes  = { "tlvm":  LvmVolume, "rlnk": ReflinkVolume, "file": FileVolume,
                          None: FileVolume }
-        self.rltypes = { "btrfs", "xfs" }
+        self.rltypes = { "btrfs" } | {x[11:] for x in opts.vouch
+                                      if re.match(r"^reflink_fs_.+", x) and len(x)>11}
         self.opts    = copy.deepcopy(opts)
 
         assert auuid is None or len(auuid) > 8
@@ -1479,13 +1480,15 @@ class LocalStorage:
             self.path       = pathxvg.rstrip("/")+"/"
             self.online, self.can_snapshot = True, False
             self.fstype     = fs = LocalStorage.get_fs_type(self.path)
-            self.pooltype   = "rlnk" if fs in self.rltypes else "file"
+            self.pooltype   = "file"
 
             if fs == "btrfs":
                 if os.stat(self.path).st_ino == 256:
                     self.snappath = self.path+"wyng_snapshot_tmp/"   ; self.can_snapshot = True
-            elif fs == "xfs":
-                self.snappath = ""   ; self.can_snapshot = True
+                    self.pooltype = "rlnk"
+            elif fs in self.rltypes:
+                self.pooltype = "rlnk" if "fs_online_factors" in opt.vouch else "file"
+                self.snappath = ""   ; self.can_snapshot = self.pooltype == "rlnk"
 
             if self.can_snapshot:
                 self.acquire_deltas = get_reflink_deltas
@@ -1571,14 +1574,16 @@ class LocalStorage:
 
     def metadata_lock(self, lvpool=None, retry=False):
         mark = 0    ; spath = self.path
+        assert self.online and self.can_snapshot
+
         if self.pooltype == "tlvm":
             self._lvm_meta_snapshot("reserve", pool=lvpool)
         elif self.pooltype == "rlnk":
-            if not self.fstype or self.fstype not in ("btrfs","xfs"):
+            if not self.fstype or self.fstype not in self.rltypes:
                 raise ValueError("Bad fstype "+repr(self.fstype))
             if self.fstype == "btrfs":
                 mark, spath = self._btrfs_subvol_snapshot(retry=retry)
-            elif self.fstype == "xfs":
+            elif self.fstype in self.rltypes:
                 pass # possibly file-lock and chmod -r rlnk snapshots
         else:
             raise ValueError(f"'{self.pooltype}' pooltype, no metadata.")
@@ -1615,7 +1620,7 @@ class LocalStorage:
                 raise RuntimeError("Thin provisioning tools version >= "+target_ver+" required.")
         elif self.pooltype == "rlnk" and self.fstype == "btrfs":
             if not shutil.which(CP.btrfs):  raise RuntimeError("Required command not found: btrfs")
-            # maybe also check kernel version and xfs reflink support...
+            # maybe also check kernel version and non-btrfs reflink support...
 
     def _btrfs_subvol_snapshot(self, delete=False, retry=False):
         if delete and not self.can_snapshot:   return None, None
@@ -1629,7 +1634,6 @@ class LocalStorage:
             if delete:   gen = self._get_btrfs_generation(dest)
             do_exec([[CP.env, "-u", "LC_ALL",
                       CP.btrfs, "subvolume", "delete", "-c", dest]])
-
         if not delete:
             do_exec([[CP.env, "-u", "LC_ALL",
                       CP.btrfs, "subvolume", "snapshot", "-r", svpath, dest]])
@@ -5488,7 +5492,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 wip"      ; prog_date = "20251001"
+prog_version     = "0.8 wip"      ; prog_date = "20251003"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
@@ -5581,6 +5585,8 @@ parser_defs = [
  [["--force"],        {"action": "store_true", "help": "Force action"}],
  [["--force-retry"],  {"action": "store_true", "help": "Retry in-process transaction again"}],
  [["--force-allow-rollback"], {"action": "store_true", "help": "Allow rollback (caution)"}],
+ [["--vouch"],        {"action": "append", "default": [],
+                       "help": "Vouch for special prerequisite condition"}],
  [["--clean"],        {"action": "store_true", "help": "Delete orphan snapshots, metadata"}],
  [["--purge"],        {"choices": ["other","full"], "default": None,
                        "help": "Delete valid snapshots"}],

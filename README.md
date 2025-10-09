@@ -31,7 +31,7 @@ untrusted data in guest file systems to bolster container-based security.
 
 Release candidate with a range of features including:
 
- - Incremental backups of Linux logical volumes from Btrfs, XFS and Thin-provisioned LVM
+ - Incremental backups of Linux logical volumes from Btrfs and Thin-provisioned LVM
 
  - Supported destinations: Local file system, Virtual machine or SSH host
 
@@ -47,7 +47,7 @@ Release candidate with a range of features including:
 
 Version 0.8 major enhancements:
 
- - Btrfs and XFS reflink support
+ - Reflink local storage support
 
  - Authenticated encryption with auth caching
 
@@ -79,7 +79,7 @@ Before starting:
 should be installed, respectively.
 
 * Volumes to be backed-up should reside locally in one of the following snapshot-capable
-storage types:  LVM thin-provisioned pool, Btrfs subvolume, or XFS/reflink capable file system. Otherwise, volumes may be imported from or saved to other file systems at standard (slower) speeds.
+storage types:  LVM thin-provisioned pool or reflink-capable file system such as Btrfs. Otherwise, volumes may be imported from or saved to other file systems at standard (slower) speeds.
 
 * For backing up from LVM, _thin-provisioning-tools & lvm2_ must be present on the source system.  For Btrfs, the `btrfs` command must be present.
 
