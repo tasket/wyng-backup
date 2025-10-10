@@ -920,6 +920,18 @@ files in place.
 
 * If an archive volume becomes damaged and unrecoverable it may be necessary to delete it from the archive by its volume ID by using `wyng delete --vid` instead of the volume name.
 
+### Reporting issues
+
+#### Conduct:
+
+When using the Wyng issues tracker its generally assumed you will do so in good faith based on the technical and UX merits of Wyng and the issue(s) at hand. Here are patterns of use which can land you in the 'bad faith' column:
+
+* Noise-making, consistently invalid or unrelated comments or suggestions
+* Gate keeping for other projects
+* Assuming the role of a non-user or gadfly; you must have a reasonably earnest users' perspective whether you are a crackerjack developer or someone "just wishing trying it out". This includes "keyword criticism" based only on terms associated with the project but not exhibiting any experience with it nor having familiarity with its theory of operation.
+* Bad faith arguments: appeals to authority, gaslightling, know-nothing assumptions, "alternative facts", etc.
+
+
 ### Testing
 
 * The best way to test Wyng updates is to pull from a 'beta' branch or 'fixes' branch and start using the program for send and receive (backup and restore) as well as prune and diff operations (`wyng diff` verifies volumes with additional checking that the archive content is identical to the local copy, which is good for testing).  Usually 'wip' and 'experimental' usually should be avoided unless you have an issue for a bug and a fix has been posted in one of them.  Note that the '08beta' branch is being retired in preparation for the v0.8 full release; its not certain when '09beta' will be started.

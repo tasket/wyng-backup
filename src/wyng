@@ -4765,6 +4765,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
     sparse      = options.sparse                  ; sparse_write = options.sparse_write or sparse
     chunksize   = aset.chunksize                  ; use_snapshot = False
     sessions    = vol.sesnames                    ; zeros        = bytes(chunksize)
+    diff_local  = diff and options.quick
     # functions
     compress    = compressors[aset.compression][2]; compresslevel = int(aset.compr_level)
     decompress  = compressors[aset.compression][0].decompress
@@ -4809,8 +4810,8 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
         # default to last session
         select_ses = sessions[-1]
 
-    ses_obj     = vol.sessions[select_ses]           ; volsize     = ses_obj.volsize
-    addrsplit   = -address_split[1]                  ; rc = l_vol  = volf = None
+    ses_obj     = vol.sessions[select_ses]      ; volsize    = ses_obj.volsize
+    addrsplit   = -address_split[1]             ; rc = l_vol = volf = getvol = None
     lchunk_addr, last_chunkx = vol.last_chunk_addr(volsize)
     assert vol.aliastype in (None, "rename")
 
@@ -4873,8 +4874,8 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
             volf = open(save_path, "r+b")    ; volf.truncate(volsize)
 
     elif diff:
-        l_vol = storage.lvols[vol.alias]     ; snap1vol = l_vol.snap1
-        paired = storage.lvols[snap1vol].paired_state(vol.mapfile(), vol.last)
+        l_vol  = storage.lvols[vol.alias]     ; snap1vol = l_vol.snap1
+        paired = storage.lvols[snap1vol].paired_state(vol.mapfile(), vol.last)    ; zero_q = 0
         if not l_vol.exists():
             err_out(f"{vol.name}: Local volume does not exist.")
             return None
@@ -4883,16 +4884,16 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
             l_vol = storage.lvols[snap1vol]
         elif paired == "D":
             l_vol = storage.lvols[snap1vol]
-            print("Snapshot is type delta:")
+            print("\nSnapshot is type delta:")
         elif storage.lvols[snap1vol].exists():
             l_vol = storage.lvols[snap1vol]
-            print("Snapshot is not paired:")
+            print("\nSnapshot is not paired:")
         else:
-            print("Snapshot not available; Comparing with source volume instead.")
+            print("\nSnapshot not available; Comparing with source volume instead:")
 
         if volsize != l_vol.getsize():
-            err_out("Volume sizes differ:\n  Archive = %d \n  Local   = %d"
-                    % (volsize, l_vol.getsize()))   ; return None
+            err_out("'%s' Volume sizes differ:\n  Archive = %d \n  Local   = %d"
+                    % (vol.name, volsize, l_vol.getsize()))   ; return None
 
         volf  = open(l_vol.path, "r+b")
 
@@ -4929,7 +4930,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
     # Note address_split is used to bisect filename to construct the subdir.
     if compare_files(aset, volumes=[vol], sessions=[vol.sessions[x] for x in incl_ses]):
         x_it(1, "Error: Local and archive metadata differ.")
-    vol.decode_manifests(incl_ses+diff_ses, force=True)
+    vol.decode_manifests(incl_ses+diff_ses, force=not diff_local)
     if verify_only != 2:   vol.sessions[select_ses].check_full_manifest()
     manifest = merge_manifests(vol, msessions=incl_ses, addcol=True, vsize=volsize, rdiff=diff_ses)
 
@@ -4939,7 +4940,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
         print("\n".join(collections.deque(  (" ".join(x.split()[1:]) for x in open(manifest)
                                             if not x.startswith("0 ")), 10)))
 
-    if not sparse:
+    if not (sparse or diff_local):
         cmds = [[CP.sed, "-E", r"/" +last_chunkx+ r"/q", manifest],  ## Enh: detect vol_shrank
                 [CP.sed, "-E", r"/^0\s/ d; "
                 r"s|^\S+\s+x(\S{" +str(address_split[0])+ r"})(\S+)\s+(S_\S+)|\3/\1/x\1\2|;"],
@@ -4950,21 +4951,24 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
         do_exec(cmds)
 
     # Create retriever process using py program
-    cmd = dest.run_args(
-            ["cd " + vol.vid
-             +" && python3 "+dest.dtmp+"/dest_helper.py receive"
-            ], destcd=dest.path)
-    getvol   = SPr.Popen(cmd, stdout=SPr.PIPE, stdin=SPr.PIPE if sparse else SPr.DEVNULL,
-                         stderr=open(tmpdir+"/receive.log","w") if debug else SPr.DEVNULL)
-    gv_stdin = io.TextIOWrapper(getvol.stdin.raw, encoding="utf-8", write_through=True) \
-                if sparse else None
+    if not diff_local:
+        cmd = dest.run_args(
+                ["cd " + vol.vid
+                +" && python3 "+dest.dtmp+"/dest_helper.py receive"
+                ], destcd=dest.path)
+        getvol   = SPr.Popen(cmd, stdout=SPr.PIPE, stdin=SPr.PIPE if sparse else SPr.DEVNULL,
+                            stderr=open(tmpdir+"/receive.log","w") if debug else SPr.DEVNULL)
+        gv_stdin = io.TextIOWrapper(getvol.stdin.raw, encoding="utf-8", write_through=True) \
+                    if sparse else None
 
     # Open manifest then receive, check and save data
     if verify_only != 2 and not verbose:   print("[", end="")
-    addr = -1    ; bcount = diff_count = progress = 0    ; buf = b''    ; magic = dest.magic
+    addr = -1    ; bcount = diff_count = progress = 0    ; buf, magic = b'', dest.magic
+
+    # Main loop: retrieve / test chunks
     for mfline in open(manifest, "r") if volsize else []:
         if lchunk_addr <= addr >= 0:   break
-        cksum, faddr, ses = mfline.split()    ; addr = int(faddr[1:], 16)
+        cksum, faddr, ses = mfline.split()    ; addr = int(faddr[1:], 16)    ; sigalarm(600)
 
         if debug:
             print(f"\r{(addr/volsize):.1%}", faddr, ses, end=" ")
@@ -4981,12 +4985,20 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
                 if sparse_write and volf_read(chunksize) != zeros:
                     punch_zero_hole(volfno, addr)    ; diff_count += chunksize
             elif diff:
-                volf_seek(addr)   ; diff_count += chunksize if volf.read(chunksize) != zeros else 0
-                if diff_count:   break
+                if zero_q:   zero_q -= 1   ; continue
+
+                volf_seek(addr)
+                if volf.read(chunksize) != zeros:   diff_count += chunksize   ; break
+                if addr < lchunk_addr:
+                    try:
+                        sdpos = volf_seek(addr + chunksize, os.SEEK_DATA)
+                    except OSError as e:
+                        if e.errno not in {6}:   raise e
+                        sdpos = volsize + 1
+                    zero_q = ((sdpos - addr) // chunksize) - 1
 
             continue
 
-        sigalarm(600)
         # Request chunks on-demand if local chunk doesn't match cksum
         if sparse and save_path:
             volf_seek(addr)    ; localbuf = volf_read(chunksize)
@@ -4996,6 +5008,14 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
                 continue
             else:
                 print("%s/%s/%s" % (ses, faddr[1:addrsplit], faddr), flush=True, file=gv_stdin)
+        elif diff_local:
+            # No fetch request for diff local; compare file chunk to hash
+            volf_seek(addr)    ; localbuf = volf_read(chunksize)
+            if b64enc(gethash(compress(localbuf, compresslevel))).decode("ascii") != cksum:
+                diff_count += chunksize   ; break
+            zero_q = 0    ; continue
+        elif diff:
+            zero_q = 0
 
         # Read chunk size
         if getvol.stdout.read(3) != magic:   raise ValueError("Bad magic.")
@@ -5081,13 +5101,13 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
 
     sigalarm(0)
     if debug:   print("\nEND receive stream.")
-    if gv_stdin:   gv_stdin.close()
-    rc = getvol.poll()
-    if rc and debug:
-        err_out("Warn: Helper exited rc="+repr(rc))
-    elif getvol.stdout.read(3) != magic and debug:
-        err_out("Warn: No magic.")
-    getvol.kill()
+    if getvol:
+        gv_stdin.close()    ; rc = getvol.poll()
+        if rc and debug:
+            err_out("Warn: Helper exited rc="+repr(rc))
+        elif getvol.stdout.read(3) != magic and debug:
+            err_out("Warn: No magic.")
+        getvol.kill()
 
     if ((not sparse and verify_only != 2 and not use_snapshot and not diff)) \
     and addr != lchunk_addr:
@@ -5492,7 +5512,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 wip"      ; prog_date = "20251003"
+prog_version     = "0.8 wip"      ; prog_date = "20251004"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
@@ -5582,6 +5602,7 @@ parser_defs = [
  [["--meta-dir"],     {"dest": "metadir", "default": "", "help": "Use alternate metadata path"}],
  [["--meta-reduce"],  {"default": "on:3000", "help": "Metadata retention policy (see doc)"}],
  [["--json"],         {"action": "store_true", "help": "Output as json format (list)"}],
+ [["--quick"],        {"action": "store_true", "help": "Faster, local only (diff)"}],
  [["--force"],        {"action": "store_true", "help": "Force action"}],
  [["--force-retry"],  {"action": "store_true", "help": "Retry in-process transaction again"}],
  [["--force-allow-rollback"], {"action": "store_true", "help": "Allow rollback (caution)"}],
