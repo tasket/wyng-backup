@@ -350,7 +350,7 @@ This rule in /etc/cron.d runs `monitor` every 20 minutes:
 
 Compare a local volume snapshot with the archive and report any differences.
 This is useful for diagnostics and can also be useful after a verification
-error has occurred.
+error has occurred.  Passing `--quick` will cause `diff` to make a local-only check, comparing the archived volume's hashes with the local snapshot instead of retrieving volume data from the archive.
 
 
 #### add
@@ -408,6 +408,7 @@ the volume data if present.
 --upgrade-format       | Upgrade older Wyng archive to current format (arch-check)
 --change-uuid          | Change the archive UUID to a new random value (arch-check)
 --dry-run              | Make `send` session a dry run, see estimate of changed data
+--quick                | Faster, local-only comparison (diff)
 --remap                | Remap volume to current archive during `send` or `diff`
 --json                 | Output volume: session info in json format (list)
 --force                | Not used with most commands
@@ -545,13 +546,6 @@ multiple volumes that have a lot of the same content and/or you are backing-up o
 Internet link.
 
 
-#### `--dry-run`
-
-Have `send` perform a dry run, where no data is saved to the archive. This is useful for testing and also getting an estimate of the amount of data that will be transmitted during a normal `send`. If a volume that had lost its snapshot or delta map is included in a dry run, its map will be re-created automatically saving time on the next `send`.
-
-Since it affects the amount of data transmitted, including the `--dedup` option in the dry run is recommended if you intend to make the actual backup with `--dedup`.
-
-
 #### `--autoprune=(off | on | full)`
 
 Autoprune may be used with either the `prune` or `send` commands and will cause Wyng to
@@ -608,20 +602,6 @@ Wyng then reads instead of prompting for passphrase input.  If a prior auth from
 `--authmin` is active, this option is ignored and the command will not be executed.
 
 
-#### `--import-other-from=volname:|:path`
-
-Enables `send`-ing a volume from a path that is not a supported snapshot storage type.  This may
-be any regular file or a block device which is seek-able.
-
-When it is specified this option causes slow delta comparisons to be used for the specified volume(s)
-instead of the default fast snapshot-based delta comparisons.  It is not recommended for regular
-use with large volumes if speed or efficiency are a priority.
-
-The special delimiter used to separate the _volname_ (archive volume name) and the _path_ is ':|:'
-which means this option cannot be used to `send` directly to volume names in the archive which
-contain that character sequence.
-
-
 #### `--session-strict=on|off`
 
 For receive, verify, diff: If set to 'on' (the default) Wyng won't retrieve volumes from next-oldest session if the
@@ -629,18 +609,11 @@ specified volumes don't have an exact match for the specified session.  When set
 Wyng will try to retrieve the next-oldest version of the volume if one exists.
 
 
-#### `--vols-from=_json file_`
+#### `--dry-run`
 
-Specify both local storage and volume names for `send`, `receive` or `verify` as sets, instead
-of using --local and volume names on the command line.  The json file must take the form
-of `{local-a: [[volname1, alias1], [volnameN, aliasN], ...], ...]}`.  This allows multiple
-local storage sources to be sent/received in a single session.
+Have `send` perform a dry run, where no data is saved to the archive. This is useful for testing and also getting an estimate of the amount of data that will be transmitted during a normal `send`. If a volume that had lost its snapshot or delta map is included in a dry run, its map will be re-created automatically saving time on the next `send`.
 
-_Alias_ can be _'null'_ for no alias or any valid name. However, the volume names (or aliases)
-must all be unique across different sources as they are stored in the same archive.  Aliases define which local volume name into which an archive volume will be received, or when sending
-they indicate a request to actually _rename_ the target volume to the alias.
-
-_Local_ may also be _'null'_ if the command/action does not require it (ex. `verify`).
+Since it affects the amount of data transmitted, including the `--dedup` option in the dry run is recommended if you intend to make the actual backup with `--dedup`.
 
 
 #### `--meta-reduce=mode:minutes`
@@ -689,6 +662,34 @@ Selects the encryption cipher/mode.  The available modes are:
 - `xchacha20-msr` — Using HMAC-SHA256(rnd||msg) function.
 - `xchacha20-ct` — Counter based; fast like _*-dgr_ with different safety trade-offs (see issue [158](https://codeberg.org/tasket/wyng-backup/issues/158)).
 - `off` — Turns off Wyng's authentication and encryption.
+
+
+#### `--import-other-from=volname:|:path`
+
+Enables `send`-ing a volume from a path that is not a supported snapshot storage type.  This may
+be any regular file or a block device which is seek-able.
+
+When it is specified this option causes slow delta comparisons to be used for the specified volume(s)
+instead of the default fast snapshot-based delta comparisons.  It is not recommended for regular
+use with large volumes if speed or efficiency are a priority.
+
+The special delimiter used to separate the _volname_ (archive volume name) and the _path_ is ':|:'
+which means this option cannot be used to `send` directly to volume names in the archive which
+contain that character sequence.
+
+
+#### `--vols-from=_json file_`
+
+Specify both local storage and volume names for `send`, `receive` or `verify` as sets, instead
+of using --local and volume names on the command line.  The json file must take the form
+of `{local-a: [[volname1, alias1], [volnameN, aliasN], ...], ...]}`.  This allows multiple
+local storage sources to be sent/received in a single session.
+
+_Alias_ can be _'null'_ for no alias or any valid name. However, the volume names (or aliases)
+must all be unique across different sources as they are stored in the same archive.  Aliases define which local volume name into which an archive volume will be received, or when sending
+they indicate a request to actually _rename_ the target volume to the alias.
+
+_Local_ may also be _'null'_ if the command/action does not require it (ex. `verify`).
 
 
 #### `--local-from=<json_file>`
@@ -783,7 +784,7 @@ object at any point in time; they aren't well suited to telling us if that objec
 (i.e. a backup archive) is the most recent update, and so they are vulnerable to rollback
 attacks that replace your current archive with an older version (in Wyng this is related to
 replay attacks, but not downgrade attacks).  Wyng guards against
-such attacks by checking that the time encoded in your locally cached archive.ini isn't newer
+such attacks by checking that the time and counters encoded in your locally cached archive.ini aren't newer
 than the one in the archive itself on the destination; Wyng also displays the last archive modification time whenever you access it.
 
 
@@ -809,7 +810,7 @@ to verifying everything within an archive in a timely manner.)
 
 ### Known Issues
 
-* Issue [260](https://codeberg.org/tasket/wyng-backup/issues/260): Versions of Wyng v0.8 older than _'20250820'_ may receive a volume incorrectly when `--use-snapshot` is used and the session is older than the most recent.  To resolve the issue the use-snapshot feature was split into two different options: A safe version enabled with `--use-snapshot` which only retrieves a whole snapshot if the specified session is newest, and an experimental version enabled by `--use-snapshot-diff` that can perform differential receive vs the snapshot if the session is older. If you use Wyng with `receive --use snapshot` to retrieve older versions of data then you are strongly urged to upgrade to a current release.
+* Issue [260](https://codeberg.org/tasket/wyng-backup/issues/260): Beta versions of Wyng v0.8 older than _'20250820'_ may receive a volume incorrectly when `--use-snapshot` is used and the session is older than the most recent.  To resolve the issue the use-snapshot feature was split into two different options: A safe version enabled with `--use-snapshot` which only retrieves a whole snapshot if the specified session is newest, and an experimental version enabled by `--use-snapshot-diff` that can perform differential receive vs the snapshot if the session is older. If you use Wyng with `receive --use snapshot` to retrieve older versions of data then you are strongly urged to upgrade to a current release.
 
 ### Tips & Caveats
 
@@ -918,25 +919,26 @@ files in place.
 
 * If data corruption in the archive is suspected, use `wyng arch-check` which will scan for errors and show options for recovery.
 
-* If an archive volume becomes damaged and unrecoverable it may be necessary to delete it from the archive by its volume ID by using `wyng delete --vid` instead of the volume name.
+* If an archive volume becomes damaged and unrecoverable it may be necessary to delete it from the archive by its volume ID by using `wyng delete --vid` instead of the volume name to return the archive to a usable state.
 
 ### Reporting issues
 
 #### Conduct:
 
-When using the Wyng issues tracker its generally assumed you will do so in good faith based on the technical and UX merits of Wyng and the issue(s) at hand. Here are patterns of use which can land you in the 'bad faith' column:
+When using the Wyng issue tracker and comms dedicated to Wyng its generally assumed you will do so in good faith based on the technical and UX merits of the project and the issue(s) at hand. Here are patterns of behavior which can land someone in the 'bad faith' column:
 
-* Noise-making, consistently invalid or unrelated comments or suggestions
-* Gate keeping for other projects
-* Assuming the role of a non-user or gadfly; you must have a reasonably earnest users' perspective whether you are a crackerjack developer or someone "just wishing trying it out". This includes "keyword criticism" based only on terms associated with the project but not exhibiting any experience with it nor having familiarity with its theory of operation.
+* Automated "AI" posting.
+* Noise-making: consistently invalid, duplicate or unrelated comments or suggestions.
+* Gate keeping for other projects; this is OK outside of Wyng comms, but can go overboard when its in the issue tracker, for example.
+* Assuming the role of a non-user or gadfly; you must have a reasonably earnest user's perspective, whether you are a crackerjack developer or someone "just trying it out". This includes "keyword criticism" based only on terms associated with the project while exhibiting a lack of experience with it or (as a developer) unfamiliarity with its theory of operation.
 * Bad faith arguments: appeals to authority, gaslightling, know-nothing assumptions, "alternative facts", etc.
 
 
 ### Testing
 
-* The best way to test Wyng updates is to pull from a 'beta' branch or 'fixes' branch and start using the program for send and receive (backup and restore) as well as prune and diff operations (`wyng diff` verifies volumes with additional checking that the archive content is identical to the local copy, which is good for testing).  Usually 'wip' and 'experimental' usually should be avoided unless you have an issue for a bug and a fix has been posted in one of them.  Note that the '08beta' branch is being retired in preparation for the v0.8 full release; its not certain when '09beta' will be started.
+The best way to test Wyng updates is to pull from a 'beta' branch or 'fixes' branch and start using the program for send and receive (backup and restore) as well as prune and diff operations (`wyng diff` verifies volumes with additional checking that the archive content is identical to the local copy, which is good for testing).  Usually 'wip' and 'experimental' usually should be avoided unless you have an issue for a bug and a fix has been posted in one of them.  Note that the '08beta' branch is being retired in preparation for the v0.8 full release; its not certain when '09beta' will be started.
 
-* Testing goals are basically stability, usability, security and efficiency. Compatibility
+Testing goals are basically stability, usability, security and efficiency. Compatibility
 is also a valued topic, where source systems are generally expected to be a fairly recent
 Linux distro or Qubes OS. Destination systems can vary a lot, they just need to have Python and
 Unix commands or support a compatible FUSE protocol such as sshfs(sftp) or s3.

@@ -1,13 +1,15 @@
-v0.8rc2 20250921 - Add manifest crc, prune safeguards, minor fixes, code cleanup and comments.
+v0.8 rc3 20251006 - Fix send bad file size 0 error; add diff seek_hole and quick option; add vouch option to enable non-Btrfs fs; retry delta scan on error; extra delta scan sanity checks; add receive timeouts; fix skip-corrupt-chunks option; keep incomplete sparse vols.
 
-v0.8rc1 20250904 - More thorough cleanup after interrupted send; fix "bad permissions" error and "local storage offline" warnings.
+v0.8 rc2 20250921 - Add manifest crc, prune safeguards, minor fixes, code cleanup and comments.
 
-v0.8beta16 20250824 - Fix use-snapshot issue 260; additional error prevention and recovery; add force-retry and use-snapshot-diff options; support sending 'nodatacow' volumes; fix for index errors
+v0.8 rc1 20250904 - More thorough cleanup after interrupted send; fix "bad permissions" error and "local storage offline" warnings.
 
-v0.8beta15 - Deprecated.
+v0.8 beta16 20250824 - Fix use-snapshot issue 260; additional error prevention and recovery; add force-retry and use-snapshot-diff options; support sending 'nodatacow' volumes; fix for index errors
 
-v0.8beta14 - Synced autoprune; protection for metadata vols; keep prior log by default; improved snapshot & cache handling; minor fixes and refinements.
+v0.8 beta15 - Deprecated.
 
-v0.8beta13 – Fixed spurious error message in sequence checker; Use single stream for improved sending.
+v0.8 beta14 - Synced autoprune; protection for metadata vols; keep prior log by default; improved snapshot & cache handling; minor fixes and refinements.
 
-v0.8beta12 – Faster receive --sparse; improved error handling; misc fixes and code cleanup.
+v0.8 beta13 – Fixed spurious error message in sequence checker; Use single stream for improved sending.
+
+v0.8 beta12 – Faster receive --sparse; improved error handling; misc fixes and code cleanup.
