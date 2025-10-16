@@ -60,7 +60,7 @@ for v in src.keys() & dest.keys():
                      rf" && mv {ses} {ses_next}", dest_url.netloc)
             dest_l.pop(dpos)
 
-rs0 = ["rsync", "-uaHW", "--no-compress", "--delete"]
+rs0 = ["rsync", "-uaHW", "--progress", "--no-compress", "--delete"]
 rs1 = ["--rsh=ssh" + (f" -p {dest_url.port}" if dest_url.port else "")] \
         if dest_url.scheme=="ssh" else []
 rs2 = [srcpath + "/."]
