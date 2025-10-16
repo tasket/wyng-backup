@@ -331,6 +331,7 @@ class ArchiveSet:
         return [self.confname+ext]
 
     def rename_saved(self, ext=".tmp"):
+        assert ext
         if exists(self.confpath+ext):
             os.replace(self.confpath+ext, self.confpath)
 
@@ -575,7 +576,7 @@ class ArchiveVolume:
         return [pjoin(vid,"sessions"+ext), pjoin(vid,fname+ext)] + arch.save_ini(ext)
 
     def rename_saved(self, ext=".tmp"):
-        assert ext and exists(pjoin(self.path,"volinfo")+ext)
+        assert ext
         for rpath in (pjoin(self.path,"volinfo"), pjoin(self.path,"sessions")):
             if exists(rpath+ext):   os.replace(rpath+ext, rpath)
         self.archive.rename_saved(ext)
@@ -883,7 +884,7 @@ class ArchiveSession:
         return saved_files
 
     def rename_saved(self, ext=".tmp"):
-        assert ext and exists(pjoin(self.path,"info")+ext)
+        assert ext
         for rpath in (pjoin(self.path,x) for x in ("info", "manifest", "manifest.z")):
             if exists(rpath+ext):   os.replace(rpath+ext, rpath)
         self.saved = self.loaded = True
@@ -1554,7 +1555,7 @@ class LocalStorage:
             if p != old.strip()[1]:
                 do_exec([[CP.lvm, "lvchange", path, "-p", "r"+p]], newses=True)
         else:
-            raise ValueError("Bad non-file path: "+path)
+            raise StorageError("Bad non-file path: "+path)
 
     def getperms(self, path, vstat=None):
         vstat = vstat or os.stat(os.path.realpath(path))
@@ -1582,13 +1583,13 @@ class LocalStorage:
             self._lvm_meta_snapshot("reserve", pool=lvpool)
         elif self.pooltype == "rlnk":
             if not self.fstype or self.fstype not in self.rltypes:
-                raise ValueError("Bad fstype "+repr(self.fstype))
+                raise StorageError("Bad fstype "+repr(self.fstype))
             if self.fstype == "btrfs":
                 mark, opstate, spath = self._btrfs_subvol_snapshot(retry=retry)
             elif self.fstype in self.rltypes:
                 pass # possibly file-lock and chmod -r rlnk snapshots
         else:
-            raise ValueError(f"'{self.pooltype}' pooltype, no metadata.")
+            raise StorageError(f"'{self.pooltype}' pooltype, no metadata.")
 
         self.locked = True
         return mark, opstate, spath,
@@ -1617,16 +1618,16 @@ class LocalStorage:
     def check_support(self):
         if self.pooltype == "tlvm":
             for prg in (CP.lvm, CP.dmsetup, CP.thin_delta ):
-                if not shutil.which(prg):  raise RuntimeError("Required command not found: "+prg)
+                if not shutil.which(prg):  raise StorageError("Required command not found: "+prg)
             try:
                 p = SPr.check_output([CP.thin_delta, "-V"])
             except:
                 p = b""
             ver = p[:5].decode("UTF-8").strip()    ; target_ver = "0.7.4"
             if p and ver < target_ver:
-                raise RuntimeError("Thin provisioning tools version >= "+target_ver+" required.")
+                raise StorageError("Thin provisioning tools version >= "+target_ver+" required.")
         elif self.pooltype == "rlnk" and self.fstype == "btrfs":
-            if not shutil.which(CP.btrfs):  raise RuntimeError("Required command not found: btrfs")
+            if not shutil.which(CP.btrfs):  raise StorageError("Required command not found: btrfs")
             # maybe also check kernel version and non-btrfs reflink support...
 
     def _btrfs_subvol_snapshot(self, delete=False, retry=False):
@@ -1910,7 +1911,7 @@ class ReflinkVolume(FileVolume):
     def create(self, size=None, snapshotfrom=None, ro=True, addtags=[]):
         assert size or snapshotfrom
         assert self.storage.online and self.storage.fstype in self.storage.rltypes
-        if self.exists():   raise ValueError(f"Volume {self.name} already exists.")
+        if self.exists():   raise StorageError(f"Volume {self.name} already exists.")
         if debug:   print("Create vol", self.name, "from", snapshotfrom, flush=True)
 
         subdir, fname  = os.path.split(self.name)
@@ -1941,7 +1942,7 @@ class ReflinkVolume(FileVolume):
             return "false"
 
     def paired_state(self, mapfile, sestag):
-        if not self.name.endswith(self.snap_ext):   raise ValueError("Not a snapshot.")
+        if not self.name.endswith(self.snap_ext):   raise StorageError("Not a snapshot.")
 
         if self.is_arch_member() != "true" or not exists(mapfile) \
         or self.gettime() != os.stat(mapfile).st_mtime_ns:
@@ -2010,7 +2011,7 @@ class LvmVolume(LocalVolume):
                     retcode = procs[ii].returncode
                     if retcode is not None:
                         if clean and retcode != 0:
-                            raise CalledProcessError("lvremove failed "+str(retcode))
+                            raise StorageError("lvremove failed "+str(retcode))
                         del(procs[ii])
 
             if debug:   print("Del vol", self.name, flush=True)
@@ -2024,14 +2025,14 @@ class LvmVolume(LocalVolume):
             else:
                 retcode = p.wait()
                 if check and retcode != 0:
-                    raise CalledProcessError("lvremove failed "+str(retcode))
+                    raise StorageError("lvremove failed "+str(retcode))
 
             for col in self.colnames:   setattr(self, col, None)
 
     def create(self, size=None, snapshotfrom=None, ro=True, addtags=[]):
         assert size or snapshotfrom and self.storage.online
         vg = self.storage.path    ; rwmode = ["-pr"+("w" if not ro else "")]
-        if self.exists():   raise ValueError(f"Volume {self.name} already exists.")
+        if self.exists():   raise StorageError(f"Volume {self.name} already exists.")
         if debug:   print("Create vol", self.name, "from", snapshotfrom, flush=True)
         if snapshotfrom:
             do_exec([[CP.lvm, "lvcreate", "-kn", "-ay"] + rwmode
@@ -2053,7 +2054,7 @@ class LvmVolume(LocalVolume):
         return int(time.mktime(time.strptime(self.lv_time, r"%Y-%m-%d %H:%M:%S %z"))*1000000000)
 
     def resize(self, size):
-        if not self.exists():   raise FileNotFoundError(self.path)
+        if not self.exists():   raise StorageError(self.path+" does not exist.")
         do_exec([[CP.lvm, "lvresize", "-L", str(size)+"b", "-f", self.path]], newses=True)
         return self.update()
 
@@ -2073,7 +2074,7 @@ class LvmVolume(LocalVolume):
             return "true"
 
     def paired_state(self, mapfile, sestag):
-        if not self.name.endswith(self.snap_ext):   raise ValueError("Not a snapshot.")
+        if not self.name.endswith(self.snap_ext):   raise StorageError("Not a snapshot.")
 
         if self.is_arch_member() != "true" or not exists(mapfile) \
         or self.gettime() != os.stat(mapfile).st_mtime_ns or sestag not in self.tags:
@@ -2883,7 +2884,6 @@ class Destination:
             elif ln.startswith(tmpprefix):
                 self.dtmp = ln.strip()
 
-        if not run:   err_out("Dest not accessible.")
         if self.online and (not self.dtmp or len(self.dtmp) != len(tmpprefix)+tmpdigits+3 \
         or not set(self.dtmp[5:]) <= set(string.ascii_letters + string.digits + "/")):
             err_out("Malformed or missing tmp path on dest.")
@@ -5011,7 +5011,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
                     try:
                         sdpos = volf_seek(addr + chunksize, os.SEEK_DATA)
                     except OSError as e:
-                        if e.errno not in {6}:   raise e
+                        if e.errno != 6:   raise e
                         sdpos = volsize + 1
                     zero_q = ((sdpos - addr) // chunksize) - 1
 
@@ -5464,7 +5464,7 @@ def handle_signal(signum, frame, int_exit=False):
     if signum == signal.SIGALRM:
         raise WTimeoutError("Timeout.\nSee send.log for details.")
     if signum not in signals_caught:   signals_caught.append(signum)
-    sys.stderr.write(" *** Caught signal "+str(signum))
+    sys.stderr.write("\n*** Caught signal "+str(signum))
 
 
 def ask_input(text=None):
@@ -5919,9 +5919,12 @@ except (InputError, SelectionError, OptionError, AuthenticationError) as e:
 except StorageError as e:
     x_it(e.args[0], f"\n{e.__class__.__name__}: {e.args[-1]}\n")
 
+except (BrokenPipeError, SPr.CalledProcessError) as e:
+    print()    ; e.add_note("See Wyng log for details.")
+    raise e
+
 except Exception as e:
     print()
-    if e is BrokenPipeError:   e.add_note("See Wyng log for details.")
     raise e
 
 ## END ##
