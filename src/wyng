@@ -2816,15 +2816,14 @@ class Destination:
 
         if debug:   print("\nDest detect:")
 
+        cmd1 = []
         if self.dtype == "qubes-ssh":
             # Enh: possibly remove dargs and use dest.run()
-            dargs = self.run_map["qubes"][:-1] + [self.sys.split(":")[0]]
-
-            cmd = dargs + [shell_prefix + "mkdir -p /tmp/wyngrpc"]
-            do_exec([cmd])
+            cmd1  = self.run_map["qubes"][:-1] + [self.sys.split(":")[0]] \
+                  + [shell_prefix + "mkdir -p /tmp/wyngrpc"]
 
         tmpprefix = self.tmpprefix    ; tmpdigits = 12   ; NL = "\n"   ; error = None ; run = False
-        cmd  = [r"printf '\nwyng_run\n'" + (rf" && mkdir -p '{self.path}'" if not ro else "")
+        cmd2 = [r"printf '\nwyng_run\n'" + (rf" && mkdir -p '{self.path}'" if not ro else "")
                 +rf" && cd '{self.path}' && printf '\nwyng_dir_exists\n'"
                 +(r" && exec 2>&1 && python3 --version && uname -a" if debug else "")
 
@@ -2847,7 +2846,8 @@ class Destination:
                 + NL+ r"ln -f archive.dat .hardlink && printf '\nwyng_hlink\n'" if not ro else "")
                 ]
         try:
-            do_exec([self.run_args(cmd),
+            if cmd1:   do_exec([cmd1], out=tmpdir+"/dest-state.log")
+            do_exec([self.run_args(cmd2),
                     # sanitize remote output:
                     [CP.cat,"-v"],  [CP.tail,"--bytes=2000"]],
                     pipefail=True,
@@ -2855,11 +2855,11 @@ class Destination:
         except SPr.CalledProcessError as e:
             for log in ("/dest-state.log", "/err.log"):
                 if exists(tmpdir+log):
-                    do_exec([ [CP.cat, "-v", tmpdir+log],  [CP.tail, "--bytes=1000"],
+                    do_exec([ [CP.cat, "-v", tmpdir+log],  [CP.tail, "--bytes=250"],
                             [CP.grep, "-vFx", " --+--"] ],
                             out=tmpdir+log+"-out", check=False)
                     err_out(open(tmpdir+log+"-out", "r").read())
-            if debug:   print(cmd); err_out(repr(e))
+            if debug:   print(cmd1 + cmd2); err_out(repr(e))
 
         for ln in open(lf, "r") if exists(lf := tmpdir+"/dest-state.log") else []:
             if debug:   print(ln, end="")
@@ -3215,6 +3215,7 @@ def do_exec(commands, cwd=None, check=True, out="", infile="", inlines=[], text=
         return control_execs, close, (inf, outf, errf)
 
     for ii in control_execs() if otherctl else _iterate_execs():   pass
+
     return close()[-1]
 
 
@@ -5459,7 +5460,7 @@ class WTimeoutError(Exception):
 
 
 def handle_signal(signum, frame, int_exit=False):
-    if signum == signal.SIGINT and int_exit:   x_it(8, " *** Interrupt.")
+    if signum == signal.SIGINT and int_exit:   x_it(8, "\n*** Interrupt.")
     if signum == signal.SIGALRM:
         raise WTimeoutError("Timeout.\nSee send.log for details.")
     if signum not in signals_caught:   signals_caught.append(signum)
@@ -5530,7 +5531,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 rc3"      ; prog_date = "20251007"
+prog_version     = "0.8 wip"      ; prog_date = "20251009"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
