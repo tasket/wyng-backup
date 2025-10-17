@@ -4893,7 +4893,8 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
 
     elif diff:
         l_vol  = storage.lvols[vol.alias]     ; snap1vol = l_vol.snap1
-        paired = storage.lvols[snap1vol].paired_state(vol.mapfile(), vol.last)    ; zero_q = 0
+        paired = storage.lvols[snap1vol].paired_state(vol.mapfile(), vol.last)
+        zero_q = 0    ; has_seekd = storage.pooltype != "tlvm"
         if not l_vol.exists():
             err_out(f"{vol.name}: Local volume does not exist.")
             return None
@@ -5007,7 +5008,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
 
                 volf_seek(addr)
                 if volf.read(chunksize) != zeros:   diff_count += chunksize   ; break
-                if addr < lchunk_addr:
+                if has_seekd and addr < lchunk_addr:
                     try:
                         sdpos = volf_seek(addr + chunksize, os.SEEK_DATA)
                     except OSError as e:
@@ -5531,7 +5532,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 wip"      ; prog_date = "20251009"
+prog_version     = "0.8 rc3"      ; prog_date = "20251010"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
