@@ -3940,6 +3940,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
          open(stmp+"/manifest.tmp", "wt") as hashf, \
          open(old_mapfile,"rb") if not send_all else NulIO() as bmapf:
 
+        has_seekd = storage.pooltype != "tlvm"
         vf_seek = vf.seek; vf_read = vf.read   ; BytesIO = io.BytesIO
         gethash = aset.getdatahash             ; b64enc  = base64.urlsafe_b64encode
         b2int   = int.from_bytes               ; islice  = itertools.islice
@@ -3947,15 +3948,17 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
 
         # Feed delta bmap to inner loop in pieces segmented by large zero delimeter.
         # This allows skipping most areas when changes are few.
-        addr    = counter = percent = bcount = ddbytes = 0   ; checkpt = 32*MB//chunksize+80
-        zdelim  = bytes(64)  ; zdlen = len(zdelim)*8
-        minibmap, bmap_list, bmsz   = None, [], zdlen*300
+        addr    = counter = percent = bcount = ddbytes = zero_q = 0
+        checkpt = 32 * MB // chunksize + 80
+        zdelim  = bytes(max(48, min(256, volsize // (MB*2048))))
+        zdlen   = len(zdelim)*8    ; minibmap, bmap_list, bmsz   = None, [], zdlen * 300
+        lchunk2 = max(0, vol.last_chunk_addr(volsize)[0] - chunksize)
 
         while addr < volsize:
             if len(bmap_list):
                 # At boundary inside list, so use islice to jump ahead here.
                 if fullmanifest:  next(islice(fullmanifest, zdlen, zdlen), None)
-                addr += chunksize*zdlen
+                addr += chunksize*zdlen     ; zero_q = max(0, zero_q - zdlen)
                 minibmap = bmap_list.pop(0)
             elif not send_all:
                 if not changed:   break
@@ -3980,11 +3983,13 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
                             raise ValueError("expected manifest addr %s, got %s"
                                             % (destfile, fman_fname))
 
+                # Skip unallocated areas quickly
+                if zero_q:
+                    if fman_hash != "0":   print("0", destfile, file=hashf)
+                    zero_q -= 1    ; continue
+
                 # Skip chunk if its deltamap bit is off.
                 if not send_all and not (minibmap[chunk//8] & (1 << chunk%8)):  continue
-
-                # Fetch chunk as buf
-                vf_seek(addr)    ; buf = vf_read(chunksize)
 
                 # Process checkpoint
                 if counter > checkpt:
@@ -4006,8 +4011,20 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
                     print(f"\r{bcount/MB: 9.1f}MB"[:12], next(spinner),
                           f"{(percent//10):0d}%"[:7], end="", flush=True)
 
+                # Fetch chunk as buf
+                vf_seek(addr)    ; buf = vf_read(chunksize)
+
                 # Compress & write only non-empty chunks
                 if buf == zeros:
+                    if has_seekd and addr < lchunk2:
+                        # Find zero runs
+                        try:
+                            sdpos = vf_seek(addr + chunksize, os.SEEK_DATA)
+                        except OSError as e:
+                            if e.errno != 6:   raise e
+                            sdpos = volsize + 1
+                        zero_q = ((sdpos - addr) // chunksize) - 1
+
                     if fman_hash != "0":   print("0", destfile, file=hashf)
                     continue
 
@@ -4035,7 +4052,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
                                 # make dedup link
                                 ddchx = ddataf_read(ch_w).hex().zfill(chdigits)
                                 tar_info.type = LNKTYPE
-                            ddataf_seek(0,2)    ; break
+                            ddataf_seek(0,2)    ; break # while pos
                         pos += 1
 
                     if ddses is None and bhashb != ddblank_ch and idxcount < chtree_max:
@@ -4116,7 +4133,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
         print("|"*((100-progress)//5) + "]", f" 100% {bcount/MB: 0.1f}MB ",
               end="", flush=True)
     if dedup and debug:   show_mem_stats()
-
+    #print("\n",ses.mfcs) #### ###
     return stream_started, bcount, ddbytes, runtime
 
 
@@ -4792,7 +4809,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
     gethash     = aset.getdatahash                ; sigalarm  = signal.alarm
 
     if not (storage.online or verify_only or options.save_to):
-        err_out("Please specify a valid --local storage.")   ; error_cache.append(vol.name)
+        err_out("Please specify a valid --local storage.")
         return None
 
     if diff or verify_only:
@@ -4848,7 +4865,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
                 save_storage = LocalStorage(ldir, options, auuid=aset.uuid,
                                             arch_vols=storage.arch_vols.copy())
         else:
-            if not storage.online:   x_it(1, "Local storage is offline!")
+            if not storage.online:   err_out("Local storage is offline!")   ; return None
             save_storage = storage    ; returned_home = storage.online
             save_type = "tlvm pool" if storage.pooltype=="tlvm" else "file"
             l_vol = save_storage.new_vol_entry(vol.alias, vol.vid)    ; save_path = l_vol.path
@@ -4880,9 +4897,10 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
             volf = open(save_path, "r+b")
 
         elif os.path.abspath(save_path).startswith("/dev/"):
-            x_it(1, "Cannot create new volume from ambiguous /dev path.\n"
+            err_out("Cannot create new volume from ambiguous /dev path.\n"
                     " Please create the volume before using 'receive', or specify"
                     " --save-to=volgroup/pool/volname in case of a thin LVM volume.")
+            return None
         else:
             save_type = "file"   ; punch_hole = save_storage.file_punch_hole
             if not exists(save_path) or not sparse_write:
@@ -4942,6 +4960,9 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
     else:
         # everything upto & including selected
         incl_ses = sessions[:sessions.index(select_ses)+1]    ; use_snapshot = False
+
+    if save_path and options.req_snapshot and not use_snapshot:
+        err_out(f"\nError: Snapshot not available for '{vol.name}'.")    ; return None
 
     # Verify metadata then merge manifests and send chunk list to dest system:
     # sed is used to expand chunk info into a path and filter out any entries
@@ -5532,7 +5553,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 rc3"      ; prog_date = "20251010"
+prog_version     = "0.8 (lseek)"      ; prog_date = "20251015"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
@@ -5602,9 +5623,11 @@ parser_defs = [
  [["--skip-corrupt-chunks"], {"action": "store_true",
                        "help": "Continue despite corrupt chunks (receive)"}],
  [["--use-snapshot"], {"action": "store_true",
-                       "help": "Receive from the local snapshot"}],
+                       "help": "Receive from local snapshot if available"}],
  [["--use-snapshot-diff"], {"action": "store_true",
                        "help": "Experimental: Use local snapshot for differential receive"}],
+ [["--req-snapshot"], {"action": "store_true",
+                       "help": "Receive only from local snapshot"}],
  [["--import-other-from"], {"action": "append", "default": [],
                        "help": "Import volume from non-snapshot file"}],
  [["--remap"],        {"action": "store_true", "help": "Remap volumes from other archive"}],
