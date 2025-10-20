@@ -13,11 +13,8 @@ from older backup sessions.
 
 Having nearly instantaneous access to volume changes and a nimble archival format
 enables backing up even terabyte-sized volumes multiple times per hour with little
-impact on system resources.
-
-Wyng pushes data to archives in a stream-like fashion, which avoids temporary data
-caches and re-processing data. And Wyng's ingenious snapshot rotation avoids common
-_aging snapshot_ space consumption pitfalls.
+impact on system resources. And Wyng's ingenious snapshot rotation avoids the common
+problem of added space consumption from aging snapshots.
 
 Wyng also doesn't require the source admin system to ever mount processed volumes or
 to handle them as anything other than blocks, so it safely handles
@@ -380,7 +377,7 @@ the volume data if present.
 --tag=tagname[,desc]   | Use session tags (send, list)
 --sparse               | Receive volume data sparsely (implies --sparse-write)
 --sparse-write         | Overwrite local data only where it differs (receive)
---use-snapshot         | Receive from local the local snapshot (receive)
+--use-snapshot         | Receive from local snapshot if available (receive)
 --send-unchanged       | Record unchanged volumes, don't skip them (send)
 --unattended, -u       | Don't prompt for interactive input
 --clean                | Perform garbage collection (arch-check) or metadata removal (delete)
@@ -395,6 +392,7 @@ the volume data if present.
 --save-to=_path_       | Save a volume to _path_ (receive).
 --vols-from=_json file_ | Specify local:[volumes] sets instead of --local
 --import-other-from    | Import volume data from a non-snapshot capable path during `send`
+--req-snapshot         | Receive only from local snapshot
 --use-snapshot-diff    | Experimental: Use local snapshot in differential mode (receive)
 --session-strict=_on_ | Don't retrieve volume from next-oldest session if no exact session match
 --encrypt=_cipher_     | Set encryption mode or _'off'_ (default: _'xchacha20-dgr'_)
@@ -521,6 +519,12 @@ sparse mode when snapshots are not already present.
 Use the newest local snapshot, if one is available, as a baseline for the `receive` process. This can result in greatly accelerated receiving of archived volumes as only the differences between the snapshot and the requested version of the volume will be transferred.
 
 Implies `--use-snapshot`.
+
+
+#### `--req-snapshot-`
+
+Require `receive` to fetch the volume(s) from local snapshots.  If a volume's snapshot is not available, the volume will be skipped and reported as an error when `receive` is finished.
+
 
 #### `--save-to=<path>`
 
@@ -923,6 +927,8 @@ files in place.
 
 ### Reporting issues
 
+Feedback about errors or other problems (such as unexpected performance issues) encountered while using Wyng is appreciated.  Feature requests are also accepted providing they are related to Wyng's core purpose.  When creating a new issue in the issue tracker, please indicate the full Wyng version, the command options used and any displayed error messages; you can also include relevant logs from /tmp/wyng-debug where applicable.
+
 #### Conduct:
 
 When using the Wyng issue tracker and comms dedicated to Wyng its generally assumed you will do so in good faith based on the technical and UX merits of the project and the issue(s) at hand. Here are patterns of behavior which can land someone in the 'bad faith' column:
@@ -934,9 +940,9 @@ When using the Wyng issue tracker and comms dedicated to Wyng its generally assu
 * Bad faith arguments: appeals to authority, gaslightling, know-nothing assumptions, "alternative facts", etc.
 
 
-### Testing
+#### Testing:
 
-The best way to test Wyng updates is to pull from a 'beta' branch or 'fixes' branch and start using the program for send and receive (backup and restore) as well as prune and diff operations (`wyng diff` verifies volumes with additional checking that the archive content is identical to the local copy, which is good for testing).  Usually 'wip' and 'experimental' usually should be avoided unless you have an issue for a bug and a fix has been posted in one of them.  Note that the '08beta' branch is being retired in preparation for the v0.8 full release; its not certain when '09beta' will be started.
+The best way to test Wyng updates is to pull from a 'beta' or 'fixes' branch and start using the program for `send` and `receive` (backup and restore) as well as `prune`. The `verify`, `diff`, `--quick diff` and `arch-check` commands verify volumes in different ways so it is also good to become familiar with them for testing.  Usually 'wip' and 'experimental' should be avoided unless you have an issue for a bug and a fix has been posted in one of them.  Note that the '08beta' branch is being retired in preparation for the v0.8 full release; its not certain when '09beta' will be started.
 
 Testing goals are basically stability, usability, security and efficiency. Compatibility
 is also a valued topic, where source systems are generally expected to be a fairly recent

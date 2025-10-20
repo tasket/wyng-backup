@@ -4792,7 +4792,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
     gethash     = aset.getdatahash                ; sigalarm  = signal.alarm
 
     if not (storage.online or verify_only or options.save_to):
-        err_out("Please specify a valid --local storage.")   ; error_cache.append(vol.name)
+        err_out("Please specify a valid --local storage.")
         return None
 
     if diff or verify_only:
@@ -4848,7 +4848,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
                 save_storage = LocalStorage(ldir, options, auuid=aset.uuid,
                                             arch_vols=storage.arch_vols.copy())
         else:
-            if not storage.online:   x_it(1, "Local storage is offline!")
+            if not storage.online:   err_out("Local storage is offline!")   ; return None
             save_storage = storage    ; returned_home = storage.online
             save_type = "tlvm pool" if storage.pooltype=="tlvm" else "file"
             l_vol = save_storage.new_vol_entry(vol.alias, vol.vid)    ; save_path = l_vol.path
@@ -4880,9 +4880,10 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
             volf = open(save_path, "r+b")
 
         elif os.path.abspath(save_path).startswith("/dev/"):
-            x_it(1, "Cannot create new volume from ambiguous /dev path.\n"
+            err_out("Cannot create new volume from ambiguous /dev path.\n"
                     " Please create the volume before using 'receive', or specify"
                     " --save-to=volgroup/pool/volname in case of a thin LVM volume.")
+            return None
         else:
             save_type = "file"   ; punch_hole = save_storage.file_punch_hole
             if not exists(save_path) or not sparse_write:
@@ -4926,7 +4927,8 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
 
     # Collect session manifests
     diff_ses = []
-    if options.use_snapshot_diff and use_snapshot and select_ses != vol.last and volsize > 0:
+    if options.use_snapshot_diff and use_snapshot and select_ses != vol.last and volsize > 0 \
+    and not options.req_snapshot:
         print("Using snapshot as baseline.")
         incl_ses = sessions[:sessions.index(select_ses)+1]
         diff_ses = sessions[sessions.index(select_ses)+1:]
@@ -4936,6 +4938,8 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
         if is_num(ses_obj.localtime):   save_storage.settime(save_path, int(ses_obj.localtime))
         print("Snapshot retrieved.")
         return volsize
+    elif save_path and options.req_snapshot and not vol.is_mdvol():
+        err_out(f"\nError: Snapshot not available for '{vol.name}' {select_ses}.")    ; return None
     elif verify_only == 2:
         # only selected session
         incl_ses = [select_ses]
@@ -4993,7 +4997,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
             print(f"\r{(addr/volsize):.1%}", faddr, ses, end=" ")
         elif verbose:
             print("".join(("\r[", ("|" * ceil((x:=addr/volsize)*20)).ljust(20,"."),
-                  f"] {x:.1%}")), end=" ", flush=True)
+                  f"] {x:.1%} ")), end="", flush=True)
         elif (addr/volsize)*100 > progress and verify_only != 2:
             print("|", end="", flush=True)   ; progress += 5
 
@@ -5532,7 +5536,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 rc3"      ; prog_date = "20251010"
+prog_version     = "0.8 rc3"      ; prog_date = "20251011"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
@@ -5602,9 +5606,11 @@ parser_defs = [
  [["--skip-corrupt-chunks"], {"action": "store_true",
                        "help": "Continue despite corrupt chunks (receive)"}],
  [["--use-snapshot"], {"action": "store_true",
-                       "help": "Receive from the local snapshot"}],
+                       "help": "Receive from local snapshot if available"}],
  [["--use-snapshot-diff"], {"action": "store_true",
                        "help": "Experimental: Use local snapshot for differential receive"}],
+ [["--req-snapshot"], {"action": "store_true",
+                       "help": "Receive only from local snapshot"}],
  [["--import-other-from"], {"action": "append", "default": [],
                        "help": "Import volume from non-snapshot file"}],
  [["--remap"],        {"action": "store_true", "help": "Remap volumes from other archive"}],
