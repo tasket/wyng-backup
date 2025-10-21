@@ -4944,7 +4944,8 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
 
     # Collect session manifests
     diff_ses = []
-    if options.use_snapshot_diff and use_snapshot and select_ses != vol.last and volsize > 0:
+    if options.use_snapshot_diff and use_snapshot and select_ses != vol.last and volsize > 0 \
+    and not options.req_snapshot:
         print("Using snapshot as baseline.")
         incl_ses = sessions[:sessions.index(select_ses)+1]
         diff_ses = sessions[sessions.index(select_ses)+1:]
@@ -4954,15 +4955,14 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
         if is_num(ses_obj.localtime):   save_storage.settime(save_path, int(ses_obj.localtime))
         print("Snapshot retrieved.")
         return volsize
+    elif save_path and options.req_snapshot and not vol.is_mdvol():
+        err_out(f"\nError: Snapshot not available for '{vol.name}' {select_ses}.")    ; return None
     elif verify_only == 2:
         # only selected session
         incl_ses = [select_ses]
     else:
         # everything upto & including selected
         incl_ses = sessions[:sessions.index(select_ses)+1]    ; use_snapshot = False
-
-    if save_path and options.req_snapshot and not use_snapshot:
-        err_out(f"\nError: Snapshot not available for '{vol.name}'.")    ; return None
 
     # Verify metadata then merge manifests and send chunk list to dest system:
     # sed is used to expand chunk info into a path and filter out any entries
@@ -5014,7 +5014,7 @@ def receive_volume(storage, vol, select_ses="", ses_strict=False, save_path="",
             print(f"\r{(addr/volsize):.1%}", faddr, ses, end=" ")
         elif verbose:
             print("".join(("\r[", ("|" * ceil((x:=addr/volsize)*20)).ljust(20,"."),
-                  f"] {x:.1%}")), end=" ", flush=True)
+                  f"] {x:.1%} ")), end="", flush=True)
         elif (addr/volsize)*100 > progress and verify_only != 2:
             print("|", end="", flush=True)   ; progress += 5
 
