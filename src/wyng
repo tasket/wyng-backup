@@ -2962,7 +2962,8 @@ def helper_send(debug=False):
                     if f.endswith(("archive.ini","/volinfo")):   shutil.copyfile(f, f+".bak")
                 catch_signals(None)
             elif member.isdir():
-                if debug:   err_out(f"dir: {os.path.abspath(os.curdir)} -- {member.name}")
+                if debug and member.name != ".":
+                    err_out(f"dir: {os.path.abspath(os.curdir)} -- {member.name}")
             tarf.members = []
         tarf.close()   ; fssync(".", force=True)   ; sigalarm(0)
 
@@ -3851,6 +3852,10 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
         tar_info.size = fileobj.write(etag) + fileobj.write(buf)   ; fileobj.seek(0)
         tarf_addfile(tarinfo=tar_info, fileobj=fileobj)
 
+    def tar_ping(name):
+        tar_info = TarInfo(name)    ; tar_info.type = tarfile.DIRTYPE  ; tarf_addfile(tar_info)
+        untar.stdin.flush()
+
     def tar_add_pass(*args, **kwargs):   pass
 
     dest        = (aset := vol.archive).dest    ; pjoin       = os.path.join
@@ -3930,8 +3935,8 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
     TarInfo = tarfile.TarInfo    ; LNKTYPE = tarfile.LNKTYPE    ; tarf = None
     if not benchmark:
         tarf     = tarfile.open(mode="w|", fileobj=untar.stdin)
-        tarf_addfile = tarf.addfile    ; tarf_add = tarf.add              ; stream_started = True
-        tar_info = TarInfo(stmp)       ; tar_info.type = tarfile.DIRTYPE  ; tarf_addfile(tar_info)
+        tarf_addfile = tarf.addfile    ; tarf_add = tarf.add    ; stream_started = True
+        tar_ping(stmp)
     else:
         tarf_addfile = tarf_add = tar_add_pass    ; stream_started = False
 
@@ -3991,6 +3996,8 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
                     # Keep updating aset counters if key has a low cadence
                     if 0 < crypto_cadence < 101 and not benchmark:
                         aset.save_ini()    ; tarf_add(aset.confname)
+                    else:
+                        tar_ping(".")
                     # Show progress.
                     if status1:
                         percent = int(addr/volsize*1000)
@@ -4002,7 +4009,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
                     counter = 0
 
                 elif status1 and chunk % checkpt == 0:
-                    percent = int(addr/volsize*1000)
+                    percent = int(addr/volsize*1000)    ; tar_ping(".")
                     print(f"\r{bcount/MB: 9.1f}MB"[:12], next(spinner),
                           f"{(percent//10):0d}%"[:7], end="", flush=True)
 
@@ -5536,7 +5543,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 rc3"      ; prog_date = "20251011"
+prog_version     = "0.8 (fix08)"      ; prog_date = "20251024"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
