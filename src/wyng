@@ -2962,6 +2962,7 @@ def helper_send(debug=False):
                     if f.endswith(("archive.ini","/volinfo")):   shutil.copyfile(f, f+".bak")
                 catch_signals(None)
             elif member.isdir():
+                err_out(f"ping {time.monotonic()}") ####
                 if debug and member.name != ".":
                     err_out(f"dir: {os.path.abspath(os.curdir)} -- {member.name}")
             tarf.members = []
@@ -4014,7 +4015,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
                     if status1:
                         percent = int(addr/volsize*1000)
                         print(f"\r{bcount/MB: 9.1f}MB"[:12], next(spinner),
-                            f"{(percent//10):0d}%"[:7], end="", flush=True)
+                              f"{(percent//10):0d}%"[:7], end="", flush=True)
 
                 # Compress & write only non-empty chunks
                 if buf == zeros:
@@ -5546,7 +5547,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 (fix08)"      ; prog_date = "20251025"
+prog_version     = "0.8 (fix08-t1)"      ; prog_date = "20251025"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
@@ -5937,7 +5938,7 @@ except StorageError as e:
     x_it(e.args[0], f"\n{e.__class__.__name__}: {e.args[-1]}\n")
 
 except (BrokenPipeError, SPr.CalledProcessError) as e:
-    print()    ; e.add_note("See Wyng log for details.")
+    print()    ; e.add_note("\n* See Wyng log for details *\n")
     raise e
 
 except Exception as e:
