@@ -2926,7 +2926,7 @@ def helper_send(debug=False):
     while True:
         sigalarm(180)
         try:
-            tarf = tarfile.open(mode="r|", fileobj=sys.stdin.buffer, bufsize=8192)
+            tarf = tarfile.open(mode="r|", fileobj=sys.stdin.buffer)
         except tarfile.ReadError as e:
             if debug:   err_out(repr(e))
             break
@@ -2934,13 +2934,13 @@ def helper_send(debug=False):
                   if (pyv := sys.version_info)[:2] > (3,11) or (pyv[:2] == (3,11) and pyv[2] > 3) \
                   or (pyv[:2] == (3,10) and pyv[2] > 11) or (pyv[:2] == (3,9) and pyv[2] > 16) \
                   or (pyv[:2] == (3,8) and pyv[2] > 16) else altextract
-        if debug:   err_out("Got tarfile")
+        err_out("Got tarfile")
         substitutions = {}    ; pdir = ""
         for member in tarf:
             sigalarm(700)
             if debug:   err_out(f"{member.type} {member.name} {member.size}")
             if member.isfile():
-                if member.name == ".": err_out(f"pass {time.monotonic()}"); continue ####
+                if member.name == ".":   err_out(f"pass {time.monotonic()}")   ; continue
                 extract(member, set_attrs=False, filter="data")
             elif member.islnk():
                 source = src_orig = member.linkname   ; dest = member.name   ; ddir = dirname(dest)
@@ -2963,7 +2963,6 @@ def helper_send(debug=False):
                     if f.endswith(("archive.ini","/volinfo")):   shutil.copyfile(f, f+".bak")
                 catch_signals(None)
             elif member.isdir():
-                err_out(f"ping {time.monotonic()}") ####
                 if member.name != ".":
                     err_out(f"dir: {os.path.abspath(os.curdir)} -- {member.name}")
             tarf.members = []
@@ -3856,8 +3855,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
 
     def tar_ping(name):
         if stream_started:
-            tar_info = TarInfo(name)
-            send_chunk(tar_info, b'', tarfill)  ; untar.stdin.flush()
+            send_chunk_remote(TarInfo(name), b'', tarfill)  ####  ; untar.stdin.flush()
 
     def tar_add_pass(*args, **kwargs):   pass
 
@@ -3940,7 +3938,6 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
     if not benchmark:
         tarf     = tarfile.open(mode="w|", fileobj=untar.stdin, bufsize=len(tarfill))
         tarf_addfile = tarf.addfile    ; tarf_add = tarf.add    ; stream_started = True
-        #### tar_ping(stmp)
     else:
         tarf_addfile = tarf_add = tar_add_pass    ; stream_started = False
 
@@ -5549,7 +5546,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 (fix08-t2)"      ; prog_date = "20251025"
+prog_version     = "0.8 (fix08-t3)"      ; prog_date = "20251026"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
