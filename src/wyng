@@ -2346,9 +2346,11 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
             if sdir.name.startswith("S") and sdir.name.endswith("-tmp"):
                 if debug:   print("Removing partial session dir '%s'" % sdir.name)
                 dest.run(["rm -rf " + vol.vid+"/"+sdir.name], destcd=dest.path)
-                shutil.rmtree(vol.path+"/"+sdir.name, ignore_errors=True)
+                shutil.rmtree(os.path.abspath(sdir), ignore_errors=True)
 
-        if len(vol.sessions) > 1 and exists(vol.mapfile(-2)):   os.remove(vol.mapfile(-2))
+            if sdir.name.endswith(".deltamap") and len(vol.sessions) \
+            and not sdir.name.startswith(vol.last):
+                os.remove(os.path.abspath(sdir))
 
         if not check_session_seq(vol):
             err_out("Session out of sequence error.")    ; error_cache.append(vol.name)
@@ -2362,8 +2364,6 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
 
         # Remove stray volume dirs and other files
         deepclean = options.clean and options.force
-        for pos in list(range(len(vol.sessions)))[:-1]:
-            if exists(vol.mapfile(pos)):   os.remove(vol.mapfile(pos))
 
         # Check all combined manifests are correct
         print("  Checking indexes,", end="", flush=True)
@@ -2940,8 +2940,8 @@ def helper_send(debug=False):
             sigalarm(700)
             if debug:   err_out(f"{member.type} {member.name} {member.size}")
             if member.isfile():
-                if member.name == ".":   err_out(f"pass {time.monotonic()}")   ; continue
-                extract(member, set_attrs=False, filter="data")
+                if member.name == ".":   err_out(f"pass {time.monotonic()}")
+                else:   extract(member, set_attrs=False, filter="data")
             elif member.islnk():
                 source = src_orig = member.linkname   ; dest = member.name   ; ddir = dirname(dest)
                 if debug:   err_out(f"ln: {source}")
@@ -3855,7 +3855,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
 
     def tar_ping(name):
         if stream_started:
-            send_chunk_remote(TarInfo(name), b'', tarfill)  ####  ; untar.stdin.flush()
+            send_chunk_remote(TarInfo(name), b'', tarfill)    ; untar.stdin.flush()
 
     def tar_add_pass(*args, **kwargs):   pass
 
@@ -5546,7 +5546,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 (fix08-t3)"      ; prog_date = "20251026"
+prog_version     = "0.8 (fix08)"      ; prog_date = "20251027"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
