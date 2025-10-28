@@ -2346,9 +2346,11 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
             if sdir.name.startswith("S") and sdir.name.endswith("-tmp"):
                 if debug:   print("Removing partial session dir '%s'" % sdir.name)
                 dest.run(["rm -rf " + vol.vid+"/"+sdir.name], destcd=dest.path)
-                shutil.rmtree(vol.path+"/"+sdir.name, ignore_errors=True)
+                shutil.rmtree(os.path.abspath(sdir), ignore_errors=True)
 
-        if len(vol.sessions) > 1 and exists(vol.mapfile(-2)):   os.remove(vol.mapfile(-2))
+            if sdir.name.endswith(".deltamap") and len(vol.sessions) \
+            and not sdir.name.startswith(vol.last):
+                os.remove(os.path.abspath(sdir))
 
         if not check_session_seq(vol):
             err_out("Session out of sequence error.")    ; error_cache.append(vol.name)
@@ -2362,8 +2364,6 @@ def arch_check(storage, aset, vol_list=None, startup=False, upgrade=False):
 
         # Remove stray volume dirs and other files
         deepclean = options.clean and options.force
-        for pos in list(range(len(vol.sessions)))[:-1]:
-            if exists(vol.mapfile(pos)):   os.remove(vol.mapfile(pos))
 
         # Check all combined manifests are correct
         print("  Checking indexes,", end="", flush=True)
@@ -2934,13 +2934,14 @@ def helper_send(debug=False):
                   if (pyv := sys.version_info)[:2] > (3,11) or (pyv[:2] == (3,11) and pyv[2] > 3) \
                   or (pyv[:2] == (3,10) and pyv[2] > 11) or (pyv[:2] == (3,9) and pyv[2] > 16) \
                   or (pyv[:2] == (3,8) and pyv[2] > 16) else altextract
-        if debug:   err_out("Got tarfile")
+        err_out("Got tarfile")
         substitutions = {}    ; pdir = ""
         for member in tarf:
             sigalarm(700)
             if debug:   err_out(f"{member.type} {member.name} {member.size}")
             if member.isfile():
-                extract(member, set_attrs=False, filter="data")
+                if member.name == ".":   err_out(f"pass {time.monotonic()}")
+                else:   extract(member, set_attrs=False, filter="data")
             elif member.islnk():
                 source = src_orig = member.linkname   ; dest = member.name   ; ddir = dirname(dest)
                 if debug:   err_out(f"ln: {source}")
@@ -2962,7 +2963,8 @@ def helper_send(debug=False):
                     if f.endswith(("archive.ini","/volinfo")):   shutil.copyfile(f, f+".bak")
                 catch_signals(None)
             elif member.isdir():
-                if debug:   err_out(f"dir: {os.path.abspath(os.curdir)} -- {member.name}")
+                if member.name != ".":
+                    err_out(f"dir: {os.path.abspath(os.curdir)} -- {member.name}")
             tarf.members = []
         tarf.close()   ; fssync(".", force=True)   ; sigalarm(0)
 
@@ -3851,6 +3853,10 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
         tar_info.size = fileobj.write(etag) + fileobj.write(buf)   ; fileobj.seek(0)
         tarf_addfile(tarinfo=tar_info, fileobj=fileobj)
 
+    def tar_ping(name):
+        if stream_started:
+            send_chunk_remote(TarInfo(name), b'', tarfill)    ; untar.stdin.flush()
+
     def tar_add_pass(*args, **kwargs):   pass
 
     dest        = (aset := vol.archive).dest    ; pjoin       = os.path.join
@@ -3928,10 +3934,10 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
 
     # Use tar to stream files to destination
     TarInfo = tarfile.TarInfo    ; LNKTYPE = tarfile.LNKTYPE    ; tarf = None
+    tarfill = os.urandom(8192)
     if not benchmark:
-        tarf     = tarfile.open(mode="w|", fileobj=untar.stdin)
-        tarf_addfile = tarf.addfile    ; tarf_add = tarf.add              ; stream_started = True
-        tar_info = TarInfo(stmp)       ; tar_info.type = tarfile.DIRTYPE  ; tarf_addfile(tar_info)
+        tarf     = tarfile.open(mode="w|", fileobj=untar.stdin, bufsize=len(tarfill))
+        tarf_addfile = tarf.addfile    ; tarf_add = tarf.add    ; stream_started = True
     else:
         tarf_addfile = tarf_add = tar_add_pass    ; stream_started = False
 
@@ -3948,7 +3954,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
 
         # Feed delta bmap to inner loop in pieces segmented by large zero delimeter.
         # This allows skipping most areas when changes are few.
-        addr    = counter = percent = bcount = ddbytes = zero_q = 0
+        addr    = counter = percent = bcount = ddbytes = zero_q = next_ping = 0
         checkpt = 32 * MB // chunksize + 80
         zdelim  = bytes(max(48, min(256, volsize // (MB*2048))))
         zdlen   = len(zdelim)*8    ; minibmap, bmap_list, bmsz   = None, [], zdlen * 300
@@ -4006,10 +4012,13 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
 
                     counter = 0
 
-                elif status1 and chunk % checkpt == 0:
-                    percent = int(addr/volsize*1000)
-                    print(f"\r{bcount/MB: 9.1f}MB"[:12], next(spinner),
-                          f"{(percent//10):0d}%"[:7], end="", flush=True)
+                elif chunk % checkpt == 0:
+                    if time.monotonic() >= next_ping:
+                        next_ping = time.monotonic() + 30    ; tar_ping(".")
+                    if status1:
+                        percent = int(addr/volsize*1000)
+                        print(f"\r{bcount/MB: 9.1f}MB"[:12], next(spinner),
+                              f"{(percent//10):0d}%"[:7], end="", flush=True)
 
                 # Fetch chunk as buf
                 vf_seek(addr)    ; buf = vf_read(chunksize)
@@ -4133,7 +4142,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
         print("|"*((100-progress)//5) + "]", f" 100% {bcount/MB: 0.1f}MB ",
               end="", flush=True)
     if dedup and debug:   show_mem_stats()
-    #print("\n",ses.mfcs) #### ###
+
     return stream_started, bcount, ddbytes, runtime
 
 
@@ -5553,7 +5562,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 (lseek)"      ; prog_date = "20251015"
+prog_version     = "0.8 (lseek)"      ; prog_date = "20251027"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
@@ -5944,7 +5953,7 @@ except StorageError as e:
     x_it(e.args[0], f"\n{e.__class__.__name__}: {e.args[-1]}\n")
 
 except (BrokenPipeError, SPr.CalledProcessError) as e:
-    print()    ; e.add_note("See Wyng log for details.")
+    print()    ; e.add_note("\n* See Wyng log for details *\n")
     raise e
 
 except Exception as e:
