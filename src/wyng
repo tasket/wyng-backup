@@ -2926,7 +2926,7 @@ def helper_send(debug=False):
     while True:
         sigalarm(180)
         try:
-            tarf = tarfile.open(mode="r|", fileobj=sys.stdin.buffer)
+            tarf = tarfile.open(mode="r|", fileobj=sys.stdin.buffer, bufsize=8192)
         except tarfile.ReadError as e:
             if debug:   err_out(repr(e))
             break
@@ -2940,6 +2940,7 @@ def helper_send(debug=False):
             sigalarm(700)
             if debug:   err_out(f"{member.type} {member.name} {member.size}")
             if member.isfile():
+                if member.name == ".": err_out(f"pass {time.monotonic()}"); continue ####
                 extract(member, set_attrs=False, filter="data")
             elif member.islnk():
                 source = src_orig = member.linkname   ; dest = member.name   ; ddir = dirname(dest)
@@ -2963,7 +2964,7 @@ def helper_send(debug=False):
                 catch_signals(None)
             elif member.isdir():
                 err_out(f"ping {time.monotonic()}") ####
-                if debug and member.name != ".":
+                if member.name != ".":
                     err_out(f"dir: {os.path.abspath(os.curdir)} -- {member.name}")
             tarf.members = []
         tarf.close()   ; fssync(".", force=True)   ; sigalarm(0)
@@ -3855,8 +3856,8 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
 
     def tar_ping(name):
         if stream_started:
-            tar_info = TarInfo(name)    ; tar_info.type = tarfile.DIRTYPE
-            tarf_addfile(tar_info)      ; untar.stdin.flush()
+            tar_info = TarInfo(name)
+            send_chunk(tar_info, b'', tarfill)  ; untar.stdin.flush()
 
     def tar_add_pass(*args, **kwargs):   pass
 
@@ -3935,10 +3936,11 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
 
     # Use tar to stream files to destination
     TarInfo = tarfile.TarInfo    ; LNKTYPE = tarfile.LNKTYPE    ; tarf = None
+    tarfill = os.urandom(8192)
     if not benchmark:
-        tarf     = tarfile.open(mode="w|", fileobj=untar.stdin)
+        tarf     = tarfile.open(mode="w|", fileobj=untar.stdin, bufsize=len(tarfill))
         tarf_addfile = tarf.addfile    ; tarf_add = tarf.add    ; stream_started = True
-        tar_ping(stmp)
+        #### tar_ping(stmp)
     else:
         tarf_addfile = tarf_add = tar_add_pass    ; stream_started = False
 
@@ -3954,7 +3956,7 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
 
         # Feed delta bmap to inner loop in pieces segmented by large zero delimeter.
         # This allows skipping most areas when changes are few.
-        addr    = counter = percent = bcount = ddbytes = last_ping = 0
+        addr    = counter = percent = bcount = ddbytes = next_ping = 0
         checkpt = 32*MB//chunksize+80
         zdelim  = bytes(64)  ; zdlen = len(zdelim)*8
         minibmap, bmap_list, bmsz   = None, [], zdlen*300
@@ -4010,8 +4012,8 @@ def send_volume(storage, vol, curtime, ses_tags, send_all=False, changed=True, b
                     counter = 0
 
                 elif chunk % checkpt == 0:
-                    if time.monotonic() >= last_ping + 60:
-                        last_ping = time.monotonic()    ; tar_ping(".")
+                    if time.monotonic() >= next_ping:
+                        next_ping = time.monotonic() + 30    ; tar_ping(".")
                     if status1:
                         percent = int(addr/volsize*1000)
                         print(f"\r{bcount/MB: 9.1f}MB"[:12], next(spinner),
@@ -5547,7 +5549,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 (fix08-t1)"      ; prog_date = "20251025"
+prog_version     = "0.8 (fix08-t2)"      ; prog_date = "20251025"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")
