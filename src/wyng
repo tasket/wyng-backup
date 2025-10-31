@@ -5546,7 +5546,7 @@ def cleanup():
 
 # Constants / Globals
 prog_name        = "wyng"
-prog_version     = "0.8 (fix08)"      ; prog_date = "20251027"
+prog_version     = "0.8 rc4"      ; prog_date = "20251028"
 prog_info        = ("Backup logical volumes and disk images.",
                     "License: GPLv3 (see 'LICENSE' file)"
                     "\nWebsite: https://codeberg.org/tasket/wyng-backup")

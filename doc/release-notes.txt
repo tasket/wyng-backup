@@ -1,3 +1,5 @@
+v0.8 rc4 20251028 - Fix rc3 timeout error; fix arch-check causing volume rescan.
+
 v0.8 rc3 20251011 - Fix send file size 0 error; add diff seek_hole and quick option; add req-snapshot option; add vouch option to enable non-Btrfs fs; retry delta scan on error; extra delta scan sanity checks; add receive timeouts; fix skip-corrupt-chunks option; keep incomplete sparse vols.
 
 v0.8 rc2 20250921 - Add manifest crc, prune safeguards, minor fixes, code cleanup and comments.
